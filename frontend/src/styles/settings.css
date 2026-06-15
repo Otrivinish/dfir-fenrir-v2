@@ -1,0 +1,185 @@
+/*
+  Settings page — sub-layout used by /settings/* sub-sections.
+  Vertical sub-nav on the left + content on the right.
+  Token-only; no hardcoded colours/fonts.
+*/
+
+.sub-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.sub-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2);
+  position: sticky;
+  top: var(--space-3);
+}
+
+/* Phase-grouped nav (used by the incident sub-nav). Pure visual grouping —
+   styled to match .settings-table th so it feels native across themes. */
+.sub-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.sub-group + .sub-group {
+  margin-top: var(--space-2);
+}
+.sub-group-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+  padding: 6px 10px 2px;
+}
+
+.sub-item {
+  display: block;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+  border-left: 2px solid transparent;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.sub-item:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.sub-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+
+.sub-content { min-width: 0; }
+
+/* Vertically stacked panels inside a settings sub-page */
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Form layout inside a settings panel */
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 480px;
+}
+.settings-form-actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+/* Simple table used by Sessions / Teams / Roles */
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.settings-table th,
+.settings-table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.settings-table th {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.settings-table tbody tr:hover { background: var(--surface-2); }
+.settings-table td.actions { text-align: right; white-space: nowrap; }
+
+/* Inline row actions */
+.row-actions {
+  display: inline-flex;
+  gap: var(--space-2);
+}
+
+/* Pill used for current-session / role labels */
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+}
+.pill.accent {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: var(--accent-soft);
+}
+.pill.ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+
+/* Wider modal variant for user detail (4-tab layout) */
+.modal-lg { max-width: 720px; width: 90vw; }
+
+/* Tab bar inside modals */
+.u-tab-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 var(--space-4);
+  margin-bottom: 0;
+}
+.u-tab {
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: var(--font-body);
+  white-space: nowrap;
+}
+.u-tab:hover { color: var(--text); }
+.u-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Key/value info grid in profile tab */
+.u-info-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-3);
+  font-size: 13px;
+}
+.u-info-label { color: var(--muted); }
+.u-info-value { font-family: var(--font-mono); color: var(--text); }
+
+/* Compact heading for sub-section toolbar */
+.panel-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.panel-toolbar .panel-h { margin: 0; }

@@ -1,0 +1,456 @@
+/*
+  Pre-auth screens: setup, login, totp-verify, totp-enrol.
+  Same DOM across themes. All styles reference tokens only.
+*/
+
+.auth-page {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+  background: var(--bg);
+  isolation: isolate;
+}
+.auth-page::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: var(--auth-grid);
+  pointer-events: none;
+  z-index: 0;
+}
+.auth-page::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: var(--auth-overlay);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.auth-shell {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 440px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.auth-shell.wide { max-width: 520px; }
+
+.auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+.auth-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-family: var(--font-heading);
+  font-weight: 800;
+  font-size: 20px;
+  color: var(--accent);
+  letter-spacing: 0;
+}
+.auth-brand-title {
+  font-family: var(--font-heading);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: var(--heading-letter-spacing);
+  text-transform: var(--heading-transform);
+  color: var(--text);
+}
+.auth-brand-sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.auth-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  box-shadow: var(--shadow);
+}
+.auth-card h1 {
+  font-family: var(--font-heading);
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 var(--space-2) 0;
+  letter-spacing: var(--heading-letter-spacing);
+  text-transform: var(--heading-transform);
+  color: var(--text);
+}
+.auth-card p.lead {
+  color: var(--muted);
+  margin: 0 0 var(--space-4) 0;
+  font-size: 13px;
+}
+
+.auth-foot {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--dim);
+  text-transform: uppercase;
+}
+
+/* ── Form primitives ──────────────────────────────────────────────────── */
+.form { display: flex; flex-direction: column; gap: var(--space-3); }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+@media (max-width: 480px) { .form-row { grid-template-columns: 1fr; } }
+
+.field { display: flex; flex-direction: column; gap: var(--space-1); }
+.field-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.field-hint {
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.input, .input-wrap {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+.input:focus, .input-wrap:focus-within {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.input::placeholder { color: var(--dim); }
+
+.input-wrap {
+  display: flex;
+  align-items: center;
+  padding: 0;
+  gap: 0;
+}
+.input-wrap > .input {
+  border: none;
+  background: transparent;
+  flex: 1;
+  border-radius: 0;
+  padding: 10px 12px;
+}
+.input-wrap > .input:focus { box-shadow: none; }
+.input-toggle {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 12px;
+  height: 100%;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.input-toggle:hover { color: var(--accent); }
+.input-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+
+.input.code {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  letter-spacing: 0.5em;
+  text-align: center;
+  padding: 12px;
+}
+
+/* ── Strength meter ──────────────────────────────────────────────────── */
+.strength {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+.strength-bar {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+.strength-cell {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+.strength-cell.on.s1 { background: var(--crit); }
+.strength-cell.on.s2 { background: var(--high); }
+.strength-cell.on.s3 { background: var(--accent); }
+.strength-cell.on.s4 { background: var(--ok); }
+.strength-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  min-width: 60px;
+  text-align: right;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font-heading);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn.primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+.btn.primary:hover:not(:disabled) { filter: brightness(1.08); color: var(--accent-fg); }
+.btn.block { width: 100%; }
+.btn.ghost { background: transparent; }
+
+/* ── Alert ───────────────────────────────────────────────────────────── */
+.alert {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  border: 1px solid transparent;
+}
+.alert.error {
+  background: color-mix(in srgb, var(--crit) 14%, transparent);
+  border-color: color-mix(in srgb, var(--crit) 40%, transparent);
+  color: var(--crit);
+}
+.alert.warn {
+  background: color-mix(in srgb, var(--high) 14%, transparent);
+  border-color: color-mix(in srgb, var(--high) 40%, transparent);
+  color: var(--high);
+}
+.alert.info {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+}
+.alert .alert-icon {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* ── Corner controls — groups theme + tz pickers on pre-auth pages ───── */
+.corner-controls {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  z-index: 10;
+}
+
+/* ── Timezone picker ──────────────────────────────────────────────────── */
+.tz-picker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+}
+.tz-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tz-btn:hover { color: var(--text); }
+.tz-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  z-index: 20;
+  width: 240px;
+  overflow: hidden;
+}
+.tz-filter {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+}
+.tz-filter::placeholder { color: var(--dim); }
+.tz-list {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.tz-group { padding: 0; }
+.tz-group-label {
+  padding: 5px 10px 3px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.tz-opt {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 4px 10px 4px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tz-opt:hover { color: var(--text); background: var(--surface-2); }
+.tz-opt.active { color: var(--accent); background: var(--accent-soft); }
+.tz-empty {
+  padding: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--dim);
+  text-align: center;
+}
+
+/* ── Theme picker (top-right) ────────────────────────────────────────── */
+.theme-picker {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  z-index: 10;
+}
+.theme-pick {
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.theme-pick:hover { color: var(--text); }
+.theme-pick.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* ── TOTP enrol ──────────────────────────────────────────────────────── */
+.totp-grid {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+@media (max-width: 520px) { .totp-grid { grid-template-columns: 1fr; } }
+.totp-qr {
+  display: grid;
+  place-items: center;
+  padding: var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.totp-qr img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #ffffff;
+  border-radius: var(--radius-sm);
+}
+.totp-secret {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  color: var(--text);
+  word-break: break-all;
+  user-select: all;
+}
+
+/* Stepper for setup → enrol flow */
+.steps {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: var(--space-3);
+}
+.step.active { color: var(--accent); }
+.step.done   { color: var(--ok); }
+.step-sep { color: var(--dim); }

@@ -1,0 +1,248 @@
+networks:
+  fenrir-internal:
+    driver: bridge
+  fenrir-analysis:
+    driver: bridge
+    internal: true  # No internet access for analysis worker
+
+volumes:
+  postgres-data:
+    driver: local
+  evidence-data:
+    driver: local
+  redis-data:
+    driver: local
+  quarantine-data:
+    driver: local
+  backup-data:
+    driver: local
+  yara-rules-data:
+    driver: local
+  branding-data:
+    driver: local
+  reports-data:
+    driver: local
+  logs-data:
+    driver: local
+  caddy-data:
+    driver: local
+  caddy-config:
+    driver: local
+
+services:
+  # ── Caddy: TLS termination & reverse proxy ──────────────────────────────
+  caddy:
+    build:
+      context: ./docker/caddy
+      dockerfile: Dockerfile
+    container_name: fenrir-v2-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+      - ./certs:/certs:ro
+    networks:
+      - fenrir-internal
+    depends_on:
+      - backend
+      - frontend
+    env_file: .env
+
+  # ── Frontend: React SPA served by hardened nginx (static) ────────────────
+  # Caddy reverse-proxies to this on :3000. nginx (unprivileged, non-root)
+  # serves the Vite-built dist with SPA fallback; it sets NO security headers
+  # (the edge Caddy owns those). read_only rootfs + tmpfs for nginx temp/pid.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: fenrir-v2-frontend
+    restart: unless-stopped
+    networks:
+      - fenrir-internal
+    expose:
+      - "3000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+      - /var/cache/nginx:nosuid,size=16m
+      - /var/run:nosuid,size=1m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/index.html"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Backend: FastAPI ─────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fenrir-v2-backend
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://fenrir:${POSTGRES_PASSWORD}@postgres:5432/fenrir
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_ALGORITHM=HS256
+      - JWT_EXPIRE_MINUTES=480
+      - QUARANTINE_PATH=/quarantine
+      - EVIDENCE_PATH=/evidence
+      - BACKUP_PATH=/backups
+      - SCRIPTS_PATH=/app/scripts
+      - YARA_RULES_PATH=/yara-rules
+      - BRANDING_PATH=/branding
+      - REPORTS_PATH=/generated_reports
+      - LOGS_PATH=/asset_logs
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PGHOST=postgres
+      - PGUSER=fenrir
+      - PGDATABASE=fenrir
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://localhost}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - TOTP_REQUIRED=${TOTP_REQUIRED:-true}
+      - INACTIVITY_TIMEOUT_MINUTES=${INACTIVITY_TIMEOUT_MINUTES:-30}
+      - EVIDENCE_KEK=${EVIDENCE_KEK}
+      - EVIDENCE_PATH=/evidence
+      - AUDIT_SIGNING_KEY=${AUDIT_SIGNING_KEY}
+      # U1 offline collectors — must match the Dockerfile ARG VELOCIRAPTOR_VERSION.
+      - VELOCIRAPTOR_VERSION=${VELOCIRAPTOR_VERSION:-0.76.6}
+    volumes:
+      - quarantine-data:/quarantine
+      - evidence-data:/evidence
+      - backup-data:/backups
+      - ./scripts:/app/scripts:ro
+      - yara-rules-data:/yara-rules:ro
+      - branding-data:/branding
+      - reports-data:/generated_reports
+      - logs-data:/asset_logs
+    networks:
+      - fenrir-internal
+      - fenrir-analysis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Analysis Worker: air-gapped malware analysis ─────────────────────────
+  analysis-worker:
+    build:
+      context: ./analysis-worker
+      dockerfile: Dockerfile
+    container_name: fenrir-v2-analysis
+    restart: unless-stopped
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - QUARANTINE_PATH=/quarantine
+      - EVIDENCE_PATH=/evidence
+      - YARA_RULES_PATH=/yara-rules
+    volumes:
+      - quarantine-data:/quarantine:ro   # READ-ONLY, noexec enforced at compose level
+      - yara-rules-data:/yara-rules:ro
+    networks:
+      - fenrir-analysis  # No internet access
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: false
+    tmpfs:
+      - /tmp:noexec,nosuid,size=256m
+
+  # ── PostgreSQL: primary database ─────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: fenrir-v2-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fenrir
+      POSTGRES_USER: fenrir
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - fenrir-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fenrir -d fenrir"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  # ── Redis: sessions & cache ───────────────────────────────────────────────
+  # NOTE: Redis data loss is acceptable. Redis holds only sessions, rate-limit
+  # counters, and caches — all of which are ephemeral by design. Sessions expire
+  # naturally; caches rebuild on next request. No Redis backup is needed.
+  redis:
+    image: redis:7-alpine
+    container_name: fenrir-v2-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - fenrir-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "--pass", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  # ── Backup: daily pg_dump ─────────────────────────────────────────────────
+  backup:
+    image: postgres:16-alpine
+    container_name: fenrir-v2-backup
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - backup-data:/backups
+      - evidence-data:/evidence:ro          # ISO/IEC 27037 §6.9.2 — mirror evidence (read-only)
+      - ./docker/backup/backup.sh:/backup.sh:ro
+    networks:
+      - fenrir-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c", "while true; do sleep 86400; sh /backup.sh; done"]
+    security_opt:
+      - no-new-privileges:true
+
+  # ── Audit-chain tamper monitor (GS-8) ────────────────────────────────────
+  # Reuses the backend image. Every ANCHOR_INTERVAL it verifies the audit-chain
+  # segment since the last anchor, RFC-3161 timestamps the chain head (best-effort,
+  # only if TSA_URL set), and records an AuditAnchor. Runs first, then sleeps — so
+  # anchoring starts immediately. See docs/coc-gs8-tamper-monitoring-slice.md.
+  audit-monitor:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fenrir-v2-audit-monitor
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://fenrir:${POSTGRES_PASSWORD}@postgres:5432/fenrir
+      - TSA_URL=${TSA_URL:-}
+      - ANCHOR_INTERVAL=${ANCHOR_INTERVAL:-3600}
+    networks:
+      - fenrir-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-c", "while true; do python -m audit_monitor || true; sleep \"${ANCHOR_INTERVAL:-3600}\"; done"]
+    security_opt:
+      - no-new-privileges:true

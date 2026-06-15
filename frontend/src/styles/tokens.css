@@ -1,0 +1,168 @@
+/*
+  Design tokens for DFIR-FENRIR v2.
+  Default = mission-control. Other themes override via [data-theme="..."].
+  Components must NEVER hardcode colours/fonts/radii — always reference these.
+*/
+
+:root,
+[data-theme="mission-control"] {
+  /* Surfaces */
+  --bg:            #07080b;
+  --surface:       #0e1015;
+  --surface-2:     #14171e;
+  --border:        #1f242d;
+  --border-strong: #2b323e;
+
+  /* Text */
+  --text:  #d9dde5;
+  --muted: #7a8595;
+  --dim:   #4b5462;
+
+  /* Brand / status */
+  --accent:      #22d3ee;
+  --accent-soft: rgba(34,211,238,0.12);
+  --accent-fg:   #001018;
+  --crit: #f43f5e;
+  --high: #f59e0b;
+  --med:  #a78bfa;
+  --low:  #22d3ee;
+  --ok:   #10b981;
+
+  /* Type */
+  --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-heading: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Radius / space */
+  --radius-sm: 2px;
+  --radius:    4px;
+  --radius-lg: 8px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Shadow / overlay */
+  --shadow-sm: 0 1px 0 rgba(0,0,0,0.4);
+  --shadow:    0 4px 18px rgba(0,0,0,0.5);
+  --auth-overlay:
+    radial-gradient(700px 700px at 50% 40%, rgba(34,211,238,0.06) 0%, transparent 70%),
+    linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.4) 100%);
+  --auth-grid:
+    linear-gradient(rgba(217,221,229,0.025) 1px, transparent 1px) 0 0 / 40px 40px,
+    linear-gradient(90deg, rgba(217,221,229,0.025) 1px, transparent 1px) 0 0 / 40px 40px;
+
+  /* Heading style (per-theme typography flavour) */
+  --heading-letter-spacing: 0.12em;
+  --heading-transform: uppercase;
+
+  /* Entity type colors (graph nodes + detail badges) */
+  --entity-host:    #22d3ee;
+  --entity-user:    #f59e0b;
+  --entity-ip:      #a78bfa;
+  --entity-domain:  #38bdf8;
+  --entity-email:   #10b981;
+  --entity-service: #fb923c;
+  --entity-network: #8b5cf6;
+  --entity-group:   #94a3b8;
+  --entity-other:   #6b7280;
+}
+
+[data-theme="nordic-calm"] {
+  --bg:            #f7f8fa;
+  --surface:       #ffffff;
+  --surface-2:     #f1f3f6;
+  --border:        #e5e7eb;
+  --border-strong: #d1d5db;
+
+  --text:  #111827;
+  --muted: #6b7280;
+  --dim:   #9ca3af;
+
+  --accent:      #3b82f6;
+  --accent-soft: #dbeafe;
+  --accent-fg:   #ffffff;
+  --crit: #dc2626;
+  --high: #ea580c;
+  --med:  #d97706;
+  --low:  #2563eb;
+  --ok:   #059669;
+
+  --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-heading: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --radius-sm: 4px;
+  --radius:    8px;
+  --radius-lg: 12px;
+
+  --shadow-sm: 0 1px 2px rgba(16,24,40,0.04);
+  --shadow:    0 4px 24px rgba(16,24,40,0.06), 0 1px 2px rgba(16,24,40,0.04);
+  --auth-overlay: none;
+  --auth-grid: none;
+
+  --heading-letter-spacing: -0.01em;
+  --heading-transform: none;
+
+  --entity-host:    #0ea5e9;
+  --entity-user:    #d97706;
+  --entity-ip:      #7c3aed;
+  --entity-domain:  #2563eb;
+  --entity-email:   #059669;
+  --entity-service: #ea580c;
+  --entity-network: #6d28d9;
+  --entity-group:   #6b7280;
+  --entity-other:   #9ca3af;
+}
+
+[data-theme="aurora-night"] {
+  --bg:            #0b0b1e;
+  --surface:       #15152e;
+  --surface-2:     #1c1c3a;
+  --border:        #2a2a4a;
+  --border-strong: #3a3a60;
+
+  --text:  #e6e7f0;
+  --muted: #8a8db1;
+  --dim:   #5a5d7a;
+
+  --accent:      #a78bfa;
+  --accent-soft: rgba(167,139,250,0.18);
+  --accent-fg:   #0b0b1e;
+  --crit: #fb7185;
+  --high: #fbbf24;
+  --med:  #f472b6;
+  --low:  #22d3ee;
+  --ok:   #34d399;
+
+  --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-heading: "Space Grotesk", "Inter", -apple-system, system-ui, sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --radius-sm: 6px;
+  --radius:    10px;
+  --radius-lg: 16px;
+
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  --shadow:    0 18px 60px rgba(167,139,250,0.18), 0 1px 0 rgba(255,255,255,0.04) inset;
+  --auth-overlay:
+    radial-gradient(800px 600px at 18% 12%, rgba(167,139,250,0.22) 0%, transparent 60%),
+    radial-gradient(700px 500px at 86% 86%, rgba(244,114,182,0.18) 0%, transparent 60%),
+    radial-gradient(600px 500px at 50% 100%, rgba(34,211,238,0.18) 0%, transparent 60%);
+  --auth-grid: none;
+
+  --heading-letter-spacing: -0.005em;
+  --heading-transform: none;
+
+  --entity-host:    #22d3ee;
+  --entity-user:    #fbbf24;
+  --entity-ip:      #c084fc;
+  --entity-domain:  #60a5fa;
+  --entity-email:   #34d399;
+  --entity-service: #fb923c;
+  --entity-network: #a78bfa;
+  --entity-group:   #94a3b8;
+  --entity-other:   #6b7280;
+}

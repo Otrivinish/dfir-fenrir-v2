@@ -1,0 +1,109 @@
+{
+    email {$LETSENCRYPT_EMAIL}
+}
+
+# ─── Shared security headers ────────────────────────────────────────────────
+# Defined once as snippets so the SPA path and the /api/docs paths can share a
+# consistent baseline and override only what they must (CSP).
+
+(security_baseline) {
+    header {
+        # TLS pinning hint to browsers — 1y, subdomains, preload list eligible.
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # MIME sniffing off.
+        X-Content-Type-Options "nosniff"
+        # Legacy clickjacking guard — superseded by CSP frame-ancestors but kept
+        # for non-CSP-aware UAs (very old browsers).
+        X-Frame-Options "DENY"
+        # Modern XSS auditor is off in all current browsers, but harmless.
+        X-XSS-Protection "1; mode=block"
+        # Referrer leakage minimisation — send origin only on cross-origin.
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Cross-origin isolation — block leakage via window.opener + share state.
+        Cross-Origin-Opener-Policy "same-origin"
+        Cross-Origin-Resource-Policy "same-origin"
+        # No need for these powerful features in a DFIR console.
+        Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(self), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), sync-xhr=(), usb=(), web-share=(), xr-spatial-tracking=()"
+        # Suppress server fingerprinting.
+        -Server
+    }
+}
+
+# CSP for the SPA. No CDNs, no remote scripts. `'unsafe-inline'` on style-src
+# only — React/Vite injects style attributes; removing it requires nonces and a
+# build-time CSP plugin (deferred). `connect-src` keeps wss/ws for WebSockets.
+(csp_spa) {
+    # frame-src 'self' — Admin → API Docs iframes same-origin /api/docs.
+    header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss: ws:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self'; worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests"
+}
+
+# CSP for FastAPI's Swagger UI + ReDoc only. The JS/CSS bundles are self-hosted
+# by the backend under /api/_static/ (see backend/Dockerfile + main.py), so no
+# external origins are allowed. `'unsafe-inline'` stays on script-src/style-src
+# because the FastAPI helpers emit inline <script>/<style> blocks — removing
+# them requires nonces and helper rewrites, deferred. Routes are admin-only.
+(csp_api_docs) {
+    # frame-ancestors 'self' — admin SPA iframes /api/docs under /admin/api-docs.
+    header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+}
+
+
+{$DOMAIN:localhost} {
+
+    __TLS_BLOCK__
+
+    import security_baseline
+    import csp_spa
+
+    # API docs — Swagger UI and ReDoc need a slightly looser CSP (CDN + inline)
+    handle /api/docs* {
+        import csp_api_docs
+        reverse_proxy backend:8000
+    }
+    handle /api/redoc* {
+        import csp_api_docs
+        reverse_proxy backend:8000
+    }
+    handle /api/openapi.json {
+        reverse_proxy backend:8000
+    }
+
+    # WebSocket endpoints
+    handle /api/warroom/ws/* {
+        reverse_proxy backend:8000 {
+            flush_interval -1
+        }
+    }
+    handle /api/notifications/ws {
+        reverse_proxy backend:8000 {
+            flush_interval -1
+        }
+    }
+
+    handle /api/* {
+        reverse_proxy backend:8000
+    }
+
+    handle /download/* {
+        reverse_proxy backend:8000
+    }
+
+    # SPA: reverse-proxy to the dedicated frontend container (nginx static
+    # server). Caddy stays a pure TLS-terminating proxy — it does not serve
+    # the SPA itself. The frontend container owns SPA fallback + asset caching.
+    handle {
+        reverse_proxy frontend:3000
+    }
+
+    log {
+        output file /data/caddy-access.log {
+            roll_size 100mb
+            roll_keep 5
+        }
+        format json
+    }
+}
+
+http://{$DOMAIN:localhost} {
+    redir https://{host}{uri} permanent
+}

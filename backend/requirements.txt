@@ -1,0 +1,39 @@
+# FastAPI core
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.26
+
+# Validation
+pydantic[email]==2.10.4
+pydantic-settings==2.7.0
+
+# DB
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+
+# Cache / session store
+redis==5.2.1
+
+# Crypto
+argon2-cffi==23.1.0       # argon2id password hashing
+cryptography==44.0.0      # Fernet for TOTP secret at rest
+pyotp==2.9.0              # RFC 6238 TOTP
+qrcode[pil]==8.0          # provisioning URI QR code
+
+# HTTP client + YAML (LOLBins/GTFOBins upstream sync)
+httpx==0.28.1
+pyyaml==6.0.2
+
+# Forensic artifact parsing
+python-evtx==0.7.4        # Windows EVTX binary log parser
+pyzipper==0.3.6           # AES-256 password-protected ZIP for artifact downloads
+python-magic==0.4.27      # MIME-type detection (wraps libmagic1 system lib)
+
+# PDF rendering (signed audit-log exports)
+reportlab==4.2.5          # platypus tables for signed audit-export PDF cover + body
+
+# RFC 3161 trusted timestamping (GS-4) — lazy-imported; only used when TSA_URL is set
+rfc3161ng==2.1.3          # build/parse/verify Time-Stamp Tokens against an external TSA
+
+# Outlook .msg parsing for the email analyzer (U8.1 phase d.1) — lazy-imported; offline.
+extract-msg==0.54.1       # OLE .msg → RFC-822 so it flows through the existing email parser

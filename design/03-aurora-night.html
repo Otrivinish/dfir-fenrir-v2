@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FENRIR 2 — Design 03 — Aurora Night</title>
+<style>
+  :root {
+    --bg: #0b0b1e;
+    --bg-2: #0e0e26;
+    --surface: #15152e;
+    --surface-2: #1c1c3a;
+    --border: #2a2a4a;
+    --border-bright: #3a3a60;
+    --text: #e6e7f0;
+    --muted: #8a8db1;
+    --dim: #5a5d7a;
+    --purple: #a78bfa;
+    --pink: #f472b6;
+    --teal: #22d3ee;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #fb7185;
+    --grad: linear-gradient(135deg, #a78bfa 0%, #f472b6 50%, #22d3ee 100%);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Inter", system-ui, sans-serif;
+    background: radial-gradient(1200px 600px at 80% -10%, rgba(167,139,250,0.08), transparent 60%),
+                radial-gradient(900px 500px at -10% 100%, rgba(34,211,238,0.06), transparent 50%),
+                var(--bg);
+    color: var(--text); font-size: 14px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased; min-height: 100vh; }
+  .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .app { display: flex; min-height: 100vh; }
+
+  /* Sidebar */
+  .sb { width: 230px; background: rgba(21,21,46,0.7); backdrop-filter: blur(20px);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column;
+    transition: width 0.2s; flex-shrink: 0; }
+  .sb.mini { width: 60px; }
+  .sb-brand { padding: 16px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 11px; }
+  .sb-logo { width: 30px; height: 30px; border-radius: 8px; background: var(--grad);
+    display: grid; place-items: center; font-weight: 800; color: #0b0b1e; font-size: 14px;
+    box-shadow: 0 0 20px rgba(167,139,250,0.3); flex-shrink: 0; }
+  .sb-name { font-weight: 700; font-size: 15px; letter-spacing: -0.01em;
+    background: var(--grad); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .sb-toggle { margin-left: auto; background: none; border: none; color: var(--muted); cursor: pointer;
+    padding: 4px 8px; border-radius: 6px; }
+  .sb-toggle:hover { background: var(--surface-2); color: var(--text); }
+  .sb.mini .sb-name, .sb.mini .nav-label, .sb.mini .sb-toggle, .sb.mini .who { display: none; }
+  .sb.mini .sb-brand { justify-content: center; padding: 16px 0; }
+  .sb-nav { padding: 12px 10px; display: flex; flex-direction: column; gap: 3px; flex: 1; }
+  .nav-item { display: flex; align-items: center; gap: 12px; padding: 9px 12px;
+    color: var(--muted); border-radius: 8px; cursor: pointer; font-weight: 500;
+    position: relative; }
+  .nav-item:hover { background: var(--surface-2); color: var(--text); }
+  .nav-item.active { background: linear-gradient(90deg, rgba(167,139,250,0.18), rgba(244,114,182,0.06));
+    color: var(--text); box-shadow: inset 0 0 0 1px rgba(167,139,250,0.3); }
+  .nav-item.active::before { content: ''; position: absolute; left: -10px; top: 8px; bottom: 8px;
+    width: 3px; border-radius: 2px; background: var(--grad); box-shadow: 0 0 8px var(--purple); }
+  .nav-icon { width: 18px; text-align: center; font-size: 15px; flex-shrink: 0; }
+  .sb.mini .nav-item { justify-content: center; }
+  .sb.mini .nav-item.active::before { display: none; }
+  .sb-foot { padding: 12px 14px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px; }
+  .avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--grad); color: #0b0b1e;
+    display: grid; place-items: center; font-weight: 700; font-size: 12px; flex-shrink: 0; }
+
+  /* Main */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .topbar { height: 60px; background: rgba(15,15,38,0.6); backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; gap: 16px; }
+  .search { flex: 1; max-width: 480px; }
+  .search input { width: 100%; padding: 8px 14px; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 10px; color: var(--text); font-size: 13px; }
+  .search input::placeholder { color: var(--dim); }
+  .search input:focus { outline: none; border-color: var(--purple); box-shadow: 0 0 0 3px rgba(167,139,250,0.15); }
+  .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 14px; color: var(--muted); }
+  .content { flex: 1; padding: 26px 28px; overflow: auto; }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* Headers */
+  h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
+  h2 { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 14px; }
+  .page-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 22px; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+  /* Buttons */
+  .btn { padding: 8px 14px; border: 1px solid var(--border); background: var(--surface-2);
+    color: var(--text); font-size: 13px; font-weight: 500; cursor: pointer; border-radius: 8px; }
+  .btn:hover { border-color: var(--purple); background: var(--surface); }
+  .btn-pri { background: var(--grad); color: #0b0b1e; border: none; font-weight: 700;
+    box-shadow: 0 8px 24px -8px rgba(167,139,250,0.5); }
+  .btn-pri:hover { transform: translateY(-1px); box-shadow: 0 12px 28px -8px rgba(167,139,250,0.6); }
+
+  /* Cards (glass) */
+  .card { background: rgba(28,28,58,0.55); backdrop-filter: blur(20px);
+    border: 1px solid var(--border); border-radius: 14px; padding: 20px; position: relative; overflow: hidden; }
+  .card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(167,139,250,0.4), transparent); }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .kpi-lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
+  .kpi-num { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; margin-top: 6px;
+    background: var(--grad); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em; padding: 11px 14px; border-bottom: 1px solid var(--border); }
+  td { padding: 13px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr { cursor: pointer; transition: background 0.1s; }
+  tbody tr:hover { background: rgba(167,139,250,0.06); }
+
+  /* Pills */
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
+  .pill-crit { background: rgba(251,113,133,0.12); color: var(--red); border: 1px solid rgba(251,113,133,0.3); }
+  .pill-high { background: rgba(251,191,36,0.12); color: var(--amber); border: 1px solid rgba(251,191,36,0.3); }
+  .pill-med  { background: rgba(244,114,182,0.12); color: var(--pink); border: 1px solid rgba(244,114,182,0.3); }
+  .pill-low  { background: rgba(34,211,238,0.12); color: var(--teal); border: 1px solid rgba(34,211,238,0.3); }
+  .pill-ok   { background: rgba(52,211,153,0.12); color: var(--green); border: 1px solid rgba(52,211,153,0.3); }
+  .pill-gray { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+
+  /* Filters */
+  .filter-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; }
+  .chip { padding: 6px 14px; border: 1px solid var(--border); border-radius: 999px;
+    font-size: 12px; font-weight: 500; color: var(--muted); cursor: pointer; background: var(--surface-2); }
+  .chip:hover { color: var(--text); border-color: var(--purple); }
+  .chip.on { background: rgba(167,139,250,0.15); color: var(--purple); border-color: var(--purple); }
+
+  /* Detail */
+  .detail-layout { display: grid; grid-template-columns: 210px 1fr; gap: 20px; }
+  .sub-nav { display: flex; flex-direction: column; gap: 3px; }
+  .sub-item { padding: 9px 14px; border-radius: 8px; cursor: pointer; color: var(--muted);
+    font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 10px; position: relative; }
+  .sub-item:hover { background: var(--surface-2); color: var(--text); }
+  .sub-item.on { background: rgba(167,139,250,0.12); color: var(--text); }
+  .sub-item.on::before { content: ''; position: absolute; left: -8px; top: 9px; bottom: 9px;
+    width: 3px; border-radius: 2px; background: var(--grad); }
+  .row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .row:last-child { border-bottom: none; }
+  .row-k { color: var(--muted); }
+  .row-v { color: var(--text); font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sb" id="sb">
+    <div class="sb-brand">
+      <div class="sb-logo">F</div>
+      <div class="sb-name">FENRIR</div>
+      <button class="sb-toggle" onclick="toggleSb()">‹</button>
+    </div>
+    <nav class="sb-nav">
+      <div class="nav-item active" onclick="show('dashboard', this)"><span class="nav-icon">◈</span><span class="nav-label">Dashboard</span></div>
+      <div class="nav-item" onclick="show('incidents', this)"><span class="nav-icon">◉</span><span class="nav-label">Incidents</span></div>
+      <div class="nav-item" onclick="show('team', this)"><span class="nav-icon">◌</span><span class="nav-label">Team</span></div>
+      <div class="nav-item" onclick="show('settings', this)"><span class="nav-icon">◎</span><span class="nav-label">Settings</span></div>
+    </nav>
+    <div class="sb-foot"><div class="avatar">AT</div><div class="who"><div style="font-size:13px;font-weight:600">Analyst Two</div><div style="font-size:11px;color:var(--muted)">admin</div></div></div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="search"><input placeholder="Search the cosmos…"></div>
+      <div class="topbar-right"><span>🔔</span><span>?</span></div>
+    </header>
+
+    <div class="content">
+
+      <section class="view active" id="dashboard">
+        <div class="page-head"><div><h1>Dashboard</h1><div class="sub">Real-time operations</div></div><button class="btn-pri btn">+ New incident</button></div>
+        <div class="grid-4" style="margin-bottom:18px">
+          <div class="card"><div class="kpi-lbl">Active incidents</div><div class="kpi-num">7</div><div class="kpi-sub">3 critical</div></div>
+          <div class="card"><div class="kpi-lbl">Open IOCs</div><div class="kpi-num">184</div><div class="kpi-sub">12 TI hits</div></div>
+          <div class="card"><div class="kpi-lbl">Mean response</div><div class="kpi-num">2.4h</div><div class="kpi-sub">↓ 18%</div></div>
+          <div class="card"><div class="kpi-lbl">Closed 7d</div><div class="kpi-num">11</div><div class="kpi-sub">on target</div></div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <h2>Activity stream</h2>
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <div class="row"><span><b>A.Two</b> contained WIN-FS01 · <span class="mono row-k">INC-042</span></span><span class="row-k mono">12m</span></div>
+              <div class="row"><span><b>System</b> matched 3 IOCs · <span class="mono row-k">INC-039</span></span><span class="row-k mono">42m</span></div>
+              <div class="row"><span><b>Commander</b> closed <span class="mono row-k">INC-038</span></span><span class="row-k mono">2h</span></div>
+              <div class="row"><span><b>YARA</b> 1 detection on <span class="mono row-k">EVT-1928</span></span><span class="row-k mono">3h</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <h2>Open incidents</h2>
+            <table>
+              <thead><tr><th>ID</th><th>Title</th><th>Sev</th><th>Phase</th></tr></thead>
+              <tbody>
+                <tr onclick="show('incident-detail')"><td class="mono">INC-042</td><td>Suspicious EDR — finance</td><td><span class="pill pill-crit">Critical</span></td><td>Containment</td></tr>
+                <tr onclick="show('incident-detail')"><td class="mono">INC-039</td><td>Phishing — exec</td><td><span class="pill pill-high">High</span></td><td>Detection</td></tr>
+                <tr onclick="show('incident-detail')"><td class="mono">INC-037</td><td>DLP outbound</td><td><span class="pill pill-med">Medium</span></td><td>Eradication</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="incidents">
+        <div class="page-head"><div><h1>Incidents</h1><div class="sub">42 total · 7 open · 3 critical</div></div><button class="btn-pri btn">+ New incident</button></div>
+        <div class="filter-bar">
+          <div class="chip on">All</div><div class="chip">Open</div><div class="chip">Closed</div><div class="chip">Critical</div><div class="chip">My incidents</div>
+          <div style="margin-left:auto;display:flex;gap:8px"><button class="btn">Filter ▾</button><button class="btn">Export</button></div>
+        </div>
+        <div class="card" style="padding:0;overflow:hidden">
+          <table>
+            <thead><tr><th>ID</th><th>Title</th><th>Severity</th><th>Phase</th><th>Assignee</th><th>Updated</th></tr></thead>
+            <tbody>
+              <tr onclick="show('incident-detail')"><td class="mono">INC-2026-042</td><td>Suspicious EDR alert — finance dept</td><td><span class="pill pill-crit">Critical</span></td><td>Containment</td><td>A. Two</td><td class="mono row-k">12m</td></tr>
+              <tr onclick="show('incident-detail')"><td class="mono">INC-2026-039</td><td>Phishing — exec mailbox</td><td><span class="pill pill-high">High</span></td><td>Detection</td><td>K. Lin</td><td class="mono row-k">3h</td></tr>
+              <tr onclick="show('incident-detail')"><td class="mono">INC-2026-037</td><td>DLP outbound — file share</td><td><span class="pill pill-med">Medium</span></td><td>Eradication</td><td>M. Cho</td><td class="mono row-k">1d</td></tr>
+              <tr onclick="show('incident-detail')"><td class="mono">INC-2026-035</td><td>Brute force — VPN</td><td><span class="pill pill-low">Low</span></td><td>Closed</td><td>—</td><td class="mono row-k">3d</td></tr>
+              <tr onclick="show('incident-detail')"><td class="mono">INC-2026-034</td><td>Malware — laptop quarantine</td><td><span class="pill pill-high">High</span></td><td>Recovery</td><td>A. Two</td><td class="mono row-k">3d</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view" id="incident-detail">
+        <div class="page-head">
+          <div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="mono row-k" style="font-size:12px">INC-2026-042</span>
+              <span class="pill pill-crit">Critical</span><span class="pill pill-gray">TLP:AMBER</span><span class="pill pill-ok">● Active</span>
+            </div>
+            <h1 style="margin-top:6px">Suspicious EDR alert — finance dept</h1>
+            <div class="sub">Created 11 May · IC: Analyst Two · 3 stakeholders</div>
+          </div>
+          <div style="display:flex;gap:8px"><button class="btn">⇄ Handoff</button><button class="btn">✏ Edit</button><button class="btn-pri btn">Resolve</button></div>
+        </div>
+        <div class="detail-layout">
+          <nav class="sub-nav">
+            <div class="sub-item on">Details</div>
+            <div class="sub-item">Timeline</div>
+            <div class="sub-item">IOCs</div>
+            <div class="sub-item">Entities</div>
+            <div class="sub-item">Evidence</div>
+            <div class="sub-item">Playbook</div>
+            <div class="sub-item">Communications</div>
+            <div class="sub-item">Reports</div>
+            <div class="sub-item">Legal &amp; LE</div>
+          </nav>
+          <div>
+            <div class="grid-2" style="margin-bottom:16px">
+              <div class="card"><h2>Identifiers</h2>
+                <div class="row"><span class="row-k">Incident ID</span><span class="row-v mono">INC-2026-042</span></div>
+                <div class="row"><span class="row-k">Type</span><span class="row-v">Malware</span></div>
+                <div class="row"><span class="row-k">Severity</span><span class="row-v">Critical</span></div>
+                <div class="row"><span class="row-k">Phase</span><span class="row-v">Containment</span></div>
+                <div class="row"><span class="row-k">Created</span><span class="row-v">11 May · 09:14</span></div>
+              </div>
+              <div class="card"><h2>Assignment</h2>
+                <div class="row"><span class="row-k">Commander</span><span class="row-v">A. Two</span></div>
+                <div class="row"><span class="row-k">Lead analyst</span><span class="row-v">K. Lin</span></div>
+                <div class="row"><span class="row-k">Reporter</span><span class="row-v">SOC Tier-1</span></div>
+                <div class="row"><span class="row-k">Team</span><span class="row-v">CIRT-EMEA</span></div>
+              </div>
+            </div>
+            <div class="card"><h2>Description</h2><p style="color:var(--muted);line-height:1.7;font-size:14px">EDR flagged unusual process tree on WIN-FS01: powershell.exe spawning encoded child via wmiprvse.exe. SHA256 matches GreyEnergy loader family in TI feed. Host isolated 09:23; mailbox of authenticated user under review.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="team">
+        <div class="page-head"><div><h1>Team</h1><div class="sub">4 members · 1 on-call</div></div><button class="btn-pri btn">+ Invite</button></div>
+        <div class="card" style="padding:0"><table>
+          <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Last active</th></tr></thead>
+          <tbody>
+            <tr><td>Analyst Two</td><td>Admin</td><td><span class="pill pill-ok">● Online</span></td><td class="mono row-k">now</td></tr>
+            <tr><td>K. Lin</td><td>Analyst</td><td><span class="pill pill-ok">● Online</span></td><td class="mono row-k">2m</td></tr>
+            <tr><td>M. Cho</td><td>Analyst</td><td><span class="pill pill-gray">○ Away</span></td><td class="mono row-k">1h</td></tr>
+            <tr><td>R. Park</td><td>Viewer</td><td><span class="pill pill-gray">○ Offline</span></td><td class="mono row-k">2d</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <section class="view" id="settings">
+        <div class="page-head"><div><h1>Settings</h1><div class="sub">Workspace &amp; preferences</div></div></div>
+        <div class="grid-2">
+          <div class="card"><h2>Account</h2>
+            <div class="row"><span class="row-k">Display name</span><span class="row-v">Analyst Two</span></div>
+            <div class="row"><span class="row-k">Email</span><span class="row-v">at@org</span></div>
+            <div class="row"><span class="row-k">2FA</span><span class="row-v">Enabled</span></div>
+          </div>
+          <div class="card"><h2>Workspace</h2>
+            <div class="row"><span class="row-k">Timezone</span><span class="row-v">UTC</span></div>
+            <div class="row"><span class="row-k">Theme</span><span class="row-v">Aurora Night</span></div>
+            <div class="row"><span class="row-k">Audit retention</span><span class="row-v">365 days</span></div>
+          </div>
+          <div class="card" style="grid-column:1/-1"><h2>Integrations</h2>
+            <div class="row"><span class="row-k">VirusTotal</span><span class="pill pill-ok">Connected</span></div>
+            <div class="row"><span class="row-k">AbuseIPDB</span><span class="pill pill-ok">Connected</span></div>
+            <div class="row"><span class="row-k">Shodan</span><span class="pill pill-gray">Not configured</span></div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+<script>
+function toggleSb(){document.getElementById('sb').classList.toggle('mini')}
+function show(v, el){
+  document.querySelectorAll('.view').forEach(e=>e.classList.remove('active'))
+  const t=document.getElementById(v); if(t) t.classList.add('active')
+  if(el){document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));el.classList.add('active')}
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,269 @@
+/*
+  War Room drawer — pinned tab on the right edge of the viewport plus a
+  slide-out drawer. Available on incident detail pages only. Token-only.
+  Drawer state persisted to localStorage by the component.
+*/
+
+.warroom-tab {
+  position: fixed;
+  right: 0;
+  top: 140px;
+  z-index: 50;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  transition: right 200ms ease, color 120ms ease, border-color 120ms ease;
+}
+.warroom-tab:hover  { color: var(--accent); border-color: var(--accent); }
+.warroom-tab.open   { right: 360px; }
+.warroom-tab .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 5px var(--ok);
+  display: inline-block;
+}
+
+.warroom-drawer {
+  position: fixed;
+  top: 52px;        /* sits beneath the topbar (52px in shell.css) */
+  bottom: 0;
+  right: 0;
+  width: 360px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  transform: translateX(100%);
+  transition: transform 200ms ease;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+}
+.warroom-drawer.open { transform: translateX(0); }
+
+.warroom-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-heading);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: var(--heading-letter-spacing);
+  text-transform: var(--heading-transform);
+  color: var(--accent);
+}
+.warroom-head .warroom-meta {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.warroom-close {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 2px 8px;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.warroom-close:hover { color: var(--accent); border-color: var(--accent); }
+
+.warroom-body {
+  flex: 1;
+  overflow: auto;
+  padding: var(--space-4);
+  color: var(--muted);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.warroom-stub {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  color: var(--dim);
+}
+.warroom-stub .panel-empty-mark { color: var(--dim); }
+
+/* ─── Incident picker ──────────────────────────────────────────────────────── */
+
+.warroom-incident-list {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+  scrollbar-width: none;
+}
+.warroom-incident-list::-webkit-scrollbar { display: none; }
+
+.warroom-no-incidents {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--dim);
+  padding: 2px 0;
+}
+
+.warroom-incident-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+  flex-shrink: 0;
+}
+.warroom-incident-item:hover { color: var(--accent); border-color: var(--accent); }
+.warroom-incident-item.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.warroom-incident-title {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.warroom-sev {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.warroom-sev--critical { background: var(--crit); }
+.warroom-sev--high     { background: var(--high); }
+.warroom-sev--medium   { background: var(--med); }
+.warroom-sev--low      { background: var(--low); }
+
+/* ─── Message feed ─────────────────────────────────────────────────────────── */
+
+.warroom-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.warroom-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.warroom-msg-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.warroom-msg-user {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+}
+
+.warroom-msg-time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.warroom-msg-body {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ─── Input row ────────────────────────────────────────────────────────────── */
+
+.warroom-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.warroom-input {
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 13px;
+  padding: 6px 10px;
+  resize: none;
+  line-height: 1.4;
+  transition: border-color 120ms ease;
+}
+.warroom-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.warroom-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.warroom-send {
+  width: 32px;
+  height: 32px;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--bg);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  transition: opacity 120ms ease;
+}
+.warroom-send:hover:not(:disabled) { opacity: 0.85; }
+.warroom-send:disabled { opacity: 0.35; cursor: not-allowed; }
