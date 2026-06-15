@@ -22,7 +22,7 @@
 ---
 
 > [!NOTE]
-> Quick install: git clone https://github.com/Otrivinish/dfir-fenrir-v2/
+> Quick install: git clone https://github.com/Otrivinish/dfir-fenrir-v2.git
 > **One command to run it:** `./setup.sh` → open `https://localhost/` → use the printed first-run token. Everything below is detail.
 
 ---
