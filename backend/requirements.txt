@@ -16,7 +16,7 @@ redis==5.2.1
 
 # Crypto
 argon2-cffi==23.1.0       # argon2id password hashing
-cryptography==44.0.0      # Fernet for TOTP secret at rest
+cryptography==46.0.7      # Fernet for TOTP secret at rest
 pyotp==2.9.0              # RFC 6238 TOTP
 qrcode[pil]==8.0          # provisioning URI QR code
 
