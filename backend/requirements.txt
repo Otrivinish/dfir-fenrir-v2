@@ -26,7 +26,7 @@ pyyaml==6.0.2
 
 # Forensic artifact parsing
 python-evtx==0.7.4        # Windows EVTX binary log parser
-pyzipper==0.3.6           # AES-256 password-protected ZIP for artifact downloads
+pyzipper==0.4.0           # AES-256 password-protected ZIP for artifact downloads
 python-magic==0.4.27      # MIME-type detection (wraps libmagic1 system lib)
 
 # PDF rendering (signed audit-log exports)
