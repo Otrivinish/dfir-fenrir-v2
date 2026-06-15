@@ -206,7 +206,7 @@ Runs as non-root uid `1002`, all capabilities dropped, `/tmp` mounted `noexec`, 
 ## 🚀 Quick start
 
 ```bash
-git clone <your-repo-url> dfir-fenrir-v2
+git clone https://github.com/Otrivinish/dfir-fenrir-v2.git dfir-fenrir-v2
 cd dfir-fenrir-v2
 ./setup.sh                 # or: make setup
 ```
