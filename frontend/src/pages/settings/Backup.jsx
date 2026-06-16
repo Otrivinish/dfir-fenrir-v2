@@ -20,8 +20,9 @@ export default function Backup() {
   const [isRunning,  setIsRunning]  = useState(false)
   const [loading,    setLoading]    = useState(true)
   const [error,      setError]      = useState(null)
-  const [runError,   setRunError]   = useState(null)
-  const [runSuccess, setRunSuccess] = useState(false)
+  const [runError,     setRunError]     = useState(null)
+  const [lastRun,      setLastRun]      = useState(null)
+  const [runStartedAt, setRunStartedAt] = useState(null)
 
   const load = useCallback(async () => {
     setError(null)
@@ -29,6 +30,7 @@ export default function Backup() {
       const res = await api.listBackups()
       setBackups(res.backups)
       setIsRunning(res.is_running)
+      setLastRun(res.last_run || null)
     } catch (e) {
       setError(e.message || 'Could not load backup status')
     } finally {
@@ -46,18 +48,24 @@ export default function Backup() {
   }, [isRunning, load])
 
   async function triggerBackup() {
-    setRunError(null); setRunSuccess(false)
+    setRunError(null)
     try {
-      await api.runBackup()
+      const res = await api.runBackup()
+      setRunStartedAt(res?.started_at || null)
       setIsRunning(true)
-      setRunSuccess(true)
-      setTimeout(() => setRunSuccess(false), 4000)
       // First poll after a short delay to give pg_dump a moment to start
       setTimeout(load, 2000)
     } catch (e) {
       setRunError(e.message || 'Failed to start backup')
     }
   }
+
+  // Show the terminal outcome of the run we triggered (or, on first load, the
+  // backend's last recorded run). Gated on finished_at >= our started_at so a
+  // stale earlier result never masquerades as this run's.
+  const showResult = lastRun
+    && (lastRun.state === 'success' || lastRun.state === 'error')
+    && (!runStartedAt || (lastRun.finished_at && lastRun.finished_at >= runStartedAt))
 
   const lastBackup = backups[0]
 
@@ -69,6 +77,31 @@ export default function Backup() {
           PostgreSQL backups run automatically every 24 hours. Files are gzip-compressed SQL dumps
           retained for 14 days. A manual backup can be triggered at any time.
         </p>
+      </div>
+
+      {/* What's in / not in this backup */}
+      <div style={{
+        display: 'flex', gap: 'var(--space-2)',
+        background: 'var(--surface-2)', border: '1px solid var(--border)',
+        borderLeft: '3px solid var(--accent)', borderRadius: 'var(--radius)',
+        padding: 'var(--space-3)', marginBottom: 'var(--space-4)',
+        fontSize: 12, color: 'var(--muted)', lineHeight: 1.55,
+      }}>
+        <span aria-hidden="true" style={{ color: 'var(--accent)', flexShrink: 0 }}>ℹ</span>
+        <div>
+          <strong style={{ color: 'var(--text)' }}>What this backup contains.</strong>{' '}
+          A complete dump of the <strong>PostgreSQL database</strong> — incidents, IOCs, timeline,
+          entities, the audit log and user records. It is small because it is text that compresses
+          well, not because anything is missing. It does <strong>not</strong> include your{' '}
+          <strong>evidence files</strong> (mirrored separately as encrypted blobs under{' '}
+          <code style={{ fontFamily: 'var(--font-mono)' }}>evidence-mirror/</code>) or any{' '}
+          <strong>secrets</strong> — the{' '}
+          <code style={{ fontFamily: 'var(--font-mono)' }}>EVIDENCE_KEK</code> and other keys live in{' '}
+          <code style={{ fontFamily: 'var(--font-mono)' }}>.env</code>, never in a backup. A full
+          restore needs all three: this DB dump <strong>+</strong> the evidence mirror{' '}
+          <strong>+</strong> the{' '}
+          <code style={{ fontFamily: 'var(--font-mono)' }}>EVIDENCE_KEK</code>/secrets.
+        </div>
       </div>
 
       {error && (
@@ -129,11 +162,18 @@ export default function Backup() {
           >
             {isRunning ? 'Backup running…' : 'Run backup now'}
           </button>
-          {runSuccess && (
-            <span style={{ fontSize: 12, color: 'var(--ok)' }}>Backup started</span>
-          )}
           {runError && (
             <span style={{ fontSize: 12, color: 'var(--crit)' }}>{runError}</span>
+          )}
+          {!runError && !isRunning && showResult && lastRun.state === 'success' && (
+            <span style={{ fontSize: 12, color: 'var(--ok)' }}>
+              ✓ Completed {formatLocal(lastRun.finished_at)}
+            </span>
+          )}
+          {!runError && !isRunning && showResult && lastRun.state === 'error' && (
+            <span style={{ fontSize: 12, color: 'var(--crit)' }}>
+              ✕ Backup failed: {lastRun.error}
+            </span>
           )}
         </div>
       </div>

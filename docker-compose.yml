@@ -217,7 +217,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    entrypoint: ["/bin/sh", "-c", "while true; do sleep 86400; sh /backup.sh; done"]
+    # Fix the shared /backups perms once on startup so the non-root backend
+    # (uid 1001) can write manual backups + prune its own, while the sticky bit
+    # keeps each side from deleting the other's files — protecting the
+    # root-owned evidence mirror from a compromised backend. Then the daily loop.
+    entrypoint: ["/bin/sh", "-c", "chown root:1001 /backups && chmod 3770 /backups; while true; do sleep 86400; sh /backup.sh; done"]
     security_opt:
       - no-new-privileges:true
 
