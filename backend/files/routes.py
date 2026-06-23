@@ -142,7 +142,13 @@ async def upload_incident_file(
     rel_path      = _incident_file_path(incident_id, file_id, original_name)
 
     ct, nonce_hex = await aencrypt_file_bytes(raw)
-    dest = Path(settings.logs_path) / rel_path
+    # Defense-in-depth: confine the write to the store root (path traversal guard).
+    base_dir = Path(settings.logs_path).resolve()
+    dest = (base_dir / rel_path).resolve()
+    try:
+        dest.relative_to(base_dir)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid file path")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(ct)
 
@@ -194,7 +200,12 @@ async def download_incident_file(
     if not ef:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
 
-    path = Path(settings.logs_path) / ef.file_path
+    base_dir = Path(settings.logs_path).resolve()
+    path = (base_dir / ef.file_path).resolve()
+    try:
+        path.relative_to(base_dir)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid file path")
     if not path.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File data missing on disk")
 
@@ -283,11 +294,24 @@ async def delete_incident_file(
     if not ef:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
 
-    path = Path(settings.logs_path) / ef.file_path
+    base_dir = Path(settings.logs_path).resolve()
+    path = (base_dir / ef.file_path).resolve()
+    try:
+        path.relative_to(base_dir)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid file path")
     try:
         path.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        # Best-effort filesystem cleanup: keep API idempotency, but record the failure.
+        await write_audit(
+            db, "file_delete_unlink_failed",
+            user_id=user.id, username=user.username,
+            resource_type="incident_file", resource_id=str(file_id),
+            details={"incident_id": str(incident_id), "filename": ef.original_name,
+                     "path": str(path), "error": str(exc)},
+            ip_address=request.client.host if request.client else None,
+        )
 
     await write_audit(
         db, "file_delete",
