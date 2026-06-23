@@ -66,4 +66,7 @@ USER fenrir
 EXPOSE 8000
 # Single worker on purpose — bootstrap + audit seed must be serialised. Scale via
 # horizontal replicas behind Caddy, not in-process workers.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# --proxy-headers + --forwarded-allow-ips: the backend only receives traffic from
+# Caddy on the internal network, so trust X-Forwarded-For and rewrite request.client
+# to the real client IP (audit logs, rate-limiting, etc. were recording Caddy's IP).
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips=*"]
