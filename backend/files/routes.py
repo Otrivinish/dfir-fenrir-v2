@@ -40,8 +40,8 @@ def _safe_name(name: str) -> str:
     return re.sub(r'[^\w.\-]', '_', Path(name).name)[:200] or "file"
 
 
-def _incident_file_path(incident_id: uuid.UUID, file_id: uuid.UUID, original_name: str) -> str:
-    return f"files/{incident_id}/{file_id}_{_safe_name(original_name)}"
+def _incident_file_path(incident_id: uuid.UUID, file_id: uuid.UUID, original_name: str) -> Path:
+    return Path("files") / str(incident_id) / f"{file_id}_{_safe_name(original_name)}"
 
 
 async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) -> Incident:
@@ -146,7 +146,7 @@ async def upload_incident_file(
     base_dir = Path(settings.logs_path).resolve()
     dest = (base_dir / rel_path).resolve()
     try:
-        dest.relative_to(base_dir)
+        safe_rel_path = dest.relative_to(base_dir).as_posix()
     except ValueError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid file path")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -159,7 +159,7 @@ async def upload_incident_file(
         original_name=original_name,
         file_size=len(raw),
         content_type=file.content_type,
-        file_path=rel_path,
+        file_path=safe_rel_path,
         nonce_hex=nonce_hex,
         uploaded_by_id=user.id,
     )
