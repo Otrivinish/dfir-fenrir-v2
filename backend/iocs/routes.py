@@ -21,11 +21,12 @@ from auth.deps import current_user, require_analyst
 from core.database import get_db
 from incidents.access import get_accessible_incident
 import lolbins.service as lol_svc
-from models import IOC, Incident, ThreatIntelIOC, User
+from models import IOC, Incident, IocTimelineLink, ThreatIntelIOC, TimelineEvent, User
 from osint.service import SOURCES, enrich_one, source_available
 from schemas import (
     EnrichResultItem,
     IocEnrichAllRequest, IocEnrichAllResponse,
+    IocTimelineLinkCreate, IocTimelineLinkList, IocTimelineLinkOut,
     IocType, IOCCreate, IOCList, IOCOut, IOCUpdate,
     TiScanResult,
 )
@@ -52,6 +53,15 @@ def _decode_cursor(cursor: Optional[str]) -> int:
 
 async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) -> Incident:
     return await get_accessible_incident(db, incident_id, user)
+
+
+async def _username_map(db: AsyncSession, user_ids) -> dict[uuid.UUID, str]:
+    """Resolve {user_id: username} for a set of adder ids (skips None/missing)."""
+    ids = {i for i in user_ids if i}
+    if not ids:
+        return {}
+    rows = (await db.execute(select(User.id, User.username).where(User.id.in_(ids)))).all()
+    return {uid: uname for uid, uname in rows}
 
 
 def _norm_tags(tags: list[str] | None) -> list[str]:
@@ -143,6 +153,11 @@ async def list_iocs(
         for ioc in items:
             _apply_lolbin(ioc)
 
+    # Resolve adder usernames for display (batched)
+    umap = await _username_map(db, [i.added_by_id for i in items])
+    for ioc in items:
+        ioc.added_by_username = umap.get(ioc.added_by_id)
+
     next_cursor = _encode_cursor(offset + limit) if has_more else None
     return IOCList(items=items, next_cursor=next_cursor)
 
@@ -212,6 +227,7 @@ async def create_ioc(
     await db.commit()
 
     out = IOCOut.model_validate(ioc)
+    out.added_by_username = user.username
     if ti_hit:
         out.ti_matched      = True
         out.ti_match_source = ti_hit.feed_name
@@ -410,6 +426,30 @@ async def update_ioc(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "IOC not found")
 
     changed: dict[str, object] = {}
+    # type/value are editable; re-check the (incident, type, value) uniqueness
+    # constraint and reject a collision with a clear 409 before mutating.
+    new_type  = req.type if req.type is not None else ioc.type
+    new_value = req.value.strip() if req.value is not None else ioc.value
+    if (new_type, new_value) != (ioc.type, ioc.value):
+        dup = (await db.execute(
+            select(IOC.id).where(
+                IOC.incident_id == incident_id,
+                IOC.type == new_type,
+                IOC.value == new_value,
+                IOC.id != ioc.id,
+            )
+        )).scalar_one_or_none()
+        if dup:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "An IOC with this type and value already exists on this incident",
+            )
+        if new_type != ioc.type:
+            ioc.type = new_type
+            changed["type"] = new_type
+        if new_value != ioc.value:
+            ioc.value = new_value
+            changed["value"] = new_value
     if req.notes is not None and req.notes != (ioc.notes or ""):
         ioc.notes = req.notes
         changed["notes"] = req.notes
@@ -440,10 +480,149 @@ async def update_ioc(
             details={"incident_id": str(incident_id), "changes": changed},
             ip_address=request.client.host if request.client else None,
         )
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "An IOC with this type and value already exists on this incident",
+        )
     out = IOCOut.model_validate(ioc)
+    umap = await _username_map(db, [ioc.added_by_id])
+    out.added_by_username = umap.get(ioc.added_by_id)
     _apply_lolbin(out)
     return out
+
+
+# ─── Timeline-event links (many-to-many) ──────────────────────────────────────
+
+async def _get_ioc(db: AsyncSession, incident_id: uuid.UUID, ioc_id: uuid.UUID) -> IOC:
+    ioc = (await db.execute(
+        select(IOC).where(IOC.id == ioc_id, IOC.incident_id == incident_id)
+    )).scalar_one_or_none()
+    if not ioc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "IOC not found")
+    return ioc
+
+
+@router.get("/{incident_id}/iocs/{ioc_id}/timeline-links",
+            response_model=IocTimelineLinkList,
+            summary="List timeline events linked to an IOC")
+async def list_ioc_timeline_links(
+    incident_id: uuid.UUID,
+    ioc_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> IocTimelineLinkList:
+    """List the timeline events linked to an IOC, oldest first.
+
+    Requires an authenticated user with access to the incident. Returns an
+    `IocTimelineLinkList` of the linked events (id, time, description).
+    """
+    await _get_incident(db, incident_id, user)
+    await _get_ioc(db, incident_id, ioc_id)
+    rows = (await db.execute(
+        select(TimelineEvent.id, TimelineEvent.event_time, TimelineEvent.description)
+        .join(IocTimelineLink, IocTimelineLink.timeline_event_id == TimelineEvent.id)
+        .where(IocTimelineLink.ioc_id == ioc_id)
+        .order_by(TimelineEvent.event_time)
+    )).all()
+    return IocTimelineLinkList(items=[
+        IocTimelineLinkOut(event_id=r.id, event_time=r.event_time, description=r.description)
+        for r in rows
+    ])
+
+
+@router.post("/{incident_id}/iocs/{ioc_id}/timeline-links",
+             response_model=IocTimelineLinkOut,
+             status_code=status.HTTP_201_CREATED,
+             summary="Link a timeline event to an IOC")
+async def link_ioc_timeline_event(
+    incident_id: uuid.UUID,
+    ioc_id: uuid.UUID,
+    req: IocTimelineLinkCreate,
+    request: Request,
+    user: User = Depends(require_analyst),
+    db: AsyncSession = Depends(get_db),
+) -> IocTimelineLinkOut:
+    """Link an existing timeline event (same incident) to an IOC.
+
+    Rejects on a closed incident (409), unknown IOC or event (404), or an
+    already-existing link (409). Requires the analyst role and access to the
+    incident; the action is audit-logged. Returns the linked event.
+    """
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    await _get_ioc(db, incident_id, ioc_id)
+
+    ev = (await db.execute(
+        select(TimelineEvent).where(
+            TimelineEvent.id == req.event_id,
+            TimelineEvent.incident_id == incident_id,
+        )
+    )).scalar_one_or_none()
+    if not ev:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Timeline event not found")
+
+    db.add(IocTimelineLink(
+        id=uuid.uuid4(), ioc_id=ioc_id, timeline_event_id=ev.id, created_by_id=user.id,
+    ))
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "This event is already linked to the IOC")
+
+    await write_audit(
+        db, "ioc_timeline_link",
+        user_id=user.id, username=user.username,
+        resource_type="ioc", resource_id=str(ioc_id),
+        details={"incident_id": str(incident_id), "timeline_event_id": str(ev.id)},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return IocTimelineLinkOut(event_id=ev.id, event_time=ev.event_time, description=ev.description)
+
+
+@router.delete("/{incident_id}/iocs/{ioc_id}/timeline-links/{event_id}",
+               summary="Unlink a timeline event from an IOC")
+async def unlink_ioc_timeline_event(
+    incident_id: uuid.UUID,
+    ioc_id: uuid.UUID,
+    event_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(require_analyst),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Remove the link between a timeline event and an IOC.
+
+    Rejects on a closed incident (409) and returns 404 if no such link exists.
+    Requires the analyst role and access to the incident; audit-logged.
+    """
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+
+    link = (await db.execute(
+        select(IocTimelineLink).where(
+            IocTimelineLink.ioc_id == ioc_id,
+            IocTimelineLink.timeline_event_id == event_id,
+        )
+    )).scalar_one_or_none()
+    if not link:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Link not found")
+    await db.delete(link)
+    await write_audit(
+        db, "ioc_timeline_unlink",
+        user_id=user.id, username=user.username,
+        resource_type="ioc", resource_id=str(ioc_id),
+        details={"incident_id": str(incident_id), "timeline_event_id": str(event_id)},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return {"ok": True}
 
 
 # ─── Delete ──────────────────────────────────────────────────────────────────

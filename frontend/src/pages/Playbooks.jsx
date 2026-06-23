@@ -28,6 +28,7 @@ export default function Playbooks() {
   const [search, setSearch]        = useState('')
   const [modal, setModal]          = useState(null) // null | 'execute' | 'new'
   const [selected, setSelected]    = useState(null) // template for execute
+  const [previewTpl, setPreviewTpl] = useState(null) // template for read-only step preview
 
   const load = useCallback(async () => {
     setError(null)
@@ -128,11 +129,20 @@ export default function Playbooks() {
               key={tpl.id}
               tpl={tpl}
               isAdmin={isAdmin}
+              onOpen={setPreviewTpl}
               onExecute={onExecute}
               onDelete={onDeleted}
             />
           ))}
         </div>
+      )}
+
+      {previewTpl && (
+        <PreviewModal
+          tpl={previewTpl}
+          onClose={() => setPreviewTpl(null)}
+          onExecute={(t) => { setPreviewTpl(null); onExecute(t) }}
+        />
       )}
 
       {modal === 'execute' && selected && (
@@ -154,10 +164,20 @@ export default function Playbooks() {
 
 // ── Playbook card ─────────────────────────────────────────────────────────────
 
-function PlaybookCard({ tpl, isAdmin, onExecute, onDelete }) {
+function PlaybookCard({ tpl, isAdmin, onOpen, onExecute, onDelete }) {
   const shortId = tpl.key.toUpperCase().replace(/_/g, '-').slice(0, 16)
+  // Click anywhere on the card (except the action buttons) opens the step preview.
+  const open = (e) => { if (e.target.closest('button')) return; onOpen(tpl) }
   return (
-    <article className="pb-card">
+    <article
+      className="pb-card"
+      role="button"
+      tabIndex={0}
+      onClick={open}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(tpl) } }}
+      style={{ cursor: 'pointer' }}
+      title="Open to view steps"
+    >
       <div className="pb-card-head">
         <div>
           <div className="pb-card-id">{shortId}</div>
@@ -188,6 +208,14 @@ function PlaybookCard({ tpl, isAdmin, onExecute, onDelete }) {
       <div className="pb-card-actions">
         <button
           type="button"
+          className="btn ghost"
+          onClick={() => onOpen(tpl)}
+          title="View steps"
+        >
+          View steps
+        </button>
+        <button
+          type="button"
           className="btn primary"
           style={{ flex: 1 }}
           onClick={() => onExecute(tpl)}
@@ -207,6 +235,107 @@ function PlaybookCard({ tpl, isAdmin, onExecute, onDelete }) {
         )}
       </div>
     </article>
+  )
+}
+
+// ── Preview modal — read-only view of a playbook's steps ──────────────────────
+
+function PreviewModal({ tpl, onClose, onExecute }) {
+  const [full, setFull]       = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError]     = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    api.getPlaybookTemplate(tpl.id)
+      .then(d => { if (!cancelled) setFull(d) })
+      .catch(e => { if (!cancelled) setError(e.message || 'Could not load playbook steps') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [tpl.id])
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const steps = [...(full?.tasks || [])].sort((a, b) => a.order - b.order)
+  const phaseLabel = (v) => PHASE.find(p => p.value === v)?.label || v
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" style={{ maxWidth: 640 }} role="dialog" aria-labelledby="pb-preview-title">
+        <div className="modal-head">
+          <h2 id="pb-preview-title">{tpl.name}</h2>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          <div style={{
+            padding: 'var(--space-3)',
+            background: 'var(--surface-2)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius)',
+            marginBottom: 'var(--space-3)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+              <span className="pb-card-id">{tpl.key.toUpperCase().replace(/_/g, '-').slice(0, 16)}</span>
+              {tpl.category && <span className="pb-cat">{tpl.category}</span>}
+              {tpl.is_system && <span className="pb-system-badge">system</span>}
+            </div>
+            {tpl.description && (
+              <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 'var(--space-2)', lineHeight: 1.5 }}>
+                {tpl.description}
+              </p>
+            )}
+          </div>
+
+          <div className="field-label" style={{ marginBottom: 'var(--space-2)' }}>
+            Steps{!loading && !error ? ` (${steps.length})` : ''}
+          </div>
+
+          {loading ? (
+            <div style={{ color: 'var(--muted)', fontSize: 13 }}>Loading steps…</div>
+          ) : error ? (
+            <div className="alert error" role="alert">
+              <span className="alert-icon">!</span><span>{error}</span>
+            </div>
+          ) : steps.length === 0 ? (
+            <div style={{ color: 'var(--muted)', fontSize: 13 }}>This playbook has no steps.</div>
+          ) : (
+            <ol style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+              {steps.map((s, i) => (
+                <li key={i} style={{
+                  background: 'var(--surface-2)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius)',
+                  padding: 'var(--space-2) var(--space-3)',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)' }}>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>
+                      {i + 1}.
+                    </span>
+                    <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)', flex: 1, wordBreak: 'break-word' }}>
+                      {s.title}
+                    </span>
+                    <span className="pill" style={{ fontSize: 10, flexShrink: 0 }}>{phaseLabel(s.phase)}</span>
+                  </div>
+                  {s.description && (
+                    <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4, marginLeft: 22, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                      {s.description}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+        <div className="modal-foot">
+          <button type="button" className="btn ghost" onClick={onClose}>Close</button>
+          <button type="button" className="btn primary" onClick={() => onExecute(tpl)}>▶ Execute</button>
+        </div>
+      </div>
+    </div>
   )
 }
 

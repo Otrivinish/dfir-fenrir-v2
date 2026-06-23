@@ -1,10 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
 import BulkImportModal from './BulkImportModal.jsx'
 import TagChip from '../../../components/TagChip.jsx'
 import TagInput, { normalizeTags } from '../../../components/TagInput.jsx'
+import { SEV_PALETTE } from '../../../components/SevBadge.jsx'
+
+// Reuse the canonical severity palette so the IOC status badges read with the
+// same bright red/green as the "critical" badge in the incident header.
+const MAL_STYLE   = { background: SEV_PALETTE.critical.bg, color: SEV_PALETTE.critical.text, borderColor: SEV_PALETTE.critical.border }
+const CLEAN_STYLE = { background: SEV_PALETTE.low.bg,      color: SEV_PALETTE.low.text,      borderColor: SEV_PALETTE.low.border }
 
 const IOC_TYPES = [
   { value: 'ip',           label: 'IP address' },
@@ -55,6 +61,8 @@ export default function IOCs() {
   const [loading, setLoading]               = useState(true)
   const [error, setError]                   = useState(null)
   const [typeFilter, setTypeFilter]         = useState('')
+  const [sortKey, setSortKey]               = useState(null)   // null = server order (added desc)
+  const [sortDir, setSortDir]               = useState('asc')
   const [modalOpen, setModalOpen]           = useState(false)
   const [exportOpen, setExportOpen]         = useState(false)
   const [bulkOpen, setBulkOpen]             = useState(false)
@@ -237,6 +245,37 @@ export default function IOCs() {
   }
 
   const hasAnyResults = Object.keys(enrichResults).length > 0
+
+  // ── Sorting (client-side; the list is capped at 200 rows) ──────────────────
+  const toggleSort = (key) => {
+    if (sortKey === key) { setSortDir(d => (d === 'asc' ? 'desc' : 'asc')); return }
+    setSortKey(key); setSortDir('asc')
+  }
+  const sortArrow = (key) => (sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '')
+
+  const sortedIocs = useMemo(() => {
+    if (!sortKey) return iocs
+    const dir = sortDir === 'asc' ? 1 : -1
+    const keyOf = (i) => {
+      switch (sortKey) {
+        case 'type':       return i.type || ''
+        case 'value':      return (i.value || '').toLowerCase()
+        case 'entity':     return (entityMap[i.entity_id]?.name || '').toLowerCase()
+        case 'source':     return (i.source || '').toLowerCase()
+        case 'confidence': return i.confidence ?? 50
+        case 'tags':       return (i.tags?.length || 0)
+        case 'added':      return i.added_at || ''
+        case 'seen_in':    return (corrMap[i.id]?.length || 0)
+        default:           return ''
+      }
+    }
+    return [...iocs].sort((a, b) => {
+      const va = keyOf(a), vb = keyOf(b)
+      if (va < vb) return -dir
+      if (va > vb) return dir
+      return 0
+    })
+  }, [iocs, sortKey, sortDir, entityMap, corrMap])
 
   return (
     <section className="panel">
@@ -430,19 +469,19 @@ export default function IOCs() {
         <table className="settings-table">
           <thead>
             <tr>
-              <th style={{ width: 110 }}>Type</th>
-              <th>Value</th>
-              <th style={{ width: 150 }}>Entity</th>
-              <th style={{ width: 90 }}>Source</th>
-              <th style={{ width: 90 }}>Confidence</th>
-              <th style={{ width: 160 }}>Tags</th>
-              <th style={{ width: 130 }}>Added</th>
-              <th style={{ width: 80 }}>Seen in</th>
+              <th style={{ width: 110, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('type')}>Type{sortArrow('type')}</th>
+              <th style={{ cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('value')}>Value{sortArrow('value')}</th>
+              <th style={{ width: 150, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('entity')}>Entity{sortArrow('entity')}</th>
+              <th style={{ width: 90, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('source')}>Source{sortArrow('source')}</th>
+              <th style={{ width: 90, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('confidence')}>Confidence{sortArrow('confidence')}</th>
+              <th style={{ width: 160, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('tags')}>Tags{sortArrow('tags')}</th>
+              <th style={{ width: 130, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('added')}>Added{sortArrow('added')}</th>
+              <th style={{ width: 80, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('seen_in')}>Seen in{sortArrow('seen_in')}</th>
               <th className="actions">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {iocs.flatMap(i => {
+            {sortedIocs.flatMap(i => {
               const results = enrichResults[i.id]
               const isExpanded = expandedId === i.id
               return [
@@ -458,8 +497,8 @@ export default function IOCs() {
               >
                 <td>
                   <span className="pill">{labelOf(i.type)}</span>
-                  {i.malicious === true  && <span className="pill pill-crit" style={{ fontSize: 10, marginLeft: 4 }}>MALICIOUS</span>}
-                  {i.malicious === false && <span className="pill pill-ok"   style={{ fontSize: 10, marginLeft: 4 }}>CLEAN</span>}
+                  {i.malicious === true  && <span className="pill" style={{ fontSize: 10, marginLeft: 4, ...MAL_STYLE }}>MALICIOUS</span>}
+                  {i.malicious === false && <span className="pill" style={{ fontSize: 10, marginLeft: 4, ...CLEAN_STYLE }}>CLEAN</span>}
                   {i.malicious == null   && <span className="pill pill-gray" style={{ fontSize: 10, marginLeft: 4 }}>UNKNOWN</span>}
                 </td>
                 <td style={{ fontSize: 12, maxWidth: 280 }}>
@@ -692,6 +731,15 @@ export default function IOCs() {
                         )}
                       </div>
 
+                      {/* Linked timeline events */}
+                      <IocTimelineLinks incidentId={inc.id} ioc={i} isClosed={isClosed} />
+
+                      {/* Provenance — when & who added this IOC */}
+                      <div style={{ fontSize: 11, color: 'var(--dim)' }}>
+                        Added {formatLocal(i.added_at)}
+                        {i.added_by_username ? ` by ${i.added_by_username}` : ''}
+                      </div>
+
                       {/* Enrichment results (only when loaded) */}
                       {results && <EnrichmentResults results={results} />}
                     </div>
@@ -787,6 +835,127 @@ function TagChips({ tags }) {
   )
 }
 
+
+// ─── IOC ↔ timeline event links ───────────────────────────────────────────────
+
+function IocTimelineLinks({ incidentId, ioc, isClosed }) {
+  const [links, setLinks]   = useState([])
+  const [events, setEvents] = useState([])
+  const [pick, setPick]     = useState('')
+  const [busy, setBusy]     = useState(false)
+  const [err, setErr]       = useState(null)
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.listIocTimelineLinks(incidentId, ioc.id)
+      setLinks(r.items || [])
+    } catch (e) {
+      setErr(e.message || 'Could not load links')
+    }
+  }, [incidentId, ioc.id])
+
+  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    api.listTimelineEvents(incidentId, { limit: 500 })
+      .then(r => setEvents(r.items || []))
+      .catch(() => {})
+  }, [incidentId])
+
+  const linkedIds  = new Set(links.map(l => l.event_id))
+  const candidates = events.filter(e => !linkedIds.has(e.id))
+
+  const addLink = async () => {
+    if (!pick) return
+    setBusy(true); setErr(null)
+    try {
+      await api.linkIocTimelineEvent(incidentId, ioc.id, pick)
+      setPick('')
+      await load()
+    } catch (e) {
+      setErr(e.message || 'Could not link event')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const removeLink = async (eventId) => {
+    setBusy(true); setErr(null)
+    try {
+      await api.unlinkIocTimelineEvent(incidentId, ioc.id, eventId)
+      await load()
+    } catch (e) {
+      setErr(e.message || 'Could not unlink event')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
+        Linked timeline events
+      </div>
+      {links.length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--dim)', marginBottom: 6 }}>None linked.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 6 }}>
+          {links.map(l => (
+            <div key={l.event_id} style={{
+              display: 'flex', alignItems: 'flex-start', gap: 'var(--space-2)',
+              padding: '4px 8px', background: 'var(--surface-2)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+            }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', flexShrink: 0 }}>
+                {formatLocal(l.event_time).slice(0, 16)}
+              </span>
+              <span style={{ fontSize: 12, color: 'var(--text)', flex: 1, wordBreak: 'break-word' }}>
+                {l.description}
+              </span>
+              {!isClosed && (
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={() => removeLink(l.event_id)}
+                  disabled={busy}
+                  title="Unlink this event"
+                  style={{ fontSize: 11, padding: '0 6px', flexShrink: 0 }}
+                >×</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {!isClosed && (
+        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+          <select
+            className="select"
+            value={pick}
+            onChange={(e) => setPick(e.target.value)}
+            style={{ flex: 1, fontSize: 12 }}
+          >
+            <option value="">
+              {candidates.length ? '— link a timeline event —' : 'No more events to link'}
+            </option>
+            {candidates.map(e => (
+              <option key={e.id} value={e.id}>
+                {formatLocal(e.event_time).slice(0, 16)} · {(e.description || '').slice(0, 60)}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={addLink}
+            disabled={!pick || busy}
+            style={{ fontSize: 12 }}
+          >
+            Link
+          </button>
+        </div>
+      )}
+      {err && <div style={{ fontSize: 11, color: 'var(--crit)', marginTop: 4 }}>{err}</div>}
+    </div>
+  )
+}
 
 // ─── Enrichment result display ────────────────────────────────────────────────
 
@@ -1118,6 +1287,8 @@ function IocModal({ incidentId, onClose, onCreated }) {
 }
 
 function EditIocModal({ incidentId, ioc, onClose, onSaved }) {
+  const [type, setType]               = useState(ioc.type)
+  const [value, setValue]             = useState(ioc.value || '')
   const [notes, setNotes]             = useState(ioc.notes || '')
   const [malicious, setMalicious]     = useState(ioc.malicious ?? false)
   const [confidence, setConfidence]   = useState(ioc.confidence ?? 50)
@@ -1139,9 +1310,13 @@ function EditIocModal({ incidentId, ioc, onClose, onSaved }) {
 
   const onSubmit = async (e) => {
     e.preventDefault()
+    const v = value.trim()
+    if (!v) { setError('Value is required.'); return }
     setBusy(true); setError(null)
     try {
       await api.updateIoc(incidentId, ioc.id, {
+        type,
+        value:      v,
         notes:      notes.trim() || null,
         malicious,
         confidence,
@@ -1165,9 +1340,17 @@ function EditIocModal({ incidentId, ioc, onClose, onSaved }) {
         </div>
         <form onSubmit={onSubmit}>
           <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--muted)', wordBreak: 'break-all' }}>
-              <span className="pill" style={{ marginRight: 6 }}>{labelOf(ioc.type)}</span>
-              {ioc.value}
+            <div className="field">
+              <label className="field-label" htmlFor="eioc-type">Type</label>
+              <select id="eioc-type" className="select" value={type} onChange={(e) => setType(e.target.value)}>
+                {IOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="eioc-value">Value</label>
+              <input id="eioc-value" className="input" value={value}
+                onChange={(e) => setValue(e.target.value)} required maxLength={2048}
+                style={{ fontFamily: 'var(--font-mono)' }} />
             </div>
             <div className="field">
               <label className="field-label" htmlFor="eioc-entity">Linked entity</label>
@@ -1312,6 +1495,41 @@ function ExportModal({ incidentId, allIocs, onClose }) {
                   </tr>
                 )
               })}
+              {/* Defanged plain-text — all IOC types, safe to paste into reports/email */}
+              {(() => {
+                const id = 'defanged-txt'
+                const count = allIocs.length
+                const busy = downloading[id]
+                const err  = errors[id]
+                return (
+                  <tr key={id}>
+                    <td>
+                      <div style={{ fontWeight: 500 }}>Defanged text</div>
+                      <div style={{ fontSize: 11, color: 'var(--dim)' }}>All types · safe sharing — http[:]//evil[.]com</div>
+                    </td>
+                    <td style={{ fontSize: 12, color: 'var(--muted)' }}>.txt — plain text</td>
+                    <td style={{ textAlign: 'center' }}>
+                      <span style={{
+                        fontFamily: 'var(--font-mono)', fontSize: 13,
+                        color: count > 0 ? 'var(--ok)' : 'var(--dim)', fontWeight: count > 0 ? 600 : 400,
+                      }}>{count}</span>
+                    </td>
+                    <td className="actions" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        onClick={() => download(id)}
+                        disabled={busy || count === 0}
+                        title={count === 0 ? 'No IOCs to export' : 'Download defanged plain-text list'}
+                        style={{ fontSize: 12 }}
+                      >
+                        {busy ? 'Downloading…' : 'Download'}
+                      </button>
+                      {err && <div style={{ fontSize: 11, color: 'var(--crit)', textAlign: 'right' }}>{err}</div>}
+                    </td>
+                  </tr>
+                )
+              })()}
             </tbody>
           </table>
         </div>

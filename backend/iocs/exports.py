@@ -31,6 +31,7 @@ ExportFormat = Literal[
     "mde-csv", "mde-json",
     "crowdstrike", "sentinelone", "cortex-xdr",
     "fortigate", "panos",
+    "defanged-txt",
 ]
 
 # ── Type maps ─────────────────────────────────────────────────────────────────
@@ -142,8 +143,62 @@ async def export_iocs(
         return _export_cortex(iocs, short)
     if fmt == "fortigate":
         return _export_fortigate(iocs, short, prefix)
+    if fmt == "defanged-txt":
+        return _export_defanged(iocs, short)
     # panos
     return _export_panos(iocs, short, prefix)
+
+
+# ── Defanged plain text (safe sharing) ─────────────────────────────────────────
+# Network indicators are "defanged" so they can't be accidentally clicked or
+# auto-linked: the colon and the last dot are bracketed
+# (http[:]//some.url[.]com, 10.0.0[.]10, user@evil[.]com). Non-network types
+# (hashes, registry keys, file paths) are emitted verbatim.
+
+_DEFANG_TYPES = {"ip", "domain", "url", "email"}
+
+_DEFANG_LABEL = {
+    "ip": "IP addresses", "domain": "Domains", "url": "URLs",
+    "hash_md5": "MD5 hashes", "hash_sha1": "SHA1 hashes", "hash_sha256": "SHA256 hashes",
+    "email": "Emails", "registry_key": "Registry keys", "file_path": "File paths",
+    "other": "Other",
+}
+
+
+def _defang(value: str) -> str:
+    out = value.replace(":", "[:]")
+    idx = out.rfind(".")
+    if idx != -1:
+        out = out[:idx] + "[.]" + out[idx + 1:]
+    return out
+
+
+def _export_defanged(iocs: list, short: str) -> Response:
+    groups: dict[str, list] = {}
+    for i in iocs:
+        groups.setdefault(i.type, []).append(i)
+
+    lines = [
+        "# DFIR-FENRIR defanged IOC export",
+        "# Indicators are defanged for safe sharing — DO NOT click or paste into a browser.",
+        f"# {len(iocs)} indicator(s)",
+        "",
+    ]
+    for t, label in _DEFANG_LABEL.items():
+        items = groups.get(t)
+        if not items:
+            continue
+        lines.append(f"## {label} ({len(items)})")
+        for i in items:
+            lines.append(_defang(i.value) if t in _DEFANG_TYPES else i.value)
+        lines.append("")
+
+    body = "\n".join(lines).rstrip("\n") + "\n"
+    return Response(
+        content=body,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="defanged-iocs-{short}.txt"'},
+    )
 
 
 # ── MDE CSV ───────────────────────────────────────────────────────────────────

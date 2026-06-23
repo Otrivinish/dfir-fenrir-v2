@@ -32,8 +32,8 @@ function toEpoch(v) {
 
 // Left-rail nav, grouped by NIST SP 800-61 R3 phase (matches the project's
 // Standards alignment in CLAUDE.md). Order is analyst-first: Details to orient,
-// then the substantive Detection & Analysis tabs, then response, then close-out,
-// with process/meta tabs at the bottom. Admin-only group appended at runtime.
+// then process/meta tabs, then the substantive Detection & Analysis tabs, then
+// response, then close-out. Admin-only group appended at runtime.
 const NAV_GROUPS = [
   {
     label: null,                       // orient row — ungrouped at the top
@@ -42,10 +42,18 @@ const NAV_GROUPS = [
     ],
   },
   {
+    label: 'Process',
+    items: [
+      { to: 'playbook',    label: 'Playbook' },
+      { to: 'assignments', label: 'Assignments' },
+    ],
+  },
+  {
     label: 'Detection & Analysis',
     items: [
       { to: 'timeline', label: 'Timeline' },
       { to: 'entities', label: 'Entities' },
+      { to: 'files',    label: 'Files' },
       { to: 'evidence', label: 'Evidence' },
       { to: 'forensic', label: 'Forensic' },
       { to: 'mitre',    label: 'MITRE ATT&CK' },
@@ -64,13 +72,6 @@ const NAV_GROUPS = [
       { to: 'legal',         label: 'Legal' },
       { to: 'handoffs',      label: 'Handoffs' },
       { to: 'post-incident', label: 'Post-Incident' },
-    ],
-  },
-  {
-    label: 'Process',
-    items: [
-      { to: 'playbook',    label: 'Playbook' },
-      { to: 'assignments', label: 'Assignments' },
     ],
   },
 ]

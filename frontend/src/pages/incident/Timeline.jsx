@@ -3,7 +3,7 @@ import { useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { formatLocal, formatLocalShort } from '../../lib/datetime.js'
 import { MITRE_TACTICS, MITRE_TECHNIQUES, tacticColor } from '../../lib/mitre.js'
-import UtcDateTimeInput from '../../components/UtcDateTimeInput.jsx'
+import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 
 // Maps 800-61 R3 phase keys to display labels.
 const IR_PHASE_LABELS = {
@@ -244,12 +244,12 @@ export default function Timeline() {
   const [error, setError]         = useState(null)
   const [expandedId, setExpandedId] = useState(null)
   const [modalOpen, setModalOpen] = useState(false)
+  const [editEvent, setEditEvent] = useState(null)
   const [busy, setBusy]           = useState(false)
 
   // LOLBin correlation state
   const [lolbinHits,   setLolbinHits]   = useState([])
   const [lolbinHitIds, setLolbinHitIds] = useState(new Set())
-  const [lolbinOpen,   setLolbinOpen]   = useState(true)
 
   // System event visibility — persisted per-incident
   const sysKey = `fenrir_timeline_system_${inc.id}`
@@ -393,81 +393,6 @@ export default function Timeline() {
         </div>
       )}
 
-      {/* LOLBin correlation panel — only when hits exist */}
-      {lolbinHits.length > 0 && (
-        <div style={{
-          marginBottom: 'var(--space-3)',
-          border: `1px solid color-mix(in srgb, var(--high) 35%, transparent)`,
-          borderLeft: `3px solid var(--high)`,
-          borderRadius: 'var(--radius)',
-          background: `color-mix(in srgb, var(--high) 6%, var(--surface))`,
-          overflow: 'hidden',
-        }}>
-          <div
-            role="button"
-            tabIndex={0}
-            style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', padding: 'var(--space-2) var(--space-3)', cursor: 'pointer', userSelect: 'none' }}
-            onClick={() => setLolbinOpen(o => !o)}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setLolbinOpen(o => !o) } }}
-          >
-            <span style={{ color: 'var(--high)', fontSize: 13 }}>⚑</span>
-            <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--high)' }}>
-              LOLBin correlations
-            </span>
-            <span style={{
-              fontSize: 10, fontWeight: 700, fontFamily: 'var(--font-mono)',
-              padding: '1px 6px', borderRadius: 'var(--radius-sm)',
-              background: `color-mix(in srgb, var(--high) 18%, transparent)`,
-              color: 'var(--high)',
-            }}>{lolbinHits.length}</span>
-            <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)' }}>
-              {lolbinOpen ? '▲' : '▼'}
-            </span>
-          </div>
-
-          {lolbinOpen && (
-            <div style={{ borderTop: `1px solid color-mix(in srgb, var(--high) 20%, transparent)` }}>
-              {lolbinHits.map((hit, i) => (
-                <div key={hit.event_id} style={{
-                  padding: 'var(--space-2) var(--space-3)',
-                  borderTop: i > 0 ? '1px solid var(--border)' : undefined,
-                  display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', alignItems: 'flex-start',
-                }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, color: 'var(--text)', marginBottom: 4, wordBreak: 'break-word' }}>
-                      {hit.description}
-                    </div>
-                    <div style={{ display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap' }}>
-                      {hit.matches.map(m => (
-                        <span key={m.name} style={{
-                          fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 700,
-                          padding: '1px 6px', borderRadius: 'var(--radius-sm)',
-                          color: m.platform === 'windows' ? 'var(--high)' : 'var(--accent)',
-                          background: m.platform === 'windows'
-                            ? 'color-mix(in srgb, var(--high) 14%, transparent)'
-                            : 'color-mix(in srgb, var(--accent) 14%, transparent)',
-                          border: m.platform === 'windows'
-                            ? '1px solid color-mix(in srgb, var(--high) 30%, transparent)'
-                            : '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
-                        }}>
-                          {m.full_name || m.name}
-                          &nbsp;·&nbsp;{m.source === 'lolbas' ? 'LOLBAS' : 'GTFOBins'}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  {hit.hostname && (
-                    <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--dim)', flexShrink: 0 }}>
-                      {hit.hostname}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
       {loading ? (
         <div className="panel-empty"><div>Loading…</div></div>
       ) : events.length === 0 ? (
@@ -485,6 +410,7 @@ export default function Timeline() {
           events={events}
           expandedId={expandedId}
           onToggle={toggle}
+          onEdit={setEditEvent}
           onDelete={onDelete}
           isClosed={isClosed}
           busy={busy}
@@ -501,11 +427,29 @@ export default function Timeline() {
         />
       )}
 
+      {editEvent && !editEvent.is_system && (
+        <EventModal
+          incidentId={inc.id}
+          event={editEvent}
+          onClose={() => setEditEvent(null)}
+          onCreated={() => { setEditEvent(null); load() }}
+        />
+      )}
+
       {sysModalOpen && (
         <SystemEventModal
           incidentId={inc.id}
           onClose={() => setSysModalOpen(false)}
           onCreated={() => { setSysModalOpen(false); load() }}
+        />
+      )}
+
+      {editEvent && editEvent.is_system && (
+        <SystemEventModal
+          incidentId={inc.id}
+          event={editEvent}
+          onClose={() => setEditEvent(null)}
+          onCreated={() => { setEditEvent(null); load() }}
         />
       )}
     </section>
@@ -514,7 +458,7 @@ export default function Timeline() {
 
 // ─── Vertical spine ───────────────────────────────────────────────────────────
 
-function TimelineSpine({ events, expandedId, onToggle, onDelete, isClosed, busy, lolbinHitIds, lolbinHitMap }) {
+function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClosed, busy, lolbinHitIds, lolbinHitMap }) {
   // Group events by date so we can insert date separators.
   const groups = []
   let currentDate = null
@@ -533,7 +477,7 @@ function TimelineSpine({ events, expandedId, onToggle, onDelete, isClosed, busy,
       {/* vertical spine line */}
       <div style={{
         position: 'absolute',
-        left: 94,
+        left: 134,
         top: 0,
         bottom: 0,
         width: 2,
@@ -555,7 +499,7 @@ function TimelineSpine({ events, expandedId, onToggle, onDelete, isClosed, busy,
               }}
             >
               {/* align with spine */}
-              <div style={{ width: 80, flexShrink: 0 }} />
+              <div style={{ width: 120, flexShrink: 0 }} />
               <div style={{
                 marginLeft: 28,
                 fontSize: 11,
@@ -589,7 +533,7 @@ function TimelineSpine({ events, expandedId, onToggle, onDelete, isClosed, busy,
           >
             {/* timestamp column */}
             <div style={{
-              width: 80,
+              width: 120,
               flexShrink: 0,
               paddingRight: 8,
               textAlign: 'right',
@@ -606,7 +550,7 @@ function TimelineSpine({ events, expandedId, onToggle, onDelete, isClosed, busy,
                   whiteSpace: 'pre',
                 }}
               >
-                {formatLocalShort(ev.event_time).slice(11, 16)}
+                {formatLocalShort(ev.event_time)}
               </span>
             </div>
 
@@ -769,9 +713,18 @@ function TimelineSpine({ events, expandedId, onToggle, onDelete, isClosed, busy,
 
                   <div style={{ fontSize: 11, color: 'var(--dim)', marginBottom: 12 }}>
                     Added {formatLocal(ev.created_at)}
+                    {ev.created_by_username ? ` by ${ev.created_by_username}` : ''}
                   </div>
 
-                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={(e) => { e.stopPropagation(); onEdit(ev) }}
+                      disabled={isClosed || busy}
+                    >
+                      Edit
+                    </button>
                     <button
                       type="button"
                       className="btn ghost"
@@ -793,18 +746,19 @@ function TimelineSpine({ events, expandedId, onToggle, onDelete, isClosed, busy,
 
 // ─── Add event modal ──────────────────────────────────────────────────────────
 
-function EventModal({ incidentId, onClose, onCreated }) {
-  const [eventTime, setEventTime]     = useState(() => new Date().toISOString())
-  const [hostname, setHostname]       = useState('')
-  const [source, setSource]           = useState('')
-  const [eventType, setEventType]     = useState('')
-  const [description, setDescription] = useState('')
-  const [rawLog, setRawLog]           = useState('')
-  const [showRaw, setShowRaw]         = useState(false)
-  const [tacticId, setTacticId]       = useState('')
-  const [tacticName, setTacticName]   = useState('')
-  const [techniqueId, setTechniqueId]     = useState('')
-  const [techniqueName, setTechniqueName] = useState('')
+function EventModal({ incidentId, event, onClose, onCreated }) {
+  const isEdit = !!event
+  const [eventTime, setEventTime]     = useState(() => event?.event_time || new Date().toISOString())
+  const [hostname, setHostname]       = useState(event?.hostname || '')
+  const [source, setSource]           = useState(event?.source || '')
+  const [eventType, setEventType]     = useState(event?.event_type || '')
+  const [description, setDescription] = useState(event?.description || '')
+  const [rawLog, setRawLog]           = useState(event?.raw_log || '')
+  const [showRaw, setShowRaw]         = useState(!!event?.raw_log)
+  const [tacticId, setTacticId]       = useState(event?.mitre_tactic_id || '')
+  const [tacticName, setTacticName]   = useState(event?.mitre_tactic_name || '')
+  const [techniqueId, setTechniqueId]     = useState(event?.mitre_technique_id || '')
+  const [techniqueName, setTechniqueName] = useState(event?.mitre_technique_name || '')
   const [busy, setBusy]   = useState(false)
   const [error, setError] = useState(null)
 
@@ -839,21 +793,38 @@ function EventModal({ incidentId, onClose, onCreated }) {
 
     setBusy(true)
     try {
-      await api.createTimelineEvent(incidentId, {
-        event_time:           eventTime,
-        hostname:             hostname.trim()  || null,
-        source:               source.trim()   || null,
-        event_type:           eventType.trim() || null,
-        description:          desc,
-        raw_log:              rawLog.trim()   || null,
-        mitre_tactic_id:      tacticId        || null,
-        mitre_tactic_name:    tacticName      || null,
-        mitre_technique_id:   techniqueId     || null,
-        mitre_technique_name: techniqueName   || null,
-      })
+      if (isEdit) {
+        // Empty strings (not null) so cleared fields actually clear — the PATCH
+        // endpoint treats null as "leave unchanged".
+        await api.updateTimelineEvent(incidentId, event.id, {
+          event_time:           eventTime,
+          hostname:             hostname.trim(),
+          source:               source.trim(),
+          event_type:           eventType.trim(),
+          description:          desc,
+          raw_log:              rawLog.trim(),
+          mitre_tactic_id:      tacticId,
+          mitre_tactic_name:    tacticName,
+          mitre_technique_id:   techniqueId,
+          mitre_technique_name: techniqueName,
+        })
+      } else {
+        await api.createTimelineEvent(incidentId, {
+          event_time:           eventTime,
+          hostname:             hostname.trim()  || null,
+          source:               source.trim()   || null,
+          event_type:           eventType.trim() || null,
+          description:          desc,
+          raw_log:              rawLog.trim()   || null,
+          mitre_tactic_id:      tacticId        || null,
+          mitre_tactic_name:    tacticName      || null,
+          mitre_technique_id:   techniqueId     || null,
+          mitre_technique_name: techniqueName   || null,
+        })
+      }
       onCreated()
     } catch (err) {
-      setError(err.message || 'Could not add event.')
+      setError(err.message || (isEdit ? 'Could not save changes.' : 'Could not add event.'))
     } finally {
       setBusy(false)
     }
@@ -868,7 +839,7 @@ function EventModal({ incidentId, onClose, onCreated }) {
     >
       <div className="modal" role="dialog" aria-labelledby="tl-modal-title" style={{ maxWidth: 560 }}>
         <div className="modal-head">
-          <h2 id="tl-modal-title">Add timeline event</h2>
+          <h2 id="tl-modal-title">{isEdit ? 'Edit timeline event' : 'Add timeline event'}</h2>
           <button
             type="button"
             className="modal-close"
@@ -886,9 +857,9 @@ function EventModal({ incidentId, onClose, onCreated }) {
               <div className="form-row">
                 <div className="field">
                   <label className="field-label" htmlFor="tl-event-time">
-                    Event time (UTC)
+                    Event time
                   </label>
-                  <UtcDateTimeInput
+                  <LocalDateTimePicker
                     id="tl-event-time"
                     value={eventTime}
                     onChange={setEventTime}
@@ -1020,7 +991,7 @@ function EventModal({ incidentId, onClose, onCreated }) {
           <div className="modal-foot">
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
             <button type="submit" className="btn primary" disabled={busy}>
-              {busy ? 'Adding…' : 'Add event'}
+              {busy ? (isEdit ? 'Saving…' : 'Adding…') : (isEdit ? 'Save changes' : 'Add event')}
             </button>
           </div>
         </form>
@@ -1196,9 +1167,10 @@ function LolbinTechniqueRow({ technique }) {
 
 // ─── System event modal (operational annotation) ──────────────────────────────
 
-function SystemEventModal({ incidentId, onClose, onCreated }) {
-  const [eventTime, setEventTime]     = useState(() => new Date().toISOString())
-  const [description, setDescription] = useState('')
+function SystemEventModal({ incidentId, event, onClose, onCreated }) {
+  const isEdit = !!event
+  const [eventTime, setEventTime]     = useState(() => event?.event_time || new Date().toISOString())
+  const [description, setDescription] = useState(event?.description || '')
   const [busy, setBusy]   = useState(false)
   const [error, setError] = useState(null)
 
@@ -1217,15 +1189,22 @@ function SystemEventModal({ incidentId, onClose, onCreated }) {
 
     setBusy(true)
     try {
-      await api.createTimelineEvent(incidentId, {
-        event_time:    eventTime,
-        description:   desc,
-        is_system:     true,
-        system_source: 'manual',
-      })
+      if (isEdit) {
+        await api.updateTimelineEvent(incidentId, event.id, {
+          event_time:  eventTime,
+          description: desc,
+        })
+      } else {
+        await api.createTimelineEvent(incidentId, {
+          event_time:    eventTime,
+          description:   desc,
+          is_system:     true,
+          system_source: 'manual',
+        })
+      }
       onCreated()
     } catch (err) {
-      setError(err.message || 'Could not add event.')
+      setError(err.message || (isEdit ? 'Could not save changes.' : 'Could not add event.'))
     } finally {
       setBusy(false)
     }
@@ -1235,7 +1214,7 @@ function SystemEventModal({ incidentId, onClose, onCreated }) {
     <div className="modal-backdrop">
       <div className="modal" role="dialog" aria-labelledby="sys-modal-title" style={{ maxWidth: 440 }}>
         <div className="modal-head">
-          <h2 id="sys-modal-title">⚙ Annotate timeline</h2>
+          <h2 id="sys-modal-title">{isEdit ? '⚙ Edit annotation' : '⚙ Annotate timeline'}</h2>
           <button
             type="button"
             className="modal-close"
@@ -1254,8 +1233,8 @@ function SystemEventModal({ incidentId, onClose, onCreated }) {
               </div>
 
               <div className="field">
-                <label className="field-label" htmlFor="sys-event-time">Event time (UTC)</label>
-                <UtcDateTimeInput
+                <label className="field-label" htmlFor="sys-event-time">Event time</label>
+                <LocalDateTimePicker
                   id="sys-event-time"
                   value={eventTime}
                   onChange={setEventTime}
@@ -1289,7 +1268,7 @@ function SystemEventModal({ incidentId, onClose, onCreated }) {
           <div className="modal-foot">
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
             <button type="submit" className="btn primary" disabled={busy}>
-              {busy ? 'Adding…' : 'Add system event'}
+              {busy ? (isEdit ? 'Saving…' : 'Adding…') : (isEdit ? 'Save changes' : 'Add system event')}
             </button>
           </div>
         </form>

@@ -4,6 +4,7 @@ import { useAuth } from '../../hooks/useAuth.jsx'
 import { api } from '../../api/client.js'
 import { formatLocalShort } from '../../lib/datetime.js'
 import UtcDateTimeInput from '../../components/UtcDateTimeInput.jsx'
+import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 import { ACTION_TEMPLATES } from './respond/actionTemplates.js'
 
 // ── Vocabulary ────────────────────────────────────────────────────────────
@@ -802,8 +803,8 @@ function ActionModal({ incidentId, category, editing, users, entities, isAdmin, 
                 </div>
 
                 <div className="field">
-                  <label className="field-label" htmlFor="am-occurred">Occurred at (UTC, optional)</label>
-                  <UtcDateTimeInput id="am-occurred" value={occurredAt} onChange={setOccurredAt} />
+                  <label className="field-label" htmlFor="am-occurred">Occurred at (optional)</label>
+                  <LocalDateTimePicker id="am-occurred" value={occurredAt} onChange={setOccurredAt} />
                 </div>
 
                 <div className="field">
