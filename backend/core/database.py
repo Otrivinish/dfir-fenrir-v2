@@ -262,4 +262,13 @@ _INPLACE_MIGRATIONS: list[str] = [
     """CREATE TRIGGER trg_audit_logs_append_only
          BEFORE UPDATE OR DELETE ON audit_logs
          FOR EACH ROW EXECUTE FUNCTION fenrir_audit_logs_append_only()""",
+
+    # Unified incident "Files" store — generalises entity_files so a file can be
+    # incident-level (no entity) or linked to one, and deleting an entity unlinks
+    # rather than destroys the file. DROP NOT NULL + re-point FK to SET NULL.
+    # (drop-if-exists then add = idempotent across restarts.)
+    "ALTER TABLE entity_files ALTER COLUMN entity_id DROP NOT NULL",
+    "ALTER TABLE entity_files DROP CONSTRAINT IF EXISTS entity_files_entity_id_fkey",
+    """ALTER TABLE entity_files ADD CONSTRAINT entity_files_entity_id_fkey
+         FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE SET NULL""",
 ]

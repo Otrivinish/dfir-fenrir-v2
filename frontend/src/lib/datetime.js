@@ -91,6 +91,61 @@ export function nowUtcInput() {
   return new Date().toISOString().slice(0, 19).replace('T', ' ')
 }
 
+// ─── Zoned wall-clock entry (input edge, local Fenrir TZ) ───────────────────
+// For datetime entry in the user's stored timezone (offset visible) rather than
+// raw UTC. Rendering already does this; these let entry match it. Storage stays
+// UTC — conversion happens here at the boundary.
+
+/** Offset (ms) of `tz` at a given UTC instant: (wall-clock-as-if-UTC) − instant. */
+function tzOffsetMs(instantMs, tz) {
+  const p = dtParts(new Date(instantMs), tz, true)
+  const asIfUtc = Date.UTC(
+    +get(p, 'year'), +get(p, 'month') - 1, +get(p, 'day'),
+    +get(p, 'hour'), +get(p, 'minute'), +get(p, 'second'),
+  )
+  return asIfUtc - instantMs
+}
+
+/** ISO-8601 (`…Z`) → wall-clock parts {y,mo,d,h,mi,s} in the stored TZ. null if empty/invalid. */
+export function isoToZonedParts(iso) {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (isNaN(d)) return null
+  const p = dtParts(d, getStoredTz(), true)
+  return {
+    y:  +get(p, 'year'),  mo: +get(p, 'month'), d: +get(p, 'day'),
+    h:  +get(p, 'hour'),  mi: +get(p, 'minute'), s: +get(p, 'second'),
+  }
+}
+
+/**
+ * Wall-clock parts {y,mo,d,h,mi,s} interpreted in the stored TZ → canonical UTC ISO.
+ * DST-safe: the zone offset is computed at the target instant with one correction
+ * pass (handles the offset changing across a transition). Returns null if invalid.
+ */
+export function zonedPartsToIso({ y, mo, d, h, mi, s = 0 }) {
+  if ([y, mo, d, h, mi, s].some(v => !Number.isFinite(v))) return null
+  const tz = getStoredTz()
+  // Provisional: treat the wall components as if they were UTC.
+  const asUtc = Date.UTC(y, mo - 1, d, h, mi, s)
+  if (isNaN(asUtc)) return null
+  // Subtract the zone's offset to land on the real instant; re-check once in case
+  // the offset differs at that corrected instant (DST boundary).
+  let utc = asUtc - tzOffsetMs(asUtc, tz)
+  const off2 = tzOffsetMs(utc, tz)
+  const utc2 = asUtc - off2
+  if (utc2 !== utc) utc = utc2
+  const dt = new Date(utc)
+  if (isNaN(dt)) return null
+  // Reject silent rollover (e.g. month 13, day 32) by round-tripping the parts.
+  const back = isoToZonedParts(dt.toISOString())
+  if (!back || back.y !== y || back.mo !== mo || back.d !== d ||
+      back.h !== h || back.mi !== mi || back.s !== s) {
+    return null
+  }
+  return dt.toISOString()
+}
+
 /** Relative descriptor — "3m ago", "2h ago", "in 5h", "yesterday". For sub-day deltas. */
 export function relative(iso) {
   if (!iso) return ''

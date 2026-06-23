@@ -267,3 +267,64 @@
 }
 .warroom-send:hover:not(:disabled) { opacity: 0.85; }
 .warroom-send:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ─── @mention autocomplete dropdown ───────────────────────────────────────── */
+
+.warroom-mention-dropdown {
+  margin: 0 var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.warroom-mention-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 6px 10px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: var(--font-body);
+}
+.warroom-mention-item.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.warroom-mention-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.warroom-mention-full {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── In-message @mention chips ─────────────────────────────────────────────── */
+
+.warroom-mention {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: var(--radius-sm);
+  padding: 0 3px;
+  font-weight: 600;
+}
+/* The current viewer's own mention — stronger, filled treatment so it stands out. */
+.warroom-mention.is-me {
+  color: var(--bg);
+  background: var(--accent);
+}

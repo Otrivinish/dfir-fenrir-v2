@@ -27,6 +27,7 @@ from auth.routes import router as auth_router
 from core.config import settings
 from core.database import SessionLocal, init_db
 from entities.routes import router as entities_router
+from files.routes import router as files_router
 from evidence.crypto import assert_kek_configured
 from evidence.download import router as exports_download_router
 from evidence.routes import router as evidence_router
@@ -262,6 +263,7 @@ app.include_router(iocs_exports_router,          prefix="/api/incidents", tags=[
 app.include_router(correlations_incident_router, prefix="/api/incidents", tags=["Correlations"])
 app.include_router(iocs_router,                  prefix="/api/incidents", tags=["IOCs"])
 app.include_router(entities_router,  prefix="/api/incidents",          tags=["Entities"])
+app.include_router(files_router,     prefix="/api/incidents",          tags=["Files"])
 app.include_router(evidence_router,  prefix="/api/incidents",          tags=["Evidence"])
 app.include_router(playbook_tasks_router,     prefix="/api/incidents",          tags=["Playbook"])
 app.include_router(playbook_templates_router, prefix="/api/playbook-templates", tags=["Playbook templates"])

@@ -337,6 +337,7 @@ class IOCOut(BaseModel):
     tags:        list[str]     = Field(default_factory=list)
     entity_id:   Optional[UUID] = None
     added_by_id: Optional[UUID] = None
+    added_by_username: Optional[str] = None
     added_at:    datetime
     updated_at:  datetime
     # Populated at query time — not stored on the row.
@@ -362,12 +363,29 @@ class IOCCreate(BaseModel):
 
 
 class IOCUpdate(BaseModel):
-    # type/value changes require delete + recreate to keep dedup + audit clean.
+    # type/value are editable; the route re-checks the (incident, type, value)
+    # uniqueness constraint and rejects a collision with 409.
+    type:       Optional[IocType]   = None
+    value:      Optional[str]       = Field(default=None, min_length=1, max_length=2048)
     notes:      Optional[str]       = Field(default=None, max_length=4096)
     malicious:  Optional[bool]      = None
     confidence: Optional[int]       = Field(default=None, ge=0, le=100)
     tags:       Optional[list[str]] = Field(default=None, max_length=32)
     entity_id:  Optional[UUID]      = None
+
+
+class IocTimelineLinkCreate(BaseModel):
+    event_id: UUID
+
+
+class IocTimelineLinkOut(BaseModel):
+    event_id:    UUID
+    event_time:  datetime
+    description: str
+
+
+class IocTimelineLinkList(BaseModel):
+    items: list[IocTimelineLinkOut]
 
 
 class IOCList(BaseModel):
@@ -430,16 +448,26 @@ class EntityList(BaseModel):
 
 class EntityFileOut(BaseModel):
     id:             UUID
-    entity_id:      UUID
+    entity_id:      Optional[UUID] = None
     incident_id:    UUID
     original_name:  str
     file_size:      int
     content_type:   Optional[str] = None
     uploaded_by_id: Optional[UUID] = None
+    # Populated at query time for display — not stored on the row.
+    uploaded_by_username: Optional[str] = None
+    entity_name:          Optional[str] = None
     uploaded_at:    datetime
 
     class Config:
         from_attributes = True
+
+
+class IncidentFileUpdate(BaseModel):
+    """Rename a stored file and/or (un)link it to an entity. `entity_id` is
+    tri-state — an explicit null unlinks; omitting it leaves the link unchanged."""
+    original_name: Optional[str]  = Field(default=None, min_length=1, max_length=512)
+    entity_id:     Optional[UUID] = None
 
 
 class EntityFileList(BaseModel):
@@ -1368,6 +1396,7 @@ class TimelineEventOut(BaseModel):
     system_source:        Optional[str]   = None
     external_safe:        bool            = True
     created_by_id:        Optional[UUID] = None
+    created_by_username:  Optional[str]  = None
     created_at:           datetime
     updated_at:           datetime
 

@@ -49,6 +49,15 @@ async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) ->
     return await get_accessible_incident(db, incident_id, user)
 
 
+async def _username_map(db: AsyncSession, user_ids) -> dict[uuid.UUID, str]:
+    """Resolve {user_id: username} for a set of author ids (skips None/missing)."""
+    ids = {i for i in user_ids if i}
+    if not ids:
+        return {}
+    rows = (await db.execute(select(User.id, User.username).where(User.id.in_(ids)))).all()
+    return {uid: uname for uid, uname in rows}
+
+
 # ─── List ─────────────────────────────────────────────────────────────────────
 
 @router.get("/{incident_id}/timeline", response_model=TimelineEventList, summary="List timeline events")
@@ -80,7 +89,11 @@ async def list_timeline_events(
     rows = (await db.execute(stmt.offset(offset).limit(limit + 1))).scalars().all()
 
     has_more    = len(rows) > limit
-    items       = [TimelineEventOut.model_validate(r) for r in rows[:limit]]
+    page        = rows[:limit]
+    umap        = await _username_map(db, [r.created_by_id for r in page])
+    for r in page:
+        r.created_by_username = umap.get(r.created_by_id)
+    items       = [TimelineEventOut.model_validate(r) for r in page]
     next_cursor = _encode_cursor(offset + limit) if has_more else None
 
     system_count = 0
@@ -153,6 +166,7 @@ async def create_timeline_event(
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
+    ev.created_by_username = user.username
     return TimelineEventOut.model_validate(ev)
 
 
@@ -220,6 +234,8 @@ async def update_timeline_event(
             ip_address=request.client.host if request.client else None,
         )
     await db.commit()
+    umap = await _username_map(db, [ev.created_by_id])
+    ev.created_by_username = umap.get(ev.created_by_id)
     return TimelineEventOut.model_validate(ev)
 
 

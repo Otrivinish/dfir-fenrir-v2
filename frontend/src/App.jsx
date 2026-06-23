@@ -36,6 +36,7 @@ import Details from './pages/incident/Details.jsx'
 import Playbook from './pages/incident/Playbook.jsx'
 import Timeline from './pages/incident/Timeline.jsx'
 import Entities from './pages/incident/Entities.jsx'
+import Files from './pages/incident/Files.jsx'
 import Evidence from './pages/incident/Evidence.jsx'
 import EvidenceItems from './pages/incident/evidence/Items.jsx'
 import EvidenceCustodyLog from './pages/incident/evidence/CustodyLog.jsx'
@@ -133,6 +134,7 @@ export default function App() {
                 <Route path="playbook"        element={<Playbook />} />
                 <Route path="timeline"        element={<Timeline />} />
                 <Route path="entities"        element={<Entities />} />
+                <Route path="files"           element={<Files />} />
                 <Route path="evidence" element={<Evidence />}>
                   <Route index               element={<Navigate to="items" replace />} />
                   <Route path="items"        element={<EvidenceItems />} />

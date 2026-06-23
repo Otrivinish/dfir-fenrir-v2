@@ -353,6 +353,25 @@ class IOC(Base):
     )
 
 
+# ─── IOC ↔ timeline event link (many-to-many within an incident) ─────────────
+class IocTimelineLink(Base):
+    __tablename__ = "ioc_timeline_links"
+
+    id                = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ioc_id            = Column(UUID(as_uuid=True),
+                              ForeignKey("iocs.id", ondelete="CASCADE"),
+                              nullable=False, index=True)
+    timeline_event_id = Column(UUID(as_uuid=True),
+                              ForeignKey("timeline_events.id", ondelete="CASCADE"),
+                              nullable=False, index=True)
+    created_by_id     = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at        = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("ioc_id", "timeline_event_id", name="uq_ioc_timeline_link"),
+    )
+
+
 # ─── Entity (asset in scope of an incident) ──────────────────────────────────
 # Distinct from IOC: an IOC is "this is a sign of badness"; an Entity is
 # "this thing exists in our environment and is relevant to the incident"
@@ -444,9 +463,12 @@ class EntityFile(Base):
     __tablename__ = "entity_files"
 
     id             = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # entity_id is optional: a file may live at the incident level (the "Files"
+    # store) with no entity, or be linked to one. Deleting the entity unlinks the
+    # file (SET NULL) rather than destroying it, since the file is incident-owned.
     entity_id      = Column(UUID(as_uuid=True),
-                            ForeignKey("entities.id", ondelete="CASCADE"),
-                            nullable=False, index=True)
+                            ForeignKey("entities.id", ondelete="SET NULL"),
+                            nullable=True, index=True)
     incident_id    = Column(UUID(as_uuid=True),
                             ForeignKey("incidents.id", ondelete="CASCADE"),
                             nullable=False, index=True)

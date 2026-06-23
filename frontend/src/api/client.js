@@ -195,6 +195,10 @@ export const api = {
   updateIoc:   (incidentId, iocId, payload)  => request('PATCH',  `/api/incidents/${incidentId}/iocs/${iocId}`, payload),
   deleteIoc:   (incidentId, iocId)           => request('DELETE', `/api/incidents/${incidentId}/iocs/${iocId}`),
   scanIocsTi:  (incidentId)                  => request('POST',   `/api/incidents/${incidentId}/iocs/scan-ti`),
+  // IOC ↔ timeline-event links (many-to-many)
+  listIocTimelineLinks:   (incidentId, iocId)          => request('GET',    `/api/incidents/${incidentId}/iocs/${iocId}/timeline-links`),
+  linkIocTimelineEvent:   (incidentId, iocId, eventId) => request('POST',   `/api/incidents/${incidentId}/iocs/${iocId}/timeline-links`, { event_id: eventId }),
+  unlinkIocTimelineEvent: (incidentId, iocId, eventId) => request('DELETE', `/api/incidents/${incidentId}/iocs/${iocId}/timeline-links/${eventId}`),
 
   // Threat intel feeds (admin CRUD + pull; analyst read)
   listTiFeeds:    ()               => request('GET',    '/api/threat-intel/feeds'),
@@ -254,6 +258,34 @@ export const api = {
     const form = new FormData()
     form.append('file', file)
     const res = await fetch(`/api/incidents/${incidentId}/entities/${entityId}/files`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: form,
+    })
+    const text = await res.text()
+    const data = text ? (() => { try { return JSON.parse(text) } catch { return text } })() : null
+    if (!res.ok) {
+      const err = new Error(
+        (data && typeof data === 'object' && (data.detail || data.message)) ||
+        (res.status === 413 ? 'File exceeds 50 MB limit.' : `Upload failed (${res.status})`)
+      )
+      err.status = res.status
+      throw err
+    }
+    return data
+  },
+
+  // Incident file store ("Files") — unified with entity files
+  listIncidentFiles:   (incidentId)             => request('GET',    `/api/incidents/${incidentId}/files`),
+  updateIncidentFile:  (incidentId, fileId, payload) => request('PATCH', `/api/incidents/${incidentId}/files/${fileId}`, payload),
+  deleteIncidentFile:  (incidentId, fileId)     => request('DELETE', `/api/incidents/${incidentId}/files/${fileId}`),
+  incidentFileDownloadUrl: (incidentId, fileId) => `/api/incidents/${incidentId}/files/${fileId}/download`,
+
+  uploadIncidentFile: async (incidentId, file, entityId = null) => {
+    const form = new FormData()
+    form.append('file', file)
+    if (entityId) form.append('entity_id', entityId)
+    const res = await fetch(`/api/incidents/${incidentId}/files`, {
       method: 'POST',
       credentials: 'same-origin',
       body: form,
