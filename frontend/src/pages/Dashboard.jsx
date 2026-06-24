@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { api } from '../api/client.js'
+import { api, notifyUnauthorized } from '../api/client.js'
 import { labelOf, byValue } from '../lib/incidentVocab.js'
 import { relative, formatLocal } from '../lib/datetime.js'
 import SevBadge, { SEV_PALETTE } from '../components/SevBadge.jsx'
@@ -279,7 +279,7 @@ export default function Dashboard() {
       } catch { /* ignore */ }
     }
     ws.onerror = () => {}
-    ws.onclose = () => { if (timer) clearTimeout(timer) }
+    ws.onclose = (e) => { if (timer) clearTimeout(timer); if (e.code === 4001) notifyUnauthorized() }
     return () => { try { ws.close() } catch { /* ok */ } }
   }, [load])
 

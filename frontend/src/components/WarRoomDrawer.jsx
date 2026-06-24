@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api } from '../api/client.js'
+import { api, notifyUnauthorized } from '../api/client.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 
 // Derive ws:// or wss:// base from current page protocol.
@@ -183,7 +183,7 @@ export default function WarRoomDrawer({ incidentId }) {
     }
 
     ws.onerror = () => {}
-    ws.onclose = () => {}
+    ws.onclose = (e) => { if (e.code === 4001) notifyUnauthorized() }
 
     return () => {
       ws.close()

@@ -386,7 +386,8 @@ async def mint_evidence(
         current_custodian_id=user.id, collected_by_id=user.id, collected_at=utcnow(),
     )
     db.add(ev)
-    analysis.evidence_id = ev_id
+    await db.flush()          # persist evidence before linking it, so the FK on
+    analysis.evidence_id = ev_id   # email_analysis can't reference a not-yet-inserted row
     await write_audit(db, "email_mint_evidence", user_id=user.id, username=user.username,
                       resource_type="evidence", resource_id=str(ev_id), outcome="success",
                       details={"incident_id": str(incident_id), "email_analysis_id": str(aid),

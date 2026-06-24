@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { notifyUnauthorized } from '../api/client.js'
 
 function wsBase() {
   return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host
@@ -46,7 +47,7 @@ export default function ToastContainer() {
     }
 
     ws.onerror = () => {}
-    ws.onclose = () => {}
+    ws.onclose = (e) => { if (e.code === 4001) notifyUnauthorized() }
 
     return () => {
       ws.close()

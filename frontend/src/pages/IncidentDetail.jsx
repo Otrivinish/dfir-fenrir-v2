@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useParams, Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { api } from '../api/client.js'
+import { api, notifyUnauthorized } from '../api/client.js'
 import { formatTitle } from '../hooks/useDocumentTitle.jsx'
 import { labelOf, pillOf } from '../lib/incidentVocab.js'
 import { useAuth } from '../hooks/useAuth.jsx'
@@ -225,7 +225,7 @@ export default function IncidentDetail() {
       } catch { /* ignore malformed frames */ }
     }
     ws.onerror = () => {}
-    ws.onclose = () => { presenceWsRef.current = null }
+    ws.onclose = (e) => { presenceWsRef.current = null; if (e.code === 4001) notifyUnauthorized() }
 
     // Ping every 30 s to keep the connection alive through idle proxies.
     presencePingRef.current = setInterval(() => {

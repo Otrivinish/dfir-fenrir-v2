@@ -374,6 +374,16 @@ class IOCUpdate(BaseModel):
     entity_id:  Optional[UUID]      = None
 
 
+class IOCBatchCreate(BaseModel):
+    items: list[IOCCreate] = Field(min_length=1, max_length=1000)
+
+
+class IOCBatchResult(BaseModel):
+    created: int
+    skipped: int       = 0   # duplicates skipped (already on the incident)
+    errors:  list[str] = Field(default_factory=list)
+
+
 class IocTimelineLinkCreate(BaseModel):
     event_id: UUID
 

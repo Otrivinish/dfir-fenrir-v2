@@ -163,12 +163,14 @@ _SYSLOG_RULES: list[tuple] = [
 
 # CSV/JSON heuristic column names (lowercased).
 _TS_COL   = {"timestamp", "time", "datetime", "date", "event_time", "@timestamp",
-             "date_time", "eventtime", "created", "created_at"}
+             "date_time", "eventtime", "created", "created_at",
+             "timegenerated", "time_generated"}  # Defender / Azure / KQL exports
 _DESC_COL = {"message", "description", "event", "log", "details", "summary",
-             "command", "cmdline", "commandline", "msg"}
+             "command", "cmdline", "commandline", "msg", "processcommandline"}
 _HOST_COL = {"hostname", "host", "computer", "device", "source_host", "computername",
-             "machine", "workstation"}
-_TYPE_COL = {"type", "event_type", "category", "action", "eventtype", "event_category"}
+             "machine", "workstation", "devicename"}
+_TYPE_COL = {"type", "event_type", "category", "action", "eventtype", "event_category",
+             "filename"}
 _SRC_COL  = {"source", "log_source", "channel", "provider", "logsource", "source_name"}
 
 # ─── Public entry point ────────────────────────────────────────────────────────
@@ -1163,6 +1165,9 @@ _TS_FORMATS = [
     "%Y-%m-%d %H:%M",
     "%d/%m/%Y %H:%M:%S",
     "%m/%d/%Y %H:%M:%S",
+    # Microsoft Defender portal CSV export: "Jun 23, 2026 10:53:35 AM"
+    "%b %d, %Y %I:%M:%S %p",
+    "%b %d, %Y %I:%M %p",
 ]
 
 
@@ -1193,6 +1198,15 @@ def _try_parse_ts(s: Optional[str]) -> Optional[datetime]:
             return datetime.fromtimestamp(epoch, tz=timezone.utc)
         if epoch > 1_000_000_000_000:
             return datetime.fromtimestamp(epoch / 1000, tz=timezone.utc)
+    except ValueError:
+        pass
+    # ISO 8601 via fromisoformat — handles offsets and (after normalizing) the
+    # 7-digit fractional seconds Defender/Azure emit, which strptime's %f rejects.
+    iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+    iso = re.sub(r"(\.\d{6})\d+", r"\1", iso)   # truncate >6 fractional digits
+    try:
+        dt = datetime.fromisoformat(iso)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except ValueError:
         pass
     for fmt in _TS_FORMATS:

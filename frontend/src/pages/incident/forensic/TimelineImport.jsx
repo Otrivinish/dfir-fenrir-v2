@@ -40,6 +40,7 @@ export default function TimelineImport() {
   const [promoting, setPromoting]       = useState(false)
   const [promoteMsg, setPromoteMsg]     = useState(null)
   const [iocTarget, setIocTarget]       = useState(null)   // ParsedEventOut | null
+  const [iocBulkOpen, setIocBulkOpen]   = useState(false)  // bulk add-to-IOCs modal
   const [viewMode, setViewMode]         = useState('table') // 'table' | 'tree'
 
   // Persisted imports — listed on mount; refreshes after each upload/dispose.
@@ -440,7 +441,13 @@ export default function TimelineImport() {
       {/* Parse button */}
       {file && !parsing && (
         <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
-          <button type="button" className="btn primary" onClick={onParse} disabled={isClosed}>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={onParse}
+            disabled={isClosed}
+            title={isClosed ? 'Closed incidents are read-only — re-open the incident to import' : 'Parse the file and save events to this incident'}
+          >
             Parse &amp; save
           </button>
           <button
@@ -618,6 +625,15 @@ export default function TimelineImport() {
               </button>
               <button
                 type="button"
+                className="btn"
+                onClick={() => setIocBulkOpen(true)}
+                disabled={promoting || isClosed}
+                title={isClosed ? 'Closed incidents are read-only' : 'Add the selected events as IOCs'}
+              >
+                {`Add ${selectedVisible.length} to IOCs`}
+              </button>
+              <button
+                type="button"
                 className="btn ghost"
                 onClick={() => setSelected(new Set())}
                 disabled={promoting}
@@ -702,6 +718,19 @@ export default function TimelineImport() {
           event={iocTarget}
           onClose={() => setIocTarget(null)}
           onCreated={() => setIocTarget(null)}
+        />
+      )}
+
+      {iocBulkOpen && (
+        <BulkIocModal
+          incidentId={inc.id}
+          events={selectedVisible}
+          onClose={() => setIocBulkOpen(false)}
+          onDone={(msg) => {
+            setIocBulkOpen(false)
+            setPromoteMsg(msg)
+            setSelected(new Set())
+          }}
         />
       )}
     </section>
@@ -915,6 +944,101 @@ function IocQuickModal({ incidentId, event, onClose, onCreated }) {
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
             <button type="submit" className="btn primary" disabled={busy}>
               {busy ? 'Adding…' : 'Add IOC'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ─── Bulk add-to-IOCs modal ───────────────────────────────────────────────────
+// Parsed events carry no extracted indicator, so the analyst picks one IOC type
+// and which field becomes the value (description / hostname / source); one IOC is
+// created per selected event that has a value for that field. Duplicates skipped.
+
+const VALUE_FIELDS = [
+  { key: 'description', label: 'Description' },
+  { key: 'hostname',    label: 'Hostname' },
+  { key: 'source',      label: 'Source' },
+]
+
+function BulkIocModal({ incidentId, events, onClose, onDone }) {
+  const [type, setType]           = useState('other')
+  const [valueField, setValueField] = useState('description')
+  const [busy, setBusy]           = useState(false)
+  const [error, setError]         = useState(null)
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [busy, onClose])
+
+  // Events that actually have a value for the chosen field.
+  const items = events
+    .map(e => (e[valueField] || '').trim())
+    .filter(Boolean)
+    .map(v => ({ type, value: v.slice(0, 2048) }))
+  const eligible = items.length
+  const skippedNoValue = events.length - eligible
+
+  const onSubmit = async (e) => {
+    e.preventDefault()
+    if (!eligible) { setError(`No selected events have a ${valueField}.`); return }
+    setBusy(true); setError(null)
+    try {
+      const res = await api.batchCreateIocs(incidentId, { items })
+      const parts = [`Added ${res.created} IOC${res.created !== 1 ? 's' : ''}`]
+      if (res.skipped)            parts.push(`${res.skipped} duplicate${res.skipped !== 1 ? 's' : ''} skipped`)
+      if (skippedNoValue)         parts.push(`${skippedNoValue} had no ${valueField}`)
+      if (res.errors?.length)     parts.push(`${res.errors.length} failed`)
+      onDone({ kind: res.created ? 'ok' : 'err', text: parts.join(' · ') + '.' })
+    } catch (err) {
+      setError(err.message || 'Bulk add failed.')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" role="dialog" aria-labelledby="bulkioc-title" style={{ maxWidth: 480 }}>
+        <div className="modal-head">
+          <h2 id="bulkioc-title">Add {events.length} event{events.length !== 1 ? 's' : ''} as IOCs</h2>
+          <button type="button" className="modal-close" onClick={onClose} disabled={busy} aria-label="Close">×</button>
+        </div>
+        <form onSubmit={onSubmit}>
+          <div className="modal-body">
+            {error && (
+              <div className="alert error" style={{ marginBottom: 'var(--space-3)' }}>
+                <span className="alert-icon">!</span><span>{error}</span>
+              </div>
+            )}
+            <div className="form">
+              <div className="form-row">
+                <div className="field">
+                  <label className="field-label" htmlFor="bulkioc-type">Type (applied to all)</label>
+                  <select id="bulkioc-type" className="select" value={type} onChange={(e) => setType(e.target.value)}>
+                    {IOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  </select>
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="bulkioc-field">Value from</label>
+                  <select id="bulkioc-field" className="select" value={valueField} onChange={(e) => setValueField(e.target.value)}>
+                    {VALUE_FIELDS.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="field-hint">
+                {eligible} of {events.length} selected event{events.length !== 1 ? 's' : ''} have a {valueField} and will be added
+                {skippedNoValue ? ` (${skippedNoValue} skipped)` : ''}. Duplicates already on the incident are skipped.
+              </div>
+            </div>
+          </div>
+          <div className="modal-foot">
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn primary" disabled={busy || !eligible}>
+              {busy ? 'Adding…' : `Add ${eligible} IOC${eligible !== 1 ? 's' : ''}`}
             </button>
           </div>
         </form>
