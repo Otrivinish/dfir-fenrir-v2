@@ -27,7 +27,7 @@ from schemas import (
     EnrichResultItem,
     IocEnrichAllRequest, IocEnrichAllResponse,
     IocTimelineLinkCreate, IocTimelineLinkList, IocTimelineLinkOut,
-    IocType, IOCCreate, IOCList, IOCOut, IOCUpdate,
+    IocType, IOCBatchCreate, IOCBatchResult, IOCCreate, IOCList, IOCOut, IOCUpdate,
     TiScanResult,
 )
 
@@ -233,6 +233,73 @@ async def create_ioc(
         out.ti_match_source = ti_hit.feed_name
     _apply_lolbin(out)
     return out
+
+
+# ─── Batch create ────────────────────────────────────────────────────────────
+# Literal path — declared before /{ioc_id} routes so FastAPI matches it first.
+
+@router.post("/{incident_id}/iocs/batch",
+             response_model=IOCBatchResult,
+             status_code=status.HTTP_201_CREATED,
+             summary="Bulk-create IOCs")
+async def batch_create_iocs(
+    incident_id: uuid.UUID,
+    req: IOCBatchCreate,
+    request: Request,
+    user: User = Depends(require_analyst),
+    db: AsyncSession = Depends(get_db),
+) -> IOCBatchResult:
+    """Bulk-create many IOCs in one request (e.g. promoted from a forensic import).
+
+    Each IOC is inserted in its own savepoint: duplicates (same incident+type+value)
+    are skipped rather than aborting the batch, other failures are collected.
+    Rejects on a closed incident with 409. Requires the analyst role; audit-logged
+    once. Returns an IOCBatchResult with created/skipped counts and any errors.
+    """
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+
+    created = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for i, item in enumerate(req.items):
+        sp = await db.begin_nested()
+        try:
+            db.add(IOC(
+                id=uuid.uuid4(),
+                incident_id=incident_id,
+                type=item.type,
+                value=item.value.strip(),
+                notes=item.notes,
+                source=item.source or "manual",
+                malicious=item.malicious,
+                confidence=item.confidence,
+                tags=_norm_tags(item.tags),
+                entity_id=item.entity_id,
+                added_by_id=user.id,
+            ))
+            await db.flush()
+            await sp.commit()
+            created += 1
+        except IntegrityError:
+            await sp.rollback()
+            skipped += 1
+        except Exception as exc:          # noqa: BLE001 — collect, don't abort the batch
+            await sp.rollback()
+            errors.append(f"[{i}] {exc}")
+
+    await write_audit(
+        db, "ioc_batch_import",
+        user_id=user.id, username=user.username,
+        resource_type="ioc", resource_id=str(incident_id),
+        details={"incident_id": str(incident_id), "created": created,
+                 "skipped": skipped, "errors": len(errors)},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return IOCBatchResult(created=created, skipped=skipped, errors=errors)
 
 
 # ─── TI scan ─────────────────────────────────────────────────────────────────

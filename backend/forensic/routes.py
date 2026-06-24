@@ -10,6 +10,7 @@ Two flows:
     GET    /imports/{import_id}          re-fetch parsed events
     DELETE /imports/{import_id}          dispose (hard delete, audit-logged)
 """
+import asyncio
 import hashlib
 import uuid
 from pathlib import Path
@@ -92,7 +93,7 @@ async def parse_forensic_artifact(
     filename = file.filename or "unknown"
 
     try:
-        detected_format, raw_events = parse_artifact(filename, content)
+        detected_format, raw_events = await asyncio.to_thread(parse_artifact, filename, content)
     except Exception as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -146,7 +147,7 @@ async def import_from_artifact(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Artifact file is no longer available")
 
     try:
-        raw_events = parse_velociraptor_collection(str(path))
+        raw_events = await asyncio.to_thread(parse_velociraptor_collection, str(path))
     except Exception as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -224,7 +225,7 @@ async def create_forensic_import(
     filename = file.filename or "unknown"
 
     try:
-        detected_format, raw_events = parse_artifact(filename, content)
+        detected_format, raw_events = await asyncio.to_thread(parse_artifact, filename, content)
     except Exception as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,

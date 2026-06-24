@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
-import { api } from '../api/client.js'
+import { api, setUnauthorizedHandler } from '../api/client.js'
 
 const AuthCtx = createContext(null)
 
@@ -39,6 +39,17 @@ export function AuthProvider({ children }) {
     })()
     return () => { cancelled = true }
   }, [refresh])
+
+  // A 401 from any data endpoint means the session ended mid-use. Drop to guest
+  // (only if currently signed in) so RequireAuth redirects to /login?next=…,
+  // instead of leaving the user stuck on an "unauthenticated" message.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setUser(null)
+      setStatus(s => (s === 'user' ? 'guest' : s))
+    })
+    return () => setUnauthorizedHandler(null)
+  }, [])
 
   const setSignedIn = useCallback((u) => {
     setUser(u); setStatus('user'); setNeedsSetup(false)

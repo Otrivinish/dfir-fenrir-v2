@@ -4,6 +4,14 @@
 // - 401 → null user / caller decides
 // - normalises FastAPI {detail, code} into Error.message + Error.status + Error.code
 
+// Registered by the auth layer; invoked when a request 401s mid-session so the
+// app can bounce the user to the login page instead of silently failing.
+let onUnauthorized = null
+export function setUnauthorizedHandler(fn) { onUnauthorized = fn }
+// Called by non-fetch transports (WebSockets) that detect an auth drop — e.g. a
+// socket closed with code 4001 (unauthenticated) — to trigger the same redirect.
+export function notifyUnauthorized() { onUnauthorized?.() }
+
 async function request(method, path, body) {
   const headers = { Accept: 'application/json' }
   const init = { method, credentials: 'same-origin', headers }
@@ -19,6 +27,12 @@ async function request(method, path, body) {
     err.status = res.status
     err.code = data && typeof data === 'object' ? data.code : undefined
     err.data = data
+    // Session expired/revoked mid-use → let the auth layer redirect to login.
+    // Skip /api/auth/* so login failures and bootstrap probes (which 401
+    // normally) don't trigger a redirect.
+    if (res.status === 401 && !path.startsWith('/api/auth/')) {
+      onUnauthorized?.()
+    }
     throw err
   }
   return data
@@ -192,6 +206,7 @@ export const api = {
     return request('GET', `/api/incidents/${incidentId}/iocs${s ? '?' + s : ''}`)
   },
   createIoc:   (incidentId, payload)         => request('POST',   `/api/incidents/${incidentId}/iocs`, payload),
+  batchCreateIocs: (incidentId, payload)     => request('POST',   `/api/incidents/${incidentId}/iocs/batch`, payload),
   updateIoc:   (incidentId, iocId, payload)  => request('PATCH',  `/api/incidents/${incidentId}/iocs/${iocId}`, payload),
   deleteIoc:   (incidentId, iocId)           => request('DELETE', `/api/incidents/${incidentId}/iocs/${iocId}`),
   scanIocsTi:  (incidentId)                  => request('POST',   `/api/incidents/${incidentId}/iocs/scan-ti`),
