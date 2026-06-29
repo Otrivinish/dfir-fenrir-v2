@@ -105,7 +105,7 @@ async def export_iocs(
     request: Request,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
-    action:      str = Query(default="Alert"),
+    action:      str = Query(default="Audit"),
     severity:    str = Query(default="Medium"),
     expiry_days: int = Query(default=90, ge=1, le=3650),
     prefix:      str = Query(default=""),
