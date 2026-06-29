@@ -3,6 +3,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
@@ -111,7 +112,9 @@ async def list_members(team_id: uuid.UUID,
                        db: AsyncSession = Depends(get_db)) -> list[UserOut]:
     """List the members of a team ordered by username. Returns 404 if the team is not
     found. Available to any authenticated user."""
-    t = (await db.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
+    t = (await db.execute(
+        select(Team).where(Team.id == team_id).options(selectinload(Team.members))
+    )).scalar_one_or_none()
     if not t:
         raise HTTPException(404, "Team not found")
     return [UserOut.model_validate(u) for u in sorted(t.members, key=lambda m: m.username)]
