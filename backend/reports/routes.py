@@ -170,6 +170,20 @@ async def get_report_data(
             d["ti_matched"] = False
         iocs_out.append(d)
 
+    # Resolve assignee UUIDs → usernames for respond actions
+    assignee_ids = {a.assignee_id for a in actions if a.assignee_id}
+    username_map = {}
+    if assignee_ids:
+        users = (await db.execute(
+            select(User.id, User.username).where(User.id.in_(assignee_ids))
+        )).all()
+        username_map = {str(u.id): u.username for u in users}
+    actions_out = []
+    for a in actions:
+        d = jsonable_encoder(a)
+        d["performed_by"] = username_map.get(str(a.assignee_id), "") if a.assignee_id else ""
+        actions_out.append(d)
+
     return {
         "generated_at":     datetime.now(timezone.utc).isoformat(),
         "incident":         jsonable_encoder(inc, exclude=_EXCLUDE),
@@ -178,7 +192,7 @@ async def get_report_data(
         "entity_relations": jsonable_encoder(list(entity_relations)),
         "timeline_events":  jsonable_encoder(list(timeline)),
         "playbook_tasks":   jsonable_encoder(list(tasks)),
-        "respond_actions":  jsonable_encoder(list(actions)),
+        "respond_actions":  actions_out,
         "decisions":        jsonable_encoder(list(decisions)),
         "lessons_learned":  jsonable_encoder(ll) if ll else None,
         "closure_checklist": jsonable_encoder([c for c in checklist if getattr(c, "is_active", True)]),
