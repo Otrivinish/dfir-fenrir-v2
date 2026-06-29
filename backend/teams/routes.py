@@ -126,7 +126,7 @@ async def add_member(team_id: uuid.UUID, user_id: uuid.UUID, request: Request,
                      db: AsyncSession = Depends(get_db)) -> dict:
     """Add a user to a team. Returns 404 if either the team or user is not found, or
     already_member if the user is already on the team. Admin only."""
-    t = (await db.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
+    t = (await db.execute(select(Team).where(Team.id == team_id).options(selectinload(Team.members)))).scalar_one_or_none()
     u = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not t or not u:
         raise HTTPException(404, "Team or user not found")
@@ -150,7 +150,7 @@ async def remove_member(team_id: uuid.UUID, user_id: uuid.UUID, request: Request
                         db: AsyncSession = Depends(get_db)) -> dict:
     """Remove a user from a team. Returns 404 if either the team or user is not found,
     or not_member if the user is not on the team. Admin only."""
-    t = (await db.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
+    t = (await db.execute(select(Team).where(Team.id == team_id).options(selectinload(Team.members)))).scalar_one_or_none()
     u = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not t or not u:
         raise HTTPException(404, "Team or user not found")
