@@ -11,6 +11,7 @@ subset, this router shows the whole incident.
 
 Mounted at prefix="/api/incidents".
 """
+import asyncio
 import re
 import uuid
 from pathlib import Path
@@ -149,8 +150,7 @@ async def upload_incident_file(
         safe_rel_path = dest.relative_to(base_dir).as_posix()
     except ValueError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid file path")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(ct)
+    await asyncio.to_thread(lambda: (dest.parent.mkdir(parents=True, exist_ok=True), dest.write_bytes(ct)))
 
     ef = EntityFile(
         id=file_id,
@@ -209,7 +209,8 @@ async def download_incident_file(
     if not path.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File data missing on disk")
 
-    plaintext = await adecrypt_file_bytes(path.read_bytes(), ef.nonce_hex)
+    raw_ct = await asyncio.to_thread(path.read_bytes)
+    plaintext = await adecrypt_file_bytes(raw_ct, ef.nonce_hex)
     return Response(
         content=plaintext,
         media_type=ef.content_type or "application/octet-stream",
