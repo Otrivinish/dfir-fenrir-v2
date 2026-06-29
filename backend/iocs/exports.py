@@ -203,13 +203,24 @@ def _export_defanged(iocs: list, short: str) -> Response:
 
 # ── MDE CSV ───────────────────────────────────────────────────────────────────
 
+_MDE_CATEGORY = {
+    "hash_md5":    "Malware",
+    "hash_sha1":   "Malware",
+    "hash_sha256": "Malware",
+    "ip":          "NetworkAddresses",
+    "domain":      "NetworkAddresses",
+    "url":         "NetworkAddresses",
+}
+
+
 def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_days: int) -> Response:
     expiry = _utc_expiry(expiry_days)
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=[
         "IndicatorType", "IndicatorValue", "ExpirationTime",
         "Action", "Severity", "Title", "Description",
-        "RecommendedActions", "RbacGroups", "Tags",
+        "RecommendedActions", "RbacGroups", "Category",
+        "MitreTechniques", "GenerateAlert",
     ])
     w.writeheader()
     for ioc in iocs:
@@ -226,9 +237,9 @@ def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_d
             "Description":        (ioc.notes or f"Exported from incident {short}")[:500],
             "RecommendedActions": "Investigate and isolate if confirmed.",
             "RbacGroups":         "",
-            # MDE doesn't have a native tags field — we emit `;`-joined so the
-            # column round-trips cleanly through Excel and stays grep-able.
-            "Tags":               ";".join(ioc.tags or []),
+            "Category":           _MDE_CATEGORY.get(ioc.type, ""),
+            "MitreTechniques":    "",
+            "GenerateAlert":      "True",
         })
     # utf-8-sig BOM for Excel compatibility
     content = buf.getvalue().encode("utf-8-sig")
