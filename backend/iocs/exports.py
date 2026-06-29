@@ -88,6 +88,8 @@ async def _load_iocs(db: AsyncSession, incident_id: uuid.UUID) -> list[IOC]:
 
 
 def _utc_expiry(days: int) -> str:
+    if days == 0:
+        return ""
     return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -105,9 +107,11 @@ async def export_iocs(
     request: Request,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
-    action:      str = Query(default="Audit"),
-    severity:    str = Query(default="Medium"),
-    expiry_days: int = Query(default=90, ge=1, le=3650),
+    action:           str  = Query(default="Audit"),
+    severity:         str  = Query(default="Medium"),
+    expiry_days:      int  = Query(default=90, ge=0, le=365),
+    mitre_techniques: str  = Query(default=""),
+    generate_alert:   bool = Query(default=True),
     prefix:      str = Query(default=""),
 ) -> Response:
     """Export all of an incident's IOCs as a downloadable file formatted for a
@@ -132,9 +136,9 @@ async def export_iocs(
     await db.commit()
 
     if fmt == "mde-csv":
-        return _export_mde_csv(iocs, short, action, severity, expiry_days)
+        return _export_mde_csv(iocs, short, action, severity, expiry_days, mitre_techniques, generate_alert)
     if fmt == "mde-json":
-        return _export_mde_json(iocs, short, action, severity, expiry_days)
+        return _export_mde_json(iocs, short, action, severity, expiry_days, mitre_techniques, generate_alert)
     if fmt == "crowdstrike":
         return _export_crowdstrike(iocs, short)
     if fmt == "sentinelone":
@@ -207,14 +211,18 @@ _MDE_CATEGORY = {
     "hash_md5":    "Malware",
     "hash_sha1":   "Malware",
     "hash_sha256": "Malware",
-    "ip":          "NetworkAddresses",
-    "domain":      "NetworkAddresses",
-    "url":         "NetworkAddresses",
+    "ip":          "SuspiciousActivity",
+    "domain":      "SuspiciousActivity",
+    "url":         "SuspiciousActivity",
 }
 
 
-def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_days: int) -> Response:
+def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_days: int, mitre_techniques: str = "", generate_alert: bool = True) -> Response:
     expiry = _utc_expiry(expiry_days)
+    # Normalise MITRE input: strip spaces, uppercase, deduplicate
+    mitre = ",".join(dict.fromkeys(
+        t.strip().upper() for t in mitre_techniques.split(",") if t.strip()
+    ))
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=[
         "IndicatorType", "IndicatorValue", "ExpirationTime",
@@ -227,6 +235,11 @@ def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_d
         itype = _MDE_TYPE.get(ioc.type)
         if not itype:
             continue
+        # Merge analyst-supplied MITRE with any T\d{4} tags on the IOC
+        ioc_mitre_tags = ",".join(
+            t.upper() for t in (ioc.tags or []) if re.match(r"^t\d{4}(\.\d{3})?$", t, re.I)
+        )
+        row_mitre = ",".join(filter(None, [mitre, ioc_mitre_tags]))
         w.writerow({
             "IndicatorType":      itype,
             "IndicatorValue":     ioc.value,
@@ -238,8 +251,8 @@ def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_d
             "RecommendedActions": "Investigate and isolate if confirmed.",
             "RbacGroups":         "",
             "Category":           _MDE_CATEGORY.get(ioc.type, ""),
-            "MitreTechniques":    "",
-            "GenerateAlert":      "True",
+            "MitreTechniques":    row_mitre,
+            "GenerateAlert":      "true" if generate_alert else "false",
         })
     # utf-8-sig BOM for Excel compatibility
     content = buf.getvalue().encode("utf-8-sig")
@@ -255,25 +268,35 @@ def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_d
 
 # ── MDE JSON ──────────────────────────────────────────────────────────────────
 
-def _export_mde_json(iocs: list, short: str, action: str, severity: str, expiry_days: int) -> Response:
+def _export_mde_json(iocs: list, short: str, action: str, severity: str, expiry_days: int, mitre_techniques: str = "", generate_alert: bool = True) -> Response:
     expiry = _utc_expiry(expiry_days)
+    mitre_list = list(dict.fromkeys(
+        t.strip().upper() for t in mitre_techniques.split(",") if t.strip()
+    ))
     items = []
     for ioc in iocs:
         itype = _MDE_TYPE.get(ioc.type)
         if not itype:
             continue
-        items.append({
+        ioc_mitre_tags = [t.upper() for t in (ioc.tags or []) if re.match(r"^t\d{4}(\.\d{3})?$", t, re.I)]
+        row_mitre = list(dict.fromkeys(mitre_list + ioc_mitre_tags))
+        item = {
             "indicatorType":      itype,
             "indicatorValue":     ioc.value,
-            "expirationTime":     expiry,
             "action":             action,
             "severity":           severity,
             "title":              f"DFIR-FENRIR incident {short}",
             "description":        (ioc.notes or f"Exported from incident {short}")[:500],
             "recommendedActions": "Investigate and isolate if confirmed.",
             "rbacGroupNames":     [],
+            "generateAlert":      generate_alert,
             "tags":               list(ioc.tags or []),
-        })
+        }
+        if expiry:
+            item["expirationTime"] = expiry
+        if row_mitre:
+            item["mitreTechniques"] = row_mitre
+        items.append(item)
     content = json.dumps({"value": items}, indent=2).encode()
     return Response(
         content=content,
