@@ -1403,15 +1403,28 @@ function EditIocModal({ incidentId, ioc, onClose, onSaved }) {
   )
 }
 
+const MDE_ACTIONS   = ['Audit', 'Block', 'BlockAndRemediate', 'Warn', 'Allowed']
+const MDE_SEVERITIES = ['Informational', 'Low', 'Medium', 'High']
+const MDE_PLATFORMS  = new Set(['mde-csv', 'mde-json'])
+
 function ExportModal({ incidentId, allIocs, onClose }) {
   const [downloading, setDownloading] = useState({})
   const [errors, setErrors]           = useState({})
+  const [mdeConfig, setMdeConfig]     = useState({
+    action:           'Audit',
+    severity:         'Medium',
+    expiry_days:      90,
+    mitre_techniques: '',
+    generate_alert:   true,
+  })
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+
+  const setMde = (key, val) => setMdeConfig(c => ({ ...c, [key]: val }))
 
   const countFor = (platformId) =>
     allIocs.filter(i => PLATFORM_TYPES[platformId]?.has(i.type)).length
@@ -1420,7 +1433,8 @@ function ExportModal({ incidentId, allIocs, onClose }) {
     setDownloading(d => ({ ...d, [platformId]: true }))
     setErrors(e => ({ ...e, [platformId]: null }))
     try {
-      await api.exportIocs(incidentId, platformId)
+      const params = MDE_PLATFORMS.has(platformId) ? mdeConfig : {}
+      await api.exportIocs(incidentId, platformId, params)
     } catch (err) {
       setErrors(e => ({ ...e, [platformId]: err.message || 'Download failed' }))
     } finally {
@@ -1444,6 +1458,59 @@ function ExportModal({ incidentId, allIocs, onClose }) {
             reflects how many of the {allIocs.length} IOC{allIocs.length !== 1 ? 's' : ''} will
             be included in each file.
           </p>
+          {/* ── Microsoft Defender config ── */}
+          <details style={{ marginBottom: 'var(--space-3)' }}>
+            <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 500, color: 'var(--muted)', userSelect: 'none' }}>
+              Microsoft Defender options
+            </summary>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-2)', marginTop: 'var(--space-2)', padding: 'var(--space-2)', background: 'var(--surface-2)', borderRadius: 6 }}>
+              <label style={{ fontSize: 12 }}>
+                <div style={{ marginBottom: 2, color: 'var(--muted)' }}>Action</div>
+                <select className="input" value={mdeConfig.action} onChange={e => setMde('action', e.target.value)} style={{ width: '100%', fontSize: 12 }}>
+                  {MDE_ACTIONS.map(a => <option key={a}>{a}</option>)}
+                </select>
+              </label>
+              <label style={{ fontSize: 12 }}>
+                <div style={{ marginBottom: 2, color: 'var(--muted)' }}>Severity</div>
+                <select className="input" value={mdeConfig.severity} onChange={e => setMde('severity', e.target.value)} style={{ width: '100%', fontSize: 12 }}>
+                  {MDE_SEVERITIES.map(s => <option key={s}>{s}</option>)}
+                </select>
+              </label>
+              <label style={{ fontSize: 12, gridColumn: '1 / -1' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                  <span style={{ color: 'var(--muted)' }}>Expiry</span>
+                  <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--fg)' }}>
+                    {mdeConfig.expiry_days === 0 ? 'Never' : `${mdeConfig.expiry_days} days`}
+                  </span>
+                </div>
+                <input
+                  type="range" min={0} max={365} step={1}
+                  value={mdeConfig.expiry_days}
+                  onChange={e => setMde('expiry_days', Number(e.target.value))}
+                  style={{ width: '100%' }}
+                />
+              </label>
+              <label style={{ fontSize: 12, gridColumn: '1 / -1' }}>
+                <div style={{ marginBottom: 2, color: 'var(--muted)' }}>MITRE Techniques (comma-separated, e.g. T1059, T1046)</div>
+                <input
+                  type="text" className="input"
+                  placeholder="T1059, T1046"
+                  value={mdeConfig.mitre_techniques}
+                  onChange={e => setMde('mitre_techniques', e.target.value)}
+                  style={{ width: '100%', fontSize: 12 }}
+                />
+              </label>
+              <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={mdeConfig.generate_alert}
+                  onChange={e => setMde('generate_alert', e.target.checked)}
+                />
+                Generate alert
+              </label>
+            </div>
+          </details>
+
           <table className="settings-table">
             <thead>
               <tr>
