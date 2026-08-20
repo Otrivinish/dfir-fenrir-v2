@@ -37,6 +37,7 @@ import Playbook from './pages/incident/Playbook.jsx'
 import Timeline from './pages/incident/Timeline.jsx'
 import Entities from './pages/incident/Entities.jsx'
 import Files from './pages/incident/Files.jsx'
+import Notes from './pages/incident/Notes.jsx'
 import Evidence from './pages/incident/Evidence.jsx'
 import EvidenceItems from './pages/incident/evidence/Items.jsx'
 import EvidenceCustodyLog from './pages/incident/evidence/CustodyLog.jsx'
@@ -53,6 +54,7 @@ import EmailAnalyzer from './pages/incident/forensic/EmailAnalyzer.jsx'
 import Sandbox from './pages/incident/forensic/Sandbox.jsx'
 import TimelineImport from './pages/incident/forensic/TimelineImport.jsx'
 import OSINTLookup from './pages/incident/forensic/OSINT.jsx'
+import Ransomware from './pages/incident/forensic/Ransomware.jsx'
 import Artifacts from './pages/incident/forensic/Artifacts.jsx'
 import Collections from './pages/incident/forensic/Collections.jsx'
 import Respond from './pages/incident/Respond.jsx'
@@ -135,6 +137,7 @@ export default function App() {
                 <Route path="timeline"        element={<Timeline />} />
                 <Route path="entities"        element={<Entities />} />
                 <Route path="files"           element={<Files />} />
+                <Route path="notes"           element={<Notes />} />
                 <Route path="evidence" element={<Evidence />}>
                   <Route index               element={<Navigate to="items" replace />} />
                   <Route path="items"        element={<EvidenceItems />} />
@@ -154,6 +157,7 @@ export default function App() {
                   <Route path="sandbox"          element={<Sandbox />} />
                   <Route path="timeline-import" element={<TimelineImport />} />
                   <Route path="osint"           element={<OSINTLookup />} />
+                  <Route path="ransomware"      element={<Ransomware />} />
                   <Route path="artifacts"      element={<Artifacts />} />
                   <Route path="collections"    element={<Collections />} />
                 </Route>

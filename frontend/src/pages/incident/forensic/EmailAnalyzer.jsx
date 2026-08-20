@@ -121,23 +121,56 @@ export default function EmailAnalyzer() {
 
           {/* Auth alignment */}
           <h4 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>Authentication</h4>
-          <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', fontSize: 13, fontFamily: 'var(--font-mono)' }}>
-            <span>SPF: <strong>{auth.spf || '—'}</strong></span>
-            <span>DKIM: <strong>{auth.dkim || '—'}</strong> {auth.dkim_domain ? `(${auth.dkim_domain})` : ''}</span>
-            <span>DMARC: <strong>{auth.dmarc || '—'}</strong></span>
-            {auth.spf_domain && <span>mailfrom: {auth.spf_domain}</span>}
-          </div>
+          <table className="table" style={{ fontSize: 12, maxWidth: 420 }}>
+            <thead><tr><th>Check</th><th>Result</th><th>Domain</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>SPF</td>
+                <td><AuthBadge value={auth.spf} /></td>
+                <td style={{ fontFamily: 'var(--font-mono)' }}>{auth.spf_domain || '—'}</td>
+              </tr>
+              <tr>
+                <td>DKIM</td>
+                <td><AuthBadge value={auth.dkim} /></td>
+                <td style={{ fontFamily: 'var(--font-mono)' }}>{auth.dkim_domain || '—'}</td>
+              </tr>
+              <tr>
+                <td>DMARC</td>
+                <td><AuthBadge value={auth.dmarc} /></td>
+                <td>—</td>
+              </tr>
+            </tbody>
+          </table>
 
           {/* Hop chain */}
           <h4 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>Received chain ({hops.length})</h4>
           {a.headers?.origin_ip && <div style={{ fontSize: 12, marginBottom: 4 }}>Originating IP: <strong style={{ fontFamily: 'var(--font-mono)' }}>{a.headers.origin_ip}</strong></div>}
-          <ol style={{ fontSize: 12, fontFamily: 'var(--font-mono)', paddingLeft: 18, margin: 0 }}>
-            {hops.map((h, i) => (
-              <li key={i} style={{ color: h.delay_seconds != null && h.delay_seconds < -60 ? 'var(--crit)' : 'inherit' }}>
-                {h.from || '?'} → {h.by || '?'} {h.ip ? `[${h.ip}]` : ''} {h.timestamp ? `· ${h.timestamp}` : ''} {h.delay_seconds != null ? `(+${Math.round(h.delay_seconds)}s)` : ''}
-              </li>
-            ))}
-          </ol>
+          {hops.length > 0 && (
+            <table className="table" style={{ fontSize: 12, fontFamily: 'var(--font-mono)' }}>
+              <thead><tr><th>#</th><th>From</th><th>By</th><th>IP</th><th>Timestamp</th><th>Delay</th></tr></thead>
+              <tbody>
+                {hops.map((h, i) => {
+                  const suspicious = h.delay_seconds != null && h.delay_seconds < -60
+                  return (
+                    <tr key={i} style={{ color: suspicious ? 'var(--crit)' : 'inherit' }}>
+                      <td>{i + 1}</td>
+                      <td>{h.from || '?'}</td>
+                      <td>{h.by || '?'}</td>
+                      <td>{h.ip || '—'}</td>
+                      <td>{h.timestamp || '—'}</td>
+                      <td>{h.delay_seconds != null ? `${h.delay_seconds >= 0 ? '+' : ''}${Math.round(h.delay_seconds)}s${suspicious ? ' ⚠' : ''}` : '—'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+
+          <DomainAuthCheck
+            incidentId={incidentId}
+            defaultDomain={(auth.spf_domain || auth.dkim_domain || '').split('@').pop()}
+            defaultSelector={auth.dkim_selector || ''}
+          />
 
           {/* URLs */}
           <h4 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>URLs ({(a.urls || []).length})</h4>
@@ -214,6 +247,120 @@ export default function EmailAnalyzer() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Authentication badge ────────────────────────────────────────────────────
+
+const AUTH_BADGE_COLOR = { pass: 'var(--ok)', fail: 'var(--crit)', softfail: 'var(--med)', neutral: 'var(--muted)', none: 'var(--dim)' }
+
+function AuthBadge({ value }) {
+  const v = (value || 'none').toLowerCase()
+  return (
+    <span style={{
+      color: AUTH_BADGE_COLOR[v] || 'var(--muted)', fontWeight: 700, textTransform: 'uppercase', fontSize: 11,
+    }}>
+      {value || '—'}
+    </span>
+  )
+}
+
+// ─── Domain auth check (manual mode — live SPF/DMARC, optional DKIM) ────────
+// SPF/DMARC come from a live DNS lookup; DKIM requires a selector, which
+// can't be discovered from a bare domain — pre-filled from the parsed
+// email's own DKIM-Signature when one was found, otherwise left blank for
+// the analyst to supply if they know it from elsewhere.
+
+function DomainAuthCheck({ incidentId, defaultDomain, defaultSelector }) {
+  const [domain,   setDomain]   = useState(defaultDomain || '')
+  const [selector, setSelector] = useState(defaultSelector || '')
+  const [busy,   setBusy]   = useState(false)
+  const [error,  setError]  = useState(null)
+  const [result, setResult] = useState(null)
+
+  useEffect(() => { if (defaultDomain) setDomain(defaultDomain) }, [defaultDomain])
+  useEffect(() => { if (defaultSelector) setSelector(defaultSelector) }, [defaultSelector])
+
+  const run = async () => {
+    if (!domain.trim()) return
+    setBusy(true); setError(null); setResult(null)
+    try {
+      setResult(await api.checkEmailDomain(incidentId, domain.trim(), selector.trim() || undefined))
+    } catch (e) {
+      setError(e.message || 'Check failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="panel" style={{ padding: 'var(--space-3)', marginTop: 'var(--space-4)' }}>
+      <h4 className="panel-h" style={{ marginTop: 0 }}>Domain auth check <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· live SPF/DMARC, manual mode</span></h4>
+      <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
+        <input className="input" style={{ maxWidth: 220 }} placeholder="domain.com"
+               value={domain} onChange={e => setDomain(e.target.value)} disabled={busy} />
+        <input className="input" style={{ maxWidth: 180 }} placeholder="DKIM selector (optional)"
+               value={selector} onChange={e => setSelector(e.target.value)} disabled={busy} />
+        <button className="btn primary" onClick={run} disabled={busy || !domain.trim()}>
+          {busy ? 'Checking…' : 'Check'}
+        </button>
+      </div>
+      <p style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4, marginBottom: 0 }}>
+        DKIM can't be checked from a domain alone — its selector only exists in an already-signed
+        email's header. Leave it blank to check SPF/DMARC only.
+      </p>
+
+      {error && <div className="alert error" role="alert" style={{ marginTop: 'var(--space-2)' }}><span className="alert-icon">!</span><span>{error}</span></div>}
+
+      {result && (
+        <div style={{ marginTop: 'var(--space-3)', display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 260, flex: 1 }}>
+            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>SPF</div>
+            {result.spf.found ? (
+              <>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all', color: 'var(--muted)' }}>{result.spf.record}</div>
+                <div style={{ fontSize: 12, marginTop: 4 }}>{result.spf.verdict}</div>
+                {result.spf.multiple_records && (
+                  <div style={{ fontSize: 12, color: 'var(--high)', marginTop: 2 }}>⚠ Multiple SPF records found — invalid per RFC 7208.</div>
+                )}
+                {result.spf.includes?.length > 0 && (
+                  <details style={{ marginTop: 4 }}>
+                    <summary style={{ cursor: 'pointer', color: 'var(--accent)', fontSize: 11 }}>Includes ({result.spf.includes.length})</summary>
+                    {result.spf.includes.map((inc, i) => (
+                      <div key={i} style={{ fontSize: 11, marginTop: 4, paddingLeft: 8, borderLeft: '1px solid var(--border)' }}>
+                        <strong>{inc.domain}</strong>: {inc.verdict}
+                      </div>
+                    ))}
+                  </details>
+                )}
+              </>
+            ) : (
+              <div style={{ fontSize: 12, color: 'var(--high)' }}>{result.spf.verdict}</div>
+            )}
+          </div>
+
+          <div style={{ minWidth: 260, flex: 1 }}>
+            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>DMARC</div>
+            {result.dmarc.found ? (
+              <>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all', color: 'var(--muted)' }}>{result.dmarc.record}</div>
+                <div style={{ fontSize: 12, marginTop: 4 }}>{result.dmarc.verdict}</div>
+                {result.dmarc.fields?.rua && <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 2 }}>Aggregate reports: {result.dmarc.fields.rua}</div>}
+              </>
+            ) : (
+              <div style={{ fontSize: 12, color: 'var(--high)' }}>{result.dmarc.verdict}</div>
+            )}
+          </div>
+
+          {result.dkim && (
+            <div style={{ minWidth: 260, flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>DKIM ({result.dkim.selector})</div>
+              <div style={{ fontSize: 12, color: result.dkim.found ? 'var(--ok)' : 'var(--high)' }}>{result.dkim.verdict}</div>
+            </div>
+          )}
         </div>
       )}
     </div>

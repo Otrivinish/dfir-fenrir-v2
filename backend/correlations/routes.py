@@ -11,8 +11,8 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
-from sqlalchemy import and_, func, select
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, func, select, tuple_
 from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -68,6 +68,25 @@ class SharedEntity(BaseModel):
 class SharedEntityList(BaseModel):
     items: list[SharedEntity]
     next_cursor: Optional[str] = None
+
+
+class LookupItem(BaseModel):
+    type:  str
+    value: str
+
+
+class LookupRequest(BaseModel):
+    items: list[LookupItem] = Field(max_length=100)
+
+
+class LookupHit(BaseModel):
+    type: str
+    value: str
+    matched_incidents: list[IncidentRef]
+
+
+class LookupResponse(BaseModel):
+    items: list[LookupHit]
 
 
 # ─── Cursor helpers ───────────────────────────────────────────────────────────
@@ -222,6 +241,43 @@ async def global_ioc_correlations(
         items=items,
         next_cursor=_enc(offset + limit) if has_more else None,
     )
+
+
+# ─── Global: correlate arbitrary (type, value) pairs ─────────────────────────
+
+@router.post("/lookup", response_model=LookupResponse,
+             summary="Correlate arbitrary indicator values against tracked IOCs")
+async def correlate_lookup(
+    req: LookupRequest,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> LookupResponse:
+    """For each (type, value) pair -- not necessarily an existing IOC -- return
+    which accessible incidents already track it as an IOC. Used by the OSINT
+    lookup page to hint "already seen elsewhere" before an analyst adds one.
+    Capped at 100 items per call; unmatched pairs come back with an empty list.
+    """
+    if not req.items:
+        return LookupResponse(items=[])
+    acc_ids = select(Incident.id).where(accessible_filter(user))
+    pairs = [(i.type, i.value) for i in req.items]
+
+    rows = (await db.execute(
+        select(IOC.type, IOC.value, Incident.id, Incident.title, Incident.severity, Incident.phase)
+        .join(Incident, Incident.id == IOC.incident_id)
+        .where(tuple_(IOC.type, IOC.value).in_(pairs), Incident.id.in_(acc_ids))
+    )).all()
+
+    matches: dict[tuple[str, str], list[IncidentRef]] = {}
+    for typ, val, inc_id, title, severity, phase in rows:
+        matches.setdefault((typ, val), []).append(
+            IncidentRef(id=inc_id, title=title, severity=severity, phase=phase)
+        )
+
+    return LookupResponse(items=[
+        LookupHit(type=i.type, value=i.value, matched_incidents=matches.get((i.type, i.value), []))
+        for i in req.items
+    ])
 
 
 # ─── Global: shared entities ──────────────────────────────────────────────────

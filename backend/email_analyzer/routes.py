@@ -12,8 +12,9 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import magic
-from fastapi import (APIRouter, Depends, File, Form, HTTPException, Request,
+from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query, Request,
                      UploadFile, status)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,12 +23,13 @@ from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
+from email_analyzer.domain_check import check_dkim, check_spf_dmarc
 from email_analyzer.parser import attachment_bytes, is_msg, msg_to_eml_bytes, parse_email
 from email_analyzer.scoring import score as score_email
 from evidence.crypto import awrite_encrypted
 from incidents.access import get_accessible_incident
 from models import Artifact, EmailAnalysis, Evidence, IOC, User, utcnow
-from schemas import (EmailAnalysisList, EmailAnalysisOut, PromoteIocsRequest)
+from schemas import (DomainCheckOut, EmailAnalysisList, EmailAnalysisOut, PromoteIocsRequest)
 
 router = APIRouter()
 
@@ -190,6 +192,59 @@ async def list_email_analyses(
         .order_by(EmailAnalysis.created_at.desc())
     )).scalars().all()
     return EmailAnalysisList(items=[EmailAnalysisOut.model_validate(r) for r in rows])
+
+
+# ─── Domain auth check (manual mode) ─────────────────────────────────────────
+# Registered before the parametric GET /{incident_id}/email/{aid} below --
+# {aid} is typed as a UUID path param, but Starlette matches routes in
+# registration order regardless of type converters, so a literal path
+# segment sharing this shape must come first or it gets swallowed by {aid}
+# and 422s on UUID parsing. Same class of ordering bug the correlations
+# router already has a comment about, for the same underlying reason.
+
+@router.get("/{incident_id}/email/domain-check", response_model=DomainCheckOut,
+            summary="Live SPF/DMARC check for a domain, optional DKIM selector")
+async def domain_check(
+    incident_id: uuid.UUID,
+    request: Request,
+    domain: str = Query(..., min_length=1, max_length=253),
+    selector: Optional[str] = Query(default=None, max_length=63),
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DomainCheckOut:
+    """Live-check a domain's SPF and DMARC records via DNS (no key required).
+    DKIM is only checked if a `selector` is supplied -- it cannot be
+    discovered from a bare domain, so manual mode requires one rather than
+    guessing. Read-only: works on a closed incident. Audited (domain +
+    whether a selector was checked, not the DNS response content).
+    """
+    await _incident(db, incident_id, user, writable=False)
+    domain = domain.strip().lower().lstrip("*.")
+
+    try:
+        result = await check_spf_dmarc(domain)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"DNS lookup failed: HTTP {e.response.status_code}")
+    except httpx.TimeoutException:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "DNS lookup timed out")
+
+    dkim = None
+    if selector:
+        try:
+            dkim = await check_dkim(domain, selector.strip())
+        except (httpx.HTTPStatusError, httpx.TimeoutException):
+            dkim = {"found": False, "selector": selector, "verdict": "DKIM lookup failed (DNS error)."}
+
+    await write_audit(
+        db, "email_domain_check",
+        user_id=user.id, username=user.username,
+        resource_type="domain", resource_id=domain,
+        details={"incident_id": str(incident_id), "selector_checked": bool(selector)},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+
+    return DomainCheckOut(domain=domain, spf=result["spf"], dmarc=result["dmarc"], dkim=dkim)
 
 
 @router.get("/{incident_id}/email/{aid}", response_model=EmailAnalysisOut,

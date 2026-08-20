@@ -22,6 +22,7 @@ const IOC_TYPES = [
   { value: 'email',        label: 'Email' },
   { value: 'registry_key', label: 'Registry key' },
   { value: 'file_path',    label: 'File path' },
+  { value: 'crypto_wallet', label: 'Crypto wallet' },
   { value: 'other',        label: 'Other' },
 ]
 

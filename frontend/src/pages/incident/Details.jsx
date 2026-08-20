@@ -523,6 +523,123 @@ function SnapshotChip({ to, label, value, accent = 'var(--accent)' }) {
   return <div style={style}>{inner}</div>
 }
 
+// Resolution summary -- required before an incident can be resolved/closed.
+// Backed by the existing LessonsLearned record (incident_narrative /
+// root_cause_description / report_security_recommendations) rather than a
+// separate field, so there's one narrative, not two. `close_incident` 409s
+// with the exact same "what's missing" wording used here if any are blank.
+function ResolutionSection({ incidentId, isClosed }) {
+  const [ll,      setLl]      = useState(null)
+  const [entities, setEntities] = useState(null)
+  const [draft,   setDraft]   = useState(null)
+  const [saving,  setSaving]  = useState(false)
+  const [savedAt, setSavedAt] = useState(null)
+  const [error,   setError]   = useState('')
+
+  useEffect(() => {
+    Promise.allSettled([
+      api.getLessonsLearned(incidentId),
+      api.listEntities(incidentId),
+    ]).then(([l, e]) => {
+      const rec = l.status === 'fulfilled' ? l.value : {}
+      setLl(rec)
+      setDraft({
+        incident_narrative: rec.incident_narrative ?? '',
+        root_cause_description: rec.root_cause_description ?? '',
+        report_security_recommendations: rec.report_security_recommendations ?? '',
+      })
+      setEntities(e.status === 'fulfilled' ? (e.value.items ?? []) : [])
+    })
+  }, [incidentId])
+
+  if (!draft) return null
+
+  const missing = [
+    !draft.incident_narrative.trim() && 'what happened',
+    !draft.root_cause_description.trim() && 'root cause',
+    !draft.report_security_recommendations.trim() && 'recommendations',
+  ].filter(Boolean)
+
+  const save = async () => {
+    setSaving(true); setError('')
+    try {
+      const updated = await api.saveLessonsLearned(incidentId, draft)
+      setLl(updated)
+      setSavedAt(Date.now())
+    } catch (e) {
+      setError(e.message || 'Failed to save.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const field = (key) => ({
+    value: draft[key],
+    onChange: (e) => setDraft(prev => ({ ...prev, [key]: e.target.value })),
+  })
+
+  return (
+    <section className="panel" style={{ marginTop: 'var(--space-4)' }}>
+      <div className="panel-toolbar">
+        <h2 className="panel-h" style={{ margin: 0 }}>Resolution summary</h2>
+        {missing.length > 0 ? (
+          <span style={{ color: 'var(--high)', fontSize: 12 }}>
+            Required to resolve — missing: {missing.join(', ')}
+          </span>
+        ) : (
+          <span style={{ color: 'var(--ok)', fontSize: 12 }}>✓ Complete — ready to resolve</span>
+        )}
+      </div>
+
+      {error && (
+        <div className="alert error" role="alert" style={{ marginBottom: 'var(--space-3)' }}>
+          <span className="alert-icon">!</span><span>{error}</span>
+        </div>
+      )}
+
+      {entities && entities.length > 0 && (
+        <div style={{ marginBottom: 'var(--space-3)' }}>
+          <div style={{ color: 'var(--muted)', fontSize: 12, marginBottom: 4 }}>
+            Entities tracked on this incident (reference — edit on the Entities tab):
+          </div>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {entities.map(e => (
+              <span key={e.id} className="pill" style={{ fontSize: 11 }}>{e.type}: {e.value}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="form">
+        <div className="field">
+          <label className="field-label">What happened</label>
+          <textarea className="input" rows={4} readOnly={isClosed}
+            placeholder="Summary of the incident for the record…" {...field('incident_narrative')} />
+        </div>
+        <div className="field">
+          <label className="field-label">Root cause</label>
+          <textarea className="input" rows={3} readOnly={isClosed}
+            placeholder="What allowed this to happen…" {...field('root_cause_description')} />
+        </div>
+        <div className="field">
+          <label className="field-label">Recommendations</label>
+          <textarea className="input" rows={3} readOnly={isClosed}
+            placeholder="What should change going forward…" {...field('report_security_recommendations')} />
+        </div>
+      </div>
+
+      {!isClosed && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
+          <button type="button" className="btn primary" onClick={save} disabled={saving}>
+            {saving ? 'Saving…' : 'Save resolution summary'}
+          </button>
+          {savedAt && <span style={{ color: 'var(--dim)', fontSize: 11 }}>Saved.</span>}
+        </div>
+      )}
+    </section>
+  )
+}
+
 function SnapshotStrip({ incidentId }) {
   const [snap, setSnap] = useState(null)
   useEffect(() => {
@@ -554,7 +671,7 @@ function SnapshotStrip({ incidentId }) {
 
 
 export default function Details() {
-  const { inc, draft, setField, readOnly, occurredAt, setOccurredAt, containedAt, setContainedAt, refresh } = useOutletContext()
+  const { inc, draft, setField, readOnly, isClosed, occurredAt, setOccurredAt, containedAt, setContainedAt, refresh } = useOutletContext()
   const { user } = useAuth()
   const [preview, setPreview] = useState(false)
   const isAdmin = user?.role === 'admin'
@@ -733,6 +850,7 @@ export default function Details() {
       </aside>
     </div>
     <AffectedSystemsSection incidentId={inc.id} readOnly={readOnly} />
+    <ResolutionSection incidentId={inc.id} isClosed={isClosed} />
     </>
   )
 }

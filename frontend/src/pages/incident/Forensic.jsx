@@ -14,6 +14,7 @@ const TABS = [
   { to: 'artifacts',        label: 'Artifacts' },
   { to: 'collections',      label: 'Collections' },
   { to: 'osint',            label: 'OSINT' },
+  { to: 'ransomware',       label: 'Ransomware' },
 ]
 
 export default function Forensic() {

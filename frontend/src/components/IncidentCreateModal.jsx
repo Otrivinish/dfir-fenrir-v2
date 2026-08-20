@@ -3,7 +3,7 @@ import { api } from '../api/client.js'
 import { SEVERITY, PHASE, TLP, INCIDENT_TYPE } from '../lib/incidentVocab.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 import TagInput from './TagInput.jsx'
-import UtcDateTimeInput from './UtcDateTimeInput.jsx'
+import LocalDateTimePicker from './LocalDateTimePicker.jsx'
 
 const INITIAL = {
   title: '',
@@ -156,10 +156,10 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
               )}
 
               <div className="field">
-                <label className="field-label" htmlFor="inc-occurred">When did it occur? (UTC, optional)</label>
-                <UtcDateTimeInput id="inc-occurred" value={form.occurred_at}
-                       onChange={v => setForm(f => ({ ...f, occurred_at: v }))} hint={false} />
-                <span style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, display: 'block' }}>UTC · YYYY-MM-DD HH:mm:ss. Used for Mean Time to Detect. Leave blank if unknown.</span>
+                <label className="field-label" htmlFor="inc-occurred">When did it occur? (optional)</label>
+                <LocalDateTimePicker id="inc-occurred" value={form.occurred_at}
+                       onChange={v => setForm(f => ({ ...f, occurred_at: v }))} />
+                <span style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, display: 'block' }}>Used for Mean Time to Detect. Leave blank if unknown.</span>
               </div>
 
               <div className="field">

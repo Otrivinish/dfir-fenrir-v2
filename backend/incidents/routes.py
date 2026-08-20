@@ -24,7 +24,7 @@ from core.database import get_db
 from core.tags import normalize_tags
 from incidents.access import accessible_filter, get_accessible_incident
 from models import (AffectedSystem, Entity, Evidence, IOC, Incident,
-                    IncidentAssignment, PlaybookTask, TimelineEvent, User,
+                    IncidentAssignment, LessonsLearned, PlaybookTask, TimelineEvent, User,
                     incident_teams, utcnow)
 from notifications.service import notify_incident_created, notify_phase_changed
 from schemas import (IncidentCreate, IncidentList, IncidentOut, IncidentSnapshot,
@@ -319,6 +319,22 @@ async def close_incident(
     inc = await get_accessible_incident(db, incident_id, user)
     if inc.status == "closed":
         return IncidentOut.model_validate(inc)
+
+    ll = (await db.execute(
+        select(LessonsLearned).where(LessonsLearned.incident_id == incident_id)
+    )).scalar_one_or_none()
+    missing = []
+    if not (ll and (ll.incident_narrative or "").strip()):
+        missing.append("what happened")
+    if not (ll and (ll.root_cause_description or "").strip()):
+        missing.append("root cause")
+    if not (ll and (ll.report_security_recommendations or "").strip()):
+        missing.append("recommendations")
+    if missing:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Resolution summary incomplete — fill in {', '.join(missing)} on the Details page before resolving.",
+        )
 
     inc.status = "closed"
     inc.closed_at = utcnow()

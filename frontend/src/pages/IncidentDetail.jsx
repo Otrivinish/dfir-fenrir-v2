@@ -54,6 +54,7 @@ const NAV_GROUPS = [
       { to: 'timeline', label: 'Timeline' },
       { to: 'entities', label: 'Entities' },
       { to: 'files',    label: 'Files' },
+      { to: 'notes',    label: 'Notes' },
       { to: 'evidence', label: 'Evidence' },
       { to: 'forensic', label: 'Forensic' },
       { to: 'mitre',    label: 'MITRE ATT&CK' },

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
+import { useAuth } from '../../../hooks/useAuth.jsx'
 import { formatLocal } from '../../../lib/datetime.js'
 
 // ─── Extraction regexes ───────────────────────────────────────────────────────
@@ -27,9 +28,22 @@ function isPrivate(ip) {
   return PRIVATE_BLOCKS.some(re => re.test(ip))
 }
 
+// Reverses common IOC "defanging" (hxxp://evil[.]com, 1[.]2[.]3[.]4) before
+// extraction runs -- reports, phishing writeups, and threat-intel feeds quote
+// indicators this way specifically so they don't render as live links/addresses.
+// Only used to find matches; the analyst's original pasted text is never rewritten.
+function refang(text) {
+  return text
+    .replace(/\[\.\]|\(\.\)|\{\.\}/g, '.')
+    .replace(/hxxps/gi, 'https')
+    .replace(/hxxp/gi, 'http')
+    .replace(/\[:\]|\(:\)/g, ':')
+}
+
 function extractAll(text) {
   const items = []
   const addedKeys = new Set()
+  const refanged = refang(text)
 
   function add(type, value) {
     const key = `${type}:${value.toLowerCase()}`
@@ -39,20 +53,20 @@ function extractAll(text) {
   }
 
   // URLs first (before domain extraction picks up URL hostnames)
-  for (const m of text.matchAll(RE_URL)) add('url', m[0])
+  for (const m of refanged.matchAll(RE_URL)) add('url', m[0])
 
   // Hashes longest-first (SHA256 > SHA1 > MD5)
-  for (const m of text.matchAll(RE_SHA256)) add('hash_sha256', m[0].toLowerCase())
+  for (const m of refanged.matchAll(RE_SHA256)) add('hash_sha256', m[0].toLowerCase())
   // SHA1 — must not already be captured as SHA256 prefix (40 < 64, separate words)
-  for (const m of text.matchAll(RE_SHA1))   add('hash_sha1',   m[0].toLowerCase())
-  for (const m of text.matchAll(RE_MD5))    add('hash_md5',    m[0].toLowerCase())
+  for (const m of refanged.matchAll(RE_SHA1))   add('hash_sha1',   m[0].toLowerCase())
+  for (const m of refanged.matchAll(RE_MD5))    add('hash_md5',    m[0].toLowerCase())
 
   // IPs
-  for (const m of text.matchAll(RE_IPV4)) add('ip', m[0])
-  for (const m of text.matchAll(RE_IPV6)) add('ip', m[0].toLowerCase())
+  for (const m of refanged.matchAll(RE_IPV4)) add('ip', m[0])
+  for (const m of refanged.matchAll(RE_IPV6)) add('ip', m[0].toLowerCase())
 
   // Domains — skip if it looks like an IP or already captured in a URL
-  for (const m of text.matchAll(RE_DOMAIN)) {
+  for (const m of refanged.matchAll(RE_DOMAIN)) {
     const val = m[0].toLowerCase()
     if (!addedKeys.has(`ip:${val}`)) add('domain', val)
   }
@@ -83,10 +97,176 @@ const IOC_TYPES_QUICK = [
   { value: 'other',        label: 'Other' },
 ]
 
+// ─── Export: CSV + printable report (HTML → browser "Save as PDF") ───────────
+// Same client-side Blob + temporary <a download> pattern Timeline.jsx and
+// Reports.jsx already use elsewhere in this app -- no backend export endpoint,
+// no PDF library; "PDF" means a self-contained HTML page the analyst prints
+// (Ctrl+P → Save as PDF), matching Reports.jsx's own convention exactly.
+
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = filename
+  document.body.appendChild(a); a.click()
+  document.body.removeChild(a); URL.revokeObjectURL(url)
+}
+
+function csvEsc(v) {
+  if (v == null) return ''
+  const s = String(v).replace(/"/g, '""')
+  return /[,"\n\r]/.test(s) ? `"${s}"` : s
+}
+
+// Flattens a nested enrichment result object into ["key", "value"] pairs for
+// display -- generic on purpose, since each OSINT source returns a different
+// shape and a per-source renderer isn't worth it for an export.
+function flattenForDisplay(obj, prefix = '') {
+  if (obj == null) return []
+  const out = []
+  for (const [k, v] of Object.entries(obj)) {
+    const key = prefix ? `${prefix}.${k}` : k
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      out.push(...flattenForDisplay(v, key))
+    } else if (Array.isArray(v)) {
+      // Elements can themselves be objects (e.g. DNSBL's `checked`, PassiveDNS's
+      // `records`) -- stringify those individually rather than joining, which
+      // would otherwise produce "[object Object]".
+      const render = (el) => (el && typeof el === 'object') ? JSON.stringify(el) : String(el)
+      const shown = v.length > 8
+        ? `${v.slice(0, 8).map(render).join(' | ')} … (+${v.length - 8} more)`
+        : v.map(render).join(' | ')
+      out.push([key, shown])
+    } else {
+      out.push([key, String(v)])
+    }
+  }
+  return out
+}
+
+function exportPlainCsv(extracted, incRef) {
+  const rows = [
+    'Type,Value,Private',
+    ...extracted.map(i => [
+      csvEsc(TYPE_LABELS[i.type] || i.type),
+      csvEsc(i.value),
+      csvEsc(i.type === 'ip' && isPrivate(i.value) ? 'yes' : ''),
+    ].join(',')),
+  ]
+  triggerDownload(
+    new Blob([rows.join('\r\n')], { type: 'text/csv;charset=utf-8' }),
+    `osint-${incRef || 'export'}-indicators.csv`,
+  )
+}
+
+function exportEnrichedCsv(extracted, results, sources, incRef) {
+  const rows = ['Type,Value,Source,Cached,Error,Details']
+  for (const item of extracted) {
+    const itemResults = results[item.id]
+    if (!itemResults || !itemResults.length) continue
+    for (const r of itemResults) {
+      const label = sources.find(s => s.id === r.source)?.label || r.source
+      const details = r.data ? flattenForDisplay(r.data).map(([k, v]) => `${k}=${v}`).join('; ') : ''
+      rows.push([
+        csvEsc(TYPE_LABELS[item.type] || item.type),
+        csvEsc(item.value),
+        csvEsc(label),
+        csvEsc(r.from_cache ? 'yes' : ''),
+        csvEsc(r.error || ''),
+        csvEsc(details),
+      ].join(','))
+    }
+  }
+  triggerDownload(
+    new Blob([rows.join('\r\n')], { type: 'text/csv;charset=utf-8' }),
+    `osint-${incRef || 'export'}-enriched.csv`,
+  )
+}
+
+function buildReportHtml(extracted, results, sources, inc, user) {
+  const esc = (s) => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))
+  const generated = new Date().toISOString()
+
+  const indicatorRows = extracted.map(i => `
+    <tr>
+      <td>${esc(TYPE_LABELS[i.type] || i.type)}</td>
+      <td class="mono">${esc(i.value)}</td>
+      <td>${i.type === 'ip' && isPrivate(i.value) ? 'Private' : ''}</td>
+    </tr>`).join('')
+
+  const enrichedSections = extracted
+    .filter(i => results[i.id]?.length)
+    .map(i => {
+      const cards = results[i.id].map(r => {
+        const label = sources.find(s => s.id === r.source)?.label || r.source
+        if (r.error) return `<div class="card"><h4>${esc(label)}</h4><p class="err">${esc(r.error)}</p></div>`
+        const pairs = r.data ? flattenForDisplay(r.data) : []
+        const kv = pairs.map(([k, v]) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')
+        return `<div class="card"><h4>${esc(label)}${r.from_cache ? ' <small>(cached)</small>' : ''}</h4>${kv || '<p class="dim">No data.</p>'}</div>`
+      }).join('')
+      return `<h3>${esc(TYPE_LABELS[i.type] || i.type)} — <span class="mono">${esc(i.value)}</span></h3><div class="cards">${cards}</div>`
+    }).join('')
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>OSINT Report — ${esc(inc?.ref || '')}</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; color: #1a1a1a; max-width: 960px; margin: 32px auto; padding: 0 16px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .meta { color: #666; font-size: 12px; margin-bottom: 24px; }
+  h2 { font-size: 15px; margin-top: 32px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+  h3 { font-size: 13px; margin-top: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; }
+  th { color: #666; font-weight: 600; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; word-break: break-all; }
+  .cards { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .card { border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; min-width: 220px; max-width: 320px; font-size: 12px; overflow-wrap: anywhere; }
+  .card h4 { margin: 0 0 6px; font-size: 12px; }
+  .kv { border-bottom: 1px dotted #eee; padding: 3px 0; }
+  .kv .k { display: block; color: #666; font-size: 10px; text-transform: uppercase; letter-spacing: 0.02em; }
+  .kv .v { display: block; overflow-wrap: anywhere; word-break: break-word; }
+  .err { color: #b91c1c; }
+  .dim { color: #999; font-style: italic; }
+  .print-hint { background: #f3f4f6; border-radius: 4px; padding: 8px 12px; font-size: 12px; margin-bottom: 24px; }
+  @media print { .print-hint { display: none; } body { margin: 0; } }
+</style></head>
+<body>
+  <div class="print-hint">To save as PDF: press Ctrl+P (Cmd+P on Mac), choose "Save as PDF" as the destination.</div>
+  <h1>OSINT Lookup Report</h1>
+  <div class="meta">
+    Incident: ${esc(inc?.ref || inc?.title || '—')} &middot;
+    Generated ${esc(generated)} by ${esc(user?.username || '—')}
+  </div>
+
+  <h2>Extracted Indicators (${extracted.length})</h2>
+  <table><thead><tr><th>Type</th><th>Value</th><th>Private</th></tr></thead>
+  <tbody>${indicatorRows}</tbody></table>
+
+  <h2>Enrichment Results</h2>
+  ${enrichedSections || '<p class="dim">No indicators enriched yet.</p>'}
+</body></html>`
+}
+
+function previewReport(extracted, results, sources, inc, user) {
+  const html = buildReportHtml(extracted, results, sources, inc, user)
+  const w = window.open('', '_blank')
+  if (!w) { alert('Pop-up blocked — please allow pop-ups for this site.'); return }
+  w.document.write(html)
+  w.document.close()
+}
+
+function downloadReport(extracted, results, sources, inc, user) {
+  const html = buildReportHtml(extracted, results, sources, inc, user)
+  triggerDownload(
+    new Blob([html], { type: 'text/html;charset=utf-8' }),
+    `osint-${inc?.ref || 'report'}.html`,
+  )
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function OSINTLookup() {
   const { inc } = useOutletContext()
+  const { user } = useAuth()
   const isClosed = inc?.status === 'closed'
 
   const [text, setText]               = useState('')
@@ -101,6 +281,7 @@ export default function OSINTLookup() {
   const [sourcesErr, setSourcesErr]   = useState(null)
   const [sessionId, setSessionId]     = useState(null)
   const [sessions, setSessions]       = useState([])
+  const [correlations, setCorrelations] = useState({})  // { "type:value": IncidentRef[] }
 
   useEffect(() => {
     api.osintSources().then(res => {
@@ -123,6 +304,19 @@ export default function OSINTLookup() {
       }
     }).catch(() => {})
   }, [inc?.id])
+
+  // Correlation hint: does this indicator already exist as an IOC on this or
+  // another accessible incident? Re-runs whenever the extracted set changes
+  // (fresh extraction or a saved session load).
+  useEffect(() => {
+    if (!extracted.length) { setCorrelations({}); return }
+    const items = extracted.map(({ type, value }) => ({ type, value }))
+    api.correlateLookup({ items }).then(res => {
+      const map = {}
+      for (const hit of res.items) map[`${hit.type}:${hit.value}`] = hit.matched_incidents
+      setCorrelations(map)
+    }).catch(() => {})
+  }, [extracted])
 
   async function onExtract() {
     if (!text.trim()) return
@@ -377,6 +571,23 @@ export default function OSINTLookup() {
                 Add {selected.size} to IOCs
               </button>
             )}
+            <button type="button" className="btn ghost" style={{ fontSize: 13 }}
+              onClick={() => exportPlainCsv(extracted, inc.ref)}>
+              Export CSV
+            </button>
+            <button type="button" className="btn ghost" style={{ fontSize: 13 }}
+              onClick={() => exportEnrichedCsv(extracted, results, sources, inc.ref)}
+              disabled={Object.keys(results).length === 0}>
+              Export CSV (enriched)
+            </button>
+            <button type="button" className="btn ghost" style={{ fontSize: 13 }}
+              onClick={() => previewReport(extracted, results, sources, inc, user)}>
+              Preview report
+            </button>
+            <button type="button" className="btn ghost" style={{ fontSize: 13 }}
+              onClick={() => downloadReport(extracted, results, sources, inc, user)}>
+              Download report (HTML)
+            </button>
             <span style={{ marginLeft: 'auto', color: 'var(--dim)', fontSize: 12 }}>
               {visible.length} indicator{visible.length !== 1 ? 's' : ''}
             </span>
@@ -392,6 +603,7 @@ export default function OSINTLookup() {
                   <th style={{ width: 90 }}>Type</th>
                   <th>Indicator</th>
                   <th style={{ width: 80, textAlign: 'center' }}>Private</th>
+                  <th style={{ width: 110 }}>Seen</th>
                   <th style={{ width: 100 }}>Enrich</th>
                   <th style={{ width: 60 }}>Add IOC</th>
                 </tr>
@@ -401,6 +613,8 @@ export default function OSINTLookup() {
                   <IndicatorRow
                     key={item.id}
                     item={item}
+                    incId={inc.id}
+                    matches={correlations[`${item.type}:${item.value}`] || []}
                     sources={sources}
                     enabledSources={enabledSources}
                     result={results[item.id]}
@@ -496,10 +710,12 @@ export default function OSINTLookup() {
 
 // ─── Indicator row ────────────────────────────────────────────────────────────
 
-function IndicatorRow({ item, sources, enabledSources, result, isEnriching, selected, onToggle, onEnrich, onAddIoc, isClosed }) {
+function IndicatorRow({ item, incId, matches, sources, enabledSources, result, isEnriching, selected, onToggle, onEnrich, onAddIoc, isClosed }) {
   const [expanded, setExpanded] = useState(false)
   const priv = item.type === 'ip' && isPrivate(item.value)
   const hasResults = result && result.length > 0
+  const trackedHere = matches.some(m => m.id === incId)
+  const elsewhere    = matches.filter(m => m.id !== incId)
 
   return (
     <>
@@ -518,6 +734,20 @@ function IndicatorRow({ item, sources, enabledSources, result, isEnriching, sele
         </td>
         <td style={{ textAlign: 'center' }}>
           {priv && <span style={{ color: 'var(--muted)', fontSize: 11 }}>Private</span>}
+        </td>
+        <td onClick={e => e.stopPropagation()}>
+          {trackedHere && (
+            <span className="pill" style={{ fontSize: 10, marginRight: 4 }}>Tracked here</span>
+          )}
+          {elsewhere.length > 0 && (
+            <span
+              className="pill"
+              style={{ fontSize: 10, color: 'var(--high)' }}
+              title={elsewhere.map(m => `${m.title} (${m.severity ?? '?'})`).join('\n')}
+            >
+              ⟲ {elsewhere.length} other{elsewhere.length !== 1 ? 's' : ''}
+            </span>
+          )}
         </td>
         <td onClick={e => e.stopPropagation()}>
           <button

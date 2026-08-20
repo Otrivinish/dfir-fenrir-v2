@@ -922,6 +922,28 @@ button.phase-step.clickable:focus-visible {
   padding-top: var(--space-4);
 }
 
+/* ── Note version history / diff ────────────────────────────────────────── */
+.note-history {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+.note-diff {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: var(--space-2) 0;
+}
+.note-diff-line { padding: 0 var(--space-1); }
+.note-diff-add { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+.note-diff-del { background: color-mix(in srgb, var(--crit) 14%, transparent); color: var(--crit); }
+.note-diff-eq  { color: var(--muted); }
+
 /* ── OOB section ─────────────────────────────────────────────────────────── */
 .oob-log-entry {
   background: var(--surface);
