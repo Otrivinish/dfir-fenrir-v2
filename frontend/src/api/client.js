@@ -195,6 +195,7 @@ export const api = {
     const s = qs.toString()
     return request('GET', `/api/correlations/entities${s ? '?' + s : ''}`)
   },
+  correlateLookup:          (payload)     => request('POST', '/api/correlations/lookup', payload),
 
   // IOCs (per-incident)
   listIocs:    (incidentId, params = {}) => {
@@ -418,6 +419,11 @@ export const api = {
   extractEmailAttachment: (incidentId, aid, idx) => request('POST', `/api/incidents/${incidentId}/email/${aid}/attachments/${idx}/extract`),
   importEmailHops:     (incidentId, aid)   => request('POST', `/api/incidents/${incidentId}/email/${aid}/import-hops`),
   mintEmailEvidence:   (incidentId, aid)   => request('POST', `/api/incidents/${incidentId}/email/${aid}/mint-evidence`),
+  checkEmailDomain:    (incidentId, domain, selector) => {
+    const qs = new URLSearchParams({ domain })
+    if (selector) qs.set('selector', selector)
+    return request('GET', `/api/incidents/${incidentId}/email/domain-check?${qs.toString()}`)
+  },
 
   // GS-11 — attach an image/* photo (encrypted at rest). Returns the updated evidence.
   addEvidencePhoto: async (incidentId, evidenceId, { file, caption, taken_at }) => {
@@ -565,6 +571,12 @@ export const api = {
   createComment:   (incidentId, payload)              => request('POST',   `/api/incidents/${incidentId}/comments`, payload),
   updateComment:   (incidentId, commentId, payload)   => request('PATCH',  `/api/incidents/${incidentId}/comments/${commentId}`, payload),
   deleteComment:   (incidentId, commentId)            => request('DELETE', `/api/incidents/${incidentId}/comments/${commentId}`),
+
+  // Notes (per-incident; one per analyst, markdown, optionally private)
+  listNotes:        (incidentId)          => request('GET',    `/api/incidents/${incidentId}/notes`),
+  saveNote:          (incidentId, payload) => request('POST',   `/api/incidents/${incidentId}/notes`, payload),
+  deleteNote:        (incidentId, noteId)  => request('DELETE', `/api/incidents/${incidentId}/notes/${noteId}`),
+  listNoteVersions:  (incidentId, noteId)  => request('GET',    `/api/incidents/${incidentId}/notes/${noteId}/versions`),
 
   // Comms — OOB passphrase + dark operation
   getPassphrase:        (incidentId)          => request('GET',   `/api/incidents/${incidentId}/oob/passphrase`),

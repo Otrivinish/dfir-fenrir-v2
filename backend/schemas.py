@@ -320,7 +320,7 @@ class IncidentSnapshot(BaseModel):
 IocType = Literal[
     "ip", "domain", "url",
     "hash_md5", "hash_sha1", "hash_sha256",
-    "email", "registry_key", "file_path", "other",
+    "email", "registry_key", "file_path", "crypto_wallet", "other",
 ]
 
 
@@ -935,6 +935,13 @@ class PromoteIocsRequest(BaseModel):
     iocs: list[PromoteIocItem] = Field(default_factory=list)
 
 
+class DomainCheckOut(BaseModel):
+    domain: str
+    spf:    dict
+    dmarc:  dict
+    dkim:   Optional[dict] = None
+
+
 # ─── Audit-chain anchors (GS-8) ───────────────────────────────────────────────
 
 class AuditAnchorOut(BaseModel):
@@ -1169,6 +1176,47 @@ class CommentUpdate(BaseModel):
 class CommentList(BaseModel):
     items:       list[CommentOut]
     next_cursor: Optional[str] = None
+
+
+# ─── Notes (one per analyst per incident) ───────────────────────────────────
+
+class NoteOut(BaseModel):
+    id:          UUID
+    incident_id: UUID
+    body:        str
+    is_private:      bool
+    version:         int
+    author_id:       Optional[UUID] = None
+    author_username: Optional[str]  = None
+    created_at:      datetime
+    updated_at:      datetime
+    edited_at:       Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class NoteCreate(BaseModel):
+    body:       str  = Field(min_length=1, max_length=8192)
+    is_private: bool = True
+
+
+class NoteList(BaseModel):
+    items: list[NoteOut]
+
+
+class NoteVersionOut(BaseModel):
+    version_number: int
+    body:           str
+    is_private:     bool
+    created_at:     datetime
+
+    class Config:
+        from_attributes = True
+
+
+class NoteVersionList(BaseModel):
+    items: list[NoteVersionOut]
 
 
 class PassphraseOut(BaseModel):

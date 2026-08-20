@@ -33,3 +33,7 @@ Thumbs.db
 /ignore
 /docs
 CLAUDE.md
+
+# Local revert log (working notes, not committed)
+REVERT.md
+TODO.md

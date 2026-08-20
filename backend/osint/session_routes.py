@@ -6,10 +6,11 @@ results so the analyst can reload their work after a page refresh.
 """
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
 from incidents.access import get_accessible_incident
@@ -57,15 +58,21 @@ async def list_osint_sessions(
 async def create_osint_session(
     incident_id: uuid.UUID,
     req: OSINTSessionCreate,
+    request: Request,
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> OSINTSessionOut:
     """Create a new OSINT session storing the raw pasted text and extracted indicators.
 
     Enrichment results start empty and are filled in via later updates. Requires the
-    analyst role and access to the incident. Returns the created session.
+    analyst role and access to the incident. Rejected if the incident is closed.
+    Records an audit entry (metadata only -- indicator count, not the raw text or
+    indicator values). Returns the created session.
     """
-    await _get_incident(db, incident_id, user)
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+
     session = OSINTSession(
         id=uuid.uuid4(),
         incident_id=incident_id,
@@ -76,6 +83,14 @@ async def create_osint_session(
         created_by=user.username,
     )
     db.add(session)
+    await db.flush()
+    await write_audit(
+        db, "osint_session_create",
+        user_id=user.id, username=user.username,
+        resource_type="osint_session", resource_id=str(session.id),
+        details={"incident_id": str(incident_id), "indicator_count": len(req.indicators)},
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
     return OSINTSessionOut.model_validate(session)
 
@@ -87,16 +102,21 @@ async def update_osint_session(
     incident_id: uuid.UUID,
     session_id:  uuid.UUID,
     req: OSINTSessionUpdate,
+    request: Request,
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> OSINTSessionOut:
     """Partially update an OSINT session's raw text, indicators, and/or enrichment results.
 
     Only the provided fields are changed; omitted fields are left untouched. Requires the
-    analyst role and access to the incident. Returns 404 if the session does not exist for
-    that incident, otherwise the updated session.
+    analyst role and access to the incident. Rejected if the incident is closed. Returns
+    404 if the session does not exist for that incident. Records an audit entry (which
+    fields changed, not their values). Returns the updated session.
     """
-    await _get_incident(db, incident_id, user)
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+
     session = (await db.execute(
         select(OSINTSession).where(
             OSINTSession.id == session_id,
@@ -106,10 +126,19 @@ async def update_osint_session(
     if not session:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
 
-    if req.raw_text   is not None: session.raw_text   = req.raw_text
-    if req.indicators is not None: session.indicators = req.indicators
-    if req.results    is not None: session.results    = req.results
+    changed_fields = []
+    if req.raw_text   is not None: session.raw_text   = req.raw_text;   changed_fields.append("raw_text")
+    if req.indicators is not None: session.indicators = req.indicators; changed_fields.append("indicators")
+    if req.results    is not None: session.results    = req.results;    changed_fields.append("results")
 
+    if changed_fields:
+        await write_audit(
+            db, "osint_session_update",
+            user_id=user.id, username=user.username,
+            resource_type="osint_session", resource_id=str(session.id),
+            details={"incident_id": str(incident_id), "changed_fields": changed_fields},
+            ip_address=request.client.host if request.client else None,
+        )
     await db.commit()
     return OSINTSessionOut.model_validate(session)
 
@@ -120,15 +149,20 @@ async def update_osint_session(
 async def delete_osint_session(
     incident_id: uuid.UUID,
     session_id:  uuid.UUID,
+    request: Request,
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Delete an OSINT session.
 
-    Requires the analyst role and access to the incident. Returns 404 if the session does
-    not exist for that incident, otherwise 204 with no body.
+    Requires the analyst role and access to the incident. Rejected if the incident is
+    closed. Returns 404 if the session does not exist for that incident. Records an
+    audit entry. Otherwise 204 with no body.
     """
-    await _get_incident(db, incident_id, user)
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+
     session = (await db.execute(
         select(OSINTSession).where(
             OSINTSession.id == session_id,
@@ -137,5 +171,13 @@ async def delete_osint_session(
     )).scalar_one_or_none()
     if not session:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+
+    await write_audit(
+        db, "osint_session_delete",
+        user_id=user.id, username=user.username,
+        resource_type="osint_session", resource_id=str(session.id),
+        details={"incident_id": str(incident_id)},
+        ip_address=request.client.host if request.client else None,
+    )
     await db.delete(session)
     await db.commit()

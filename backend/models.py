@@ -1001,6 +1001,52 @@ class Comment(Base):
     edited_at   = Column(DateTime(timezone=True))   # set on first edit
 
 
+# ─── Notes (one per analyst per incident; markdown; optionally private) ─────
+# A personal markdown scratchpad, GitHub-README style -- one evolving note
+# per analyst per incident, not a thread of entries. A note marked private
+# is visible only to its author -- not even an admin -- so `is_private` is
+# never bypassed in the list query. See notes/routes.py.
+# Every actual change snapshots a NoteVersion (version-numbered, its own
+# is_private carried forward from save time) so history/diff stay accurate
+# even if the note's current privacy later changes.
+
+class Note(Base):
+    __tablename__ = "notes"
+    __table_args__ = (
+        UniqueConstraint("incident_id", "author_id", name="uq_notes_incident_author"),
+    )
+
+    id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id = Column(UUID(as_uuid=True),
+                         ForeignKey("incidents.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+
+    body        = Column(Text, nullable=False)
+    is_private  = Column(Boolean, nullable=False, default=True, server_default="true")
+    version     = Column(Integer, nullable=False, default=1, server_default="1")
+    author_id   = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    created_at  = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+    updated_at  = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    edited_at   = Column(DateTime(timezone=True))   # set on first edit
+
+
+class NoteVersion(Base):
+    __tablename__ = "note_versions"
+    __table_args__ = (
+        UniqueConstraint("note_id", "version_number", name="uq_note_version"),
+    )
+
+    id             = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    note_id        = Column(UUID(as_uuid=True), ForeignKey("notes.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_number = Column(Integer, nullable=False)
+
+    body        = Column(Text, nullable=False)
+    is_private  = Column(Boolean, nullable=False)   # carried from the note at save time
+
+    created_at  = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+
+
 # ─── OOB communications log (per-incident) ───────────────────────────────────
 # Records out-of-band contact events. Channel list matches old Fenrir:
 # personal_mobile / signal / whatsapp / personal_email / in_person /

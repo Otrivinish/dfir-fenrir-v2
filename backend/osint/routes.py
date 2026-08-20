@@ -6,9 +6,10 @@ The caller selects which sources to query per indicator.
 """
 import asyncio
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audit.service import write_audit
 from auth.deps import current_user
 from core.database import get_db
 from models import User
@@ -43,10 +44,17 @@ async def list_sources(
              summary="Enrich an indicator (OSINT)")
 async def enrich_indicator(
     req: EnrichRequest,
-    _: User = Depends(current_user),
+    request: Request,
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> EnrichResponse:
-    """Enrich a single indicator with one or more selected sources in parallel."""
+    """Enrich a single indicator with one or more selected sources in parallel.
+
+    Records one audit entry per call covering every source requested (not one per
+    source) -- the indicator value/type/sources are logged, since an indicator is not
+    sensitive in the way a note or comment body is; it's the same value that would be
+    logged the moment it's added as an IOC.
+    """
     # Deduplicate requested sources while preserving order
     seen: set[str] = set()
     sources = [s for s in req.sources if not (s in seen or seen.add(s))]  # type: ignore[func-returns-value]
@@ -63,5 +71,14 @@ async def enrich_indicator(
             ))
         else:
             results.append(EnrichResultItem(source=source, **raw))
+
+    await write_audit(
+        db, "osint_enrich",
+        user_id=user.id, username=user.username,
+        resource_type="osint_indicator", resource_id=req.indicator,
+        details={"ioc_type": req.ioc_type, "sources": sources},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
 
     return EnrichResponse(indicator=req.indicator, ioc_type=req.ioc_type, results=results)
