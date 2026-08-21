@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal, relative } from '../../../lib/datetime.js'
+import UtcDateTimePicker from '../../../components/UtcDateTimePicker.jsx'
 
 // Web Browser History — upload a Chrome/Edge/Brave `History` file or
 // Firefox `places.sqlite`, parsed offline (read-only SQLite, no BLOB/
@@ -57,6 +58,7 @@ export default function WebBrowserHistory() {
 
   const [file, setFile]       = useState(null)
   const [browser, setBrowser] = useState('chrome')
+  const [formHistoryFile, setFormHistoryFile] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [uploadErr, setUploadErr] = useState(null)
 
@@ -91,19 +93,22 @@ export default function WebBrowserHistory() {
   }, [incidentId])
   useEffect(() => { loadUploads() }, [loadUploads])
 
-  const buildFilters = useCallback((cursor) => ({
+  // uploadOverride lets a just-clicked Uploads-list row search immediately
+  // with its own id, bypassing the stale `filterUpload` closure a state
+  // setter + synchronous call would otherwise read before the re-render.
+  const buildFilters = useCallback((cursor, uploadOverride) => ({
     search: search.trim() || undefined,
-    upload_id: filterUpload || undefined,
+    upload_id: (uploadOverride !== undefined ? uploadOverride : filterUpload) || undefined,
     browser: filterBrowser || undefined,
-    date_from: dateFrom ? new Date(dateFrom).toISOString() : undefined,
-    date_to: dateTo ? new Date(dateTo).toISOString() : undefined,
+    date_from: dateFrom || undefined,
+    date_to: dateTo || undefined,
     cursor: cursor || undefined,
   }), [search, filterUpload, filterBrowser, dateFrom, dateTo])
 
-  const runVisitSearch = useCallback(async () => {
+  const runVisitSearch = useCallback(async (uploadOverride) => {
     setVisitsLoading(true); setVisitsErr(null)
     try {
-      const r = await api.listWebHistoryVisits(incidentId, buildFilters(null))
+      const r = await api.listWebHistoryVisits(incidentId, buildFilters(null, uploadOverride))
       setVisits(r.items); setVisitsCursor(r.next_cursor); setSelected(new Set())
     } catch (e) {
       setVisitsErr(e.message || 'Search failed.')
@@ -125,10 +130,13 @@ export default function WebBrowserHistory() {
     }
   }
 
-  const runTermSearch = useCallback(async () => {
+  const runTermSearch = useCallback(async (uploadOverride) => {
     setTermsLoading(true)
     try {
-      const r = await api.listWebHistorySearchTerms(incidentId, { search: search.trim() || undefined, upload_id: filterUpload || undefined })
+      const r = await api.listWebHistorySearchTerms(incidentId, {
+        search: search.trim() || undefined,
+        upload_id: (uploadOverride !== undefined ? uploadOverride : filterUpload) || undefined,
+      })
       setTerms(r.items); setTermsCursor(r.next_cursor)
     } finally {
       setTermsLoading(false)
@@ -148,11 +156,12 @@ export default function WebBrowserHistory() {
     }
   }
 
-  const runDownloadSearch = useCallback(async () => {
+  const runDownloadSearch = useCallback(async (uploadOverride) => {
     setDownloadsLoading(true); setDownloadsErr(null)
     try {
       const r = await api.listWebHistoryDownloads(incidentId, {
-        search: search.trim() || undefined, upload_id: filterUpload || undefined,
+        search: search.trim() || undefined,
+        upload_id: (uploadOverride !== undefined ? uploadOverride : filterUpload) || undefined,
         browser: filterBrowser || undefined,
       })
       setDownloads(r.items); setDownloadsCursor(r.next_cursor); setSelected(new Set())
@@ -179,10 +188,16 @@ export default function WebBrowserHistory() {
     }
   }
 
-  const runActiveSearch = () => {
-    if (tab === 'visits') runVisitSearch()
-    else if (tab === 'downloads') runDownloadSearch()
-    else runTermSearch()
+  const runActiveSearch = (uploadOverride) => {
+    if (tab === 'visits') runVisitSearch(uploadOverride)
+    else if (tab === 'downloads') runDownloadSearch(uploadOverride)
+    else runTermSearch(uploadOverride)
+  }
+
+  const onSelectUploadRow = (u) => {
+    const next = filterUpload === u.id ? '' : u.id
+    setFilterUpload(next)
+    runActiveSearch(next)
   }
 
   useEffect(() => {
@@ -195,10 +210,14 @@ export default function WebBrowserHistory() {
     if (!file) return
     setUploading(true); setUploadErr(null)
     try {
-      await api.uploadWebHistory(incidentId, { file, browser })
-      setFile(null)
+      const created = await api.uploadWebHistory(incidentId, { file, browser, formHistoryFile: browser === 'firefox' ? formHistoryFile : null })
+      setFile(null); setFormHistoryFile(null)
       loadUploads()
-      runVisitSearch()
+      // Auto-select the just-uploaded file so its parsed data shows immediately,
+      // instead of silently staying on "All uploads" (looked like nothing happened
+      // when e.g. a 0-visit file was uploaded on top of other uploads' data).
+      setFilterUpload(created.id)
+      runActiveSearch(created.id)
     } catch (e) {
       setUploadErr(e.message || 'Upload failed.')
     } finally {
@@ -210,7 +229,9 @@ export default function WebBrowserHistory() {
     if (!confirm(`Delete this ${BROWSER_LABEL[u.browser]} upload and its ${u.record_count} visits, ${u.search_term_count} search terms, and ${u.download_count} downloads?`)) return
     try {
       await api.deleteWebHistoryUpload(incidentId, u.id)
-      loadUploads(); runVisitSearch()
+      const stillSelected = filterUpload === u.id ? '' : filterUpload
+      if (stillSelected !== filterUpload) setFilterUpload(stillSelected)
+      loadUploads(); runActiveSearch(stillSelected)
     } catch (e) {
       setUploadsErr(e.message || 'Delete failed.')
     }
@@ -257,11 +278,19 @@ export default function WebBrowserHistory() {
         </select>
         <input type="file" disabled={uploading || isClosed}
                onChange={e => setFile(e.target.files?.[0] || null)} />
+        {browser === 'firefox' && (
+          <label style={{ display: 'flex', gap: 'var(--space-1)', alignItems: 'center', fontSize: 12, color: 'var(--muted)' }}>
+            + formhistory.sqlite (optional, for search terms)
+            <input type="file" disabled={uploading || isClosed}
+                   onChange={e => setFormHistoryFile(e.target.files?.[0] || null)} />
+          </label>
+        )}
         <button type="button" className="btn primary" onClick={onUpload} disabled={!file || uploading || isClosed}>
           {uploading ? 'Uploading…' : 'Upload & Parse'}
         </button>
         <span style={{ color: 'var(--dim)', fontSize: 11 }}>
           Chrome/Edge/Brave "History" or Firefox "places.sqlite" — up to 500 MB. Parsed offline, read-only; nothing is executed.
+          Firefox search-bar terms live in a separate formhistory.sqlite — upload both together.
         </span>
       </div>
       {uploadErr && (
@@ -281,16 +310,18 @@ export default function WebBrowserHistory() {
       ) : (
         <div style={{ marginBottom: 'var(--space-4)' }}>
           {uploads.map(u => (
-            <div key={u.id} style={{
-              display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap',
-              padding: 'var(--space-2) 0', borderBottom: '1px solid var(--border)', fontSize: 12,
+            <div key={u.id} onClick={() => onSelectUploadRow(u)} title="Click to show only this upload's parsed data" style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap', cursor: 'pointer',
+              padding: 'var(--space-2)', margin: '0 calc(-1 * var(--space-2))', borderRadius: 'var(--radius)',
+              borderBottom: '1px solid var(--border)', fontSize: 12,
+              background: filterUpload === u.id ? 'var(--accent-soft)' : 'transparent',
             }}>
               <span className="pill">{BROWSER_LABEL[u.browser] || u.browser}</span>
               <span style={{ fontFamily: 'var(--font-mono)' }}>{u.original_filename}</span>
               <span style={{ color: 'var(--muted)' }}>{u.record_count} visits · {u.search_term_count} search terms · {u.download_count} downloads</span>
               {u.truncated && <span style={{ color: 'var(--high)' }}>⚠ truncated at defensive cap</span>}
               <span style={{ color: 'var(--dim)' }} title={formatLocal(u.uploaded_at)}>{relative(u.uploaded_at)} · {u.uploaded_by}</span>
-              <div style={{ marginLeft: 'auto', display: 'flex', gap: 'var(--space-2)' }}>
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 'var(--space-2)' }} onClick={e => e.stopPropagation()}>
                 {u.evidence_id ? (
                   <span style={{ color: 'var(--ok)' }}>Evidence ✓</span>
                 ) : (
@@ -332,11 +363,11 @@ export default function WebBrowserHistory() {
                   <option value="">All browsers</option>
                   {BROWSERS.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
                 </select>
-                <input className="input" type="date" style={{ maxWidth: 140 }} value={dateFrom} onChange={e => setDateFrom(e.target.value)} title="From date (UTC)" />
-                <input className="input" type="date" style={{ maxWidth: 140 }} value={dateTo} onChange={e => setDateTo(e.target.value)} title="To date (UTC)" />
+                <div style={{ width: 190 }}><UtcDateTimePicker value={dateFrom} onChange={setDateFrom} clearable /></div>
+                <div style={{ width: 190 }}><UtcDateTimePicker value={dateTo} onChange={setDateTo} clearable /></div>
               </>
             )}
-            <button type="button" className="btn primary" onClick={runActiveSearch}>Search</button>
+            <button type="button" className="btn primary" onClick={() => runActiveSearch()}>Search</button>
             {(tab === 'visits' || tab === 'downloads') && selected.size > 0 && (
               <button type="button" className="btn ghost" onClick={() => setIocTarget([...selected])} disabled={isClosed}>
                 Add {selected.size} to IOCs

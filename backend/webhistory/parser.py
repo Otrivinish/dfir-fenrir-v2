@@ -19,6 +19,7 @@ Safety, on top of what `forensic/parser.py` already does:
     file, not real-world profiles -- real histories are nowhere near it.
   - The temp file is always unlinked in a `finally`, success or exception.
 """
+import contextlib
 import os
 import sqlite3
 import tempfile
@@ -82,32 +83,21 @@ def _host_of(url: str) -> Optional[str]:
         return None
 
 
-def parse_history_db(content: bytes) -> dict:
-    """Parse a Chromium or Firefox history SQLite file.
-
-    Returns {"schema_family": "chromium"|"firefox", "visits": [...],
-    "search_terms": [...], "truncated": bool}. Raises ValueError if the
-    file isn't a recognized Chrome/Edge/Brave or Firefox history database.
-    """
+@contextlib.contextmanager
+def _readonly_sqlite(content: bytes):
+    """Write `content` to a throwaway temp file and open it read-only +
+    immutable via a `file:` URI -- shared by every entry point in this
+    module so the safety-critical bits (no writable handle, no execution,
+    always cleaned up) live in exactly one place."""
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             f.write(content)
             tmp_path = f.name
-
         conn = sqlite3.connect(f"file:{tmp_path}?mode=ro&immutable=1", uri=True)
+        conn.row_factory = sqlite3.Row
         try:
-            conn.row_factory = sqlite3.Row
-            tables = {r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()}
-
-            if "visits" in tables and "urls" in tables:
-                return _parse_chromium(conn, tables)
-            elif "moz_historyvisits" in tables and "moz_places" in tables:
-                return _parse_firefox(conn)
-            else:
-                raise ValueError("Not a recognized Chrome/Edge/Brave or Firefox history database")
+            yield conn
         finally:
             conn.close()
     finally:
@@ -116,6 +106,55 @@ def parse_history_db(content: bytes) -> dict:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def parse_history_db(content: bytes) -> dict:
+    """Parse a Chromium or Firefox history SQLite file.
+
+    Returns {"schema_family": "chromium"|"firefox", "visits": [...],
+    "search_terms": [...], "truncated": bool}. Raises ValueError if the
+    file isn't a recognized Chrome/Edge/Brave or Firefox history database.
+    """
+    with _readonly_sqlite(content) as conn:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+
+        if "visits" in tables and "urls" in tables:
+            return _parse_chromium(conn, tables)
+        elif "moz_historyvisits" in tables and "moz_places" in tables:
+            return _parse_firefox(conn)
+        else:
+            raise ValueError("Not a recognized Chrome/Edge/Brave or Firefox history database")
+
+
+def parse_form_history_db(content: bytes) -> list[dict]:
+    """Parse Firefox's separate `formhistory.sqlite` (moz_formhistory table)
+    for search-bar queries.
+
+    Only rows with fieldname == 'searchbar-history' are extracted -- the
+    dedicated search-bar widget's remembered queries, the closest Firefox
+    equivalent to Chromium's keyword_search_terms. Every other fieldname in
+    this file is a generic per-site form field value (arbitrary text typed
+    into any website's form, not a search) and is deliberately left alone:
+    pulling those in under a tab labeled "Search terms" would silently mix
+    in untargeted, potentially sensitive form data the analyst didn't ask
+    for. Raises ValueError if the file isn't a recognized formhistory.sqlite.
+    """
+    with _readonly_sqlite(content) as conn:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "moz_formhistory" not in tables:
+            raise ValueError("Not a recognized Firefox form history database")
+
+        rows = conn.execute(
+            "SELECT value, lastUsed FROM moz_formhistory "
+            "WHERE fieldname = 'searchbar-history' ORDER BY lastUsed DESC LIMIT ?",
+            (_MAX_ROWS,),
+        ).fetchall()
+
+    return [{"term": r["value"], "url": None, "visit_time": _prtime_to_utc(r["lastUsed"])} for r in rows]
 
 
 def _parse_chromium(conn: sqlite3.Connection, tables: set) -> dict:
@@ -223,8 +262,10 @@ def _parse_firefox(conn: sqlite3.Connection) -> dict:
             "transition": _FIREFOX_VISIT_TYPES.get(r["visit_type"]),
         })
 
-    # Firefox has no equivalent of Chromium's keyword_search_terms table --
-    # typed search queries aren't stored separately from regular URL visits.
+    # Firefox has no equivalent of Chromium's keyword_search_terms table
+    # inside places.sqlite -- typed/form entries instead live in a separate
+    # profile file, formhistory.sqlite (moz_formhistory table), which this
+    # analyzer doesn't ingest (only one SQLite file is uploaded at a time).
     return {
         "schema_family": "firefox",
         "visits": visits,

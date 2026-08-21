@@ -31,7 +31,7 @@ from schemas import (BrowserHistoryDownloadList, BrowserHistoryDownloadOut,
                      BrowserHistorySearchTermList, BrowserHistorySearchTermOut,
                      BrowserHistoryUploadList, BrowserHistoryUploadOut,
                      BrowserHistoryVisitList, BrowserHistoryVisitOut)
-from webhistory.parser import SQLITE_MAGIC, parse_history_db
+from webhistory.parser import SQLITE_MAGIC, parse_form_history_db, parse_history_db
 
 router = APIRouter()
 
@@ -125,6 +125,7 @@ async def upload_history(
     request: Request,
     file: UploadFile = File(...),
     browser: str = Form(...),
+    form_history_file: Optional[UploadFile] = File(default=None),
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> BrowserHistoryUploadOut:
@@ -132,11 +133,18 @@ async def upload_history(
     (capped at 500 MB). Quarantines the raw file as an Artifact, persists
     every visit and (Chromium only) typed search term, and returns the
     upload summary. Requires the analyst role and an open incident.
+
+    Firefox only: an optional second file, `formhistory.sqlite`, may be
+    uploaded alongside `places.sqlite` -- its search-bar queries (Firefox
+    keeps those in a separate profile file, not in places.sqlite) are
+    merged into this same upload's search terms.
     """
     await _incident(db, incident_id, user)
 
     if browser not in _VALID_BROWSERS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"browser must be one of {sorted(_VALID_BROWSERS)}")
+    if form_history_file is not None and browser != "firefox":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "form_history_file is only supported for browser=firefox")
 
     data = await file.read()
     if not data:
@@ -150,6 +158,21 @@ async def upload_history(
         parsed = await asyncio.to_thread(parse_history_db, data)
     except ValueError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+
+    form_history_data = None
+    if form_history_file is not None:
+        form_history_data = await form_history_file.read()
+        if not form_history_data:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Empty form_history_file")
+        if len(form_history_data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"form_history_file exceeds {MAX_UPLOAD_BYTES} bytes")
+        if form_history_data[:16] != SQLITE_MAGIC:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "form_history_file is not a SQLite database")
+        try:
+            form_terms = await asyncio.to_thread(parse_form_history_db, form_history_data)
+        except ValueError as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+        parsed["search_terms"] = [*parsed["search_terms"], *form_terms]
 
     src_name = file.filename or "History"
     art_id, stored = _store_quarantine(incident_id, src_name, data)
@@ -166,10 +189,25 @@ async def upload_history(
     )
     db.add(artifact)
 
+    form_history_art_id = None
+    if form_history_data is not None:
+        fh_name = form_history_file.filename or "formhistory.sqlite"
+        form_history_art_id, fh_stored = _store_quarantine(incident_id, fh_name, form_history_data)
+        db.add(Artifact(
+            id=form_history_art_id, incident_id=incident_id,
+            original_filename=fh_name, stored_filename=fh_stored,
+            file_size=len(form_history_data), mime_type="application/vnd.sqlite3",
+            md5_hash=hashlib.md5(form_history_data).hexdigest(),
+            sha256_hash=hashlib.sha256(form_history_data).hexdigest(),
+            sha512_hash=hashlib.sha512(form_history_data).hexdigest(),
+            description="Browser form history (firefox searchbar-history)",
+            uploaded_by_id=user.id, uploaded_by=user.username,
+        ))
+
     upload = BrowserHistoryUpload(
         id=uuid.uuid4(), incident_id=incident_id,
         browser=browser, schema_family=parsed["schema_family"],
-        source_artifact_id=art_id,
+        source_artifact_id=art_id, form_history_artifact_id=form_history_art_id,
         original_filename=src_name, file_size=len(data), sha256_hash=sha256,
         record_count=len(parsed["visits"]), search_term_count=len(parsed["search_terms"]),
         download_count=len(parsed["downloads"]),
@@ -216,6 +254,7 @@ async def upload_history(
             "record_count": len(visit_rows), "search_term_count": len(term_rows),
             "download_count": len(download_rows),
             "sha256": sha256,
+            "form_history_provided": form_history_data is not None,
         },
         ip_address=request.client.host if request.client else None,
     )
