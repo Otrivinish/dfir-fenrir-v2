@@ -9,6 +9,7 @@ const TABS = [
   { to: 'lolbins',          label: 'LOLBins' },
   { to: 'pcap',             label: 'PCAP' },
   { to: 'email',            label: 'Email' },
+  { to: 'web-browser',      label: 'Web Browser' },
   { to: 'sandbox',          label: 'Sandbox' },
   { to: 'timeline-import',  label: 'Timeline Import' },
   { to: 'artifacts',        label: 'Artifacts' },

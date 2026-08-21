@@ -942,6 +942,96 @@ class DomainCheckOut(BaseModel):
     dkim:   Optional[dict] = None
 
 
+# ─── Browser history ─────────────────────────────────────────────────────────
+
+BrowserName = Literal["chrome", "edge", "brave", "firefox"]
+
+
+class BrowserHistoryUploadOut(BaseModel):
+    id:                 UUID
+    incident_id:        UUID
+    browser:            str
+    schema_family:      str
+    source_artifact_id: Optional[UUID] = None
+    evidence_id:        Optional[UUID] = None
+    original_filename:  str
+    file_size:          int
+    sha256_hash:        str
+    record_count:       int
+    search_term_count:  int
+    download_count:     int
+    truncated:          bool
+    uploaded_by:        Optional[str] = None
+    uploaded_at:        datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BrowserHistoryUploadList(BaseModel):
+    items: list[BrowserHistoryUploadOut]
+
+
+class BrowserHistoryVisitOut(BaseModel):
+    id:          UUID
+    upload_id:   UUID
+    url:         str
+    host:        Optional[str] = None
+    title:       Optional[str] = None
+    visit_time:  datetime
+    visit_count: Optional[int] = None
+    transition:  Optional[str] = None
+    browser:     Optional[str] = None   # joined in from the parent upload, for a mixed-upload view
+
+    class Config:
+        from_attributes = True
+
+
+class BrowserHistoryVisitList(BaseModel):
+    items:       list[BrowserHistoryVisitOut]
+    next_cursor: Optional[str] = None
+
+
+class BrowserHistorySearchTermOut(BaseModel):
+    id:         UUID
+    upload_id:  UUID
+    term:       str
+    url:        Optional[str] = None
+    visit_time: Optional[datetime] = None
+    browser:    Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BrowserHistorySearchTermList(BaseModel):
+    items:       list[BrowserHistorySearchTermOut]
+    next_cursor: Optional[str] = None
+
+
+class BrowserHistoryDownloadOut(BaseModel):
+    id:             UUID
+    upload_id:      UUID
+    url:            Optional[str] = None
+    target_path:    Optional[str] = None
+    start_time:     Optional[datetime] = None
+    end_time:       Optional[datetime] = None
+    received_bytes: Optional[int] = None
+    total_bytes:    Optional[int] = None
+    state:          Optional[str] = None
+    danger:         Optional[str] = None
+    mime_type:      Optional[str] = None
+    browser:        Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BrowserHistoryDownloadList(BaseModel):
+    items:       list[BrowserHistoryDownloadOut]
+    next_cursor: Optional[str] = None
+
+
 # ─── Audit-chain anchors (GS-8) ───────────────────────────────────────────────
 
 class AuditAnchorOut(BaseModel):

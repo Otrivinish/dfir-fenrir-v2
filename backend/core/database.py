@@ -271,4 +271,9 @@ _INPLACE_MIGRATIONS: list[str] = [
     "ALTER TABLE entity_files DROP CONSTRAINT IF EXISTS entity_files_entity_id_fkey",
     """ALTER TABLE entity_files ADD CONSTRAINT entity_files_entity_id_fkey
          FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE SET NULL""",
+
+    # Browser history: downloads extraction added after the uploads table
+    # already existed in deployed instances -- create_all won't ALTER an
+    # existing table, so the new counter column needs an explicit migration.
+    "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS download_count INTEGER NOT NULL DEFAULT 0",
 ]
