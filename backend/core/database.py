@@ -276,4 +276,7 @@ _INPLACE_MIGRATIONS: list[str] = [
     # already existed in deployed instances -- create_all won't ALTER an
     # existing table, so the new counter column needs an explicit migration.
     "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS download_count INTEGER NOT NULL DEFAULT 0",
+    # Same reason, for the optional Firefox formhistory.sqlite artifact link.
+    "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS form_history_artifact_id UUID "
+    "REFERENCES artifacts(id) ON DELETE SET NULL",
 ]

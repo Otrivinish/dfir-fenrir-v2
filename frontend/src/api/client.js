@@ -750,10 +750,11 @@ export const api = {
   deleteApiKey:       (service)        => request('DELETE', `/api/settings/api-keys/${service}`),
 
   // Browser history (per-incident)
-  uploadWebHistory: async (incidentId, { file, browser }) => {
+  uploadWebHistory: async (incidentId, { file, browser, formHistoryFile }) => {
     const form = new FormData()
     form.append('file', file)
     form.append('browser', browser)
+    if (formHistoryFile) form.append('form_history_file', formHistoryFile)
     const res = await fetch(`/api/incidents/${incidentId}/webhistory`, {
       method: 'POST', credentials: 'same-origin', body: form,
     })

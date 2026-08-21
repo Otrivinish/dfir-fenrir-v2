@@ -1225,6 +1225,11 @@ class BrowserHistoryUpload(Base):
     schema_family      = Column(String(16), nullable=False)   # chromium | firefox (content-detected)
 
     source_artifact_id = Column(UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
+    # Firefox only: the separately-uploaded formhistory.sqlite quarantined
+    # alongside the main places.sqlite (its search-bar terms are merged into
+    # this upload's search_terms; the raw file itself gets its own Artifact
+    # row like the main file does, but is not mintable as Evidence separately).
+    form_history_artifact_id = Column(UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
     evidence_id        = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
 
     original_filename  = Column(String(512), nullable=False)

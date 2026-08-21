@@ -953,6 +953,7 @@ class BrowserHistoryUploadOut(BaseModel):
     browser:            str
     schema_family:      str
     source_artifact_id: Optional[UUID] = None
+    form_history_artifact_id: Optional[UUID] = None
     evidence_id:        Optional[UUID] = None
     original_filename:  str
     file_size:          int
