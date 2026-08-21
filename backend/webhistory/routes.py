@@ -52,20 +52,29 @@ def _safe_filename(name: str) -> str:
     return base[:200]
 
 
+def _resolve_in_quarantine(incident_id: uuid.UUID, stored_filename: str) -> Path:
+    """Resolve a stored filename to an absolute path and verify it is
+    actually contained within the quarantine root, regardless of what
+    `_safe_filename` let through -- belt-and-suspenders against path
+    traversal, not reliant on the regex sanitizer alone."""
+    root = Path(settings.quarantine_path).resolve()
+    p = (root / str(incident_id) / stored_filename).resolve()
+    if p != root and root not in p.parents:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid path")
+    return p
+
+
 def _store_quarantine(incident_id: uuid.UUID, filename: str, data: bytes) -> tuple[uuid.UUID, str]:
     aid = uuid.uuid4()
     stored = f"{aid}_{_safe_filename(filename)}"
-    out_dir = _quarantine_dir(incident_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / stored).write_bytes(data)
+    target = _resolve_in_quarantine(incident_id, stored)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
     return aid, stored
 
 
 def _read_quarantine(incident_id: uuid.UUID, stored_filename: str) -> bytes:
-    p = (_quarantine_dir(incident_id) / stored_filename).resolve()
-    root = Path(settings.quarantine_path).resolve()
-    if root not in p.parents:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid path")
+    p = _resolve_in_quarantine(incident_id, stored_filename)
     if not p.exists():
         raise HTTPException(status.HTTP_410_GONE, "Source file no longer in quarantine")
     return p.read_bytes()
@@ -124,7 +133,7 @@ async def upload_history(
     every visit and (Chromium only) typed search term, and returns the
     upload summary. Requires the analyst role and an open incident.
     """
-    inc = await _incident(db, incident_id, user)
+    await _incident(db, incident_id, user)
 
     if browser not in _VALID_BROWSERS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"browser must be one of {sorted(_VALID_BROWSERS)}")
@@ -268,7 +277,7 @@ async def mint_evidence(
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> BrowserHistoryUploadOut:
-    inc = await _incident(db, incident_id, user)
+    await _incident(db, incident_id, user)
     upload = await _get_upload(db, incident_id, upload_id)
     if upload.evidence_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Already minted as Evidence")

@@ -135,6 +135,19 @@ export default function WebBrowserHistory() {
     }
   }, [incidentId, search, filterUpload])
 
+  const loadMoreTerms = async () => {
+    if (!termsCursor) return
+    setTermsLoading(true)
+    try {
+      const r = await api.listWebHistorySearchTerms(incidentId, {
+        search: search.trim() || undefined, upload_id: filterUpload || undefined, cursor: termsCursor,
+      })
+      setTerms(prev => [...prev, ...r.items]); setTermsCursor(r.next_cursor)
+    } finally {
+      setTermsLoading(false)
+    }
+  }
+
   const runDownloadSearch = useCallback(async () => {
     setDownloadsLoading(true); setDownloadsErr(null)
     try {
@@ -444,6 +457,11 @@ export default function WebBrowserHistory() {
                 </table>
               </div>
               {terms.length === 0 && !termsLoading && <div className="panel-empty">No search terms match.</div>}
+              {termsCursor && (
+                <button type="button" className="btn ghost" style={{ marginTop: 'var(--space-2)' }} onClick={loadMoreTerms} disabled={termsLoading}>
+                  {termsLoading ? 'Loading…' : 'Load more'}
+                </button>
+              )}
             </>
           )}
         </>
