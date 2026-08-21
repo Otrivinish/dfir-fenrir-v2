@@ -749,6 +749,45 @@ export const api = {
   setApiKey:          (service, value) => request('PUT',    `/api/settings/api-keys/${service}`, { value }),
   deleteApiKey:       (service)        => request('DELETE', `/api/settings/api-keys/${service}`),
 
+  // Browser history (per-incident)
+  uploadWebHistory: async (incidentId, { file, browser }) => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('browser', browser)
+    const res = await fetch(`/api/incidents/${incidentId}/webhistory`, {
+      method: 'POST', credentials: 'same-origin', body: form,
+    })
+    const text = await res.text()
+    const data = text ? (() => { try { return JSON.parse(text) } catch { return text } })() : null
+    if (!res.ok) {
+      const err = new Error((data && typeof data === 'object' && (data.detail || data.message)) || `Upload failed (${res.status})`)
+      err.status = res.status; err.data = data
+      throw err
+    }
+    return data
+  },
+  listWebHistoryUploads:  (incidentId) => request('GET', `/api/incidents/${incidentId}/webhistory`),
+  deleteWebHistoryUpload: (incidentId, uploadId) => request('DELETE', `/api/incidents/${incidentId}/webhistory/${uploadId}`),
+  mintWebHistoryEvidence: (incidentId, uploadId) => request('POST', `/api/incidents/${incidentId}/webhistory/${uploadId}/mint-evidence`),
+  listWebHistoryVisits:      (incidentId, params = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    const s = qs.toString()
+    return request('GET', `/api/incidents/${incidentId}/webhistory/visits${s ? '?' + s : ''}`)
+  },
+  listWebHistorySearchTerms: (incidentId, params = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    const s = qs.toString()
+    return request('GET', `/api/incidents/${incidentId}/webhistory/search-terms${s ? '?' + s : ''}`)
+  },
+  listWebHistoryDownloads: (incidentId, params = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    const s = qs.toString()
+    return request('GET', `/api/incidents/${incidentId}/webhistory/downloads${s ? '?' + s : ''}`)
+  },
+
   // OSINT enrichment
   osintSources: () => request('GET', '/api/osint/sources'),
   osintEnrich:  (payload) => request('POST', '/api/osint/enrich', payload),

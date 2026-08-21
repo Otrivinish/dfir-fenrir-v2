@@ -1208,6 +1208,93 @@ class Artifact(Base):
     uploaded_at       = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
 
 
+# ─── Browser history (Chrome/Edge/Brave "History" or Firefox "places.sqlite") ─
+# One upload = one parsed SQLite file. The raw file is quarantined as an
+# Artifact (same as email_analyzer) with an optional later "mint as Evidence"
+# for chain-of-custody; the parsed visits/search-terms are persisted here so
+# the page survives a refresh -- not held in request-scoped memory.
+
+class BrowserHistoryUpload(Base):
+    __tablename__ = "browser_history_uploads"
+
+    id                 = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id        = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"),
+                                nullable=False, index=True)
+
+    browser            = Column(String(16), nullable=False)   # chrome | edge | brave | firefox (analyst-selected)
+    schema_family      = Column(String(16), nullable=False)   # chromium | firefox (content-detected)
+
+    source_artifact_id = Column(UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
+    evidence_id        = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
+
+    original_filename  = Column(String(512), nullable=False)
+    file_size          = Column(Integer, nullable=False)
+    sha256_hash        = Column(String(64), nullable=False)
+
+    record_count       = Column(Integer, nullable=False, default=0)
+    search_term_count  = Column(Integer, nullable=False, default=0)
+    download_count     = Column(Integer, nullable=False, default=0)
+    truncated          = Column(Boolean, nullable=False, default=False)  # hit the defensive row cap
+
+    uploaded_by_id      = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    uploaded_by         = Column(String(64))
+    uploaded_at         = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+
+
+class BrowserHistoryVisit(Base):
+    __tablename__ = "browser_history_visits"
+
+    id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    upload_id   = Column(UUID(as_uuid=True), ForeignKey("browser_history_uploads.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    # Denormalized for direct incident-scoped search/pagination without a join.
+    incident_id = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+
+    url         = Column(Text, nullable=False)
+    host        = Column(String(512), index=True)
+    title       = Column(Text)
+    visit_time  = Column(DateTime(timezone=True), nullable=False, index=True)
+    visit_count = Column(Integer)
+    transition  = Column(String(32))   # decoded label, e.g. "typed" | "link" | "reload" | "bookmark"
+
+
+class BrowserHistorySearchTerm(Base):
+    __tablename__ = "browser_history_search_terms"
+
+    id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    upload_id   = Column(UUID(as_uuid=True), ForeignKey("browser_history_uploads.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    incident_id = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+
+    term        = Column(Text, nullable=False)
+    url         = Column(Text)
+    # The associated URL's last-visit time (keyword_search_terms itself has no
+    # timestamp column) -- approximate, not "when this was typed."
+    visit_time  = Column(DateTime(timezone=True), index=True)
+
+
+class BrowserHistoryDownload(Base):
+    __tablename__ = "browser_history_downloads"
+
+    id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    upload_id   = Column(UUID(as_uuid=True), ForeignKey("browser_history_uploads.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    incident_id = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+
+    url            = Column(Text)              # final URL in the redirect chain (Chromium); best-effort (Firefox)
+    target_path    = Column(Text)              # where the file was saved on disk
+    start_time     = Column(DateTime(timezone=True), index=True)
+    end_time       = Column(DateTime(timezone=True))
+    received_bytes = Column(Integer)
+    total_bytes    = Column(Integer)
+    state          = Column(String(32))        # decoded label: in_progress | complete | cancelled | interrupted
+    danger         = Column(String(32))        # decoded label where recognized, else the raw code as a string
+    mime_type      = Column(String(128))
+
+
 # ─── Collection packages (U1 — signed offline collectors) ────────────────────
 # An incident-scoped, Ed25519-signed Velociraptor offline-collector package.
 # The package ZIP (collector binary + signed manifest + launcher) lives on the

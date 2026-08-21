@@ -51,6 +51,7 @@ import Attribution from './pages/incident/forensic/Attribution.jsx'
 import LOLBins from './pages/incident/forensic/LOLBins.jsx'
 import PCAP from './pages/incident/forensic/PCAP.jsx'
 import EmailAnalyzer from './pages/incident/forensic/EmailAnalyzer.jsx'
+import WebBrowserHistory from './pages/incident/forensic/WebBrowserHistory.jsx'
 import Sandbox from './pages/incident/forensic/Sandbox.jsx'
 import TimelineImport from './pages/incident/forensic/TimelineImport.jsx'
 import OSINTLookup from './pages/incident/forensic/OSINT.jsx'
@@ -154,6 +155,7 @@ export default function App() {
                   <Route path="lolbins"      element={<LOLBins />} />
                   <Route path="pcap"         element={<PCAP />} />
                   <Route path="email"        element={<EmailAnalyzer />} />
+                  <Route path="web-browser"  element={<WebBrowserHistory />} />
                   <Route path="sandbox"          element={<Sandbox />} />
                   <Route path="timeline-import" element={<TimelineImport />} />
                   <Route path="osint"           element={<OSINTLookup />} />
