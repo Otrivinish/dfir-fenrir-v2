@@ -283,7 +283,14 @@ def _unwrap_safelink(url: str) -> str | None:
         parts = urlsplit(url)
     except ValueError:
         return None
-    if not parts.netloc.lower().split(":")[0].endswith("safelinks.protection.outlook.com"):
+    # `.hostname` (not a manual `.split(":")` on netloc) so userinfo/port/IPv6
+    # brackets are stripped correctly, and an exact-or-subdomain check (not
+    # `.endswith(domain)`) so a host like "evilsafelinks.protection.outlook.com"
+    # -- which ends with the same substring but isn't a subdomain of it --
+    # can't be mistaken for the real thing (CodeQL: incomplete substring sanitization).
+    host = (parts.hostname or "").lower()
+    domain = "safelinks.protection.outlook.com"
+    if not (host == domain or host.endswith("." + domain)):
         return None
     return parse_qs(parts.query).get("url", [None])[0] or None
 
