@@ -1,0 +1,5 @@
+# Shell scripts run inside Linux containers (shebang + `sh`/`bash`) -- a CRLF
+# line ending breaks the shebang (`/bin/sh\r`: no such file or directory) on
+# any checkout where core.autocrlf converts LF to CRLF (default on Windows).
+# This forces LF regardless of the checking-out machine's autocrlf setting.
+*.sh text eol=lf

@@ -11,7 +11,17 @@ DKIM-Signature header) isn't guessable, there is no selector registry to
 enumerate. Manual mode takes an optional selector instead of pretending to
 guess one; the caller (frontend) auto-fills it from an already-parsed
 email's `dkim_selector` when one is available.
+
+`fetch_domain_auth`/`evaluate_source_ip` below reuse the same lookups for the
+*automatic* cross-check run on every analysis: does the message's own
+Authentication-Results claim (spf=pass, dmarc=pass, ...) actually match a
+live re-check against the claimed domain's current DNS records, instead of
+being trusted as-is? An Authentication-Results header can be missing,
+stripped, or forged upstream of FENRIR's own boundary -- this is the
+"validate, don't just parse" half of the analyzer.
 """
+import ipaddress
+
 import httpx
 
 _TIMEOUT = httpx.Timeout(10.0)
@@ -135,3 +145,57 @@ async def check_dkim(domain: str, selector: str) -> dict:
         "fields": fields,
         "verdict": "Public key present." if has_key else "Record found but no public key ('p=') — likely revoked/rotated out.",
     }
+
+
+# ─── Automatic cross-check (every analysis, not manual-only) ────────────────
+
+def evaluate_source_ip(spf: dict, ip: str | None) -> bool | None:
+    """Does `ip` actually match an ip4:/ip6: mechanism in the SPF record or
+    its already-expanded includes? True/False when the record is expressed
+    in terms we can evaluate without further DNS calls; None when it relies
+    on a/mx/exists/ptr mechanisms we don't resolve (would cost more lookups
+    per analysis) -- unknown, not a guessed pass or fail."""
+    if not ip or not spf.get("found"):
+        return None
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+
+    def matches(mechanisms):
+        for m in mechanisms or []:
+            mech = m.lstrip("+")
+            if mech.lower().startswith(("ip4:", "ip6:")):
+                try:
+                    if addr in ipaddress.ip_network(mech.split(":", 1)[1], strict=False):
+                        return True
+                except ValueError:
+                    continue
+        return False
+
+    if matches(spf.get("mechanisms")):
+        return True
+    for inc in spf.get("includes") or []:
+        if inc.get("found") and matches(inc.get("mechanisms")):
+            return True
+
+    unresolved = any(
+        m.lstrip("+-~?").split(":")[0].lower() not in ("ip4", "ip6", "include", "all")
+        for m in (spf.get("mechanisms") or [])
+    )
+    return None if unresolved else False
+
+
+async def fetch_domain_auth(domain: str, selector: str | None = None) -> dict:
+    """Automatic counterpart to the manual domain-check panel: live SPF/DMARC,
+    plus DKIM if a selector is already known (from the message's own
+    DKIM-Signature header). No new DNS pattern -- reuses `check_spf_dmarc`/
+    `check_dkim` so both paths agree on what "live" means."""
+    live = await check_spf_dmarc(domain)
+    dkim = None
+    if selector:
+        try:
+            dkim = await check_dkim(domain, selector)
+        except (httpx.HTTPStatusError, httpx.TimeoutException):
+            dkim = {"found": False, "selector": selector, "verdict": "DKIM lookup failed (DNS error)."}
+    return {"domain": domain, "spf": live["spf"], "dmarc": live["dmarc"], "dkim": dkim}

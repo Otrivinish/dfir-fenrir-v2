@@ -413,6 +413,21 @@ export const api = {
     }
     return data
   },
+  analyzeEmailBulk: async (incidentId, files) => {
+    const form = new FormData()
+    for (const f of files) form.append('files', f)
+    const res = await fetch(`/api/incidents/${incidentId}/email/analyze-bulk`, {
+      method: 'POST', credentials: 'same-origin', body: form,
+    })
+    const text = await res.text()
+    const data = text ? (() => { try { return JSON.parse(text) } catch { return text } })() : null
+    if (!res.ok) {
+      const err = new Error((data && typeof data === 'object' && (data.detail || data.message)) || `Bulk analyze failed (${res.status})`)
+      err.status = res.status; err.data = data
+      throw err
+    }
+    return data
+  },
   listEmailAnalyses:   (incidentId)        => request('GET',  `/api/incidents/${incidentId}/email`),
   getEmailAnalysis:    (incidentId, aid)   => request('GET',  `/api/incidents/${incidentId}/email/${aid}`),
   promoteEmailIocs:    (incidentId, aid, iocs) => request('POST', `/api/incidents/${incidentId}/email/${aid}/promote-iocs`, { iocs }),

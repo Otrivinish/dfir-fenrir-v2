@@ -901,6 +901,7 @@ class EmailAnalysisOut(BaseModel):
     incident_id:        UUID
     source_artifact_id: Optional[UUID] = None
     evidence_id:        Optional[UUID] = None
+    batch_id:           Optional[UUID] = None
     subject:      Optional[str] = None
     from_display: Optional[str] = None
     from_addr:    Optional[str] = None
@@ -912,6 +913,10 @@ class EmailAnalysisOut(BaseModel):
     score:        int
     findings:     list = []
     headers:      dict = {}
+    raw_headers:  Optional[str] = None
+    auth_verified: Optional[dict] = None
+    body_text:    Optional[str] = None
+    body_html:    Optional[str] = None
     urls:         list = []
     attachments:  list = []
     created_by:   Optional[str] = None
@@ -923,6 +928,13 @@ class EmailAnalysisOut(BaseModel):
 
 class EmailAnalysisList(BaseModel):
     items: list[EmailAnalysisOut]
+
+
+class EmailBulkAnalyzeOut(BaseModel):
+    batch_id: str
+    analyzed: list[EmailAnalysisOut] = []
+    skipped:  list[str] = []
+    errors:   list[str] = []
 
 
 class PromoteIocItem(BaseModel):
