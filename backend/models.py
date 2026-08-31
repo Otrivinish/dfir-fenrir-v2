@@ -193,6 +193,7 @@ class EmailAnalysis(Base):
                                nullable=False, index=True)
     source_artifact_id = Column(UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
     evidence_id        = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
+    batch_id           = Column(UUID(as_uuid=True), nullable=True, index=True)  # groups a bulk-import run
 
     subject       = Column(Text)
     from_display  = Column(String(512))
@@ -206,6 +207,10 @@ class EmailAnalysis(Base):
     score     = Column(Integer, nullable=False, default=0)          # 0–100
     findings  = Column(JSON, nullable=False, default=list)          # [{code,severity,title,detail,layer,points}]
     headers   = Column(JSON, nullable=False, default=dict)          # hops + auth + notable header map
+    raw_headers   = Column(Text, nullable=True)                     # full verbatim header block
+    auth_verified = Column(JSON, nullable=True)                     # live SPF/DMARC/DKIM cross-check vs. the header's own claim
+    body_text = Column(Text, nullable=True)                         # plain-text body, for the UI preview
+    body_html = Column(Text, nullable=True)                         # SANITIZED html body only -- never raw attacker HTML
     urls      = Column(JSON, nullable=False, default=list)          # [{url,defanged,host,display_text,promoted_ioc_id?}]
     attachments = Column(JSON, nullable=False, default=list)        # [{filename,declared_type,true_type,size,md5,sha256,entropy,flags,artifact_id?}]
 

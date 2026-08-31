@@ -279,4 +279,17 @@ _INPLACE_MIGRATIONS: list[str] = [
     # Same reason, for the optional Firefox formhistory.sqlite artifact link.
     "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS form_history_artifact_id UUID "
     "REFERENCES artifacts(id) ON DELETE SET NULL",
+
+    # Email analyzer redesign: full raw header capture, live SPF/DMARC/DKIM
+    # cross-check against the header's own claim (not blind trust), and a
+    # batch_id grouping analyses created by one bulk-import run.
+    "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS raw_headers TEXT",
+    "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS auth_verified JSON",
+    "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS batch_id UUID",
+    "CREATE INDEX IF NOT EXISTS ix_email_analysis_batch_id ON email_analysis(batch_id)",
+
+    # Email analyzer: sanitized body preview (plain text + nh3-sanitized HTML,
+    # never the raw attacker HTML -- see email_analyzer/parser.py).
+    "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS body_text TEXT",
+    "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS body_html TEXT",
 ]
