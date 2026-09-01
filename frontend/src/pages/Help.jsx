@@ -663,6 +663,29 @@ const CATEGORIES = [
         ],
       },
       {
+        id: 'iw-iocs',
+        title: 'IOCs',
+        tags: ['ioc', 'indicator', 'enrich', 'correlate', 'mark malicious', 'export', 'scan', 'bulk'],
+        body: [
+          { type: 'p', text: 'Indicators of compromise tied to this incident. See also [[ioc-types]] and [[ioc-enrichment]] for status and enrichment fundamentals.' },
+          { type: 'section', title: 'Table columns', items: [
+            'Type · Value (with badges) · linked Entity · Source · confidence bar · added-at · tags.',
+            '**⚠ TI** badge — value matches an enabled Threat Intel feed.',
+            '**LOL** badge — file-path matches a known LOLBin.',
+            '**⋈** badge — IOC appears in N other incidents (click for cross-incident list).',
+          ] },
+          { type: 'section', title: 'Toolbar', items: [
+            '**+ Add IOC** · **Bulk import (CSV)** · **Run all sources** (batch enrich whole incident).',
+            '**Scan to platforms** — modal pushes IOCs to Microsoft Defender / CrowdStrike / SentinelOne / Cortex XDR / FortiGate / Palo Alto for blocking or hunting.',
+          ] },
+          { type: 'section', title: 'Row actions', items: [
+            'Click a row to expand: full value, **Mark Malicious / Mark Clean / Mark Unknown** buttons, notes editor, enrichment cards.',
+            'Per-row **Enrich** runs only the enrichment sources that apply to this IOC type.',
+            '**Edit** · **Delete** · **Open correlations**.',
+          ] },
+        ],
+      },
+      {
         id: 'iw-entities',
         title: 'Entities',
         tags: ['entity', 'asset', 'host', 'user', 'graph', 'compromised', 'connect', 'import'],
@@ -703,11 +726,10 @@ const CATEGORIES = [
       {
         id: 'iw-forensic',
         title: 'Forensic Tab',
-        tags: ['forensic', 'iocs', 'detections', 'attribution', 'lolbins', 'pcap', 'sandbox', 'timeline import', 'artifacts', 'osint'],
+        tags: ['forensic', 'detections', 'attribution', 'lolbins', 'pcap', 'sandbox', 'timeline import', 'artifacts', 'osint'],
         body: [
-          { type: 'p', text: 'The investigation workbench. Nine inner tabs:' },
+          { type: 'p', text: 'The investigation workbench. Eight inner tabs (IOCs moved to its own top-level incident tab — see [[iw-iocs]]):' },
           { type: 'table', headers: ['Sub-tab', 'Purpose'], rows: [
-            ['**IOCs**',            'Indicators of compromise — see [[fo-iocs]].'],
             ['**Detections**',      'YARA rules, scan results, detection queries — see [[fo-detections]].'],
             ['**Attribution**',     'Link the incident to a threat actor / cluster — see [[fo-attribution]].'],
             ['**LOLBins**',         'LOLBAS + GTFOBins reference and correlations — see [[fo-lolbins]].'],
@@ -836,31 +858,8 @@ const CATEGORIES = [
     icon: '⌖',
     label: 'Forensic Tools',
     color: '#22d3ee',
-    desc: 'IOCs · Detections · OSINT · PCAP · Attribution · Artifacts · LOLBins · Timeline Import',
+    desc: 'Detections · OSINT · PCAP · Attribution · Artifacts · LOLBins · Timeline Import',
     articles: [
-      {
-        id: 'fo-iocs',
-        title: 'IOCs',
-        tags: ['ioc', 'indicator', 'enrich', 'correlate', 'mark malicious', 'export', 'scan', 'bulk'],
-        body: [
-          { type: 'p', text: 'Indicators of compromise tied to this incident. See also [[ioc-types]] and [[ioc-enrichment]] for status and enrichment fundamentals.' },
-          { type: 'section', title: 'Table columns', items: [
-            'Type · Value (with badges) · linked Entity · Source · confidence bar · added-at · tags.',
-            '**⚠ TI** badge — value matches an enabled Threat Intel feed.',
-            '**LOL** badge — file-path matches a known LOLBin.',
-            '**⋈** badge — IOC appears in N other incidents (click for cross-incident list).',
-          ] },
-          { type: 'section', title: 'Toolbar', items: [
-            '**+ Add IOC** · **Bulk import (CSV)** · **Run all sources** (batch enrich whole incident).',
-            '**Scan to platforms** — modal pushes IOCs to Microsoft Defender / CrowdStrike / SentinelOne / Cortex XDR / FortiGate / Palo Alto for blocking or hunting.',
-          ] },
-          { type: 'section', title: 'Row actions', items: [
-            'Click a row to expand: full value, **Mark Malicious / Mark Clean / Mark Unknown** buttons, notes editor, enrichment cards.',
-            'Per-row **Enrich** runs only the enrichment sources that apply to this IOC type.',
-            '**Edit** · **Delete** · **Open correlations**.',
-          ] },
-        ],
-      },
       {
         id: 'fo-detections',
         title: 'Detections',

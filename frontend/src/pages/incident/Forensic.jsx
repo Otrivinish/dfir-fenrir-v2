@@ -1,9 +1,10 @@
 import { NavLink, Outlet, useOutletContext } from 'react-router-dom'
 
 // Forensic sub-section — investigation tooling. Inner-tab layout:
-// IOCs (default) · Detections · Attribution · LOLBins · PCAP · Sandbox · Timeline Import · Artifacts.
+// Detections (default) · Attribution · LOLBins · PCAP · Sandbox · Timeline Import · Artifacts.
+// IOCs moved to a top-level incident tab (between Timeline and Entities) —
+// it's created from most of these sub-features but was buried here.
 const TABS = [
-  { to: 'iocs',             label: 'IOCs' },
   { to: 'detections',       label: 'Detections' },
   { to: 'attribution',      label: 'Attribution' },
   { to: 'lolbins',          label: 'LOLBins' },
@@ -12,6 +13,7 @@ const TABS = [
   { to: 'web-browser',      label: 'Web Browser' },
   { to: 'sandbox',          label: 'Sandbox' },
   { to: 'timeline-import',  label: 'Timeline Import' },
+  { to: 'defender-pdf',     label: 'Defender Import' },
   { to: 'artifacts',        label: 'Artifacts' },
   { to: 'collections',      label: 'Collections' },
   { to: 'osint',            label: 'OSINT' },

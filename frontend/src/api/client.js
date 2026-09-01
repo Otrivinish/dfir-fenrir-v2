@@ -673,7 +673,7 @@ export const api = {
     if (!res.ok) {
       const err = new Error(
         (data && typeof data === 'object' && (data.detail || data.message)) ||
-        (res.status === 413 ? 'File exceeds 100 MB limit.' : `Upload failed (${res.status})`)
+        (res.status === 413 ? 'File exceeds 500 MB limit.' : `Upload failed (${res.status})`)
       )
       err.status = res.status
       err.data   = data
@@ -782,6 +782,43 @@ export const api = {
     }
     return data
   },
+  parseDefenderPdf: async (incidentId, file) => {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch(`/api/incidents/${incidentId}/forensic/defender-pdf/parse`, {
+      method: 'POST', credentials: 'same-origin', body: form,
+    })
+    const text = await res.text()
+    const data = text ? (() => { try { return JSON.parse(text) } catch { return text } })() : null
+    if (!res.ok) {
+      const err = new Error((data && typeof data === 'object' && (data.detail || data.message)) || `Parse failed (${res.status})`)
+      err.status = res.status; err.data = data
+      throw err
+    }
+    return data
+  },
+  createDefenderPdfImport: async (incidentId, file) => {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch(`/api/incidents/${incidentId}/forensic/defender-pdf/imports`, {
+      method: 'POST', credentials: 'same-origin', body: form,
+    })
+    const text = await res.text()
+    const data = text ? (() => { try { return JSON.parse(text) } catch { return text } })() : null
+    if (!res.ok) {
+      const err = new Error((data && typeof data === 'object' && (data.detail || data.message)) ||
+        (res.status === 413 ? 'File exceeds 25 MB limit.' : `Upload failed (${res.status})`))
+      err.status = res.status; err.data = data
+      throw err
+    }
+    return data
+  },
+  listDefenderPdfImports: (incidentId) =>
+    request('GET',    `/api/incidents/${incidentId}/forensic/defender-pdf/imports`),
+  getDefenderPdfImport:  (incidentId, importId) =>
+    request('GET',    `/api/incidents/${incidentId}/forensic/defender-pdf/imports/${importId}`),
+  deleteDefenderPdfImport: (incidentId, importId) =>
+    request('DELETE', `/api/incidents/${incidentId}/forensic/defender-pdf/imports/${importId}`),
   listWebHistoryUploads:  (incidentId) => request('GET', `/api/incidents/${incidentId}/webhistory`),
   deleteWebHistoryUpload: (incidentId, uploadId) => request('DELETE', `/api/incidents/${incidentId}/webhistory/${uploadId}`),
   mintWebHistoryEvidence: (incidentId, uploadId) => request('POST', `/api/incidents/${incidentId}/webhistory/${uploadId}/mint-evidence`),
