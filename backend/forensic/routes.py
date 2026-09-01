@@ -33,7 +33,11 @@ from .parser import parse_artifact, parse_velociraptor_collection
 
 router = APIRouter()
 
-_MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
+# Raised from 100 MB after a real Microsoft Entra ID Audit Log export for a
+# single day (not even a month, unlike the sign-in log exports) came in at
+# 178 MB for one tenant -- matches the cap already used for other large
+# forensic uploads (Web Browser History).
+_MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 
 
 def _events_from_raw(raw_events: list[dict]) -> list[ParsedEventOut]:

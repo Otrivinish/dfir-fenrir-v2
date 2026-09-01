@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useOutletContext } from 'react-router-dom'
-import { api } from '../../../api/client.js'
-import { formatLocal } from '../../../lib/datetime.js'
-import BulkImportModal from './BulkImportModal.jsx'
-import TagChip from '../../../components/TagChip.jsx'
-import TagInput, { normalizeTags } from '../../../components/TagInput.jsx'
-import { SEV_PALETTE } from '../../../components/SevBadge.jsx'
+import { api } from '../../api/client.js'
+import { formatLocal } from '../../lib/datetime.js'
+import BulkImportModal from './iocs/BulkImportModal.jsx'
+import TagChip from '../../components/TagChip.jsx'
+import TagInput, { normalizeTags } from '../../components/TagInput.jsx'
+import { SEV_PALETTE } from '../../components/SevBadge.jsx'
 
 // Reuse the canonical severity palette so the IOC status badges read with the
 // same bright red/green as the "critical" badge in the incident header.
@@ -1674,7 +1674,7 @@ function CorrelationModal({ ioc, incidents, onClose }) {
                   </td>
                   <td className="actions">
                     <Link
-                      to={`/incidents/${inc.id}/forensic/iocs`}
+                      to={`/incidents/${inc.id}/iocs`}
                       className="btn ghost"
                       style={{ fontSize: 11, padding: '2px 8px' }}
                       onClick={onClose}

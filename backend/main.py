@@ -50,6 +50,7 @@ from comms.routes import router as comms_router
 from mitre.routes import router as mitre_router, global_router as mitre_global_router
 from respond.routes import router as respond_router
 from forensic.routes import router as forensic_router
+from defender_pdf.routes import router as defender_pdf_router
 from osint.routes import router as osint_router
 from osint.session_routes import router as osint_session_router
 from reports.routes import router as reports_router
@@ -275,6 +276,7 @@ app.include_router(respond_router,            prefix="/api/incidents",          
 app.include_router(comms_router,             prefix="/api/incidents",          tags=["Comms"])
 app.include_router(timeline_router,          prefix="/api/incidents",          tags=["Timeline"])
 app.include_router(forensic_router,          prefix="/api/incidents",          tags=["Forensic"])
+app.include_router(defender_pdf_router,      prefix="/api/incidents",          tags=["Forensic"])
 app.include_router(mitre_router,             prefix="/api/incidents",          tags=["MITRE ATT&CK"])
 app.include_router(mitre_global_router,      prefix="/api/mitre",              tags=["MITRE ATT&CK"])
 app.include_router(lolbins_router,           prefix="/api/lolbins",            tags=["LOLBins"])

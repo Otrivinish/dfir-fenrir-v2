@@ -148,7 +148,7 @@ export default function GlobalSearch() {
                 <section className="sr-group">
                   <div className="sr-group-label">IOCs</div>
                   {results.iocs.map(r => (
-                    <button key={r.id} className="sr-item" role="option" onClick={() => go(`/incidents/${r.incident_id}/forensic/iocs`)}>
+                    <button key={r.id} className="sr-item" role="option" onClick={() => go(`/incidents/${r.incident_id}/iocs`)}>
                       <span className="sr-item-ref">{r.type}</span>
                       <span className="sr-item-title">
                         {highlight(r.value, query)}

@@ -32,6 +32,10 @@ python-magic==0.4.27      # MIME-type detection (wraps libmagic1 system lib)
 # PDF rendering (signed audit-log exports)
 reportlab==4.2.5          # platypus tables for signed audit-export PDF cover + body
 
+# PDF text/word extraction (Defender incident PDF import) — pure-Python
+# (wraps pdfminer.six), no native PDF renderer in the attack surface
+pdfplumber==0.11.10
+
 # RFC 3161 trusted timestamping (GS-4) — lazy-imported; only used when TSA_URL is set
 rfc3161ng==2.1.3          # build/parse/verify Time-Stamp Tokens against an external TSA
 

@@ -658,7 +658,7 @@ function SnapshotStrip({ incidentId }) {
       display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)',
       marginBottom: 'var(--space-4)',
     }}>
-      <SnapshotChip to="../forensic/iocs" label="IOCs"     value={snap.iocs} />
+      <SnapshotChip to="../iocs" label="IOCs"     value={snap.iocs} />
       <SnapshotChip to="../entities"      label="Entities" value={snap.entities} />
       <SnapshotChip to="../evidence"      label="Evidence" value={snap.evidence} />
       <SnapshotChip to="../timeline"      label="Timeline" value={snap.timeline} />

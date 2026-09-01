@@ -1407,6 +1407,32 @@ class ForensicImport(Base):
     uploaded_at       = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
 
 
+class DefenderPdfImport(Base):
+    __tablename__ = "defender_pdf_imports"
+
+    id                = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id       = Column(UUID(as_uuid=True),
+                               ForeignKey("incidents.id", ondelete="CASCADE"),
+                               nullable=False, index=True)
+
+    filename            = Column(String(512), nullable=False)
+    file_size           = Column(Integer, nullable=False)
+    sha256_hash         = Column(String(64), nullable=False)
+    source_artifact_id  = Column(UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
+
+    candidate_count       = Column(Integer, nullable=False, default=0)
+    low_confidence_count  = Column(Integer, nullable=False, default=0)
+
+    # {"Severity": ..., "Status": ..., "title": ..., ...} -- display-only
+    # incident metadata, and the parsed candidates keyed to DefenderPdfCandidate.
+    incident_meta     = Column(JSON, nullable=False, default=dict)
+    candidates        = Column(JSON, nullable=False, default=list)
+
+    uploaded_by_id    = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    uploaded_by       = Column(String(64))
+    uploaded_at       = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+
+
 # ─── Post-Incident: Closure Checklist ────────────────────────────────────────
 
 class ClosureChecklistItem(Base):
