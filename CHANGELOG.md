@@ -2,7 +2,7 @@
 
 All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
-## [0.3.0] — unreleased (branch `fix/post-incident`)
+## [0.3.0] — unreleased (branch `fix/post-incident`, merged with `main` through #25)
 
 Post-incident report remap, incident detection time, two UX standards (control sizing, date/time entry), a dependency refresh under a 14-day cooldown, and layout fixes.
 
@@ -74,7 +74,8 @@ Every version, including transitive ones, was released **at least 14 days** befo
 | python-evtx / extract-msg | 0.7.4 → 0.8.1 / 0.54.1 → 0.56.1 |
 | python-multipart, pyotp, qrcode, pyyaml | patch / minor |
 
-- **New `backend/constraints.txt`** locks every transitive package; the Dockerfile installs with `-r requirements.txt -c constraints.txt`. When bumping `requirements.txt`, re-resolve it with the same 14-day rule.
+- `main`'s new packages (#24/#25: `pdfplumber` 0.11.10, `nh3` 0.3.7, `tnefparse` 1.4.0) were already the newest ≥ 14-day releases; kept as-is.
+- **New `backend/constraints.txt`** locks every transitive package (73 packages in total after the merge); the Dockerfile installs with `-r requirements.txt -c constraints.txt`. When bumping `requirements.txt`, re-resolve it with the same 14-day rule.
 - `dashboard/routes.py`: `Query(regex=…)` → `Query(pattern=…)` (FastAPI deprecation; same validation).
 - **Behaviour changes, reviewed:**
   - `.msg` import now uses extract-msg's native converter and keeps **all** "To" recipients (the old fallback dropped all but the first); a missing Date header is `null` instead of `""`.
@@ -90,9 +91,9 @@ Every version, including transitive ones, was released **at least 14 days** befo
 
 ### Verification
 
-- **Dependencies:** a smoke test through the app's own code paths, run before and after the bump, passed 12/12: password hashing, TOTP/QR, Fernet, AES-GCM (including decrypting stored files), Ed25519, RSA/x509, EVTX, `.msg`, the audit PDF, report data, Redis, API/ASGI. `pip check` is clean; all 68 installed packages are ≥ 14 days old.
+- **Dependencies:** a smoke test through the app's own code paths, run before and after the bump, passed 12/12, and **14/14 after merging `main`** (adds the Defender PDF parser, `nh3` sanitising and `tnefparse`): password hashing, TOTP/QR, Fernet, AES-GCM (including decrypting stored files), Ed25519, RSA/x509, EVTX, `.msg`, the audit PDF, report data, Redis, API/ASGI. `pip check` is clean; all 73 installed packages are ≥ 14 days old.
 - **Report:** 58 automated render checks on real and synthetic data. "Show structure" and the report produce identical section lists in all 4 mode/appendix combinations.
-- **UI:** headless-browser audit of 27 incident sub-pages at 1100 / 1280 / 1440 / 1920 px — no wrapped toolbar buttons, and no page scrolls sideways.
+- **UI:** headless-browser audit of 27 incident sub-pages (30 after the merge, including the new top-level IOCs tab and Defender PDF import) at 1100 / 1280 / 1440 / 1920 px — no wrapped toolbar buttons, and no page scrolls sideways.
 - Logs of backend, frontend and Caddy were clean after each deploy.
 
 ### Known issues / not in this release
@@ -105,3 +106,4 @@ Every version, including transitive ones, was released **at least 14 days** befo
   - The "Include sections" checkboxes have no effect.
 - A pre-existing warning is still logged: duplicate OpenAPI operation ID `mint_evidence`.
 - The frontend bundle grew ~11% (Markdown rendering in reports).
+- `backend/requirements.txt` (from #25) describes `pdfplumber` as having "no native PDF renderer in the attack surface", but `pdfplumber` 0.11 depends on `pypdfium2` (native PDFium), which is installed in the image.
