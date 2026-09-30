@@ -3,7 +3,6 @@ import { useOutletContext } from 'react-router-dom'
 import { useAuth } from '../../hooks/useAuth.jsx'
 import { api } from '../../api/client.js'
 import { formatLocalShort } from '../../lib/datetime.js'
-import UtcDateTimeInput from '../../components/UtcDateTimeInput.jsx'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 import { ACTION_TEMPLATES } from './respond/actionTemplates.js'
 
@@ -176,13 +175,8 @@ export default function Respond() {
       {loading ? (
         <div className="panel-empty"><div>Loading…</div></div>
       ) : (
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, minmax(230px, 1fr))',
-          gap: 'var(--space-3)',
-          overflowX: 'auto',
-          alignItems: 'start',
-        }}>
+        <div className="respond-board-wrap">
+        <div className="respond-board">
           {(['containment', 'eradication', 'recovery']).map(cat => (
             <BoardColumn
               key={cat}
@@ -231,6 +225,7 @@ export default function Respond() {
             onAdd={!isClosed ? () => setModal({ type: 'decision' }) : null}
             addLabel="+ Record decision"
           />
+        </div>
         </div>
       )}
 
@@ -294,6 +289,8 @@ function BoardColumn({ title, color, items, renderItem, emptyHint, onAdd, addLab
         padding: 'var(--space-2) var(--space-3)',
         borderBottom: '1px solid var(--border)',
         display: 'flex',
+        flexWrap: 'wrap',
+        gap: 'var(--space-2)',
         alignItems: 'center',
         justifyContent: 'space-between',
         background: 'var(--surface-2)',
@@ -323,7 +320,7 @@ function BoardColumn({ title, color, items, renderItem, emptyHint, onAdd, addLab
             type="button"
             className="btn primary"
             onClick={onAdd}
-            style={{ fontSize: 11, padding: '2px 8px' }}
+            style={{ fontSize: 11, padding: '2px 8px', whiteSpace: 'nowrap' }}
           >
             {addLabel}
           </button>
@@ -932,8 +929,8 @@ function DecisionModal({ incidentId, editing, users, isAdmin, onClose, onSaved }
                 </div>
 
                 <div className="field">
-                  <label className="field-label" htmlFor="dm-at">Decided at (UTC, optional)</label>
-                  <UtcDateTimeInput id="dm-at" value={decidedAt} onChange={setDecidedAt} />
+                  <label className="field-label" htmlFor="dm-at">Decided at (optional)</label>
+                  <LocalDateTimePicker id="dm-at" value={decidedAt} onChange={setDecidedAt} clearable />
                 </div>
               </div>
 

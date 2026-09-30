@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal, relative } from '../../../lib/datetime.js'
-import UtcDateTimePicker from '../../../components/UtcDateTimePicker.jsx'
+import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 
 // Web Browser History — upload a Chrome/Edge/Brave `History` file or
 // Firefox `places.sqlite`, parsed offline (read-only SQLite, no BLOB/
@@ -363,8 +363,8 @@ export default function WebBrowserHistory() {
                   <option value="">All browsers</option>
                   {BROWSERS.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
                 </select>
-                <div style={{ width: 190 }}><UtcDateTimePicker value={dateFrom} onChange={setDateFrom} clearable /></div>
-                <div style={{ width: 190 }}><UtcDateTimePicker value={dateTo} onChange={setDateTo} clearable /></div>
+                <div style={{ width: 230 }}><LocalDateTimePicker value={dateFrom} onChange={setDateFrom} utc hint={false} clearable placeholder="From (UTC)" /></div>
+                <div style={{ width: 230 }}><LocalDateTimePicker value={dateTo} onChange={setDateTo} utc hint={false} clearable placeholder="To (UTC)" /></div>
               </>
             )}
             <button type="button" className="btn primary" onClick={() => runActiveSearch()}>Search</button>

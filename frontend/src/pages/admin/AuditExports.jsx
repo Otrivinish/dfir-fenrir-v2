@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../../api/client.js'
 import { formatLocal, relative } from '../../lib/datetime.js'
-import UtcDateTimeInput from '../../components/UtcDateTimeInput.jsx'
+import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -81,12 +81,12 @@ function GenerateModal({ onClose, onCreated }) {
             <div className="modal-body" style={{ display: 'grid', gap: 'var(--space-3)' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-2)' }}>
                 <label style={{ display: 'grid', gap: 4, fontSize: 12 }}>
-                  <span style={{ color: 'var(--muted)' }}>From (UTC)</span>
-                  <UtcDateTimeInput value={dateFrom} onChange={setDateFrom} hint={false} />
+                  <span style={{ color: 'var(--muted)' }}>From</span>
+                  <LocalDateTimePicker value={dateFrom} onChange={setDateFrom} hint={false} clearable />
                 </label>
                 <label style={{ display: 'grid', gap: 4, fontSize: 12 }}>
-                  <span style={{ color: 'var(--muted)' }}>To (UTC)</span>
-                  <UtcDateTimeInput value={dateTo} onChange={setDateTo} hint={false} />
+                  <span style={{ color: 'var(--muted)' }}>To</span>
+                  <LocalDateTimePicker value={dateTo} onChange={setDateTo} hint={false} clearable />
                 </label>
               </div>
               <label style={{ display: 'grid', gap: 4, fontSize: 12 }}>

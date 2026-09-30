@@ -3,7 +3,7 @@ import { api } from '../../../api/client.js'
 import { useAuth } from '../../../hooks/useAuth.jsx'
 import { formatLocalShort } from '../../../lib/datetime.js'
 import HandoffWizard from './HandoffWizard.jsx'
-import UtcDateTimeInput from '../../../components/UtcDateTimeInput.jsx'
+import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -684,8 +684,8 @@ function ManualAckModal({ inc, lp, onClose, onAcked }) {
                      onChange={e => set('recipient_agency', e.target.value)}
                      maxLength={256} placeholder="e.g. Metropolitan Police, OCSCU" />
             </Field>
-            <Field label="Received at (UTC) *">
-              <UtcDateTimeInput value={form.received_at} onChange={v => set('received_at', v)} hint={false} />
+            <Field label="Received at *">
+              <LocalDateTimePicker value={form.received_at} onChange={v => set('received_at', v)} hint={false} required />
             </Field>
           </div>
 

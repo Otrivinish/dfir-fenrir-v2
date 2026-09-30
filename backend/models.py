@@ -296,6 +296,7 @@ class Incident(Base):
     updated_at    = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     closed_at     = Column(DateTime(timezone=True))
     occurred_at   = Column(DateTime(timezone=True))   # analyst-supplied: when the incident actually occurred
+    detected_at   = Column(DateTime(timezone=True))   # analyst-supplied: when the incident was detected
     contained_at  = Column(DateTime(timezone=True))   # auto-set on CER phase; editable
 
     # Detection and affected scope

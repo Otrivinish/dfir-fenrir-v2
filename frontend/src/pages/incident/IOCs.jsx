@@ -467,290 +467,293 @@ export default function IOCs() {
           {!isClosed && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Click "Add IOC" to record an indicator.</div>}
         </div>
       ) : (
-        <table className="settings-table">
-          <thead>
-            <tr>
-              <th style={{ width: 110, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('type')}>Type{sortArrow('type')}</th>
-              <th style={{ cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('value')}>Value{sortArrow('value')}</th>
-              <th style={{ width: 150, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('entity')}>Entity{sortArrow('entity')}</th>
-              <th style={{ width: 90, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('source')}>Source{sortArrow('source')}</th>
-              <th style={{ width: 90, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('confidence')}>Confidence{sortArrow('confidence')}</th>
-              <th style={{ width: 160, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('tags')}>Tags{sortArrow('tags')}</th>
-              <th style={{ width: 130, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('added')}>Added{sortArrow('added')}</th>
-              <th style={{ width: 80, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('seen_in')}>Seen in{sortArrow('seen_in')}</th>
-              <th className="actions">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sortedIocs.flatMap(i => {
-              const results = enrichResults[i.id]
-              const isExpanded = expandedId === i.id
-              return [
-              <tr
-                key={i.id}
-                onClick={(e) => {
-                  // Click-anywhere-to-toggle, except on actual interactive elements.
-                  if (e.target.closest('button, a, input, textarea, select')) return
-                  setExpandedId(isExpanded ? null : i.id)
-                }}
-                style={{ cursor: 'pointer' }}
-                aria-expanded={isExpanded}
-              >
-                <td>
-                  <span className="pill">{labelOf(i.type)}</span>
-                  {i.malicious === true  && <span className="pill" style={{ fontSize: 10, marginLeft: 4, ...MAL_STYLE }}>MALICIOUS</span>}
-                  {i.malicious === false && <span className="pill" style={{ fontSize: 10, marginLeft: 4, ...CLEAN_STYLE }}>CLEAN</span>}
-                  {i.malicious == null   && <span className="pill pill-gray" style={{ fontSize: 10, marginLeft: 4 }}>UNKNOWN</span>}
-                </td>
-                <td style={{ fontSize: 12, maxWidth: 280 }}>
-                  <span
-                    title={i.value}
-                    style={{
-                      display: 'inline-block', maxWidth: 240,
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      verticalAlign: 'middle',
-                      fontFamily: 'var(--font-mono)',
-                    }}
-                  >{i.value}</span>
-                  {i.ti_matched && (
-                    <span
-                      title={`Threat intel match — ${i.ti_match_source}`}
-                      style={{
-                        marginLeft: 6, fontSize: 10, padding: '1px 5px',
-                        borderRadius: 'var(--radius-sm)',
-                        background: 'color-mix(in srgb, var(--crit) 15%, transparent)',
-                        color: 'var(--crit)',
-                        border: '1px solid color-mix(in srgb, var(--crit) 40%, transparent)',
-                        fontFamily: 'var(--font-body)', fontWeight: 600,
-                        verticalAlign: 'middle', whiteSpace: 'nowrap', cursor: 'default',
-                      }}
-                    >⚠ TI</span>
-                  )}
-                  {i.lolbin_hit && (
-                    <span
-                      title={`LOLBin/GTFOBin — ${i.lolbin_name}`}
-                      style={{
-                        marginLeft: 6, fontSize: 10, padding: '1px 5px',
-                        borderRadius: 'var(--radius-sm)',
-                        background: 'color-mix(in srgb, var(--high) 15%, transparent)',
-                        color: 'var(--high)',
-                        border: '1px solid color-mix(in srgb, var(--high) 40%, transparent)',
-                        fontFamily: 'var(--font-body)', fontWeight: 600,
-                        verticalAlign: 'middle', whiteSpace: 'nowrap', cursor: 'default',
-                      }}
-                    >LOL</span>
-                  )}
-                </td>
-                <td style={{ fontSize: 12 }}>
-                  {i.entity_id && entityMap[i.entity_id] ? (
-                    <Link
-                      to={`/incidents/${inc.id}/entities`}
-                      className="pill"
-                      title={`Linked to ${entityMap[i.entity_id].type}: ${entityMap[i.entity_id].name} — click to open Entities`}
-                      style={{ textDecoration: 'none' }}
-                    >
-                      {entityMap[i.entity_id].type}: {entityMap[i.entity_id].name}
-                    </Link>
-                  ) : (
-                    <span style={{ color: 'var(--dim)' }}>—</span>
-                  )}
-                </td>
-                <td style={{ color: 'var(--muted)', fontSize: 12 }}>{i.source || '—'}</td>
-                <td><ConfidencePill value={i.confidence ?? 50} /></td>
-                <td><TagChips tags={i.tags} /></td>
-                <td
-                  title={formatLocal(i.added_at)}
-                  style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}
+        <div className="table-scroll">
+          <table className="settings-table compact">
+            <thead>
+              <tr>
+                <th style={{ width: 110, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('type')}>Type{sortArrow('type')}</th>
+                <th style={{ cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('value')}>Value{sortArrow('value')}</th>
+                <th style={{ width: 150, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('entity')}>Entity{sortArrow('entity')}</th>
+                <th style={{ width: 90, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('source')}>Source{sortArrow('source')}</th>
+                <th style={{ width: 90, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('confidence')}>Confidence{sortArrow('confidence')}</th>
+                <th style={{ width: 160, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('tags')}>Tags{sortArrow('tags')}</th>
+                <th style={{ width: 130, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('added')}>Added{sortArrow('added')}</th>
+                <th style={{ width: 80, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('seen_in')}>Seen in{sortArrow('seen_in')}</th>
+                <th className="actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedIocs.flatMap(i => {
+                const results = enrichResults[i.id]
+                const isExpanded = expandedId === i.id
+                return [
+                <tr
+                  key={i.id}
+                  onClick={(e) => {
+                    // Click-anywhere-to-toggle, except on actual interactive elements.
+                    if (e.target.closest('button, a, input, textarea, select')) return
+                    setExpandedId(isExpanded ? null : i.id)
+                  }}
+                  style={{ cursor: 'pointer' }}
+                  aria-expanded={isExpanded}
                 >
-                  {formatLocal(i.added_at).slice(0, 16)}
-                </td>
-                <td style={{ textAlign: 'center' }}>
-                  {corrMap[i.id]?.length > 0 && (
+                  <td>
+                    <span className="pill">{labelOf(i.type)}</span>
+                    {i.malicious === true  && <span className="pill" style={{ fontSize: 10, marginLeft: 4, ...MAL_STYLE }}>MALICIOUS</span>}
+                    {i.malicious === false && <span className="pill" style={{ fontSize: 10, marginLeft: 4, ...CLEAN_STYLE }}>CLEAN</span>}
+                    {i.malicious == null   && <span className="pill pill-gray" style={{ fontSize: 10, marginLeft: 4 }}>UNKNOWN</span>}
+                  </td>
+                  <td style={{ fontSize: 12, maxWidth: 280 }}>
+                    <span
+                      title={i.value}
+                      style={{
+                        display: 'inline-block', maxWidth: 'min(240px, 11vw)',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        verticalAlign: 'middle',
+                        fontFamily: 'var(--font-mono)',
+                      }}
+                    >{i.value}</span>
+                    {i.ti_matched && (
+                      <span
+                        title={`Threat intel match — ${i.ti_match_source}`}
+                        style={{
+                          marginLeft: 6, fontSize: 10, padding: '1px 5px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: 'color-mix(in srgb, var(--crit) 15%, transparent)',
+                          color: 'var(--crit)',
+                          border: '1px solid color-mix(in srgb, var(--crit) 40%, transparent)',
+                          fontFamily: 'var(--font-body)', fontWeight: 600,
+                          verticalAlign: 'middle', whiteSpace: 'nowrap', cursor: 'default',
+                        }}
+                      >⚠ TI</span>
+                    )}
+                    {i.lolbin_hit && (
+                      <span
+                        title={`LOLBin/GTFOBin — ${i.lolbin_name}`}
+                        style={{
+                          marginLeft: 6, fontSize: 10, padding: '1px 5px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: 'color-mix(in srgb, var(--high) 15%, transparent)',
+                          color: 'var(--high)',
+                          border: '1px solid color-mix(in srgb, var(--high) 40%, transparent)',
+                          fontFamily: 'var(--font-body)', fontWeight: 600,
+                          verticalAlign: 'middle', whiteSpace: 'nowrap', cursor: 'default',
+                        }}
+                      >LOL</span>
+                    )}
+                  </td>
+                  <td style={{ fontSize: 12 }}>
+                    {i.entity_id && entityMap[i.entity_id] ? (
+                      <Link
+                        to={`/incidents/${inc.id}/entities`}
+                        className="pill"
+                        title={`Linked to ${entityMap[i.entity_id].type}: ${entityMap[i.entity_id].name} — click to open Entities`}
+                        style={{ textDecoration: 'none' }}
+                      >
+                        {entityMap[i.entity_id].type}: {entityMap[i.entity_id].name}
+                      </Link>
+                    ) : (
+                      <span style={{ color: 'var(--dim)' }}>—</span>
+                    )}
+                  </td>
+                  <td style={{ color: 'var(--muted)', fontSize: 12 }}>{i.source || '—'}</td>
+                  <td><ConfidencePill value={i.confidence ?? 50} /></td>
+                  <td><TagChips tags={i.tags} /></td>
+                  <td
+                    title={formatLocal(i.added_at)}
+                    style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}
+                  >
+                    {formatLocal(i.added_at).slice(0, 16)}
+                  </td>
+                  <td style={{ textAlign: 'center' }}>
+                    {corrMap[i.id]?.length > 0 && (
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        onClick={() => setCorrTarget({ ioc: i, incidents: corrMap[i.id] })}
+                        title={`Also seen in ${corrMap[i.id].length} other incident${corrMap[i.id].length !== 1 ? 's' : ''}`}
+                        style={{
+                          fontSize: 11,
+                          padding: '2px 6px',
+                          color: 'var(--accent)',
+                          fontFamily: 'var(--font-mono)',
+                        }}
+                      >
+                        ⋈ {corrMap[i.id].length}
+                      </button>
+                    )}
+                  </td>
+                  <td className="actions">
                     <button
                       type="button"
                       className="btn ghost"
-                      onClick={() => setCorrTarget({ ioc: i, incidents: corrMap[i.id] })}
-                      title={`Also seen in ${corrMap[i.id].length} other incident${corrMap[i.id].length !== 1 ? 's' : ''}`}
-                      style={{
-                        fontSize: 11,
-                        padding: '2px 6px',
-                        color: 'var(--accent)',
-                        fontFamily: 'var(--font-mono)',
-                      }}
+                      onClick={() => enrichOne(i)}
+                      disabled={enrichingId === i.id}
+                      title="Enrich this indicator (VT, AbuseIPDB, Shodan, GreyNoise, URLScan)"
+                      style={{ fontSize: 11, padding: '2px 6px' }}
                     >
-                      ⋈ {corrMap[i.id].length}
+                      {enrichingId === i.id ? '…' : enrichResults[i.id] ? '↻' : 'Enrich'}
                     </button>
-                  )}
-                </td>
-                <td className="actions">
-                  <button
-                    type="button"
-                    className="btn ghost"
-                    onClick={() => enrichOne(i)}
-                    disabled={enrichingId === i.id}
-                    title="Enrich this indicator (VT, AbuseIPDB, Shodan, GreyNoise, URLScan)"
-                    style={{ fontSize: 11 }}
-                  >
-                    {enrichingId === i.id ? '…' : enrichResults[i.id] ? '↻' : 'Enrich'}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn ghost"
-                    onClick={() => setEditTarget(i)}
-                    disabled={isClosed}
-                    style={{ fontSize: 11 }}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    className="btn ghost"
-                    onClick={() => onDelete(i)}
-                    disabled={isClosed || busy}
-                  >
-                    Delete
-                  </button>
-                </td>
-              </tr>,
-              isExpanded && (
-                <tr key={`${i.id}-detail`}>
-                  <td colSpan={9} style={{ paddingTop: 0, paddingBottom: 'var(--space-3)' }}>
-                    <div style={{
-                      display: 'flex', flexDirection: 'column', gap: 'var(--space-3)',
-                      padding: 'var(--space-3)',
-                      background: 'var(--surface)',
-                      border: '1px solid var(--border)',
-                      borderRadius: 'var(--radius-sm)',
-                    }}>
-                      {/* Full value (not truncated, selectable) */}
-                      <div>
-                        <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
-                          Value
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => setEditTarget(i)}
+                      disabled={isClosed}
+                      style={{ fontSize: 11, padding: '2px 6px' }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => onDelete(i)}
+                      disabled={isClosed || busy}
+                      style={{ fontSize: 11, padding: '2px 6px' }}
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>,
+                isExpanded && (
+                  <tr key={`${i.id}-detail`}>
+                    <td colSpan={9} style={{ paddingTop: 0, paddingBottom: 'var(--space-3)' }}>
+                      <div style={{
+                        display: 'flex', flexDirection: 'column', gap: 'var(--space-3)',
+                        padding: 'var(--space-3)',
+                        background: 'var(--surface)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)',
+                      }}>
+                        {/* Full value (not truncated, selectable) */}
+                        <div>
+                          <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
+                            Value
+                          </div>
+                          <div style={{
+                            fontFamily: 'var(--font-mono)', fontSize: 12,
+                            wordBreak: 'break-all', userSelect: 'text', color: 'var(--text)',
+                            padding: 'var(--space-2)',
+                            background: 'var(--surface-2)',
+                            border: '1px solid var(--border)',
+                            borderRadius: 'var(--radius-sm)',
+                          }}>
+                            {i.value}
+                          </div>
                         </div>
-                        <div style={{
-                          fontFamily: 'var(--font-mono)', fontSize: 12,
-                          wordBreak: 'break-all', userSelect: 'text', color: 'var(--text)',
-                          padding: 'var(--space-2)',
-                          background: 'var(--surface-2)',
-                          border: '1px solid var(--border)',
-                          borderRadius: 'var(--radius-sm)',
-                        }}>
-                          {i.value}
-                        </div>
-                      </div>
 
-                      {/* Mark buttons */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-                        <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 4 }}>
-                          Status
-                        </span>
-                        <button
-                          type="button"
-                          className="btn"
-                          onClick={() => markIoc(i, true)}
-                          disabled={isClosed || busy}
-                          aria-pressed={i.malicious === true}
-                          style={{
-                            fontSize: 11,
-                            color: i.malicious === true ? 'var(--crit)' : 'var(--muted)',
-                            borderColor: i.malicious === true ? 'color-mix(in srgb, var(--crit) 50%, transparent)' : undefined,
-                            background:  i.malicious === true ? 'color-mix(in srgb, var(--crit) 14%, transparent)' : undefined,
-                          }}
-                        >⚠ Mark Malicious</button>
-                        <button
-                          type="button"
-                          className="btn"
-                          onClick={() => markIoc(i, false)}
-                          disabled={isClosed || busy}
-                          aria-pressed={i.malicious === false}
-                          style={{
-                            fontSize: 11,
-                            color: i.malicious === false ? 'var(--ok)' : 'var(--muted)',
-                            borderColor: i.malicious === false ? 'color-mix(in srgb, var(--ok) 50%, transparent)' : undefined,
-                            background:  i.malicious === false ? 'color-mix(in srgb, var(--ok) 14%, transparent)' : undefined,
-                          }}
-                        >✓ Mark Clean</button>
-                        <button
-                          type="button"
-                          className="btn"
-                          onClick={() => markIoc(i, null)}
-                          disabled={isClosed || busy}
-                          aria-pressed={i.malicious == null}
-                          style={{
-                            fontSize: 11,
-                            color: i.malicious == null ? 'var(--text)' : 'var(--muted)',
-                            borderColor: i.malicious == null ? 'var(--border-strong)' : undefined,
-                            background:  i.malicious == null ? 'var(--surface-2)' : undefined,
-                          }}
-                        >? Mark Unknown</button>
-                      </div>
-
-                      {/* Notes editor */}
-                      <div>
-                        <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
-                          Notes
-                        </div>
-                        {editingNotesId === i.id ? (
-                          <textarea
-                            className="input"
-                            autoFocus
-                            value={notesDraft}
-                            onChange={(e) => setNotesDraft(e.target.value)}
-                            onBlur={() => saveNotesEdit(i)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                                e.preventDefault(); saveNotesEdit(i)
-                              }
-                              if (e.key === 'Escape') { e.preventDefault(); cancelNotesEdit() }
-                            }}
-                            rows={4}
-                            maxLength={4096}
-                            style={{ width: '100%', resize: 'vertical' }}
-                          />
-                        ) : (
+                        {/* Mark buttons */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 4 }}>
+                            Status
+                          </span>
                           <button
                             type="button"
-                            className="btn ghost"
-                            onClick={() => !isClosed && startNotesEdit(i)}
-                            disabled={isClosed}
-                            title={isClosed ? 'Closed incidents are read-only' : 'Click to edit notes (⌘/Ctrl+Enter to save · Esc to cancel)'}
+                            className="btn"
+                            onClick={() => markIoc(i, true)}
+                            disabled={isClosed || busy}
+                            aria-pressed={i.malicious === true}
                             style={{
-                              padding: 'var(--space-2)',
-                              textAlign: 'left',
-                              fontFamily: 'var(--font-body)',
-                              fontWeight: 400,
-                              whiteSpace: 'pre-wrap',
-                              wordBreak: 'break-word',
-                              minHeight: 40,
-                              width: '100%',
-                              justifyContent: 'flex-start',
-                              alignItems: 'flex-start',
+                              fontSize: 11,
+                              color: i.malicious === true ? 'var(--crit)' : 'var(--muted)',
+                              borderColor: i.malicious === true ? 'color-mix(in srgb, var(--crit) 50%, transparent)' : undefined,
+                              background:  i.malicious === true ? 'color-mix(in srgb, var(--crit) 14%, transparent)' : undefined,
                             }}
-                          >
-                            {i.notes || <span style={{ color: 'var(--dim)' }}>— click to add notes —</span>}
-                          </button>
-                        )}
+                          >⚠ Mark Malicious</button>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => markIoc(i, false)}
+                            disabled={isClosed || busy}
+                            aria-pressed={i.malicious === false}
+                            style={{
+                              fontSize: 11,
+                              color: i.malicious === false ? 'var(--ok)' : 'var(--muted)',
+                              borderColor: i.malicious === false ? 'color-mix(in srgb, var(--ok) 50%, transparent)' : undefined,
+                              background:  i.malicious === false ? 'color-mix(in srgb, var(--ok) 14%, transparent)' : undefined,
+                            }}
+                          >✓ Mark Clean</button>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => markIoc(i, null)}
+                            disabled={isClosed || busy}
+                            aria-pressed={i.malicious == null}
+                            style={{
+                              fontSize: 11,
+                              color: i.malicious == null ? 'var(--text)' : 'var(--muted)',
+                              borderColor: i.malicious == null ? 'var(--border-strong)' : undefined,
+                              background:  i.malicious == null ? 'var(--surface-2)' : undefined,
+                            }}
+                          >? Mark Unknown</button>
+                        </div>
+
+                        {/* Notes editor */}
+                        <div>
+                          <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
+                            Notes
+                          </div>
+                          {editingNotesId === i.id ? (
+                            <textarea
+                              className="input"
+                              autoFocus
+                              value={notesDraft}
+                              onChange={(e) => setNotesDraft(e.target.value)}
+                              onBlur={() => saveNotesEdit(i)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                                  e.preventDefault(); saveNotesEdit(i)
+                                }
+                                if (e.key === 'Escape') { e.preventDefault(); cancelNotesEdit() }
+                              }}
+                              rows={4}
+                              maxLength={4096}
+                              style={{ width: '100%', resize: 'vertical' }}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn ghost"
+                              onClick={() => !isClosed && startNotesEdit(i)}
+                              disabled={isClosed}
+                              title={isClosed ? 'Closed incidents are read-only' : 'Click to edit notes (⌘/Ctrl+Enter to save · Esc to cancel)'}
+                              style={{
+                                padding: 'var(--space-2)',
+                                textAlign: 'left',
+                                fontFamily: 'var(--font-body)',
+                                fontWeight: 400,
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-word',
+                                minHeight: 40,
+                                width: '100%',
+                                justifyContent: 'flex-start',
+                                alignItems: 'flex-start',
+                              }}
+                            >
+                              {i.notes || <span style={{ color: 'var(--dim)' }}>— click to add notes —</span>}
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Linked timeline events */}
+                        <IocTimelineLinks incidentId={inc.id} ioc={i} isClosed={isClosed} />
+
+                        {/* Provenance — when & who added this IOC */}
+                        <div style={{ fontSize: 11, color: 'var(--dim)' }}>
+                          Added {formatLocal(i.added_at)}
+                          {i.added_by_username ? ` by ${i.added_by_username}` : ''}
+                        </div>
+
+                        {/* Enrichment results (only when loaded) */}
+                        {results && <EnrichmentResults results={results} />}
                       </div>
-
-                      {/* Linked timeline events */}
-                      <IocTimelineLinks incidentId={inc.id} ioc={i} isClosed={isClosed} />
-
-                      {/* Provenance — when & who added this IOC */}
-                      <div style={{ fontSize: 11, color: 'var(--dim)' }}>
-                        Added {formatLocal(i.added_at)}
-                        {i.added_by_username ? ` by ${i.added_by_username}` : ''}
-                      </div>
-
-                      {/* Enrichment results (only when loaded) */}
-                      {results && <EnrichmentResults results={results} />}
-                    </div>
-                  </td>
-                </tr>
-              ),
-              ]
-            })}
-          </tbody>
-        </table>
+                    </td>
+                  </tr>
+                ),
+                ]
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {modalOpen && (

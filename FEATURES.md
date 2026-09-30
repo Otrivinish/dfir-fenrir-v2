@@ -21,13 +21,13 @@
 - Cursor-paginated incident list with severity/status/team/tag filters
 - Create incident with inline validation; detail page with edit-on-blur
 - Unique incident numbers (`INC-NNNN`, Postgres sequence)
-- 800-61 R3 phase stepper — interactive, audit-logged transitions
+- 800-61 R3 phase stepper — interactive, audit-logged transitions; phases colour-coded by NIST CSF 2.0 function
 - Severity scale (internal Low/Med/High/Critical → NCISS at report time)
 - TLP 2.0 marking · incident type · CSF 2.0 function tag · reporter field
 - Markdown description (view + edit preview)
 - Affected systems (with bulk promote to entities)
 - Detection method classification
-- Occurred / Contained datetimes (ISO 8601 UTC, rendered in user TZ)
+- Occurred / Detected / Contained datetimes — one date/time picker everywhere (entered in the operator's timezone with offset shown, stored UTC)
 - Operational dark-mode toggle (`dark_operation`)
 - Tags (incident + IOC scoped, normalised, auto-sourced, 20-cap, usage-ranked typeahead)
 
@@ -129,7 +129,7 @@
 - Lessons learned (root cause, effectiveness ratings, observations, near-misses, timeline metrics, action items, control improvements; HTML export)
 - Response analytics (TTD/TTC/TTR, IOC/entity/timeline/playbook/respond/evidence breakdowns)
 - MITRE post-incident summary
-- **6 report templates** (Mission Control, Executive, Nordic Calm, Forensic, Compact, Tactical) with exec/full modes, 12 section toggles, classification override, remediation roadmap, show-structure preview, audit-grade history + verified re-download
+- **Post-incident report** — 4 layouts (Executive, Tactical, Forensic, Print); Executive / Full modes; auto-numbered sections incl. What happened, Markdown description, Decisions Log, Stakeholders, Legal & Regulatory Deadlines (met / violated), Attack Chain visual, Threat Actor Attribution, remediation plan anchored to close time; Appendix A Affected Systems / B Timeline; classification override; show-structure preview that mirrors the report; audit-grade history + verified re-download
 - Business-impact assessment (6 dimensions)
 - Cost tracking (line items, category/phase summaries)
 - **Legal & regulatory deadlines** — GDPR, NIS2, DORA, HIPAA, CCPA, PCI-DSS with live countdowns, status workflow, custom deadlines
@@ -145,7 +145,7 @@
 
 ## Cross-incident analytics
 
-- **Dashboard** — 7 KPI cards (open, crit+high, opened/closed 30d, MTTD/MTTR/MTTC), context strip (on-call, stale, legal-overdue), distribution widgets, All/Mine scope, 30-day trend, analyst workload, top MITRE tactics, live indicator, open-incidents table, 14-day activity feed
+- **Dashboard** — 7 KPI cards (open, crit+high, opened/closed 30d, MTTD/MTTR/MTTC), context strip (on-call, stale, legal-overdue), distribution widgets, All/Mine scope, 30-day trend, analyst workload, top MITRE tactics, live indicator, open-incidents table, recent-activity strip (latest 6) with a 14-day "List all" popup
 - Global ⌘K / Ctrl+K search across incidents/IOCs/entities/timeline (access-controlled, deep-linking)
 - Threat Intelligence Hub (KPI bar, matched-incidents tab, IOC database, feed management link)
 - Threat Actors database (scoring, MITRE sync, custom actors)
@@ -188,6 +188,7 @@
 
 ## Infrastructure
 
+- Backend dependencies pinned with a 14-day release cooldown; transitive packages locked in `backend/constraints.txt`
 - Docker Compose: Caddy TLS (BYO / generated / DuckDNS / internal), Postgres + daily backup, Redis, air-gapped analysis worker, audit-monitor
 - Non-root containers (backend 1001, worker 1002), read-only rootfs + tmpfs, dropped caps, `no-new-privileges`
 - Volume separation (evidence, quarantine, reports, logs, branding); network isolation (`fenrir-internal` bridge + `fenrir-analysis` internal-only)

@@ -27,6 +27,12 @@
   --med:  #a78bfa;
   --low:  #22d3ee;
   --ok:   #10b981;
+  /* IR phase colours: hue from NIST CSF 2.0 function colours (nist.gov/cyberframework/faqs),
+     lightness matched to this theme. Prep=Protect, Detect=Detect, C/E/R=Respond, Post=Recover. */
+  --phase-prep:    #818cf8;
+  --phase-detect:  #fbbf24;
+  --phase-respond: #f87171;
+  --phase-post:    #4ade80;
 
   /* Type */
   --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -89,6 +95,12 @@
   --med:  #d97706;
   --low:  #2563eb;
   --ok:   #059669;
+  /* IR phase colours: hue from NIST CSF 2.0 function colours (nist.gov/cyberframework/faqs),
+     lightness matched to this theme. Prep=Protect, Detect=Detect, C/E/R=Respond, Post=Recover. */
+  --phase-prep:    #6366f1;
+  --phase-detect:  #d97706;
+  --phase-respond: #dc2626;
+  --phase-post:    #16a34a;
 
   --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-heading: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -136,6 +148,12 @@
   --med:  #f472b6;
   --low:  #22d3ee;
   --ok:   #34d399;
+  /* IR phase colours: hue from NIST CSF 2.0 function colours (nist.gov/cyberframework/faqs),
+     lightness matched to this theme. Prep=Protect, Detect=Detect, C/E/R=Respond, Post=Recover. */
+  --phase-prep:    #a5b4fc;
+  --phase-detect:  #fcd34d;
+  --phase-respond: #f87171;
+  --phase-post:    #4ade80;
 
   --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-heading: "Space Grotesk", "Inter", -apple-system, system-ui, sans-serif;

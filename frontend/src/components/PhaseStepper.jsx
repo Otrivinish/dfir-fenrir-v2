@@ -1,7 +1,8 @@
 import { Fragment } from 'react'
 import { PHASE } from '../lib/incidentVocab.js'
 
-// Visual stepper for the 800-61 R3 phases.
+// Visual stepper for the 800-61 R3 phases. Each phase is coloured by its NIST
+// CSF 2.0 function (--phase-* tokens); state is shown by fill / ✓ / dimming.
 // When `onPhaseClick` is provided, non-current steps are click-targets that
 // fire `onPhaseClick(value)` so the caller can show a confirmation modal.
 // When `disabled` is true (e.g. closed incident), the stepper is static.
@@ -25,6 +26,7 @@ export default function PhaseStepper({ current, onPhaseClick, disabled = false }
               <button
                 type="button"
                 className={cls}
+                data-phase={p.value}
                 onClick={() => onPhaseClick(p.value)}
                 title={`Change phase to ${p.label}`}
                 aria-label={`Change phase to ${p.label}`}
@@ -45,6 +47,7 @@ export default function PhaseStepper({ current, onPhaseClick, disabled = false }
               aria-current={isCurrent ? 'step' : undefined}
               title={p.label}
               className={cls}
+              data-phase={p.value}
             >
               {p.short || p.label}
             </span>
