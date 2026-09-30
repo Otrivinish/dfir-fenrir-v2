@@ -19,7 +19,7 @@ const IOC_TYPES = [
 ]
 
 const ACCEPTED = '.evtx,.xml,.db,.sqlite,.csv,.tsv,.json,.jsonl,.log'
-const MAX_MB = 100
+const MAX_MB = 500
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
@@ -78,6 +78,27 @@ export default function TimelineImport() {
   const events  = result?.events || []
   const sources = useMemo(() => [...new Set(events.map(e => e.source).filter(Boolean))], [events])
 
+  // Large imports (Entra's non-interactive/MSI/Application sign-in exports
+  // routinely run to 20k+ events) take tens of seconds to render as one
+  // unfiltered table -- default to showing just the suspicious ones so the
+  // analyst isn't stuck waiting on a slow render of rows they don't need
+  // first. They can still switch this off to see everything. Set alongside
+  // `setResult` at each call site below (not a useEffect reacting to
+  // `result`) -- an effect fires *after* the first render, so React would
+  // still have to render the full unfiltered table once before the filtered
+  // re-render landed, which is exactly the slow render this is meant to skip.
+  function applyResult(detail) {
+    setResult({
+      source_file:      detail.filename,
+      detected_format:  detail.detected_format,
+      count:            detail.event_count,
+      suspicious_count: detail.suspicious_count,
+      events:           detail.events,
+      import_id:        detail.id,
+    })
+    setFilterSuspicious((detail.events?.length || 0) > 1000)
+  }
+
   const visible = useMemo(() => events.filter(e => {
     if (filterSuspicious && !e.suspicious) return false
     if (filterSource && e.source !== filterSource) return false
@@ -133,14 +154,7 @@ export default function TimelineImport() {
     try {
       const detail = await api.createForensicImport(inc.id, file)
       // detail shape: ForensicImportDetail — same as ParseResponse + id + metadata.
-      setResult({
-        source_file:      detail.filename,
-        detected_format:  detail.detected_format,
-        count:            detail.event_count,
-        suspicious_count: detail.suspicious_count,
-        events:           detail.events,
-        import_id:        detail.id,
-      })
+      applyResult(detail)
       setActiveImportId(detail.id)
       await loadImports()
       // Clear the staged file so the dropzone resets — the upload is now saved.
@@ -161,14 +175,7 @@ export default function TimelineImport() {
     setPromoteMsg(null)
     try {
       const detail = await api.getForensicImport(inc.id, importId)
-      setResult({
-        source_file:      detail.filename,
-        detected_format:  detail.detected_format,
-        count:            detail.event_count,
-        suspicious_count: detail.suspicious_count,
-        events:           detail.events,
-        import_id:        detail.id,
-      })
+      applyResult(detail)
       setActiveImportId(detail.id)
       setFile(null)
     } catch (e) {
@@ -186,14 +193,7 @@ export default function TimelineImport() {
     setPromoteMsg(null)
     try {
       const detail = await api.importForensicFromArtifact(inc.id, artifactId)
-      setResult({
-        source_file:      detail.filename,
-        detected_format:  detail.detected_format,
-        count:            detail.event_count,
-        suspicious_count: detail.suspicious_count,
-        events:           detail.events,
-        import_id:        detail.id,
-      })
+      applyResult(detail)
       setActiveImportId(detail.id)
       setFile(null)
       await loadImports()

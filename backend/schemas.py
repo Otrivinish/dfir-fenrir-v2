@@ -903,6 +903,7 @@ class EmailAnalysisOut(BaseModel):
     incident_id:        UUID
     source_artifact_id: Optional[UUID] = None
     evidence_id:        Optional[UUID] = None
+    batch_id:           Optional[UUID] = None
     subject:      Optional[str] = None
     from_display: Optional[str] = None
     from_addr:    Optional[str] = None
@@ -914,6 +915,10 @@ class EmailAnalysisOut(BaseModel):
     score:        int
     findings:     list = []
     headers:      dict = {}
+    raw_headers:  Optional[str] = None
+    auth_verified: Optional[dict] = None
+    body_text:    Optional[str] = None
+    body_html:    Optional[str] = None
     urls:         list = []
     attachments:  list = []
     created_by:   Optional[str] = None
@@ -925,6 +930,13 @@ class EmailAnalysisOut(BaseModel):
 
 class EmailAnalysisList(BaseModel):
     items: list[EmailAnalysisOut]
+
+
+class EmailBulkAnalyzeOut(BaseModel):
+    batch_id: str
+    analyzed: list[EmailAnalysisOut] = []
+    skipped:  list[str] = []
+    errors:   list[str] = []
 
 
 class PromoteIocItem(BaseModel):
@@ -1598,6 +1610,60 @@ class TimelineEventBatchCreate(BaseModel):
 class TimelineEventBatchResult(BaseModel):
     created: int
     errors:  list[str] = Field(default_factory=list)
+
+
+# ─── Defender incident PDF import (stateless preview + review) ──────────────
+# The analyst reviews and reclassifies every candidate in the frontend, then
+# commits accepted ones via the existing IOC/Entity/Timeline create endpoints
+# -- same "parse returns candidates, promotion is a frontend concern" pattern
+# already used by ForensicImport and EmailAnalysis. Nothing is persisted here.
+
+DefenderCandidateDestination = Literal["ioc", "entity", "timeline_event"]
+
+
+class DefenderPdfCandidate(BaseModel):
+    kind:                 str
+    suggested_destination: DefenderCandidateDestination
+    value:                Optional[str] = None
+    description:          str
+    verdict:              Optional[str] = None
+    event_time:           Optional[datetime] = None
+    hostname:             Optional[str] = None
+    source:               Optional[str] = None
+    event_type:           Optional[str] = None
+    ioc_type:             Optional[IocType] = None
+    entity_type_hint:     Optional[EntityType] = None
+    criticality:          Optional[Criticality] = None
+    raw_log:              Optional[str] = None
+    low_confidence:       bool = False
+
+
+class DefenderPdfParseResponse(BaseModel):
+    incident:    dict[str, str]
+    candidates:  list[DefenderPdfCandidate]
+
+
+class DefenderPdfImportSummary(BaseModel):
+    id:                    UUID
+    filename:              str
+    file_size:             int
+    sha256_hash:           str
+    candidate_count:       int
+    low_confidence_count:  int
+    uploaded_by:           Optional[str] = None
+    uploaded_at:           datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DefenderPdfImportDetail(DefenderPdfImportSummary):
+    incident:    dict[str, str]
+    candidates:  list[DefenderPdfCandidate]
+
+
+class DefenderPdfImportList(BaseModel):
+    items: list[DefenderPdfImportSummary]
 
 
 # ─── Post-Incident ────────────────────────────────────────────────────────────

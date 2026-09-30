@@ -53,6 +53,7 @@ const NAV_GROUPS = [
     label: 'Detection & Analysis',
     items: [
       { to: 'timeline', label: 'Timeline' },
+      { to: 'iocs',     label: 'IOCs' },
       { to: 'entities', label: 'Entities' },
       { to: 'files',    label: 'Files' },
       { to: 'notes',    label: 'Notes' },

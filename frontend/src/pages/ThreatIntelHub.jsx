@@ -93,7 +93,7 @@ function MatchedIncidents() {
             <tr key={row.incident_id}>
               <td>
                 <Link
-                  to={`/incidents/${row.incident_id}/forensic/iocs`}
+                  to={`/incidents/${row.incident_id}/iocs`}
                   style={{ color: 'var(--accent)', textDecoration: 'none', fontWeight: 500 }}
                 >
                   {row.title}

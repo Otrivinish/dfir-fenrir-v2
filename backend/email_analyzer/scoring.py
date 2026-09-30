@@ -42,7 +42,7 @@ def _famtype(mime):
     return mime
 
 
-def score(parsed: dict) -> dict:
+def score(parsed: dict, auth_verified: dict | None = None) -> dict:
     findings: list[dict] = []
     force_red = False
 
@@ -79,6 +79,21 @@ def score(parsed: dict) -> dict:
         add("dkim_unaligned", "medium", "DKIM not aligned",
             f"DKIM was signed by {dkim_reg}, not the From domain {from_reg}.", "header", 15)
 
+    # Cross-check the header's own auth claim against a live DNS re-check
+    # (auth_verified is None if the caller skipped/timed out on validation).
+    if auth_verified and not auth_verified.get("error"):
+        live_domain = auth_verified.get("domain")
+        if spf == "pass" and auth_verified.get("ip_in_spf") is False:
+            add("spf_claim_unverified", "high", "SPF pass claim doesn't match live record",
+                f"The header claims spf=pass but the source IP {parsed.get('origin_ip') or '?'} is not "
+                f"authorized by {live_domain}'s current SPF record — the Authentication-Results header "
+                "may be forged or stale.", "header", 25)
+        live_dmarc = auth_verified.get("dmarc") or {}
+        if dmarc == "pass" and not live_dmarc.get("found"):
+            add("dmarc_claim_unverified", "medium", "DMARC pass claim doesn't match live record",
+                f"The header claims dmarc=pass but {live_domain} currently has no DMARC record — the "
+                "Authentication-Results header may be forged or stale.", "header", 20)
+
     reply_to = parsed.get("reply_to")
     if reply_to and from_addr and reply_to.lower() != from_addr.lower() and _reg(_domain(reply_to)) != from_reg:
         add("replyto_mismatch", "high", "Reply-To differs from From",
@@ -107,25 +122,29 @@ def score(parsed: dict) -> dict:
             break
 
     # ── URLs ──
+    # Evaluate the real destination, not the wrapper: a Safelink-rewritten URL
+    # legitimately has a safelinks.protection.outlook.com host, so shortener/
+    # raw-IP/punycode/mismatch checks run against `safelink_target` when present.
     for u in parsed.get("urls") or []:
         host = (u.get("host") or "").lower()
+        real_host = (u.get("safelink_host") or host)
         dh = u.get("display_host")
-        if dh and host and _reg(dh) != _reg(host):
+        if dh and real_host and _reg(dh) != _reg(real_host):
             add("url_display_mismatch", "high", "Link text hides its true destination",
-                f"The link shows {dh} but points to {host}.", "url", 25)
-        if _reg(host) in SHORTENERS:
+                f"The link shows {dh} but points to {real_host}.", "url", 25)
+        if _reg(real_host) in SHORTENERS:
             add("url_shortener", "low", "URL shortener",
-                f"{host} hides the final destination.", "url", 10)
-        if re.fullmatch(r'\d{1,3}(\.\d{1,3}){3}', host or ""):
+                f"{real_host} hides the final destination.", "url", 10)
+        if re.fullmatch(r'\d{1,3}(\.\d{1,3}){3}', real_host or ""):
             add("url_raw_ip", "medium", "Raw-IP URL",
-                f"{u.get('url')} uses a bare IP address instead of a hostname.", "url", 15)
-        authority = u.get("url", "").split("//", 1)[-1].split("/", 1)[0]
+                f"{u.get('safelink_target') or u.get('url')} uses a bare IP address instead of a hostname.", "url", 15)
+        authority = (u.get("safelink_target") or u.get("url", "")).split("//", 1)[-1].split("/", 1)[0]
         if "@" in authority:
             add("url_userinfo", "medium", "Userinfo trick in URL",
                 "The URL authority contains '@' — the visible host may be fake.", "url", 15)
-        if "xn--" in host:
+        if "xn--" in real_host:
             add("url_punycode", "medium", "Punycode URL host",
-                f"{host} uses punycode — possible homoglyph.", "url", 15)
+                f"{real_host} uses punycode — possible homoglyph.", "url", 15)
 
     # ── attachments ──
     for a in parsed.get("attachments") or []:

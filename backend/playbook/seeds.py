@@ -7,7 +7,7 @@ baseline (per CLAUDE.md) plus common incident-type scaffolds:
   - cisa_vuln_resp   — CISA Vulnerability Response Playbook
   - incident-type scaffolds: ransomware, credential stuffing, phishing, data egress,
     OAuth abuse, insider exfiltration, DDoS, BEC, network intrusion, malware infection,
-    data-breach notification (GDPR), cloud compromise
+    data-breach notification (GDPR), cloud compromise, AI-enabled device code phishing
 
 The task content is aligned to the public guidance from those frameworks but
 is not a byte-perfect reproduction. Treat as starting scaffolds — operators
@@ -722,6 +722,68 @@ CLOUD_COMPROMISE = {
 }
 
 
+# ─── AI-Enabled Device Code Phishing ──────────────────────────────────────────
+# Aligned to Microsoft's April 2026 advisory on device-code phishing escalating
+# beyond the Storm-2372 pattern: GenAI-crafted lures, dynamically-generated
+# device codes fetched only after the victim clicks (so the 15-minute window
+# starts late), and disposable polling infrastructure (e.g. Railway.com nodes)
+# watching Microsoft's device-login endpoint every few seconds for the token.
+
+AI_DEVICE_CODE_PHISHING = {
+    "key":      "ai_device_code_phishing",
+    "category": "Identity",
+    "name": "AI-Enabled Device Code Phishing Response",
+    "description": (
+        "Device-code / OAuth device-authorization-flow phishing where the lure, "
+        "device-code polling, and redirect infrastructure are AI- and script-"
+        "automated (per Microsoft's April 2026 advisory). MFA is satisfied by the "
+        "victim in the normal flow, so the attacker walks away with a valid token "
+        "rather than a password — treat every hit as a token compromise, not a "
+        "credential-harvesting near-miss."
+    ),
+    "tasks": [
+        {"phase": "detection_and_analysis",           "order": 10, "title": "Confirm device-code flow abuse",
+         "description": "Correlate a user's device-login/devicelogin.microsoft.com visit or entry of a code with a subsequent sign-in from an unfamiliar IP/ASN. Check sign-in logs for errorCode 50199 sequences (device-code auth) tied to risky sign-ins."},
+        {"phase": "detection_and_analysis",           "order": 20, "title": "Identify the phishing lure + delivery path",
+         "description": "Pull the originating email/message: theme (invoice, RFP, password-expiry, shared file), sender, and redirect chain (compromised domain, Vercel/Cloudflare Workers/AWS Lambda hop) that generated the code on click."},
+        {"phase": "detection_and_analysis",           "order": 30, "title": "Check for pre-attack GetCredentialType recon",
+         "description": "Attackers often validate account existence via GetCredentialType 10-15 days before phishing. Search sign-in/identity logs for that probing against targeted accounts."},
+        {"phase": "detection_and_analysis",           "order": 40, "title": "Scope every user who completed the device-code prompt",
+         "description": "Don't stop at the reported user — pull all device-code sign-ins in the campaign window across the tenant. Compromise is scaled first, then filtered by the actor for high-value (finance/exec/admin) roles."},
+        {"phase": "detection_and_analysis",           "order": 50, "title": "Check for device registration / PRT issuance",
+         "description": "Attackers commonly register a new device within minutes of token theft to mint a Primary Refresh Token for long-lived access. Review Entra device registrations against each affected account's normal device set."},
+        {"phase": "detection_and_analysis",           "order": 60, "title": "Hunt for Graph API reconnaissance",
+         "description": "Look for anomalous Microsoft Graph calls (org-structure enumeration, mailbox/OneDrive listing) from the stolen token shortly after issuance."},
+        {"phase": "detection_and_analysis",           "order": 70, "title": "Check for malicious inbox rules + email exfiltration",
+         "description": "Search for inbox rules with randomized/special-character-only names that hide, forward, or delete mail, and for mailbox search/export activity targeting wire-transfer or executive correspondence."},
+        {"phase": "detection_and_analysis",           "order": 80, "title": "Correlate infrastructure against known IOCs",
+         "description": "Match sign-in source IPs and redirect domains against current threat-intel feed for this campaign family (short-lived Railway.com/hosting-provider ranges, brand-impersonating domains). Treat any hit as high-confidence."},
+        {"phase": "containment_eradication_recovery", "order": 10, "title": "Revoke refresh tokens + force re-authentication",
+         "description": "Revoke sessions/refresh tokens for every affected account immediately. Note access tokens can remain valid for up to an hour after revocation — don't treat revocation alone as instant containment."},
+        {"phase": "containment_eradication_recovery", "order": 20, "title": "Remove attacker-registered devices + PRTs",
+         "description": "Delete any device object registered outside the user's normal pattern during the incident window; this invalidates the PRT persistence path."},
+        {"phase": "containment_eradication_recovery", "order": 30, "title": "Remove malicious inbox rules + review delegate/mailbox permissions",
+         "description": "Delete attacker-created rules; check for added mailbox delegates, forwarding, or Send-As grants left behind."},
+        {"phase": "containment_eradication_recovery", "order": 40, "title": "Block device code flow via Conditional Access",
+         "description": "Restrict the device-authorization grant tenant-wide except for explicitly approved use cases (e.g. specific kiosk/CLI scenarios), scoped by group/location."},
+        {"phase": "containment_eradication_recovery", "order": 50, "title": "Step affected accounts up to phishing-resistant MFA",
+         "description": "This flow satisfies standard MFA by design — re-enrol affected users on FIDO2 keys or Authenticator passkey rather than re-adding push/OTP MFA."},
+        {"phase": "containment_eradication_recovery", "order": 60, "title": "Block campaign infrastructure",
+         "description": "Block identified redirect/polling domains and IP ranges at the mail gateway, Safe Links, and network egress. Submit brand-impersonating domains for takedown."},
+        {"phase": "containment_eradication_recovery", "order": 70, "title": "Verify no residual access + notify affected users",
+         "description": "Confirm no active sessions, devices, tokens, or inbox rules remain for each account. Notify affected users and, for finance/exec accounts, warn Finance of potential BEC follow-on."},
+        {"phase": "post_incident",                    "order": 10, "title": "Deploy hunting queries tenant-wide",
+         "description": "Operationalise Microsoft's advanced-hunting queries (errorCode 50199 sequences, URL-click-to-risky-sign-in correlation, device-registration + inbox-rule anomalies) as standing Sentinel/XDR detections."},
+        {"phase": "post_incident",                    "order": 20, "title": "Review Conditional Access + legacy-auth posture tenant-wide",
+         "description": "Confirm device code flow stays default-blocked, legacy authentication protocols are disabled, and sign-in risk policies auto-remediate risky sign-ins."},
+        {"phase": "post_incident",                    "order": 30, "title": "Targeted awareness for high-value roles",
+         "description": "Brief finance, executive, and admin staff specifically — this campaign filters for them post-compromise. Cover the device-code lure pattern, not just generic phishing cues."},
+        {"phase": "post_incident",                    "order": 40, "title": "Lessons learned + report",
+         "description": "Document the full chain from lure to token theft to post-compromise action; record IOCs contributed to threat intel; assign hardening owners."},
+    ],
+}
+
+
 _SEEDS = (
     NIST_800_61_R3,
     CISA_FED_IR,
@@ -738,6 +800,7 @@ _SEEDS = (
     MALWARE_INFECTION,
     DATA_BREACH_NOTIFICATION,
     CLOUD_COMPROMISE,
+    AI_DEVICE_CODE_PHISHING,
 )
 
 

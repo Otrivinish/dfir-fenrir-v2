@@ -6,9 +6,12 @@ Parse + score an email, then route its content into existing subsystems:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import io
 import re
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -23,17 +26,24 @@ from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
-from email_analyzer.domain_check import check_dkim, check_spf_dmarc
-from email_analyzer.parser import attachment_bytes, is_msg, msg_to_eml_bytes, parse_email
+from email_analyzer.domain_check import check_dkim, check_spf_dmarc, evaluate_source_ip, fetch_domain_auth
+from email_analyzer.parser import (attachment_bytes, is_msg, msg_to_eml_bytes, parse_email,
+                                   repair_wrapped_export)
 from email_analyzer.scoring import score as score_email
 from evidence.crypto import awrite_encrypted
 from incidents.access import get_accessible_incident
 from models import Artifact, EmailAnalysis, Evidence, IOC, User, utcnow
-from schemas import (DomainCheckOut, EmailAnalysisList, EmailAnalysisOut, PromoteIocsRequest)
+from schemas import (DomainCheckOut, EmailAnalysisList, EmailAnalysisOut, EmailBulkAnalyzeOut,
+                     PromoteIocsRequest)
 
 router = APIRouter()
 
 MAX_EMAIL_BYTES = 25 * 1024 * 1024
+MAX_BULK_FILES = 200
+MAX_BULK_TOTAL_BYTES = 250 * 1024 * 1024
+AUTH_VALIDATE_TIMEOUT = 8.0     # per distinct domain -- a slow/unreachable DNS
+                                # server must never block or fail the analysis
+_AUTH_CONCURRENCY = 5           # cap concurrent live-DNS lookups within a batch
 
 
 def _quarantine_dir(incident_id: uuid.UUID) -> Path:
@@ -43,6 +53,128 @@ def _quarantine_dir(incident_id: uuid.UUID) -> Path:
 def _safe_filename(name: str) -> str:
     base = re.sub(r"[^A-Za-z0-9._-]", "_", (name or "file").strip()) or "file"
     return base[:200]
+
+
+async def _read_capped(file: UploadFile, cap: int) -> bytes:
+    """Read an upload, aborting as soon as it exceeds `cap` -- never trusts
+    Content-Length and never buffers more than the limit (mirrors pcap's
+    upload guard)."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                                f"Upload exceeds the {cap // (1024 * 1024)} MiB limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _read_zip_member_capped(zf: zipfile.ZipFile, info: zipfile.ZipInfo, cap: int) -> bytes | None:
+    """Stream-decompress one zip member, aborting past `cap` regardless of what
+    the archive's own (attacker-controlled) size metadata claims -- the only
+    safe way to bound a decompression bomb, since `ZipInfo.file_size` is just
+    a declared value in the archive, not a check on the decompressed stream."""
+    buf = bytearray()
+    with zf.open(info) as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            buf += chunk
+            if len(buf) > cap:
+                return None
+    return bytes(buf)
+
+
+def _extract_zip_members(data: bytes) -> tuple[list[tuple[str, bytes]], list[str]]:
+    """Safely pull .eml/.msg members out of an uploaded zip for bulk import.
+
+    Rejects zip-slip (absolute paths / `..` components), silently-nested
+    archives (only .eml/.msg extensions are read at all, so a nested .zip is
+    just skipped, never recursed into), and enforces a per-member decompressed
+    size cap (via streamed reads, not trusting declared sizes) plus a total
+    batch size cap and a member-count cap. Nothing dropped is silent -- every
+    exclusion is returned as a human-readable reason.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Not a valid zip file")
+
+    members: list[tuple[str, bytes]] = []
+    skipped: list[str] = []
+    max_skip_notes = 500   # a hostile zip with millions of junk entries must not
+
+    def note(msg: str) -> None:
+        # inflate the response payload one skip-string per entry
+        if len(skipped) < max_skip_notes:
+            skipped.append(msg)
+        elif len(skipped) == max_skip_notes:
+            skipped.append(f"... additional skipped entries omitted (over {max_skip_notes})")
+
+    total = 0
+    for info in zf.infolist():
+        name = info.filename
+        if info.is_dir():
+            continue
+        if len(members) >= MAX_BULK_FILES:
+            note(f"stopped after {MAX_BULK_FILES} files -- remaining zip entries not processed")
+            break
+        if total >= MAX_BULK_TOTAL_BYTES:
+            note("stopped -- batch exceeds total size limit; remaining zip entries not processed")
+            break
+        norm = Path(name.replace("\\", "/"))
+        if norm.is_absolute() or ".." in norm.parts:
+            note(f"{name}: rejected (path traversal)")
+            continue
+        if not name.lower().endswith((".eml", ".msg")):
+            note(f"{name}: skipped (not .eml/.msg)")
+            continue
+        payload = _read_zip_member_capped(zf, info, min(MAX_EMAIL_BYTES, MAX_BULK_TOTAL_BYTES - total))
+        if payload is None:
+            note(f"{name}: skipped (exceeds size limit during extraction)")
+            continue
+        total += len(payload)
+        members.append((name, payload))
+    return members, skipped
+
+
+def _auth_check_domain(parsed: dict) -> str | None:
+    """Which domain the automatic SPF/DMARC/DKIM cross-check should target --
+    the same domain SPF itself is evaluated against (smtp.mailfrom from
+    Authentication-Results), falling back to the envelope/header From when
+    that header is missing."""
+    auth = parsed.get("auth") or {}
+    for candidate in (auth.get("spf_domain"), parsed.get("return_path"), parsed.get("from_addr")):
+        if not candidate:
+            continue
+        domain = candidate.rsplit("@", 1)[-1] if "@" in candidate else candidate
+        domain = domain.strip().lower().rstrip(".")
+        if domain:
+            return domain
+    return None
+
+
+async def _auto_verify_auth(parsed: dict) -> Optional[dict]:
+    """Best-effort automatic auth cross-check for a single analyze() call.
+    Never raises -- a DNS timeout/error degrades to an 'unavailable' marker
+    rather than failing or stalling the analysis."""
+    domain = _auth_check_domain(parsed)
+    if not domain:
+        return None
+    try:
+        result = await asyncio.wait_for(
+            fetch_domain_auth(domain, (parsed.get("auth") or {}).get("dkim_selector")),
+            timeout=AUTH_VALIDATE_TIMEOUT,
+        )
+    except Exception:
+        return {"domain": domain, "error": "Live DNS validation timed out or failed."}
+    result["ip_in_spf"] = evaluate_source_ip(result["spf"], parsed.get("origin_ip"))
+    return result
 
 
 async def _incident(db, incident_id, user, *, writable=True):
@@ -111,6 +243,7 @@ async def analyze_email(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide raw header text or an .eml file")
     if not data:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Empty input")
+    data = repair_wrapped_export(data)
     if len(data) > MAX_EMAIL_BYTES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             f"Message exceeds {MAX_EMAIL_BYTES} bytes")
@@ -128,7 +261,8 @@ async def analyze_email(
             src_name = src_name[:-4] + ".eml"
 
     parsed = parse_email(data)
-    verdict = score_email(parsed)
+    auth_verified = await _auto_verify_auth(parsed)
+    verdict = score_email(parsed, auth_verified)
 
     # Persist the raw message as a quarantine Artifact (re-readable for extraction / evidence).
     art_id, stored = _store_quarantine(incident_id, src_name, data)
@@ -156,6 +290,8 @@ async def analyze_email(
             "notable": parsed.get("notable_headers"),
             "origin_ip": parsed.get("origin_ip"), "x_originating_ip": parsed.get("x_originating_ip"),
         },
+        raw_headers=parsed.get("raw_headers"), auth_verified=auth_verified,
+        body_text=parsed.get("body_text"), body_html=parsed.get("body_html"),
         urls=parsed.get("urls"), attachments=parsed.get("attachments"),
         created_by_id=user.id, created_by=user.username,
     )
@@ -172,6 +308,160 @@ async def analyze_email(
     )
     await db.commit()
     return EmailAnalysisOut.model_validate(analysis)
+
+
+@router.post("/{incident_id}/email/analyze-bulk", response_model=EmailBulkAnalyzeOut,
+             status_code=status.HTTP_201_CREATED,
+             summary="Bulk-analyze multiple emails")
+async def analyze_email_bulk(
+    incident_id: uuid.UUID,
+    request: Request,
+    files: list[UploadFile] = File(...),
+    user: User = Depends(require_analyst),
+    db: AsyncSession = Depends(get_db),
+) -> EmailBulkAnalyzeOut:
+    """Analyze many emails in one batch: either multiple .eml/.msg uploads, or
+    a single .zip containing them.
+
+    Each message runs through the same offline parse+score pipeline as a
+    single analyze, tagged with a shared batch_id so the history view can be
+    filtered to this run. Live SPF/DMARC/DKIM validation is looked up once per
+    distinct sender domain in the batch (phishing runs typically reuse one
+    spoofed domain across many messages) and run concurrently with a capped
+    timeout, so one slow or unreachable domain can't stall the whole batch.
+    Nothing is silently dropped -- oversized/invalid members are reported back
+    as `skipped`/`errors`. Requires the analyst role and an open incident.
+    """
+    await _incident(db, incident_id, user)
+    if len(files) > MAX_BULK_FILES:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            f"Batch exceeds {MAX_BULK_FILES} files")
+
+    items: list[tuple[str, bytes]] = []
+    skipped: list[str] = []
+    if len(files) == 1 and (files[0].filename or "").lower().endswith(".zip"):
+        zdata = await _read_capped(files[0], MAX_BULK_TOTAL_BYTES)
+        items, skipped = _extract_zip_members(zdata)
+    else:
+        total = 0
+        for f in files:
+            name = f.filename or "message.eml"
+            if not name.lower().endswith((".eml", ".msg")):
+                skipped.append(f"{name}: skipped (not .eml/.msg)")
+                continue
+            remaining = MAX_BULK_TOTAL_BYTES - total
+            if remaining <= 0:
+                skipped.append(f"{name}: skipped (batch exceeds total size limit)")
+                continue
+            try:
+                data = await _read_capped(f, min(MAX_EMAIL_BYTES, remaining))
+            except HTTPException:
+                skipped.append(f"{name}: skipped (exceeds size limit)")
+                continue
+            if not data:
+                skipped.append(f"{name}: skipped (empty file)")
+                continue
+            total += len(data)
+            items.append((name, data))
+
+    if not items:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No valid .eml/.msg files in the upload")
+
+    batch_id = uuid.uuid4()
+    parsed_items: list[tuple[str, dict, bytes, bool]] = []
+    errors: list[str] = []
+    for name, data in items:
+        data = repair_wrapped_export(data)
+        from_msg = False
+        if is_msg(data) or name.lower().endswith(".msg"):
+            try:
+                data = msg_to_eml_bytes(data)
+                from_msg = True
+                if name.lower().endswith(".msg"):
+                    name = name[:-4] + ".eml"
+            except Exception as e:
+                errors.append(f"{name}: could not parse .msg file ({e})")
+                continue
+        try:
+            parsed = parse_email(data)
+        except Exception as e:
+            errors.append(f"{name}: parse failed ({e})")
+            continue
+        parsed_items.append((name, parsed, data, from_msg))
+
+    # One live-DNS fetch per distinct claimed domain across the whole batch.
+    domains = {d for d in (_auth_check_domain(p) for _, p, _, _ in parsed_items) if d}
+    sem = asyncio.Semaphore(_AUTH_CONCURRENCY)
+
+    async def _fetch(domain: str) -> tuple[str, dict]:
+        async with sem:
+            try:
+                result = await asyncio.wait_for(fetch_domain_auth(domain, None), timeout=AUTH_VALIDATE_TIMEOUT)
+            except Exception:
+                result = {"domain": domain, "error": "Live DNS validation timed out or failed."}
+            return domain, result
+
+    domain_cache = dict(await asyncio.gather(*(_fetch(d) for d in domains))) if domains else {}
+
+    created: list[EmailAnalysis] = []
+    for name, parsed, data, from_msg in parsed_items:
+        domain = _auth_check_domain(parsed)
+        base = domain_cache.get(domain) if domain else None
+        auth_verified = None
+        if base is not None:
+            auth_verified = base if base.get("error") else {
+                **base, "ip_in_spf": evaluate_source_ip(base["spf"], parsed.get("origin_ip")),
+            }
+        verdict = score_email(parsed, auth_verified)
+
+        art_id, stored = _store_quarantine(incident_id, name, data)
+        db.add(Artifact(
+            id=art_id, incident_id=incident_id,
+            original_filename=name, stored_filename=stored,
+            file_size=len(data), mime_type="message/rfc822",
+            md5_hash=hashlib.md5(data).hexdigest(),
+            sha256_hash=hashlib.sha256(data).hexdigest(),
+            sha512_hash=hashlib.sha512(data).hexdigest(),
+            description=f"Source email: {parsed.get('subject') or '(no subject)'}",
+            analysis_status="pending", analysis_results={},
+            uploaded_by_id=user.id, uploaded_by=user.username,
+        ))
+        analysis = EmailAnalysis(
+            incident_id=incident_id, source_artifact_id=art_id, batch_id=batch_id,
+            subject=parsed.get("subject"), from_display=parsed.get("from_display"),
+            from_addr=parsed.get("from_addr"), reply_to=parsed.get("reply_to"),
+            return_path=parsed.get("return_path"), message_id=parsed.get("message_id"),
+            date_hdr=parsed.get("date_hdr"),
+            verdict=verdict["verdict"], score=verdict["score"], findings=verdict["findings"],
+            headers={
+                "hops": parsed.get("hops"), "auth": parsed.get("auth"),
+                "notable": parsed.get("notable_headers"),
+                "origin_ip": parsed.get("origin_ip"), "x_originating_ip": parsed.get("x_originating_ip"),
+            },
+            raw_headers=parsed.get("raw_headers"), auth_verified=auth_verified,
+            body_text=parsed.get("body_text"), body_html=parsed.get("body_html"),
+            urls=parsed.get("urls"), attachments=parsed.get("attachments"),
+            created_by_id=user.id, created_by=user.username,
+        )
+        db.add(analysis)
+        await db.flush()
+        created.append(analysis)
+
+    await write_audit(
+        db, "email_analyze_bulk", user_id=user.id, username=user.username,
+        resource_type="email_analysis", resource_id=str(batch_id), outcome="success",
+        details={"incident_id": str(incident_id), "batch_id": str(batch_id),
+                 "analyzed": len(created), "skipped": len(skipped), "errors": len(errors),
+                 "from_msg_count": sum(1 for *_, fm in parsed_items if fm)},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+
+    return EmailBulkAnalyzeOut(
+        batch_id=str(batch_id),
+        analyzed=[EmailAnalysisOut.model_validate(a) for a in created],
+        skipped=skipped, errors=errors,
+    )
 
 
 @router.get("/{incident_id}/email", response_model=EmailAnalysisList,

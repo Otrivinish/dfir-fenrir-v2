@@ -5,7 +5,10 @@ Supported formats:
   - EVTX             (Windows Event Log binary)
   - XML              (wevtutil / PowerShell XML export; same schema as EVTX records)
   - SQLite           (Chrome or Firefox browsing history)
-  - CSV / TSV
+  - CSV / TSV (generic, Microsoft Defender XDR "Evidence and response" export,
+               or Microsoft Entra ID exports -- Interactive/Non-interactive/
+               MSI/Application sign-ins with their Authentication Details,
+               and the Audit Log)
   - JSON / JSONL
   - syslog / auth.log (RFC 3164 BSD timestamps or ISO 8601 prefix)
   - journald JSON    (journalctl -o json or -o json-pretty)
@@ -199,6 +202,22 @@ def parse_artifact(filename: str, content: bytes) -> tuple[str, list[dict]]:
     if ext in (".db", ".sqlite", ".sqlite3"):
         return "sqlite", _parse_sqlite(content, filename)
     if ext in (".csv",):
+        if _looks_like_defender_evidence_csv(content):
+            return "defender_evidence_response", _parse_defender_evidence_csv(content)
+        if _looks_like_entra_signin_csv(content):
+            noninteractive = _is_entra_noninteractive_filename(filename)
+            fmt = "entra_noninteractive_signin" if noninteractive else "entra_signin"
+            return fmt, _parse_entra_signin_csv(content, interactive=not noninteractive)
+        if _looks_like_entra_authdetails_csv(content):
+            noninteractive = _is_entra_noninteractive_filename(filename)
+            fmt = "entra_noninteractive_authdetails" if noninteractive else "entra_authdetails"
+            return fmt, _parse_entra_authdetails_csv(content, interactive=not noninteractive)
+        if _looks_like_entra_svc_signin_csv(content):
+            kind = _entra_svc_signin_kind(filename)
+            fmt = "entra_msi_signin" if kind == "Managed Identity" else "entra_application_signin"
+            return fmt, _parse_entra_svc_signin_csv(content, kind=kind)
+        if _looks_like_entra_audit_csv(content):
+            return "entra_audit", _parse_entra_audit_csv(content)
         return "csv", _parse_csv(content)
     if ext in (".tsv",):
         return "csv", _parse_csv(content, dialect="tsv")
@@ -229,6 +248,22 @@ def parse_artifact(filename: str, content: bytes) -> tuple[str, list[dict]]:
 
     if snippet.lstrip().startswith(b"{") or snippet.lstrip().startswith(b"["):
         return _dispatch_json(content)
+    if _looks_like_defender_evidence_csv(content):
+        return "defender_evidence_response", _parse_defender_evidence_csv(content)
+    if _looks_like_entra_signin_csv(content):
+        noninteractive = _is_entra_noninteractive_filename(filename)
+        fmt = "entra_noninteractive_signin" if noninteractive else "entra_signin"
+        return fmt, _parse_entra_signin_csv(content, interactive=not noninteractive)
+    if _looks_like_entra_authdetails_csv(content):
+        noninteractive = _is_entra_noninteractive_filename(filename)
+        fmt = "entra_noninteractive_authdetails" if noninteractive else "entra_authdetails"
+        return fmt, _parse_entra_authdetails_csv(content, interactive=not noninteractive)
+    if _looks_like_entra_svc_signin_csv(content):
+        kind = _entra_svc_signin_kind(filename)
+        fmt = "entra_msi_signin" if kind == "Managed Identity" else "entra_application_signin"
+        return fmt, _parse_entra_svc_signin_csv(content, kind=kind)
+    if _looks_like_entra_audit_csv(content):
+        return "entra_audit", _parse_entra_audit_csv(content)
     try:
         return "csv", _parse_csv(content)
     except Exception:
@@ -862,6 +897,476 @@ def _dispatch_json(content: bytes) -> tuple[str, list[dict]]:
 
 
 # ─── CSV / TSV ────────────────────────────────────────────────────────────────
+
+def _looks_like_defender_evidence_csv(content: bytes) -> bool:
+    """Sniff the header row for Microsoft Defender XDR's incident 'Evidence
+    and response' tab export -- a fixed CSV shape distinct from Advanced
+    Hunting / other Defender exports, so it needs its own field mapping
+    rather than the generic heuristic column matcher."""
+    try:
+        first_line = content[:2048].decode("utf-8-sig", errors="replace").splitlines()[0]
+        header = {h.strip().lower() for h in next(csv.reader(io.StringIO(first_line)))}
+    except Exception:
+        return False
+    return _DEFENDER_EVIDENCE_HEADER.issubset(header)
+
+
+_DEFENDER_EVIDENCE_HEADER = {"first seen", "entity", "entity type", "verdict", "detection origin"}
+_DEFENDER_SUSPICIOUS_VERDICTS = {"suspicious", "malicious"}
+
+
+def _parse_defender_evidence_csv(content: bytes) -> list[dict]:
+    try:
+        text = content.decode("utf-8-sig", errors="replace")
+    except Exception as e:
+        raise ValueError(f"Could not decode CSV: {e}")
+
+    reader = csv.DictReader(io.StringIO(text))
+    results: list[dict] = []
+    for row in reader:
+        if len(results) >= MAX_EVENTS:
+            break
+        ev = _defender_row_to_event(row)
+        if ev:
+            results.append(ev)
+    return results
+
+
+def _defender_row_to_event(row: dict) -> Optional[dict]:
+    if not row:
+        return None
+    # Defender's own header names have spaces, so the generic _first()/_TS_COL
+    # heuristics never match them -- map the fixed columns directly instead.
+    lower = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+
+    event_time  = _try_parse_ts(lower.get("first seen"))
+    entity      = lower.get("entity") or ""
+    entity_type = lower.get("entity type") or "Entity"
+    verdict     = lower.get("verdict") or ""
+    remediation = lower.get("remediation status") or ""
+    impacted    = lower.get("impacted assets") or ""
+    origin      = lower.get("detection origin") or ""
+    threats     = lower.get("threats") or ""
+
+    desc_parts = [f"{entity_type}: {entity or '(unnamed)'}"]
+    if verdict:
+        desc_parts.append(verdict)
+    if remediation:
+        desc_parts.append(remediation)
+    if origin:
+        desc_parts.append(f"via {origin}")
+    if threats:
+        desc_parts.append(f"[{threats}]")
+    description = " — ".join(desc_parts)[:512]
+    if not description:
+        return None
+
+    suspicious = verdict.lower() in _DEFENDER_SUSPICIOUS_VERDICTS
+    suspicious_reasons = [f"Defender verdict: {verdict}"] if suspicious else []
+
+    raw_log = json.dumps(row, ensure_ascii=False, default=str)[:MAX_RAW_CHARS]
+
+    return _make_event(
+        event_time=event_time,
+        hostname=impacted[:512] or None,
+        source="Microsoft Defender — Evidence and Response",
+        event_type=entity_type,
+        description=description,
+        raw_log=raw_log,
+        suspicious=suspicious,
+        suspicious_reasons=suspicious_reasons,
+    )
+
+
+# ─── Microsoft Entra ID sign-in log exports ─────────────────────────────────
+# Covers all six CSV downloads offered from Entra admin center -> Sign-in
+# logs: Interactive / Non-interactive / Managed Identity (MSI) / Application
+# sign-ins, each of the first two with an optional "Authentication Details"
+# companion export. Several of these share an *identical* header with their
+# sibling (verified against real exports of all six) -- there is no column
+# that says which one a file is, so each pair is told apart by filename
+# ("InteractiveSignIns..." vs "NonInteractiveSignIns...", "MSISignIns..." vs
+# "ApplicationSignIns...").
+
+_ENTRA_SIGNIN_HEADER = {"date (utc)", "request id", "correlation id",
+                         "conditional access", "resource tenant id", "user id"}
+_ENTRA_AUTHDETAILS_HEADER = {"request id", "date", "authentication method",
+                              "succeeded", "result detail"}
+_ENTRA_SVC_SIGNIN_HEADER = {"date (utc)", "request id", "correlation id",
+                             "service principal id", "service principal name",
+                             "credential key id"}
+# "Interrupted" (e.g. an MFA prompt abandoned mid-flow) is not a hard failure
+# but is exactly the kind of partial-auth signal worth an analyst's attention
+# in a compromise investigation, not just outright "Failure".
+_ENTRA_SUSPICIOUS_STATUSES = {"failure", "interrupted"}
+# Entra's own non-interactive/MSI/Application sign-in exports routinely run to
+# 100k+ rows for a single month on one tenant (verified against real 100k-row
+# exports) -- MAX_EVENTS=2000 would silently drop the vast majority of them,
+# including most of the handful of genuine failures buried in that volume,
+# which is the whole point of importing this log in the first place. Cap
+# *normal* rows at a much higher number but never drop a suspicious/failed one
+# just because the export is large; the separate suspicious ceiling is a
+# purely defensive backstop against a pathological file, not expected to ever
+# bind on a real export.
+_ENTRA_MAX_NORMAL_EVENTS = 20_000
+_ENTRA_MAX_SUSPICIOUS_EVENTS = 50_000
+
+
+def _entra_cap_events(rows, row_to_event) -> list[dict]:
+    results: list[dict] = []
+    kept_normal = kept_suspicious = 0
+    for row in rows:
+        ev = row_to_event(row)
+        if not ev:
+            continue
+        if ev["suspicious"]:
+            if kept_suspicious >= _ENTRA_MAX_SUSPICIOUS_EVENTS:
+                continue
+            kept_suspicious += 1
+        else:
+            if kept_normal >= _ENTRA_MAX_NORMAL_EVENTS:
+                continue
+            kept_normal += 1
+        results.append(ev)
+    return results
+
+
+def _is_entra_noninteractive_filename(filename: str) -> bool:
+    return "noninteractive" in re.sub(r"[^a-z]", "", filename.lower())
+
+
+def _entra_svc_signin_kind(filename: str) -> str:
+    return "Managed Identity" if "msisignins" in re.sub(r"[^a-z]", "", filename.lower()) else "Application"
+
+
+def _looks_like_entra_signin_csv(content: bytes) -> bool:
+    """Sniff the header row for a Microsoft Entra ID sign-ins export (Entra
+    admin center -> Sign-in logs -> Download -> CSV; Interactive or
+    Non-interactive). Its heuristic-defeating quirks: column names have
+    spaces ("Date (UTC)"), several have stray trailing/doubled spaces
+    ("Application ID ", "Autonomous system  number"), and the header has a
+    genuine *duplicate* column ("Incoming token type" appears twice -- Entra
+    emits it once for the primary auth step and once for a federation/token-
+    issuer step). None of those break `csv.DictReader` (it just keeps the
+    later "Incoming token type" value under that key), but they do defeat the
+    generic column-name heuristics in `_row_to_event`, which is why this
+    export needs its own mapping like the Defender CSV above."""
+    try:
+        first_line = content[:4096].decode("utf-8-sig", errors="replace").splitlines()[0]
+        header = {h.strip().lower() for h in next(csv.reader(io.StringIO(first_line)))}
+    except Exception:
+        return False
+    return _ENTRA_SIGNIN_HEADER.issubset(header)
+
+
+def _looks_like_entra_authdetails_csv(content: bytes) -> bool:
+    """Sniff the header row for a Microsoft Entra ID "Authentication Details"
+    export -- the per-step companion to a sign-in export (one sign-in's
+    Request ID can have several rows here, one per auth method/step:
+    password, MFA push, etc.)."""
+    try:
+        first_line = content[:4096].decode("utf-8-sig", errors="replace").splitlines()[0]
+        header = {h.strip().lower() for h in next(csv.reader(io.StringIO(first_line)))}
+    except Exception:
+        return False
+    return _ENTRA_AUTHDETAILS_HEADER.issubset(header)
+
+
+def _looks_like_entra_svc_signin_csv(content: bytes) -> bool:
+    """Sniff the header row for a Microsoft Entra ID "Managed Identity" or
+    "Application" (service principal) sign-in export -- same report family as
+    the interactive/non-interactive ones, but for non-human identities, so it
+    has no User/Username column at all, only Service principal ID/name."""
+    try:
+        first_line = content[:4096].decode("utf-8-sig", errors="replace").splitlines()[0]
+        header = {h.strip().lower() for h in next(csv.reader(io.StringIO(first_line)))}
+    except Exception:
+        return False
+    return _ENTRA_SVC_SIGNIN_HEADER.issubset(header)
+
+
+def _parse_entra_signin_csv(content: bytes, *, interactive: bool = True) -> list[dict]:
+    try:
+        text = content.decode("utf-8-sig", errors="replace")
+    except Exception as e:
+        raise ValueError(f"Could not decode CSV: {e}")
+    reader = csv.DictReader(io.StringIO(text))
+    return _entra_cap_events(reader, lambda row: _entra_signin_row_to_event(row, interactive=interactive))
+
+
+def _parse_entra_authdetails_csv(content: bytes, *, interactive: bool = True) -> list[dict]:
+    try:
+        text = content.decode("utf-8-sig", errors="replace")
+    except Exception as e:
+        raise ValueError(f"Could not decode CSV: {e}")
+    reader = csv.DictReader(io.StringIO(text))
+    return _entra_cap_events(reader, lambda row: _entra_authdetails_row_to_event(row, interactive=interactive))
+
+
+def _parse_entra_svc_signin_csv(content: bytes, *, kind: str) -> list[dict]:
+    try:
+        text = content.decode("utf-8-sig", errors="replace")
+    except Exception as e:
+        raise ValueError(f"Could not decode CSV: {e}")
+    reader = csv.DictReader(io.StringIO(text))
+    return _entra_cap_events(reader, lambda row: _entra_svc_signin_row_to_event(row, kind=kind))
+
+
+def _entra_authdetails_row_to_event(row: dict, *, interactive: bool = True) -> Optional[dict]:
+    if not row:
+        return None
+    lower = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+
+    event_time = _try_parse_ts(lower.get("date"))
+    method     = lower.get("authentication method") or "authentication step"
+    detail     = lower.get("authentication method detail") or ""
+    succeeded  = (lower.get("succeeded") or "").lower() == "true"
+    result     = lower.get("result detail") or ""
+
+    desc_parts = [method + (f" ({detail})" if detail else "")]
+    desc_parts.append("succeeded" if succeeded else "FAILED")
+    if result:
+        desc_parts.append(result)
+    description = " — ".join(desc_parts)[:512]
+
+    kind = "Interactive" if interactive else "Non-interactive"
+    raw_log = json.dumps(row, ensure_ascii=False, default=str)[:MAX_RAW_CHARS]
+
+    return _make_event(
+        event_time=event_time,
+        # No user/device identifier lives in this export -- only a Request ID
+        # GUID linking back to the parent sign-in row in a *different* file,
+        # which this row-by-row importer has no way to cross-reference.
+        hostname=None,
+        source=f"Microsoft Entra ID — {kind} Sign-in Auth Details",
+        event_type="auth_step" if succeeded else "auth_step_failed",
+        description=description,
+        raw_log=raw_log,
+        suspicious=not succeeded,
+        suspicious_reasons=["Authentication step failed"] if not succeeded else [],
+    )
+
+
+def _entra_signin_row_to_event(row: dict, *, interactive: bool = True) -> Optional[dict]:
+    if not row:
+        return None
+    lower = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+
+    event_time  = _try_parse_ts(lower.get("date (utc)"))
+    user        = lower.get("user") or ""
+    username    = lower.get("username") or ""
+    application = lower.get("application") or ""
+    ip          = lower.get("ip address") or ""
+    location    = lower.get("location") or ""
+    status      = lower.get("status") or ""
+    # "Failure reason" carries a meaningless "Other." placeholder on plenty of
+    # *successful* sign-ins too (verified against a real export) -- only
+    # treat it as signal when the sign-in actually failed.
+    failure     = lower.get("failure reason") or ""
+    mfa_result  = lower.get("multifactor authentication result") or ""
+    os_         = lower.get("operating system") or ""
+    browser     = lower.get("browser") or ""
+    compliant   = lower.get("compliant") or ""
+    managed     = lower.get("managed") or ""
+    flagged     = lower.get("flagged for review") or ""
+
+    who = f"{user} ({username})" if user and username and user != username else (username or user)
+    if not who:
+        return None
+
+    desc_parts = [f"{who} → {application or 'Entra ID'}"]
+    if ip:
+        desc_parts.append(f"from {ip}" + (f" ({location})" if location else ""))
+    desc_parts.append(status or "unknown status")
+    if status.lower() in _ENTRA_SUSPICIOUS_STATUSES and failure and failure != "Other.":
+        desc_parts.append(failure)
+    if mfa_result:
+        desc_parts.append(f"MFA: {mfa_result}")
+    device_bits = " / ".join(b for b in [os_, browser] if b)
+    if device_bits:
+        flags = [f for f, v in (("compliant", compliant), ("managed", managed)) if v.lower() == "true"]
+        desc_parts.append(device_bits + (f" ({', '.join(flags)})" if flags else ""))
+    description = " — ".join(desc_parts)[:512]
+
+    suspicious = status.lower() in _ENTRA_SUSPICIOUS_STATUSES or flagged.lower() == "true"
+    suspicious_reasons = []
+    if status.lower() in _ENTRA_SUSPICIOUS_STATUSES:
+        suspicious_reasons.append(f"Sign-in status: {status}")
+    if flagged.lower() == "true":
+        suspicious_reasons.append("Flagged for review")
+
+    raw_log = json.dumps(row, ensure_ascii=False, default=str)[:MAX_RAW_CHARS]
+    kind = "Interactive" if interactive else "Non-interactive"
+    type_prefix = "signin" if interactive else "noninteractive_signin"
+
+    return _make_event(
+        event_time=event_time,
+        hostname=username or user or None,
+        source=f"Microsoft Entra ID — {kind} Sign-in",
+        event_type=f"{type_prefix}_{status.lower()}" if status else type_prefix,
+        description=description,
+        raw_log=raw_log,
+        suspicious=suspicious,
+        suspicious_reasons=suspicious_reasons,
+    )
+
+
+def _entra_svc_signin_row_to_event(row: dict, *, kind: str) -> Optional[dict]:
+    if not row:
+        return None
+    lower = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+
+    event_time  = _try_parse_ts(lower.get("date (utc)"))
+    principal   = lower.get("service principal name") or lower.get("service principal id") or ""
+    application = lower.get("application") or ""
+    resource    = lower.get("resource") or ""
+    ip          = lower.get("ip address") or ""
+    location    = lower.get("location") or ""
+    status      = lower.get("status") or ""
+    failure     = lower.get("failure reason") or ""
+
+    if not principal:
+        return None
+
+    desc_parts = [f"{principal} ({kind.lower()}) → {application or 'Entra ID'}"]
+    if resource and resource != application:
+        desc_parts.append(f"via {resource}")
+    if ip:
+        desc_parts.append(f"from {ip}" + (f" ({location})" if location else ""))
+    desc_parts.append(status or "unknown status")
+    if status.lower() in _ENTRA_SUSPICIOUS_STATUSES and failure and failure != "Other.":
+        desc_parts.append(failure)
+    description = " — ".join(desc_parts)[:512]
+
+    suspicious = status.lower() in _ENTRA_SUSPICIOUS_STATUSES
+    suspicious_reasons = [f"Sign-in status: {status}"] if suspicious else []
+
+    raw_log = json.dumps(row, ensure_ascii=False, default=str)[:MAX_RAW_CHARS]
+
+    return _make_event(
+        event_time=event_time,
+        hostname=principal or None,
+        source=f"Microsoft Entra ID — {kind} Sign-in",
+        event_type=f"{kind.lower().replace(' ', '_')}_signin_{status.lower()}" if status else "svc_signin",
+        description=description,
+        raw_log=raw_log,
+        suspicious=suspicious,
+        suspicious_reasons=suspicious_reasons,
+    )
+
+
+# ─── Microsoft Entra ID Audit Log export ────────────────────────────────────
+# A different shape from the sign-in exports above: 86 columns, one row per
+# directory-change event (not an authentication attempt), with up to 3 sparse
+# "TargetN" objects (each up to 5 modified properties) and up to 6
+# "AdditionalDetailN" key/value pairs -- most cells in most rows are empty,
+# which is normal for this format's schema, not a parsing problem.
+
+_ENTRA_AUDIT_HEADER = {"date (utc)", "correlationid", "service", "category",
+                        "activity", "result", "actortype"}
+# Verified against a real 177,648-row/1-month export: ProvisioningManagement
+# (HR/app sync connector activity) alone is 91.6% of all rows and 97.1% of all
+# "Failure" results in it -- almost entirely routine sync/connector errors,
+# not security signal. Excluding it from "suspicious" keeps that flag
+# meaningful instead of drowning the analyst in sync noise; it still gets
+# imported, just capped much harder than every other category (below).
+_ENTRA_AUDIT_NOISY_CATEGORY = "provisioningmanagement"
+_ENTRA_AUDIT_FAILURE_RESULTS = {"failure", "clienterror"}
+_ENTRA_AUDIT_MAX_NOISY_EVENTS = 500
+_ENTRA_AUDIT_MAX_NORMAL_EVENTS = 20_000
+_ENTRA_AUDIT_MAX_SUSPICIOUS_EVENTS = 50_000
+
+
+def _looks_like_entra_audit_csv(content: bytes) -> bool:
+    try:
+        first_line = content[:4096].decode("utf-8-sig", errors="replace").splitlines()[0]
+        header = {h.strip().lower() for h in next(csv.reader(io.StringIO(first_line)))}
+    except Exception:
+        return False
+    return _ENTRA_AUDIT_HEADER.issubset(header)
+
+
+def _parse_entra_audit_csv(content: bytes) -> list[dict]:
+    try:
+        text = content.decode("utf-8-sig", errors="replace")
+    except Exception as e:
+        raise ValueError(f"Could not decode CSV: {e}")
+    reader = csv.DictReader(io.StringIO(text))
+
+    results: list[dict] = []
+    kept_noisy = kept_normal = kept_suspicious = 0
+    for row in reader:
+        ev = _entra_audit_row_to_event(row)
+        if not ev:
+            continue
+        category = (row.get("Category") or "").strip().lower()
+        if ev["suspicious"]:
+            if kept_suspicious >= _ENTRA_AUDIT_MAX_SUSPICIOUS_EVENTS:
+                continue
+            kept_suspicious += 1
+        elif category == _ENTRA_AUDIT_NOISY_CATEGORY:
+            if kept_noisy >= _ENTRA_AUDIT_MAX_NOISY_EVENTS:
+                continue
+            kept_noisy += 1
+        else:
+            if kept_normal >= _ENTRA_AUDIT_MAX_NORMAL_EVENTS:
+                continue
+            kept_normal += 1
+        results.append(ev)
+    return results
+
+
+def _entra_audit_row_to_event(row: dict) -> Optional[dict]:
+    if not row:
+        return None
+    lower = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+
+    event_time = _try_parse_ts(lower.get("date (utc)"))
+    actor = (lower.get("actordisplayname") or lower.get("actoruserprincipalname")
+             or lower.get("actorserviceprincipalname") or lower.get("actortype") or "Unknown actor")
+    activity = lower.get("activity") or "Unknown activity"
+    category = lower.get("category") or ""
+    result   = lower.get("result") or ""
+    # Real "ResultReason" text can be a multi-hundred-character SCIM/connector
+    # error blob with embedded newlines -- flatten and cap it so the
+    # description stays one readable line; the full text is still in raw_log.
+    reason   = (lower.get("resultreason") or "").replace("\r", " ").replace("\n", " ")
+    ip       = lower.get("ipaddress") or ""
+
+    targets = []
+    for i in (1, 2, 3):
+        name = lower.get(f"target{i}displayname") or lower.get(f"target{i}userprincipalname")
+        ttype = lower.get(f"target{i}type")
+        if name:
+            targets.append(f"{ttype}: {name}" if ttype else name)
+
+    desc_parts = [f"{actor} → {activity}"]
+    if targets:
+        desc_parts.append("on " + ", ".join(targets))
+    if ip:
+        desc_parts.append(f"from {ip}")
+    desc_parts.append(result or "unknown result")
+    if result.lower() in _ENTRA_AUDIT_FAILURE_RESULTS and reason:
+        desc_parts.append(reason[:200])
+    description = " — ".join(desc_parts)[:512]
+
+    suspicious = (result.lower() in _ENTRA_AUDIT_FAILURE_RESULTS
+                  and category.lower() != _ENTRA_AUDIT_NOISY_CATEGORY)
+    suspicious_reasons = [f"Audit result: {result}"] if suspicious else []
+
+    raw_log = json.dumps(row, ensure_ascii=False, default=str)[:MAX_RAW_CHARS]
+
+    return _make_event(
+        event_time=event_time,
+        hostname=actor or None,
+        source="Microsoft Entra ID — Audit Log",
+        event_type=f"audit_{category.lower()}" if category else "audit",
+        description=description,
+        raw_log=raw_log,
+        suspicious=suspicious,
+        suspicious_reasons=suspicious_reasons,
+    )
+
 
 def _parse_csv(content: bytes, dialect: str = "auto") -> list[dict]:
     try:

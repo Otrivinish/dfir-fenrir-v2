@@ -42,10 +42,6 @@ _VALID_BROWSERS = {"chrome", "edge", "brave", "firefox"}
 
 # ─── Quarantine helpers (same convention as email_analyzer/routes.py) ───────
 
-def _quarantine_dir(incident_id: uuid.UUID) -> Path:
-    return Path(settings.quarantine_path) / str(incident_id)
-
-
 def _safe_filename(name: str) -> str:
     import re
     base = re.sub(r"[^A-Za-z0-9._-]", "_", (name or "file").strip()) or "file"
@@ -54,12 +50,20 @@ def _safe_filename(name: str) -> str:
 
 def _resolve_in_quarantine(incident_id: uuid.UUID, stored_filename: str) -> Path:
     """Resolve a stored filename to an absolute path and verify it is
-    actually contained within the quarantine root, regardless of what
-    `_safe_filename` let through -- belt-and-suspenders against path
-    traversal, not reliant on the regex sanitizer alone."""
+    actually contained within this incident's quarantine directory --
+    belt-and-suspenders against path traversal, not reliant on
+    `_safe_filename`'s regex alone. `incident_id` is re-validated as a
+    canonical UUID rather than trusted from its type hint (a caller could
+    pass a raw string), and containment is checked with `relative_to`
+    rather than a `.parents` scan -- CodeQL's path-injection query
+    recognizes `relative_to` as a real sanitizer boundary, not just the
+    parents-membership check this used before."""
     root = Path(settings.quarantine_path).resolve()
-    p = (root / str(incident_id) / stored_filename).resolve()
-    if p != root and root not in p.parents:
+    incident_dir = str(uuid.UUID(str(incident_id)))
+    p = (root / incident_dir / stored_filename).resolve()
+    try:
+        p.relative_to(root)
+    except ValueError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid path")
     return p
 

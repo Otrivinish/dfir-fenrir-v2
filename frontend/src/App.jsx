@@ -45,7 +45,7 @@ import EvidenceAuditChain from './pages/incident/evidence/AuditChain.jsx'
 import EvidenceExport from './pages/incident/evidence/Export.jsx'
 import EvidenceSOP from './pages/incident/evidence/SOP.jsx'
 import Forensic from './pages/incident/Forensic.jsx'
-import IOCs from './pages/incident/forensic/IOCs.jsx'
+import IOCs from './pages/incident/IOCs.jsx'
 import Detections from './pages/incident/forensic/Detections.jsx'
 import Attribution from './pages/incident/forensic/Attribution.jsx'
 import LOLBins from './pages/incident/forensic/LOLBins.jsx'
@@ -54,6 +54,7 @@ import EmailAnalyzer from './pages/incident/forensic/EmailAnalyzer.jsx'
 import WebBrowserHistory from './pages/incident/forensic/WebBrowserHistory.jsx'
 import Sandbox from './pages/incident/forensic/Sandbox.jsx'
 import TimelineImport from './pages/incident/forensic/TimelineImport.jsx'
+import DefenderPdfImport from './pages/incident/forensic/DefenderPdfImport.jsx'
 import OSINTLookup from './pages/incident/forensic/OSINT.jsx'
 import Ransomware from './pages/incident/forensic/Ransomware.jsx'
 import Artifacts from './pages/incident/forensic/Artifacts.jsx'
@@ -136,6 +137,7 @@ export default function App() {
                 <Route path="details"         element={<Details />} />
                 <Route path="playbook"        element={<Playbook />} />
                 <Route path="timeline"        element={<Timeline />} />
+                <Route path="iocs"            element={<IOCs />} />
                 <Route path="entities"        element={<Entities />} />
                 <Route path="files"           element={<Files />} />
                 <Route path="notes"           element={<Notes />} />
@@ -148,8 +150,7 @@ export default function App() {
                   <Route path="sop"          element={<EvidenceSOP />} />
                 </Route>
                 <Route path="forensic" element={<Forensic />}>
-                  <Route index               element={<Navigate to="iocs" replace />} />
-                  <Route path="iocs"         element={<IOCs />} />
+                  <Route index               element={<Navigate to="detections" replace />} />
                   <Route path="detections"   element={<Detections />} />
                   <Route path="attribution"  element={<Attribution />} />
                   <Route path="lolbins"      element={<LOLBins />} />
@@ -158,6 +159,7 @@ export default function App() {
                   <Route path="web-browser"  element={<WebBrowserHistory />} />
                   <Route path="sandbox"          element={<Sandbox />} />
                   <Route path="timeline-import" element={<TimelineImport />} />
+                  <Route path="defender-pdf" element={<DefenderPdfImport />} />
                   <Route path="osint"           element={<OSINTLookup />} />
                   <Route path="ransomware"      element={<Ransomware />} />
                   <Route path="artifacts"      element={<Artifacts />} />

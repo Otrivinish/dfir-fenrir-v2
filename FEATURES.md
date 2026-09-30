@@ -110,7 +110,9 @@
 - Per-incident coverage matrix (12 tactics, observed vs gaps, technique pills)
 
 ### Email analyzer
-- Offline phishing triage (`.msg`/RFC-822 parsing → Artifact/IOC/Timeline/Evidence)
+- Phishing triage, single-message or bulk (`.msg`/RFC-822 parsing, `.zip` batch
+  import → Artifact/IOC/Timeline/Evidence); full raw headers, Safelink
+  unwrapping, live SPF/DMARC/DKIM cross-check against the header's own claim
 
 ## Response & recovery
 

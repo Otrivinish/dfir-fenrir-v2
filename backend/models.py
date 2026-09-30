@@ -193,6 +193,7 @@ class EmailAnalysis(Base):
                                nullable=False, index=True)
     source_artifact_id = Column(UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
     evidence_id        = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
+    batch_id           = Column(UUID(as_uuid=True), nullable=True, index=True)  # groups a bulk-import run
 
     subject       = Column(Text)
     from_display  = Column(String(512))
@@ -206,6 +207,10 @@ class EmailAnalysis(Base):
     score     = Column(Integer, nullable=False, default=0)          # 0–100
     findings  = Column(JSON, nullable=False, default=list)          # [{code,severity,title,detail,layer,points}]
     headers   = Column(JSON, nullable=False, default=dict)          # hops + auth + notable header map
+    raw_headers   = Column(Text, nullable=True)                     # full verbatim header block
+    auth_verified = Column(JSON, nullable=True)                     # live SPF/DMARC/DKIM cross-check vs. the header's own claim
+    body_text = Column(Text, nullable=True)                         # plain-text body, for the UI preview
+    body_html = Column(Text, nullable=True)                         # SANITIZED html body only -- never raw attacker HTML
     urls      = Column(JSON, nullable=False, default=list)          # [{url,defanged,host,display_text,promoted_ioc_id?}]
     attachments = Column(JSON, nullable=False, default=list)        # [{filename,declared_type,true_type,size,md5,sha256,entropy,flags,artifact_id?}]
 
@@ -1400,6 +1405,32 @@ class ForensicImport(Base):
 
     uploaded_by_id    = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     uploaded_by       = Column(String(64))                  # denormalised username
+    uploaded_at       = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+
+
+class DefenderPdfImport(Base):
+    __tablename__ = "defender_pdf_imports"
+
+    id                = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id       = Column(UUID(as_uuid=True),
+                               ForeignKey("incidents.id", ondelete="CASCADE"),
+                               nullable=False, index=True)
+
+    filename            = Column(String(512), nullable=False)
+    file_size           = Column(Integer, nullable=False)
+    sha256_hash         = Column(String(64), nullable=False)
+    source_artifact_id  = Column(UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
+
+    candidate_count       = Column(Integer, nullable=False, default=0)
+    low_confidence_count  = Column(Integer, nullable=False, default=0)
+
+    # {"Severity": ..., "Status": ..., "title": ..., ...} -- display-only
+    # incident metadata, and the parsed candidates keyed to DefenderPdfCandidate.
+    incident_meta     = Column(JSON, nullable=False, default=dict)
+    candidates        = Column(JSON, nullable=False, default=list)
+
+    uploaded_by_id    = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    uploaded_by       = Column(String(64))
     uploaded_at       = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
 
 
