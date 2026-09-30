@@ -1,19 +1,31 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { formatLocal, isoToZonedParts, zonedPartsToIso } from '../lib/datetime.js'
 import { getStoredTz } from '../lib/timezone.js'
 
+// THE date+time entry component (UX standard — see CLAUDE.md "Date/time entry
+// standard"). Use it for every date+time field; don't add another one.
+//
 // Datetime entry in the user's stored (Fenrir) timezone, offset visible — the
-// same zone + format used when rendering times elsewhere. A read-only trigger
+// same zone + format used when rendering times elsewhere. `utc` switches entry
+// and display to UTC (+00:00) for filters over data that is itself shown in UTC. A read-only trigger
 // opens a calendar-grid + time popup; the emitted `onChange` value is canonical
 // UTC ISO-8601 (`…Z`), so storage/transmit stay UTC.
 //
-// Contract matches UtcDateTimeInput so it is a drop-in swap:
+// Contract:
 //   value:    canonical ISO string (`…Z`) or ''
-//   onChange: receives a canonical ISO string for a valid pick
+//   onChange: receives a canonical ISO string for a valid pick ('' on Clear)
+//
+// The popup is portalled to <body> and pinned to the viewport next to the
+// trigger (flipping above it when there's no room below), so it never needs
+// the surrounding modal / page to be scrolled to reach the time row + Done.
+
+const POPUP_W = 268
+const GAP = 4
+const MARGIN = 8
 
 const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
 
-function nowParts() { return isoToZonedParts(new Date().toISOString()) }
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)) }
 function daysInMonth(y, mo) { return new Date(Date.UTC(y, mo, 0)).getUTCDate() }
 // Monday-first weekday index (0=Mon … 6=Sun) of the 1st of the month.
@@ -25,23 +37,34 @@ export default function LocalDateTimePicker({
   onChange,
   required = false,
   disabled = false,
+  clearable = false,
+  utc = false,
+  hint = true,
+  placeholder = 'YYYY-MM-DD HH:mm:ss',
 }) {
+  const tz = utc ? 'UTC' : getStoredTz()
+  const nowParts = () => isoToZonedParts(new Date().toISOString(), tz)
   const [open, setOpen] = useState(false)
-  const [parts, setParts] = useState(() => isoToZonedParts(value) || nowParts())
+  const [pos, setPos] = useState(null)
+  const popupRef = useRef(null)
+  const [parts, setParts] = useState(() => isoToZonedParts(value, tz) || nowParts())
   const [view, setView] = useState(() => ({ y: parts.y, mo: parts.mo }))
   const wrapRef = useRef(null)
 
   // Mirror external value changes while the popup is closed.
   useEffect(() => {
     if (open) return
-    const p = isoToZonedParts(value)
+    const p = isoToZonedParts(value, tz)
     if (p) { setParts(p); setView({ y: p.y, mo: p.mo }) }
-  }, [value, open])
+  }, [value, open, tz])
 
   // Close on outside-click / Escape while open.
   useEffect(() => {
     if (!open) return
-    const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false) }
+    const onDown = (e) => {
+      if (wrapRef.current?.contains(e.target) || popupRef.current?.contains(e.target)) return
+      setOpen(false)
+    }
     const onKey = (e) => { if (e.key === 'Escape') setOpen(false) }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
@@ -51,9 +74,35 @@ export default function LocalDateTimePicker({
     }
   }, [open])
 
+  // Pin the popup to the viewport beside the trigger; re-place on scroll/resize.
+  useLayoutEffect(() => {
+    if (!open) { setPos(null); return }
+    const place = () => {
+      const trigger = wrapRef.current?.querySelector('button')
+      const popup = popupRef.current
+      if (!trigger || !popup) return
+      const r = trigger.getBoundingClientRect()
+      const h = popup.offsetHeight
+      const vh = window.innerHeight, vw = window.innerWidth
+      let top = r.bottom + GAP
+      if (top + h > vh - MARGIN) {
+        top = r.top - GAP - h >= MARGIN ? r.top - GAP - h : Math.max(MARGIN, vh - MARGIN - h)
+      }
+      const left = Math.min(Math.max(MARGIN, r.left), Math.max(MARGIN, vw - MARGIN - POPUP_W))
+      setPos({ top, left })
+    }
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [open])
+
   const commit = (next) => {
     setParts(next)
-    const iso = zonedPartsToIso(next)
+    const iso = zonedPartsToIso(next, tz)
     if (iso) onChange(iso)
   }
 
@@ -66,7 +115,7 @@ export default function LocalDateTimePicker({
   }
   const setNow = () => {
     const iso = new Date().toISOString()
-    const p = isoToZonedParts(iso)
+    const p = isoToZonedParts(iso, tz)
     setParts(p); setView({ y: p.y, mo: p.mo })
     onChange(iso)
   }
@@ -88,7 +137,7 @@ export default function LocalDateTimePicker({
   const isSelected = (d) =>
     d === parts.d && view.y === parts.y && view.mo === parts.mo
 
-  const display = value ? formatLocal(value) : ''
+  const display = value ? formatLocal(value, tz) : ''
   const monthLabel = `${view.y}-${String(view.mo).padStart(2, '0')}`
 
   return (
@@ -101,26 +150,33 @@ export default function LocalDateTimePicker({
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => !disabled && setOpen(o => !o)}
+        title={display || placeholder}
+        aria-label={id ? undefined : (display || placeholder)}
         style={{
           width: '100%', textAlign: 'left', cursor: disabled ? 'default' : 'pointer',
-          fontFamily: 'var(--font-mono)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+          display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+          whiteSpace: 'nowrap', overflow: 'hidden',
           color: display ? 'var(--text)' : 'var(--dim)',
         }}
       >
-        <span style={{ fontSize: 13 }} aria-hidden="true">🗓</span>
-        <span>{display || 'YYYY-MM-DD HH:mm:ss'}</span>
+        <span style={{ fontSize: '0.95em', flexShrink: 0 }} aria-hidden="true">🗓</span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.93em', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {display || placeholder}
+        </span>
       </button>
-      <div className="field-hint">{getStoredTz()} · 24-hour · offset shown</div>
+      {hint && <div className="field-hint">{tz} · 24-hour · offset shown</div>}
 
-      {open && (
+      {open && createPortal(
         <div
+          ref={popupRef}
           role="dialog"
           aria-label="Pick date and time"
           style={{
-            position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 50,
+            position: 'fixed', top: pos?.top ?? 0, left: pos?.left ?? 0, zIndex: 1000,
+            visibility: pos ? 'visible' : 'hidden',
             background: 'var(--surface)', border: '1px solid var(--border-strong)',
             borderRadius: 'var(--radius)', boxShadow: 'var(--shadow)',
-            padding: 'var(--space-3)', width: 268,
+            padding: 'var(--space-3)', width: POPUP_W,
           }}
         >
           {/* month nav */}
@@ -183,14 +239,19 @@ export default function LocalDateTimePicker({
             marginTop: 'var(--space-2)', fontFamily: 'var(--font-mono)', fontSize: 11,
             color: 'var(--muted)', wordBreak: 'break-word',
           }}>
-            {value ? formatLocal(value) : '—'}
+            {value ? formatLocal(value, tz) : '—'}
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--space-2)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', marginTop: 'var(--space-2)' }}>
+            {clearable && (
+              <button type="button" className="btn-link" onClick={() => { onChange(''); setOpen(false) }}
+                style={{ fontSize: 11 }}>Clear</button>
+            )}
             <button type="button" className="btn primary" onClick={() => setOpen(false)}
-              style={{ fontSize: 11, padding: '3px 12px' }}>Done</button>
+              style={{ fontSize: 11, padding: '3px 12px', marginLeft: 'auto' }}>Done</button>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* keep native required semantics on the form */}

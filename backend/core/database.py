@@ -73,6 +73,8 @@ _INPLACE_MIGRATIONS: list[str] = [
     # contained_at (auto-set on CER phase transition, editable after).
     "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS occurred_at  TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS contained_at TIMESTAMP WITH TIME ZONE",
+    # detected_at (analyst-supplied: when the incident was detected).
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS detected_at  TIMESTAMP WITH TIME ZONE",
 
     # Incident type classification (CISA/SOC category).
     "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS incident_type VARCHAR(32)",

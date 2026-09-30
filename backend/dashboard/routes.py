@@ -444,7 +444,7 @@ async def dashboard_top_tactics(
 
 @router.get("/top-tags")
 async def dashboard_top_tags(
-    scope: str  = Query(default="incident", regex="^(incident|ioc|all)$"),
+    scope: str  = Query(default="incident", pattern="^(incident|ioc|all)$"),
     limit: int  = Query(default=8, ge=1, le=20),
     user:  User = Depends(require_analyst),
     db:    AsyncSession = Depends(get_db),

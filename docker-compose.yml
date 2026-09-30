@@ -75,7 +75,7 @@ services:
       - /var/cache/nginx:nosuid,size=16m
       - /var/run:nosuid,size=1m
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/index.html"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/index.html"]
       interval: 30s
       timeout: 5s
       retries: 3

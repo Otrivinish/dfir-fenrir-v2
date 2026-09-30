@@ -643,7 +643,7 @@ export default function Reports({ inc }) {
       mode, footer,
       classification, audience,
       includeInternalEvents,
-      sections,
+      includeTimelineAppendix,
     })
     const w = window.open('', '_blank')
     if (!w) { setError('Pop-up blocked — please allow pop-ups for this site.'); return }
@@ -990,9 +990,9 @@ export default function Reports({ inc }) {
                     style={{ marginTop: 2, flexShrink: 0 }}
                   />
                   <span>
-                    <div>Appendix A — Timeline</div>
+                    <div>Appendix B — Timeline</div>
                     <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 2 }}>
-                      Visual zig-zag spine appended after §14, for C-tier readers.
+                      Visual zig-zag spine appended after Appendix A (Affected Systems), for C-tier readers.
                     </div>
                   </span>
                 </label>

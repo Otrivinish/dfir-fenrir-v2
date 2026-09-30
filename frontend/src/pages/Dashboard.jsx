@@ -41,6 +41,124 @@ const EVENT_CONFIG = {
   evidence_collected:{ label: 'Evidence collected', dot: 'var(--low)'    },
 }
 
+// ─── Recent activity: 6-card strip + "List all" popup (last 14 days) ─────────
+
+const ACTIVITY_STRIP_COUNT = 6
+const ACTIVITY_LIST_MAX    = 200   // API maximum per request; window is 14 days
+
+function activityCfg(item) {
+  return EVENT_CONFIG[item.event_type] || { label: item.event_type, dot: 'var(--muted)' }
+}
+
+function ActivityCard({ item }) {
+  const cfg = activityCfg(item)
+  return (
+    <div style={{
+      minWidth: 0, padding: 'var(--space-2) var(--space-3)',
+      background: 'var(--surface-2)', border: '1px solid var(--border)',
+      borderTop: `2px solid ${cfg.dot}`, borderRadius: 'var(--radius)',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, fontSize: 11 }}>
+        <span style={{ color: cfg.dot, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cfg.label}</span>
+        <span style={{ color: 'var(--dim)', flexShrink: 0 }} title={formatLocal(item.ts)}>{relative(item.ts)}</span>
+      </div>
+      <Link
+        to={`/incidents/${item.incident_id}/details`}
+        title={item.incident_title}
+        style={{ display: 'block', marginTop: 4, fontSize: 12, fontWeight: 600, color: 'var(--text)',
+                 textDecoration: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+      >
+        {item.incident_title}
+      </Link>
+      {item.label && item.label !== item.incident_title && (
+        <div title={item.label} style={{ marginTop: 2, fontSize: 11, color: 'var(--muted)',
+                                         whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {item.label}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ActivityModal({ mine, onClose }) {
+  const [items, setItems] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    api.getDashboardActivity(mine, ACTIVITY_LIST_MAX)
+      .then(r => setItems(r.items || []))
+      .catch(e => setError(e.message || 'Failed to load activity'))
+  }, [mine])
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  // Group by day in the analyst's timezone (formatLocal = "YYYY-MM-DD HH:MM:SS ±HH:MM").
+  const days = useMemo(() => {
+    const out = []
+    for (const it of items || []) {
+      const day = formatLocal(it.ts).slice(0, 10)
+      if (!out.length || out[out.length - 1].day !== day) out.push({ day, rows: [] })
+      out[out.length - 1].rows.push(it)
+    }
+    return out
+  }, [items])
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="activity-modal-title" style={{ maxWidth: 720 }}>
+        <div className="modal-head">
+          <h2 id="activity-modal-title">Activity — last 14 days</h2>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <div className="modal-body" style={{ maxHeight: '70vh' }}>
+          {error && <div className="alert error" role="alert"><span className="alert-icon">!</span><span>{error}</span></div>}
+          {!error && items === null && <div style={{ fontSize: 12, color: 'var(--muted)' }}>Loading…</div>}
+          {items?.length === 0 && <div style={{ fontSize: 12, color: 'var(--muted)' }}>No activity in the last 14 days.</div>}
+          {days.map(d => (
+            <div key={d.day} style={{ marginBottom: 'var(--space-3)' }}>
+              <div style={{
+                fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, color: 'var(--muted)',
+                letterSpacing: '0.08em', padding: '4px 0', borderBottom: '1px solid var(--border)',
+              }}>{d.day}</div>
+              {d.rows.map((it, i) => {
+                const cfg = activityCfg(it)
+                return (
+                  <div key={i} style={{
+                    display: 'grid', gridTemplateColumns: '130px 140px 1fr', gap: 'var(--space-2)',
+                    alignItems: 'baseline', padding: '6px 0', fontSize: 12,
+                    borderBottom: i < d.rows.length - 1 ? '1px solid var(--border)' : 'none',
+                  }}>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--dim)' }}>{formatLocal(it.ts).slice(11)}</span>
+                    <span style={{ color: cfg.dot, fontWeight: 600 }}>{cfg.label}</span>
+                    <span style={{ minWidth: 0 }}>
+                      <Link to={`/incidents/${it.incident_id}/details`} onClick={onClose}
+                            style={{ color: 'var(--text)', fontWeight: 600, textDecoration: 'none' }}>
+                        {it.incident_title}
+                      </Link>
+                      {it.label && it.label !== it.incident_title && (
+                        <span style={{ color: 'var(--muted)' }}> — {it.label}</span>
+                      )}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          ))}
+          {items?.length === ACTIVITY_LIST_MAX && (
+            <div style={{ fontSize: 11, color: 'var(--dim)' }}>
+              Showing the latest {ACTIVITY_LIST_MAX} events (the maximum per request).
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Severity breakdown bar ───────────────────────────────────────────────────
 
 const SEV_ORDER = ['critical', 'high', 'medium', 'low']
@@ -200,6 +318,7 @@ export default function Dashboard() {
     try { return localStorage.getItem(LS_MINE) === '1' } catch { return false }
   })
   const [showCreate, setShowCreate] = useState(false)
+  const [showActivity, setShowActivity] = useState(false)
   const [trend,    setTrend]    = useState(null)   // { days, series:[{date, opened, closed}] }
   const [workload, setWorkload] = useState([])     // [{user_id, username, active_count}]
   const [tactics,  setTactics]  = useState([])     // [{tactic_id, tactic_name, count}]
@@ -216,7 +335,7 @@ export default function Dashboard() {
     try {
       const [sum, act, incs, legal, oc, tr, wl, tt, tg] = await Promise.all([
         api.getDashboardSummary(mine),
-        api.getDashboardActivity(mine, 50),
+        api.getDashboardActivity(mine, ACTIVITY_STRIP_COUNT),
         api.listIncidents({ status: 'open', limit: 50, ...(mine ? { mine: true } : {}) }),
         api.getDashboardLegalSummary(mine).catch(() => ({ by_incident: {}, overdue_total: 0 })),
         api.getCurrentOnCall().catch(() => null),
@@ -458,92 +577,34 @@ export default function Dashboard() {
       {/* Trend chart — full-width opened-vs-closed mini bar chart */}
       <TrendChart trend={trend} style={{ marginBottom: 'var(--space-4)' }} />
 
-      {/* Two-column: incidents table + activity feed */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 'var(--space-4)', alignItems: 'start' }}>
-
-        {/* Open incidents table */}
-        <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 'var(--space-3) var(--space-4)' }}>
-            <h2 className="panel-h" style={{ margin: 0 }}>Open Incidents</h2>
-            <Link to="/incidents" style={{ fontSize: 12, color: 'var(--accent)' }}>View all →</Link>
+      {/* Open incidents table — full width */}
+      <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 'var(--space-3) var(--space-4)' }}>
+          <h2 className="panel-h" style={{ margin: 0 }}>Open Incidents</h2>
+          <Link to="/incidents" style={{ fontSize: 12, color: 'var(--accent)' }}>View all →</Link>
+        </div>
+        {!incidents?.length ? (
+          <div className="panel-empty" style={{ padding: 'var(--space-4)' }}>No open incidents</div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: 'var(--surface-2)' }}>
+                  <th style={{ ...TH, paddingLeft: 16 }}>#</th>
+                  <th style={TH}>Title</th>
+                  <th style={TH}>Severity</th>
+                  <th style={TH}>Phase</th>
+                  <th style={TH}>Legal</th>
+                  <th style={TH}>Assignee</th>
+                  <th style={{ ...TH, textAlign: 'right', paddingRight: 16 }}>Age</th>
+                </tr>
+              </thead>
+              <tbody>
+                {incidents.map(inc => <IncidentRow key={inc.id} inc={inc} legal={legalByIncident[inc.id]} />)}
+              </tbody>
+            </table>
           </div>
-          {!incidents?.length ? (
-            <div className="panel-empty" style={{ padding: 'var(--space-4)' }}>No open incidents</div>
-          ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                <thead>
-                  <tr style={{ background: 'var(--surface-2)' }}>
-                    <th style={{ ...TH, paddingLeft: 16 }}>#</th>
-                    <th style={TH}>Title</th>
-                    <th style={TH}>Severity</th>
-                    <th style={TH}>Phase</th>
-                    <th style={TH}>Legal</th>
-                    <th style={TH}>Assignee</th>
-                    <th style={{ ...TH, textAlign: 'right', paddingRight: 16 }}>Age</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {incidents.map(inc => <IncidentRow key={inc.id} inc={inc} legal={legalByIncident[inc.id]} />)}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        {/* Activity feed */}
-        <div className="panel">
-          <h2 className="panel-h">Recent Activity</h2>
-          <div style={{ fontSize: 11, color: 'var(--dim)', marginBottom: 'var(--space-2)' }}>Last 14 days</div>
-          {!activity?.length ? (
-            <div style={{ fontSize: 12, color: 'var(--muted)', padding: 'var(--space-3) 0' }}>
-              No activity yet
-            </div>
-          ) : (
-            <div style={{ maxHeight: 560, overflowY: 'auto', marginRight: -4, paddingRight: 4 }}>
-              {activity.map((item, i) => {
-                const cfg = EVENT_CONFIG[item.event_type] || { label: item.event_type, dot: 'var(--muted)' }
-                return (
-                  <div
-                    key={i}
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: '8px 1fr',
-                      gap: 8,
-                      padding: '8px 0',
-                      borderBottom: i < activity.length - 1 ? '1px solid var(--border)' : 'none',
-                    }}
-                  >
-                    <div style={{
-                      width: 7, height: 7, borderRadius: '50%',
-                      background: cfg.dot, marginTop: 5, flexShrink: 0,
-                    }} />
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 4 }}>
-                        <Link
-                          to={`/incidents/${item.incident_id}/details`}
-                          style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', textDecoration: 'none', lineHeight: 1.3 }}
-                        >
-                          {item.incident_title}
-                        </Link>
-                        <span style={{ fontSize: 10, color: 'var(--dim)', flexShrink: 0, paddingTop: 2 }}>
-                          {relative(item.ts)}
-                        </span>
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, lineHeight: 1.4 }}>
-                        <span style={{ color: cfg.dot, fontWeight: 600 }}>{cfg.label}</span>
-                        {item.label && item.label !== item.incident_title && (
-                          <span style={{ marginLeft: 4 }}>— {item.label}</span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-
+        )}
       </div>
 
       {/* Bottom row — Analyst Workload + Top Tactics + Top Tags */}
@@ -552,6 +613,27 @@ export default function Dashboard() {
         <TopTacticsCard items={tactics} />
         <TopTagsCard items={topTags} />
       </div>
+
+      {/* Recent activity — bottom, horizontal, latest 6; "List all" = last 14 days */}
+      <div className="panel" style={{ marginTop: 'var(--space-4)' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 'var(--space-2)' }}>
+          <h2 className="panel-h" style={{ margin: 0 }}>
+            Recent Activity <span style={{ fontWeight: 400, color: 'var(--dim)', textTransform: 'none', letterSpacing: 0 }}>· latest {ACTIVITY_STRIP_COUNT}</span>
+          </h2>
+          <button type="button" className="btn-link" onClick={() => setShowActivity(true)} style={{ fontSize: 12, color: 'var(--accent)' }}>
+            List all (14 days) →
+          </button>
+        </div>
+        {!activity?.length ? (
+          <div style={{ fontSize: 12, color: 'var(--muted)', padding: 'var(--space-2) 0' }}>No activity yet</div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 'var(--space-3)' }}>
+            {activity.slice(0, ACTIVITY_STRIP_COUNT).map((item, i) => <ActivityCard key={i} item={item} />)}
+          </div>
+        )}
+      </div>
+
+      {showActivity && <ActivityModal mine={mine} onClose={() => setShowActivity(false)} />}
 
       <IncidentCreateModal
         open={showCreate}

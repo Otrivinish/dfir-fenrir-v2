@@ -7,7 +7,7 @@ import { useAuth } from '../../hooks/useAuth.jsx'
 import { api } from '../../api/client.js'
 import TagChip from '../../components/TagChip.jsx'
 import TagInput from '../../components/TagInput.jsx'
-import UtcDateTimeInput from '../../components/UtcDateTimeInput.jsx'
+import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 import StakeholderMatrixBanner from '../../components/StakeholderMatrixBanner.jsx'
 
 function TeamChip({ team }) {
@@ -671,7 +671,7 @@ function SnapshotStrip({ incidentId }) {
 
 
 export default function Details() {
-  const { inc, draft, setField, readOnly, isClosed, occurredAt, setOccurredAt, containedAt, setContainedAt, refresh } = useOutletContext()
+  const { inc, draft, setField, readOnly, isClosed, occurredAt, setOccurredAt, detectedAt, setDetectedAt, containedAt, setContainedAt, refresh } = useOutletContext()
   const { user } = useAuth()
   const [preview, setPreview] = useState(false)
   const isAdmin = user?.role === 'admin'
@@ -696,6 +696,70 @@ export default function Details() {
     <>
     <StakeholderMatrixBanner severity={inc.severity} />
     <SnapshotStrip incidentId={inc.id} />
+    <section className="panel classification-band">
+      <h2 className="panel-h">Classification</h2>
+      <div className="classification-grid">
+        <div className="field">
+          <label className="field-label" htmlFor="cls-type">Type</label>
+          <select id="cls-type" className="select" disabled={readOnly}
+                  value={draft.incident_type ?? ''} onChange={setField('incident_type')}>
+            <option value="">— unclassified —</option>
+            {INCIDENT_TYPE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label className="field-label" htmlFor="cls-severity">Severity</label>
+          <select id="cls-severity" className="select" disabled={readOnly}
+                  value={draft.severity} onChange={setField('severity')}>
+            {SEVERITY.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label className="field-label" htmlFor="cls-tlp">TLP</label>
+          <select id="cls-tlp" className="select" disabled={readOnly}
+                  value={draft.tlp} onChange={setField('tlp')}>
+            {TLP.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label className="field-label" htmlFor="cls-triage">Triage state</label>
+          <select id="cls-triage" className="select" disabled={readOnly}
+                  value={draft.triage_state ?? 'suspected'} onChange={setField('triage_state')}>
+            {TRIAGE_STATE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label className="field-label" htmlFor="cls-detection">Detection method</label>
+          <select id="cls-detection" className="select" disabled={readOnly}
+                  value={draft.detection_method ?? ''} onChange={setField('detection_method')}>
+            <option value="">— unknown —</option>
+            {DETECTION_METHOD.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label className="field-label" htmlFor="cls-reporter">Reporter</label>
+          <input id="cls-reporter" className="input" value={draft.reporter} onChange={setField('reporter')}
+                 readOnly={readOnly} maxLength={128} placeholder="—" />
+        </div>
+        <div className="field">
+          <label className="field-label" htmlFor="cls-occurred">Occurred</label>
+          <LocalDateTimePicker id="cls-occurred" value={occurredAt} onChange={setOccurredAt}
+                               disabled={readOnly} clearable />
+        </div>
+        <div className="field">
+          <label className="field-label" htmlFor="cls-detected">Detected</label>
+          <LocalDateTimePicker id="cls-detected" value={detectedAt} onChange={setDetectedAt}
+                               disabled={readOnly} clearable />
+        </div>
+        {containedAt !== undefined && (
+          <div className="field">
+            <label className="field-label" htmlFor="cls-contained">Contained</label>
+            <LocalDateTimePicker id="cls-contained" value={containedAt} onChange={setContainedAt}
+                                 disabled={readOnly} clearable />
+          </div>
+        )}
+      </div>
+    </section>
     <div className="detail-grid">
       <div className="panel">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-2)' }}>
@@ -737,77 +801,6 @@ export default function Details() {
       </div>
 
       <aside style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', minWidth: 0 }}>
-        <section className="panel" style={{ overflow: 'hidden', minWidth: 0 }}>
-          <h2 className="panel-h">Classification</h2>
-          <dl className="kv" style={{ overflow: 'hidden' }}>
-            <dt>Type</dt>
-            <dd style={{ minWidth: 0 }}>
-              <select className="select" disabled={readOnly} style={{ width: '100%' }}
-                      value={draft.incident_type ?? ''} onChange={setField('incident_type')}>
-                <option value="">— unclassified —</option>
-                {INCIDENT_TYPE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </dd>
-            <dt>Severity</dt>
-            <dd style={{ minWidth: 0 }}>
-              <select className="select" disabled={readOnly} style={{ width: '100%' }}
-                      value={draft.severity} onChange={setField('severity')}>
-                {SEVERITY.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </dd>
-            <dt>TLP</dt>
-            <dd style={{ minWidth: 0 }}>
-              <select className="select" disabled={readOnly} style={{ width: '100%' }}
-                      value={draft.tlp} onChange={setField('tlp')}>
-                {TLP.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </dd>
-            <dt>Triage state</dt>
-            <dd style={{ minWidth: 0 }}>
-              <select className="select" disabled={readOnly} style={{ width: '100%' }}
-                      value={draft.triage_state ?? 'suspected'} onChange={setField('triage_state')}>
-                {TRIAGE_STATE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </dd>
-            <dt>Detection method</dt>
-            <dd style={{ minWidth: 0 }}>
-              <select className="select" disabled={readOnly} style={{ width: '100%' }}
-                      value={draft.detection_method ?? ''} onChange={setField('detection_method')}>
-                <option value="">— unknown —</option>
-                {DETECTION_METHOD.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </dd>
-            <dt>Reporter</dt>
-            <dd style={{ minWidth: 0 }}>
-              <input className="input" value={draft.reporter} onChange={setField('reporter')}
-                     readOnly={readOnly} maxLength={128} placeholder="—" style={{ width: '100%', boxSizing: 'border-box' }} />
-            </dd>
-            <dt>Occurred (UTC)</dt>
-            <dd style={{ minWidth: 0, overflow: 'hidden' }}>
-              <UtcDateTimeInput
-                value={occurredAt}
-                onChange={setOccurredAt}
-                disabled={readOnly}
-                hint={!readOnly}
-                style={{ width: '100%', boxSizing: 'border-box', fontSize: 12 }}
-              />
-            </dd>
-            {containedAt !== undefined && (
-              <>
-                <dt>Contained (UTC)</dt>
-                <dd style={{ minWidth: 0, overflow: 'hidden' }}>
-                  <UtcDateTimeInput
-                    value={containedAt}
-                    onChange={setContainedAt}
-                    disabled={readOnly}
-                    hint={!readOnly}
-                    style={{ width: '100%', boxSizing: 'border-box', fontSize: 12 }}
-                  />
-                </dd>
-              </>
-            )}
-          </dl>
-        </section>
 
         <section className="panel" style={{ overflow: 'hidden', minWidth: 0 }}>
           <h2 className="panel-h">Snapshot</h2>

@@ -109,6 +109,9 @@
 }
 .settings-table tbody tr:hover { background: var(--surface-2); }
 .settings-table td.actions { text-align: right; white-space: nowrap; }
+/* Dense tables with many columns (e.g. IOCs): tighter cell padding so they fit their panel. */
+.settings-table.compact th,
+.settings-table.compact td { padding-left: 8px; padding-right: 8px; }
 
 /* Inline row actions */
 .row-actions {

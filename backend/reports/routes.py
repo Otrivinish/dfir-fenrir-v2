@@ -21,16 +21,35 @@ from auth.deps import current_user, require_analyst
 from core.database import get_db
 from incidents.access import get_accessible_incident
 from models import (
-    BusinessImpact, ClosureChecklistItem, Decision, Entity, EntityRelation,
-    Evidence, GeneratedReport, Incident, IncidentAssignment, IncidentCost,
-    IOC, LessonsLearned, PlaybookTask, ReportAccess, RespondAction,
-    ThreatIntelIOC, TimelineEvent, User,
+    AffectedSystem, BusinessImpact, ClosureChecklistItem, Decision, Entity, EntityRelation,
+    Evidence, GeneratedReport, Incident, IncidentAssignment, IncidentAttribution,
+    IncidentCost, IncidentStakeholder, IOC, LessonsLearned, PlaybookTask,
+    RegulatoryDeadline, ReportAccess, RespondAction, ThreatActor, ThreatIntelIOC,
+    TimelineEvent, User,
 )
 from sqlalchemy import tuple_
 
 router = APIRouter()
 
 _EXCLUDE = {"oob_passphrase"}
+
+
+def _deadline_compliance(d: RegulatoryDeadline, now: datetime) -> tuple[str, Optional[float]]:
+    """Was the regulatory deadline met? Returns (compliance, hours_late).
+
+    met      — completed on or before deadline_at
+    violated — completed after deadline_at, or still open past deadline_at
+    pending  — still open, deadline not yet reached
+    waived   — explicitly waived
+    """
+    if d.status == "waived":
+        return "waived", None
+    if d.status == "completed":
+        done = d.completed_at or now
+        late = (done - d.deadline_at).total_seconds() / 3600
+        return ("violated", round(late, 1)) if late > 0 else ("met", None)
+    late = (now - d.deadline_at).total_seconds() / 3600
+    return ("violated", round(late, 1)) if late > 0 else ("pending", None)
 
 
 @router.get("/{incident_id}/reports/data", summary="Get report data")
@@ -43,8 +62,10 @@ async def get_report_data(
 
     Aggregates the incident with its IOCs (threat-intel enriched), entities and relations,
     timeline, playbook tasks, respond actions, decisions, closure checklist, lessons learned,
-    evidence summary, business impact, costs, a MITRE summary computed from the timeline, and
-    assignments. Sensitive fields (e.g. oob_passphrase) are excluded. Requires read access to the
+    evidence summary, business impact, costs, a MITRE summary computed from the timeline,
+    assignments, regulatory deadlines (with met/violated compliance), stakeholders (identity +
+    role only), threat-actor attributions and affected systems. Sensitive fields (e.g.
+    oob_passphrase, stakeholder contact details) are excluded. Requires read access to the
     incident (returns 404 otherwise).
     """
     # Access gate — returns 404 (not 403) for incidents the caller can't see,
@@ -120,6 +141,31 @@ async def get_report_data(
         .order_by(IncidentAssignment.role_label)
     )).scalars().all()
 
+    deadlines = (await db.execute(
+        select(RegulatoryDeadline)
+        .where(RegulatoryDeadline.incident_id == incident_id)
+        .order_by(RegulatoryDeadline.deadline_at)
+    )).scalars().all()
+
+    stakeholders = (await db.execute(
+        select(IncidentStakeholder)
+        .where(IncidentStakeholder.incident_id == incident_id)
+        .order_by(IncidentStakeholder.type, IncidentStakeholder.name)
+    )).scalars().all()
+
+    attributions = (await db.execute(
+        select(IncidentAttribution, ThreatActor)
+        .outerjoin(ThreatActor, ThreatActor.id == IncidentAttribution.threat_actor_id)
+        .where(IncidentAttribution.incident_id == incident_id)
+        .order_by(IncidentAttribution.created_at)
+    )).all()
+
+    affected_systems = (await db.execute(
+        select(AffectedSystem)
+        .where(AffectedSystem.incident_id == incident_id)
+        .order_by(AffectedSystem.created_at)
+    )).scalars().all()
+
     # TI-match enrichment for IOCs — same single-query pattern as list_iocs.
     ti_map: dict[tuple, str] = {}
     if iocs:
@@ -170,8 +216,9 @@ async def get_report_data(
             d["ti_matched"] = False
         iocs_out.append(d)
 
-    # Resolve assignee UUIDs → usernames for respond actions
+    # Resolve assignee / decider UUIDs → usernames for respond actions + decisions
     assignee_ids = {a.assignee_id for a in actions if a.assignee_id}
+    assignee_ids |= {d.decided_by_id for d in decisions if d.decided_by_id}
     username_map = {}
     if assignee_ids:
         users = (await db.execute(
@@ -184,16 +231,65 @@ async def get_report_data(
         d["performed_by"] = username_map.get(str(a.assignee_id), "") if a.assignee_id else ""
         actions_out.append(d)
 
+    decisions_out = []
+    for dec in decisions:
+        d = jsonable_encoder(dec)
+        d["decided_by_username"] = username_map.get(str(dec.decided_by_id), "") if dec.decided_by_id else ""
+        decisions_out.append(d)
+
+    now = datetime.now(timezone.utc)
+    deadlines_out = []
+    for dl in deadlines:
+        compliance, hours_late = _deadline_compliance(dl, now)
+        deadlines_out.append({
+            "regulation":   dl.regulation,
+            "article":      dl.article,
+            "obligation":   dl.obligation,
+            "recipient":    dl.recipient,
+            "deadline_at":  dl.deadline_at.isoformat(),
+            "status":       dl.status,
+            "completed_at": dl.completed_at.isoformat() if dl.completed_at else None,
+            "is_mandatory": dl.is_mandatory,
+            "compliance":   compliance,
+            "hours_late":   hours_late,
+        })
+
+    # Stakeholders: identity + role only. Contact methods and notes are
+    # deliberately left out — reports can be shared under TLP:CLEAR/GREEN.
+    stakeholders_out = [
+        {"name": s.name, "title": s.title, "organization": s.organization, "type": s.type}
+        for s in stakeholders
+    ]
+
+    attributions_out = []
+    for attr, actor in attributions:
+        attributions_out.append({
+            "actor_name":          actor.name if actor else attr.actor_label,
+            "actor_mitre_id":      actor.mitre_id if actor else None,
+            "actor_motivation":    actor.motivation if actor else None,
+            "actor_country":       actor.country_of_origin if actor else None,
+            "confidence":          attr.confidence,
+            "score":               attr.score,
+            "analyst_notes":       attr.analyst_notes,
+            "supporting_ioc_count":      len(attr.supporting_ioc_ids or []),
+            "supporting_timeline_count": len(attr.supporting_timeline_ids or []),
+            "created_by_username": attr.created_by_username,
+            "created_at":          attr.created_at.isoformat() if attr.created_at else None,
+        })
+
+    incident_out = jsonable_encoder(inc, exclude=_EXCLUDE)
+    incident_out["ref"] = inc.ref
+
     return {
-        "generated_at":     datetime.now(timezone.utc).isoformat(),
-        "incident":         jsonable_encoder(inc, exclude=_EXCLUDE),
+        "generated_at":     now.isoformat(),
+        "incident":         incident_out,
         "iocs":             iocs_out,
         "entities":         jsonable_encoder(list(entities)),
         "entity_relations": jsonable_encoder(list(entity_relations)),
         "timeline_events":  jsonable_encoder(list(timeline)),
         "playbook_tasks":   jsonable_encoder(list(tasks)),
         "respond_actions":  actions_out,
-        "decisions":        jsonable_encoder(list(decisions)),
+        "decisions":        decisions_out,
         "lessons_learned":  jsonable_encoder(ll) if ll else None,
         "closure_checklist": jsonable_encoder([c for c in checklist if getattr(c, "is_active", True)]),
         "evidence_summary": {
@@ -207,6 +303,10 @@ async def get_report_data(
         "costs":            jsonable_encoder(list(costs)),
         "mitre_summary":    mitre_summary,
         "assignments":      jsonable_encoder(list(assignments)),
+        "regulatory_deadlines": deadlines_out,
+        "stakeholders":     stakeholders_out,
+        "attributions":     attributions_out,
+        "affected_systems": jsonable_encoder(list(affected_systems)),
     }
 
 

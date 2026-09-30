@@ -35,11 +35,10 @@ function dtParts(d, tz, includeSeconds) {
 function get(parts, type) { return parts.find(p => p.type === type)?.value || '' }
 
 /** "YYYY-MM-DD HH:MM:SS +ZZ:ZZ" — full timestamp with offset. */
-export function formatLocal(iso) {
+export function formatLocal(iso, tz = getStoredTz()) {
   if (!iso) return ''
   const d = new Date(iso)
   if (isNaN(d)) return iso
-  const tz = getStoredTz()
   const p = dtParts(d, tz, true)
   return `${get(p, 'year')}-${get(p, 'month')}-${get(p, 'day')} ${get(p, 'hour')}:${get(p, 'minute')}:${get(p, 'second')} ${getOffsetString(d, tz)}`
 }
@@ -52,43 +51,6 @@ export function formatLocalShort(iso) {
   const tz = getStoredTz()
   const p = dtParts(d, tz, false)
   return `${get(p, 'year')}-${get(p, 'month')}-${get(p, 'day')} ${get(p, 'hour')}:${get(p, 'minute')}`
-}
-
-// ─── Manual UTC entry (input edge) ──────────────────────────────────────────
-// The global rule mandates UTC + 24h + `YYYY-MM-DD HH:mm:ss` for entry. Browser
-// <input type="datetime-local"> renders in locale (MM/DD/YYYY AM/PM) and can't be
-// forced, so manual datetime entry uses a validated text field via these helpers.
-
-const UTC_INPUT_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/
-
-/** ISO-8601 (`…Z`) → "YYYY-MM-DD HH:MM:SS" in **UTC** for a text input. '' if empty/invalid. */
-export function formatUtcInput(iso) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (isNaN(d)) return ''
-  return d.toISOString().slice(0, 19).replace('T', ' ')
-}
-
-/** "YYYY-MM-DD HH:MM[:SS]" interpreted as **UTC** → canonical ISO-8601 (`…Z`), or null if invalid. */
-export function parseUtcInput(str) {
-  if (!str) return null
-  const m = UTC_INPUT_RE.exec(String(str).trim())
-  if (!m) return null
-  const [, y, mo, d, h, mi, s] = m
-  const ms = Date.UTC(+y, +mo - 1, +d, +h, +mi, s ? +s : 0)
-  const dt = new Date(ms)
-  if (isNaN(dt)) return null
-  // Reject silent rollover (e.g. month 13, day 32, hour 25).
-  if (dt.getUTCFullYear() !== +y || dt.getUTCMonth() !== +mo - 1 || dt.getUTCDate() !== +d ||
-      dt.getUTCHours() !== +h || dt.getUTCMinutes() !== +mi || dt.getUTCSeconds() !== (s ? +s : 0)) {
-    return null
-  }
-  return dt.toISOString()
-}
-
-/** Current time as "YYYY-MM-DD HH:MM:SS" in UTC (for "now" seeds). */
-export function nowUtcInput() {
-  return new Date().toISOString().slice(0, 19).replace('T', ' ')
 }
 
 // ─── Zoned wall-clock entry (input edge, local Fenrir TZ) ───────────────────
@@ -106,12 +68,12 @@ function tzOffsetMs(instantMs, tz) {
   return asIfUtc - instantMs
 }
 
-/** ISO-8601 (`…Z`) → wall-clock parts {y,mo,d,h,mi,s} in the stored TZ. null if empty/invalid. */
-export function isoToZonedParts(iso) {
+/** ISO-8601 (`…Z`) → wall-clock parts {y,mo,d,h,mi,s} in `tz` (default: stored TZ). null if empty/invalid. */
+export function isoToZonedParts(iso, tz = getStoredTz()) {
   if (!iso) return null
   const d = new Date(iso)
   if (isNaN(d)) return null
-  const p = dtParts(d, getStoredTz(), true)
+  const p = dtParts(d, tz, true)
   return {
     y:  +get(p, 'year'),  mo: +get(p, 'month'), d: +get(p, 'day'),
     h:  +get(p, 'hour'),  mi: +get(p, 'minute'), s: +get(p, 'second'),
@@ -119,13 +81,12 @@ export function isoToZonedParts(iso) {
 }
 
 /**
- * Wall-clock parts {y,mo,d,h,mi,s} interpreted in the stored TZ → canonical UTC ISO.
+ * Wall-clock parts {y,mo,d,h,mi,s} interpreted in `tz` (default: stored TZ) → canonical UTC ISO.
  * DST-safe: the zone offset is computed at the target instant with one correction
  * pass (handles the offset changing across a transition). Returns null if invalid.
  */
-export function zonedPartsToIso({ y, mo, d, h, mi, s = 0 }) {
+export function zonedPartsToIso({ y, mo, d, h, mi, s = 0 }, tz = getStoredTz()) {
   if ([y, mo, d, h, mi, s].some(v => !Number.isFinite(v))) return null
-  const tz = getStoredTz()
   // Provisional: treat the wall components as if they were UTC.
   const asUtc = Date.UTC(y, mo - 1, d, h, mi, s)
   if (isNaN(asUtc)) return null
@@ -138,7 +99,7 @@ export function zonedPartsToIso({ y, mo, d, h, mi, s = 0 }) {
   const dt = new Date(utc)
   if (isNaN(dt)) return null
   // Reject silent rollover (e.g. month 13, day 32) by round-tripping the parts.
-  const back = isoToZonedParts(dt.toISOString())
+  const back = isoToZonedParts(dt.toISOString(), tz)
   if (!back || back.y !== y || back.mo !== mo || back.d !== d ||
       back.h !== h || back.mi !== mi || back.s !== s) {
     return null

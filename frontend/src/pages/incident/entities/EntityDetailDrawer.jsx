@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
-import UtcDateTimeInput from '../../../components/UtcDateTimeInput.jsx'
+import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 
 const ENTITY_TYPES = [
   { value: 'host',          label: 'Host'          },
@@ -553,11 +553,12 @@ export default function EntityDetailDrawer({
                   style={{ fontSize: 12, resize: 'vertical' }}
                 />
                 <div className="add-note-occurred-wrap">
-                  <span>When (UTC):</span>
-                  <UtcDateTimeInput
+                  <span>When:</span>
+                  <LocalDateTimePicker
                     value={noteOccurredAt}
                     onChange={setNoteOccurredAt}
                     hint={false}
+                    clearable
                   />
                   <span style={{ color: 'var(--dim)' }}>(leave blank for now)</span>
                 </div>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
-import UtcDateTimeInput from '../../components/UtcDateTimeInput.jsx'
+import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -157,7 +157,7 @@ function InitPanel({ incId, onDone }) {
           Breach Detected At
         </label>
         <div style={{ maxWidth: 260 }}>
-          <UtcDateTimeInput value={breachAt} onChange={setBreachAt} />
+          <LocalDateTimePicker value={breachAt} onChange={setBreachAt} required />
         </div>
         <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4 }}>
           All deadlines are calculated from this timestamp.
@@ -462,8 +462,8 @@ function AddDeadlineModal({ incId, onCreated, onClose }) {
               <input type="number" className="input" min={1} value={form.deadline_hours} onChange={e => set('deadline_hours', e.target.value)} />
             </div>
             <div className="field">
-              <label className="field-label">Breach Detected At (UTC)</label>
-              <UtcDateTimeInput value={form.breach_detected_at} onChange={v => set('breach_detected_at', v)} />
+              <label className="field-label">Breach Detected At</label>
+              <LocalDateTimePicker value={form.breach_detected_at} onChange={v => set('breach_detected_at', v)} required />
             </div>
           </div>
 

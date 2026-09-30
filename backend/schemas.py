@@ -259,6 +259,7 @@ class IncidentUpdate(BaseModel):
     detection_method: Optional[DetectionMethod]  = None
     reporter:         Optional[str]              = Field(default=None, max_length=128)
     occurred_at:      Optional[datetime]         = None
+    detected_at:      Optional[datetime]         = None
     contained_at:     Optional[datetime]         = None
     team_ids:         Optional[list[UUID]]       = None  # None = no change; [] = remove all teams
     tags:             Optional[list[str]]        = None  # None = no change; [] = clear
@@ -284,6 +285,7 @@ class IncidentOut(BaseModel):
     updated_at:       datetime
     closed_at:        Optional[datetime] = None
     occurred_at:      Optional[datetime] = None
+    detected_at:      Optional[datetime] = None
     contained_at:     Optional[datetime] = None
     teams:            list[TeamRef] = []
     tags:             list[str]      = Field(default_factory=list)

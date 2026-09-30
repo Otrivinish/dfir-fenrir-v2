@@ -13,11 +13,12 @@ import TagChip from '../components/TagChip.jsx'
 // Fields that flow through the Save button (form-style editing).
 // `phase` is intentionally excluded — it has its own action path via the
 // status-band stepper, with confirmation and audit logging.
-// `occurred_at` and `contained_at` are handled separately (UTC datetime entry).
+// `occurred_at`, `detected_at` and `contained_at` are handled separately (datetime entry).
 const EDITABLE = ['title', 'description', 'severity', 'tlp', 'triage_state', 'incident_type', 'detection_method', 'reporter']
 
-// Value for the UTC datetime entry field: the canonical ISO-8601 (`…Z`) string
-// as-is (UtcDateTimeInput renders/edits it in UTC). '' when absent.
+// Value for the datetime entry field: the canonical ISO-8601 (`…Z`) string
+// as-is (LocalDateTimePicker renders/edits it in the Fenrir timezone and
+// emits UTC). '' when absent.
 function toEntryValue(iso) {
   return iso || ''
 }
@@ -184,6 +185,7 @@ export default function IncidentDetail() {
   const [editing, setEditing] = useState(false)
   const [phaseTarget, setPhaseTarget] = useState(null)
   const [occurredAt,  setOccurredAt]  = useState('')
+  const [detectedAt,  setDetectedAt]  = useState('')
   const [containedAt, setContainedAt] = useState('')
   const [presenceUsers, setPresenceUsers] = useState([])
   const presenceWsRef  = useRef(null)
@@ -196,6 +198,7 @@ export default function IncidentDetail() {
       setInc(r)
       setDraft(pickEditable(r))
       setOccurredAt(toEntryValue(r.occurred_at))
+      setDetectedAt(toEntryValue(r.detected_at))
       setContainedAt(toEntryValue(r.contained_at))
     } catch (e) {
       setError(e.message || 'Incident not found.')
@@ -242,6 +245,7 @@ export default function IncidentDetail() {
   const changes = useMemo(() => diff(draft, inc), [draft, inc])
   // Compare by instant (epoch ms), not display string — entry is canonical UTC ISO.
   const dtDirty = toEpoch(occurredAt)  !== toEpoch(inc?.occurred_at) ||
+                  toEpoch(detectedAt)  !== toEpoch(inc?.detected_at) ||
                   toEpoch(containedAt) !== toEpoch(inc?.contained_at)
   const dirty   = Object.keys(changes).length > 0 || dtDirty
 
@@ -264,6 +268,9 @@ export default function IncidentDetail() {
       if (toEpoch(occurredAt) !== toEpoch(inc.occurred_at)) {
         dtChanges.occurred_at = occurredAt || null
       }
+      if (toEpoch(detectedAt) !== toEpoch(inc.detected_at)) {
+        dtChanges.detected_at = detectedAt || null
+      }
       if (toEpoch(containedAt) !== toEpoch(inc.contained_at)) {
         dtChanges.contained_at = containedAt || null
       }
@@ -271,6 +278,7 @@ export default function IncidentDetail() {
       setInc(updated)
       setDraft(pickEditable(updated))
       setOccurredAt(toEntryValue(updated.occurred_at))
+      setDetectedAt(toEntryValue(updated.detected_at))
       setContainedAt(toEntryValue(updated.contained_at))
       setSavedAt(Date.now())
       setEditing(false)
@@ -284,6 +292,7 @@ export default function IncidentDetail() {
   const onDiscard = () => {
     setDraft(pickEditable(inc))
     setOccurredAt(toEntryValue(inc.occurred_at))
+    setDetectedAt(toEntryValue(inc.detected_at))
     setContainedAt(toEntryValue(inc.contained_at))
     setEditing(false)
     setError('')
@@ -294,6 +303,7 @@ export default function IncidentDetail() {
     setInc(updated)
     setDraft(pickEditable(updated))
     setOccurredAt(toEntryValue(updated.occurred_at))
+    setDetectedAt(toEntryValue(updated.detected_at))
     setContainedAt(toEntryValue(updated.contained_at))
     setPhaseTarget(null)
   }
@@ -472,7 +482,7 @@ export default function IncidentDetail() {
           ))}
         </nav>
         <div className="sub-content">
-          <Outlet context={{ inc, draft, setField, readOnly, editing, isClosed, refresh, occurredAt, setOccurredAt, containedAt, setContainedAt }} />
+          <Outlet context={{ inc, draft, setField, readOnly, editing, isClosed, refresh, occurredAt, setOccurredAt, detectedAt, setDetectedAt, containedAt, setContainedAt }} />
         </div>
       </div>
 

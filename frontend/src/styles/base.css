@@ -18,3 +18,39 @@ input, select, textarea { font: inherit; color: inherit; }
 
 /* Selection */
 ::selection { background: var(--accent-soft); color: var(--text); }
+
+/* ── Control sizing standard ──────────────────────────────────────────────
+   App-wide rule (see CLAUDE.md "Control sizing standard"):
+   1. Toolbar buttons never wrap their label — a squeezed toolbar wraps as a
+      row instead of turning buttons into tall multi-line blocks. (Scoped to
+      toolbars: buttons used as inline-editable text in tables must still wrap.)
+   2. Dropdowns and search boxes inside a toolbar are compact and sized to
+      their content, matching the ~30px button height. Form fields
+      (outside toolbars) keep the standard 14px / ~43px size.
+   3. Scrollbars are thin and theme-coloured everywhere.
+   4. A wide table never widens the page: wrap it in .table-scroll so only the
+      table scrolls sideways, inside its own panel. */
+.panel-toolbar .btn { white-space: nowrap; flex-shrink: 0; }
+.panel-toolbar,
+.panel-toolbar > div { flex-wrap: wrap; }
+
+.panel-toolbar .select,
+.panel-toolbar .input {
+  width: auto;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.panel-toolbar .input { min-width: 160px; }
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 45%, transparent) transparent;
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+  border-radius: 8px;
+}
+
+.table-scroll { overflow-x: auto; max-width: 100%; }

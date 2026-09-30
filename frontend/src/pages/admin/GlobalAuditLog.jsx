@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api/client.js'
 import { formatLocal } from '../../lib/datetime.js'
-import UtcDateTimeInput from '../../components/UtcDateTimeInput.jsx'
+import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 
 // ─── Shared helpers (mirror per-incident AuditLog.jsx) ───────────────────────
 
@@ -167,16 +167,14 @@ function FilterBar({ onApply }) {
         <option value="">All resource types</option>
         {RESOURCE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
       </select>
-      <UtcDateTimeInput
-        value={dateFrom} onChange={setDateFrom}
-        title="From (UTC)" placeholder="From — YYYY-MM-DD HH:mm:ss"
-        hint={false} style={{ width: 210 }}
-      />
-      <UtcDateTimeInput
-        value={dateTo} onChange={setDateTo}
-        title="To (UTC)" placeholder="To — YYYY-MM-DD HH:mm:ss"
-        hint={false} style={{ width: 210 }}
-      />
+      <div style={{ width: 240 }}>
+        <LocalDateTimePicker value={dateFrom} onChange={setDateFrom}
+                             placeholder="From — YYYY-MM-DD HH:mm:ss" hint={false} clearable />
+      </div>
+      <div style={{ width: 240 }}>
+        <LocalDateTimePicker value={dateTo} onChange={setDateTo}
+                             placeholder="To — YYYY-MM-DD HH:mm:ss" hint={false} clearable />
+      </div>
       <button type="submit"  className="btn btn-primary" style={{ fontSize: '0.8rem' }}>Apply</button>
       <button type="button"  className="btn btn-ghost"   style={{ fontSize: '0.8rem' }} onClick={handleReset}>Reset</button>
     </form>

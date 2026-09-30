@@ -251,7 +251,7 @@ async def update_incident(
             changed[field] = new
 
     # Datetime fields: use model_fields_set to allow explicit null-set (clearing).
-    for field in ("occurred_at", "contained_at"):
+    for field in ("occurred_at", "detected_at", "contained_at"):
         if field in req.model_fields_set:
             val = getattr(req, field)
             setattr(inc, field, val)
