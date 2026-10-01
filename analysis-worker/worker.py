@@ -446,6 +446,8 @@ def _read_artifact(path: str) -> bytes:
         raise HTTPException(400, "Path outside quarantine")
     if not p.exists():
         raise HTTPException(404, "File not found")
+    if not p.is_file():
+        raise HTTPException(400, "Path must reference a regular file")
     if p.stat().st_size > MAX_INPUT_BYTES:
         raise HTTPException(413, "Artifact exceeds the 500 MiB analysis limit")
     return p.read_bytes()
