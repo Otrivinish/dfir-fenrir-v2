@@ -10,8 +10,9 @@
 #     copy is copy-new-only (cp -an). Safe to re-run.
 #   • Offline-safe: docker compose + psql + cp only; no network.
 #
-# Restores the PostgreSQL database (from a gzip pg_dump) and/or the evidence volume
-# (from the copy-new-only mirror created by docker/backup/backup.sh).
+# Restores the PostgreSQL database (from a gzip pg_dump — age-encrypted `.sql.gz.age`
+# dumps are decrypted on THIS host with --identity, never inside a container) and/or
+# the evidence volume (from the copy-new-only mirror created by docker/backup/backup.sh).
 #
 # IMPORTANT: the evidence mirror is CIPHERTEXT. It is useless without the matching
 # EVIDENCE_KEK — that key is NOT in any backup. Ensure the deployment's .env has the
@@ -24,18 +25,20 @@ cd "$REPO_ROOT"
 PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$REPO_ROOT")}"
 
 DO_DB=0 ; DO_EVIDENCE=0 ; ANY_SCOPE=0
-APPLY=0 ; ASSUME_YES=0 ; FILE=""
+APPLY=0 ; ASSUME_YES=0 ; FILE="" ; IDENTITY="${AGE_IDENTITY:-}"
 
 usage() {
   cat <<EOF
-Usage: scripts/restore.sh [--db] [--evidence] [--file <dump.sql.gz>] [--apply] [--yes]
+Usage: scripts/restore.sh [--db] [--evidence] [--file <dump.sql.gz[.age]>] [--identity <age key>] [--apply] [--yes]
 
   (no flags)      DRY RUN — restore BOTH db + evidence, plan only, no changes.
   --db            Restore the database only.
   --evidence      Restore the evidence volume only.
                   (give both, or neither, to restore both.)
   --file <name>   Specific DB dump basename in the backup volume
-                  (default: newest fenrir_backup_*.sql.gz).
+                  (default: newest fenrir_backup_*.sql.gz[.age]).
+  --identity <f>  age identity (private key) file for .age dumps — keep it offline;
+                  or set AGE_IDENTITY. Needs \`age\` installed on this host.
   --apply         Actually perform the restore (otherwise dry-run).
   --yes           Skip the interactive confirmation (unattended; implies you've
                   already reviewed a --dry-run). Only meaningful with --apply.
@@ -50,6 +53,7 @@ while [ $# -gt 0 ]; do
     --db)       DO_DB=1 ; ANY_SCOPE=1 ;;
     --evidence) DO_EVIDENCE=1 ; ANY_SCOPE=1 ;;
     --file)     FILE="${2:-}" ; shift ;;
+    --identity) IDENTITY="${2:-}" ; shift ;;
     --apply)    APPLY=1 ;;
     --yes)      ASSUME_YES=1 ;;
     -h|--help)  usage ; exit 0 ;;
@@ -69,11 +73,15 @@ docker compose ps >/dev/null 2>&1 || die "docker compose not available / not in 
 # ── Resolve the DB dump (newest by default) ─────────────────────────────────
 if [ "$DO_DB" -eq 1 ]; then
   if [ -z "$FILE" ]; then
-    FILE="$(docker compose exec -T backup sh -c 'ls -1t /backups/fenrir_backup_*.sql.gz 2>/dev/null | head -1 | xargs -r basename' | tr -d '\r')"
-    [ -n "$FILE" ] || die "no DB backups (fenrir_backup_*.sql.gz) found in the backup volume"
+    FILE="$(docker compose exec -T backup sh -c 'ls -1t /backups/fenrir_backup_*.sql.gz /backups/fenrir_backup_*.sql.gz.age 2>/dev/null | head -1 | xargs -r basename' | tr -d '\r')"
+    [ -n "$FILE" ] || die "no DB backups (fenrir_backup_*.sql.gz[.age]) found in the backup volume"
   fi
   docker compose exec -T backup sh -c "test -f /backups/$FILE" \
     || die "DB dump not found in backup volume: $FILE"
+  if [[ "$FILE" == *.age ]]; then
+    command -v age >/dev/null 2>&1 || die "$FILE is age-encrypted: install age on this host"
+    [ -n "$IDENTITY" ] && [ -r "$IDENTITY" ] || die "$FILE is age-encrypted: pass --identity <age key file> (or AGE_IDENTITY)"
+  fi
 fi
 
 # ── Plan ────────────────────────────────────────────────────────────────────
@@ -84,7 +92,7 @@ log "Restore evidence: $([ "$DO_EVIDENCE" -eq 1 ] && echo "yes  (from /backups/e
 log "Mode:           $([ "$APPLY" -eq 1 ] && echo 'APPLY (destructive)' || echo 'DRY RUN (no changes)')"
 echo "──────────────────────────────────────────────────────────────"
 if [ "$DO_DB" -eq 1 ]; then
-  log "DB restore will: stop backend+analysis-worker → psql < (gunzip dump, --clean --if-exists) → restart"
+  log "DB restore will: stop backend+analysis-worker → psql < ($([[ "$FILE" == *.age ]] && echo 'age -d on this host → ')gunzip dump, --clean --if-exists) → restart"
 fi
 if [ "$DO_EVIDENCE" -eq 1 ]; then
   log "Evidence restore will: cp -an /backups/evidence-mirror → evidence volume (adds missing files only)"
@@ -111,9 +119,16 @@ docker compose stop backend analysis-worker >/dev/null
 
 if [ "$DO_DB" -eq 1 ]; then
   log "Restoring database from $FILE…"
-  docker compose exec -T backup sh -c "gunzip -c '/backups/$FILE'" \
-    | docker compose exec -T postgres psql -U fenrir -d fenrir -v ON_ERROR_STOP=1 >/dev/null
-  log "Database restored."
+  if [[ "$FILE" == *.age ]]; then
+    docker compose exec -T backup cat "/backups/$FILE" | age -d -i "$IDENTITY" | gunzip -c \
+      | docker compose exec -T postgres psql -U fenrir -d fenrir -v ON_ERROR_STOP=1 >/dev/null
+  else
+    docker compose exec -T backup sh -c "gunzip -c '/backups/$FILE'" \
+      | docker compose exec -T postgres psql -U fenrir -d fenrir -v ON_ERROR_STOP=1 >/dev/null
+  fi
+  log "Database restored — re-applying roles, ownership and grants (restored objects"
+  log "come back owned by the restoring superuser)…"
+  docker compose exec -T postgres sh /docker-entrypoint-initdb.d/10-fenrir-roles.sh
 fi
 
 if [ "$DO_EVIDENCE" -eq 1 ]; then

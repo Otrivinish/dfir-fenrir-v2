@@ -25,7 +25,7 @@ from rate_limit.middleware import RateLimitMiddleware
 from auth.bootstrap import bootstrap_on_startup
 from auth.routes import router as auth_router
 from core.config import settings
-from core.database import SessionLocal, init_db
+from core.database import SessionLocal
 from entities.routes import router as entities_router
 from files.routes import router as files_router
 from notes.routes import router as notes_router
@@ -119,7 +119,9 @@ async def lifespan(app: FastAPI):
     assert_kek_configured()
     # Fail-fast on audit-export misconfig — refuse to serve without Ed25519 key.
     assert_signing_key_configured()
-    await init_db()
+    # Schema DDL is NOT run here: the `migrate` one-shot (python -m core.migrate) runs
+    # it as the owner role before the backend starts, so the long-running app
+    # connects as fenrir_app with data privileges only.
     async with SessionLocal() as db:
         await bootstrap_on_startup(db)
         await seed_playbook_templates(db)

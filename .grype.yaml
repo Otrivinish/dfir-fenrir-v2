@@ -1,0 +1,23 @@
+# grype config for scripts/scan.sh (`make scan`).
+# scan.sh fails on any High/Critical vulnerability that HAS a fix and is not
+# excepted below. Every exception carries a reason and an `expires:` date (UTC);
+# scan.sh FAILS once an expiry has passed — then upgrade, or renew with evidence.
+ignore:
+  # expires: 2026-12-31
+  # Velociraptor v0.76.6 (the ISO/IEC 27041-validated acquisition tool) embeds Go
+  # modules with upstream-fixed advisories (x/crypto v0.51.0, x/net, grpc v1.81.1,
+  # stdlib go1.25.3). v0.76.7 embeds the SAME versions (scanned 2026-10-01), so no
+  # drop-in fix exists. Server side only the Linux binary runs — offline, no listener,
+  # to repack collectors. Re-check v0.77.x and re-validate per
+  # docs/coc-27041-validation-slice.md before this date.
+  - package:
+      location: "/opt/velociraptor/**"
+    reason: "Velociraptor v0.76.6 embedded Go modules; no fixed 0.76.x release; offline repack only (expires 2026-12-31)"
+  # expires: 2026-12-31
+  # CVE-2026-82049: tarfile extraction-filter bypass, fixed only in CPython 3.14.
+  # Not reachable: FENRIR never extracts tar archives to disk — the one tarfile use
+  # (backend/lolbins/service.py) reads members in memory via extractfile().
+  - vulnerability: CVE-2026-82049
+    package:
+      name: python
+    reason: "tarfile extraction filters unused (in-memory extractfile only); fixed only in 3.14 (expires 2026-12-31)"

@@ -27,35 +27,7 @@ dc() {
   else die "Docker Compose not found."; fi
 }
 
-# Secret generators — prefer openssl, fall back to python3.
-gen_hex() {  # $1 = byte count → 2*N hex chars
-  if   have openssl; then openssl rand -hex "$1"
-  elif have python3; then python3 -c "import secrets,sys; print(secrets.token_hex(int(sys.argv[1])))" "$1"
-  else die "Need openssl or python3 to generate secrets."; fi
-}
-gen_b64() {  # $1 = byte count → base64 (single line)
-  if   have openssl; then openssl rand -base64 "$1" | tr -d '\n'
-  elif have python3; then python3 -c "import os,base64,sys; print(base64.b64encode(os.urandom(int(sys.argv[1]))).decode())" "$1"
-  else die "Need openssl or python3 to generate secrets."; fi
-}
-
 env_get() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -n1 | cut -d= -f2- || true; }
-
-# Set KEY=VALUE only if the key is missing, empty, or still a change_me_ placeholder.
-fill() {
-  local key="$1" val="$2" cur
-  if ! grep -qE "^${key}=" "$ENV_FILE"; then
-    printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"; ok "added $key"; return
-  fi
-  cur="$(env_get "$key")"
-  case "$cur" in
-    ""|change_me_*)
-      awk -F= -v k="$key" -v v="$val" '$1==k{print k"="v; next}{print}' "$ENV_FILE" > "$ENV_FILE.tmp" \
-        && mv "$ENV_FILE.tmp" "$ENV_FILE"
-      ok "generated $key" ;;
-    *) say "$key already set — kept" ;;
-  esac
-}
 
 print_token() {
   local t dom
@@ -84,17 +56,27 @@ dc version >/dev/null 2>&1 || die "Docker Compose not available."
 
 # ── 1. .env ──
 if [ ! -f "$ENV_FILE" ]; then
-  cp "$ROOT/.env.example" "$ENV_FILE"; ok "created .env from .env.example"
+  (umask 077; cp "$ROOT/.env.example" "$ENV_FILE"); ok "created .env from .env.example"
 else
-  say ".env exists — filling only blank/placeholder secrets"
+  say ".env exists — keeping it"
 fi
+# .env is owner-only, always (the umask is scoped to the .env writes above so it
+# can't leak into cert generation).
+chmod 600 "$ENV_FILE"
 
-# ── 2. secrets (idempotent) ──
-fill POSTGRES_PASSWORD "$(gen_hex 24)"   # URL-safe (rides in DATABASE_URL)
-fill REDIS_PASSWORD    "$(gen_hex 24)"
-fill SECRET_KEY        "$(gen_hex 64)"
-fill EVIDENCE_KEK      "$(gen_hex 32)"   # 32 bytes → AES-256 KEK; backend won't boot without it
-fill AUDIT_SIGNING_KEY "$(gen_b64 32)"   # 32-byte Ed25519 seed, base64
+# ── 2. secrets → ./secrets files (idempotent) ──
+# Generates any missing secret, imports legacy values still in .env (and blanks
+# them there), and renders the Redis ACL. Never overwrites an existing secret.
+# The evidence KEK in ./secrets/evidence_kek is irreplaceable: back it up offline.
+"$ROOT/scripts/secrets.sh" --apply
+# Internal service-to-service TLS (Postgres, Redis, worker, Caddy→backend mTLS):
+# creates the internal CA once; renews any leaf within 30 days of expiry.
+"$ROOT/scripts/internal-pki.sh" --apply
+if [ -z "$(env_get BACKUP_AGE_RECIPIENT)" ]; then
+  warn "BACKUPS ARE NOT ENCRYPTED: BACKUP_AGE_RECIPIENT is empty in .env."
+  warn "  Generate an age key OFFLINE (age-keygen -o fenrir-backup.agekey), keep the key in"
+  warn "  your password manager, and set BACKUP_AGE_RECIPIENT=<its age1… public key>."
+fi
 
 # ── 3. TLS — self-signed only (skip for BYO cert / DuckDNS) ──
 DOMAIN="$(env_get DOMAIN)"; [ -n "$DOMAIN" ] || DOMAIN=localhost
@@ -111,14 +93,29 @@ else
 fi
 
 # ── 4. build + start ──
-say "building + starting the stack (first run can take a few minutes)…"
-dc up -d --build
+say "building the stack (first run can take a few minutes)…"
+dc build
+# Caddy runs non-root with no capabilities: hand it its volumes + TLS files.
+"$ROOT/scripts/caddy-volume-prep.sh" --apply >/dev/null && ok "caddy volumes prepared"
+# Least-privilege DB roles: a fresh volume gets them at initdb; an existing database
+# (e.g. upgraded from before the role split) needs them BEFORE `migrate` runs. The
+# role script is idempotent, so it is simply (re)applied every time.
+say "starting postgres + applying DB roles…"
+dc up -d postgres
+for i in $(seq 1 60); do
+  [ "$(docker inspect --format '{{.State.Health.Status}}' "$(dc ps -q postgres)" 2>/dev/null)" = healthy ] && break
+  sleep 2
+done
+"$ROOT/scripts/db-roles.sh" --apply >/dev/null && ok "DB roles, ownership and grants applied"
+say "starting the stack…"
+dc up -d
 
 # ── 5. wait for health, then surface the setup token ──
 if have curl; then
   say "waiting for the backend to become healthy…"
   for i in $(seq 1 60); do
-    if curl -sk "https://localhost/api/health" 2>/dev/null | grep -q '"status":"ok"'; then
+    # The edge only serves https://$DOMAIN — ask for exactly that name, via loopback.
+    if curl -sk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/health" 2>/dev/null | grep -q '"status":"ok"'; then
       ok "backend healthy"; break
     fi
     sleep 2

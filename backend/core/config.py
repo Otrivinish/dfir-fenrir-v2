@@ -1,17 +1,47 @@
 """Application settings loaded from env."""
 from typing import List, Optional
+from urllib.parse import quote
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=None, case_sensitive=False)
+    # Secrets (postgres_password, redis_password, secret_key, evidence_kek,
+    # audit_signing_key, …) arrive as Docker Compose secret FILES under
+    # /run/secrets/<field_name> — never as environment variables, so they are not
+    # in `docker inspect`, /proc/*/environ or subprocess environments. NOTE: an
+    # environment variable of the same name would take precedence over the file.
+    model_config = SettingsConfigDict(env_file=None, case_sensitive=False, secrets_dir="/run/secrets")
 
-    # Database
-    database_url: str = "postgresql+asyncpg://fenrir:fenrir@postgres:5432/fenrir"
+    # Database — give DATABASE_URL whole (dev only), or let it be built from
+    # PGHOST/PGUSER/PGDATABASE + the postgres_password secret (see _build_database_url).
+    database_url: Optional[str] = None
+    pghost: str = "postgres"
+    pguser: str = "fenrir"
+    pgdatabase: str = "fenrir"
+    # Set only for the `migrate` one-shot: DDL runs as this owner role (SET LOCAL ROLE)
+    # so every object is owned by it, never by the login role (fenrir_migrator).
+    db_owner_role: Optional[str] = None
+    # Internal-CA certificate (secret file) → TLS 1.3 to Postgres with full server
+    # verification (hostname + chain). Unset = plaintext (dev only; pg_hba rejects it).
+    db_ssl_ca: Optional[str] = None
+
+    # Credential the backend presents to the analysis worker (secret file
+    # /run/secrets/worker_token) — the worker rejects every call without it.
+    worker_token: Optional[str] = None
+    worker_url: str = "http://analysis-worker:8001"
+    # Internal-CA certificate: https worker URLs are verified against it (TLS 1.3).
+    worker_tls_ca: Optional[str] = None
 
     # Redis
     redis_url: str = "redis://redis:6379"
     redis_password: str | None = None
+    # rediss:// → TLS 1.3 with the server verified against the internal CA, and this
+    # client certificate presented (Redis requires mutual TLS).
+    redis_tls_ca: Optional[str] = None
+    redis_tls_cert: Optional[str] = None
+    redis_tls_key: Optional[str] = None
 
     # App
     secret_key: str = "change_me_to_a_long_random_value"
@@ -124,10 +154,29 @@ class Settings(BaseSettings):
 
     # Backup
     backup_path: str = "/backups"
+    # age public-key recipient (`age1…`). Set → manual DB dumps are written as
+    # .sql.gz.age, encrypted to it; the private identity stays OFFLINE with the
+    # operator, so a compromised host can't read its own backups. Unset → plaintext
+    # (with a warning) — see .env.example.
+    backup_age_recipient: Optional[str] = None
 
-    # Postgres password for pg_dump in the backup endpoint.
-    # In Docker this is POSTGRES_PASSWORD; fallback: parse from database_url.
+    # Postgres password — the /run/secrets/postgres_password file in Docker. Used to
+    # build database_url and for pg_dump in the backup endpoint.
     postgres_password: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _build_database_url(self) -> "Settings":
+        if not self.database_url:
+            if not self.postgres_password:
+                raise ValueError(
+                    "Database credentials missing: provide the postgres_password secret "
+                    "(/run/secrets/postgres_password) or a full DATABASE_URL."
+                )
+            self.database_url = (
+                f"postgresql+asyncpg://{quote(self.pguser, safe='')}:{quote(self.postgres_password, safe='')}"
+                f"@{self.pghost}:5432/{self.pgdatabase}"
+            )
+        return self
 
     @property
     def cors_origins_list(self) -> List[str]:

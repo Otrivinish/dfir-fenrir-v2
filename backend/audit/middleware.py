@@ -40,17 +40,13 @@ def _redact_path(path: str) -> str:
 
 
 def _client_ip(request: Request) -> str | None:
-    """Real client IP, behind a single trusted reverse proxy (Caddy).
+    """Real client IP, as resolved by uvicorn's proxy-headers handling.
 
-    `X-Forwarded-For` may contain a comma-separated chain — the left-most
-    entry is the original client. If the header is absent we fall back to
-    the immediate peer (which is Caddy in production, or the dev client).
+    uvicorn rewrites `request.client` from `X-Forwarded-For` ONLY when the TCP
+    peer is the trusted Caddy (FORWARDED_ALLOW_IPS, pinned in compose). Never
+    parse the header here: any other container reaching the backend directly
+    could forge it and poison the audit trail's source IP.
     """
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        first = xff.split(",", 1)[0].strip()
-        if first:
-            return first
     if request.client:
         return request.client.host
     return None

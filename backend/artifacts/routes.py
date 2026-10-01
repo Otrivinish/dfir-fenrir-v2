@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
+from core.worker_client import WORKER_URL, worker_client, worker_headers
 from core.config import settings
 from core.database import get_db
 from incidents.access import get_accessible_incident
@@ -44,7 +45,6 @@ from models import Artifact, Incident, IOC, User
 
 router = APIRouter()
 
-WORKER_URL   = "http://analysis-worker:8001"
 CHUNK_SIZE   = 64 * 1024   # 64 KiB
 ZIP_PASSWORD = b"infected"
 
@@ -393,10 +393,11 @@ async def analyze_artifact(
         params["length"] = length
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with worker_client(timeout=120.0) as client:
             resp = await client.post(
                 f"{WORKER_URL}/analyze/{tool}",
                 json=params,
+                headers=worker_headers(),
             )
             resp.raise_for_status()
             result = resp.json()

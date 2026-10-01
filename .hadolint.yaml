@@ -1,0 +1,9 @@
+# hadolint config for scripts/scan.sh (`make scan`).
+failure-threshold: warning
+ignored:
+  # Pin apt package versions: NOT done on purpose. Base images are digest-pinned
+  # (scripts/refresh-digests.sh) and apt must be free to take Debian security
+  # updates at build time; exact apt pins break builds whenever Debian patches.
+  - DL3008
+  # Same reasoning for Alpine apk version pins.
+  - DL3018

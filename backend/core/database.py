@@ -1,4 +1,7 @@
 """Async SQLAlchemy engine + session factory."""
+import re
+import ssl
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
@@ -14,8 +17,19 @@ class Base(DeclarativeBase):
 # its DB session and connection). 20 + 10 fits comfortably under a default PG
 # max_connections of 100 even with 3 backend replicas. pool_recycle keeps
 # long-lived conns from going stale behind firewalls / NAT timeouts.
+def _db_ssl_context() -> ssl.SSLContext | None:
+    """verify-full TLS 1.3 to Postgres, anchored on the internal CA."""
+    if not settings.db_ssl_ca:
+        return None
+    ctx = ssl.create_default_context(cafile=settings.db_ssl_ca)   # CERT_REQUIRED + hostname check
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    return ctx
+
+
+_ssl = _db_ssl_context()
 engine = create_async_engine(
     settings.database_url,
+    connect_args={"ssl": _ssl} if _ssl else {},
     pool_size=20,
     max_overflow=10,
     pool_pre_ping=True,
@@ -40,10 +54,29 @@ async def init_db() -> None:
     """
     # Import models so SQLAlchemy registers them before create_all
     import models  # noqa: F401
+    role = settings.db_owner_role
+    if role and not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", role):
+        raise ValueError(f"invalid DB_OWNER_ROLE {role!r}")
     async with engine.begin() as conn:
+        if role:
+            # Transaction-scoped: every object created below is owned by the owner role.
+            await conn.execute(text(f"SET LOCAL ROLE {role}"))
         await conn.run_sync(lambda sync_conn: Base.metadata.create_all(sync_conn, checkfirst=True))
         for stmt in _INPLACE_MIGRATIONS:
             await conn.execute(text(stmt))
+        if role:
+            for stmt in _PRIVILEGE_MIGRATIONS:
+                await conn.execute(text(stmt))
+
+
+# Re-asserted on every migrate run (default privileges would otherwise hand the app
+# full DML on freshly created tables): GS-8 tamper evidence enforced by privilege.
+_PRIVILEGE_MIGRATIONS: list[str] = [
+    "REVOKE UPDATE, DELETE, TRUNCATE ON audit_logs FROM fenrir_app",
+    "REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON audit_anchor FROM fenrir_app",
+    "GRANT SELECT ON audit_logs TO fenrir_monitor",
+    "GRANT SELECT, INSERT ON audit_anchor TO fenrir_monitor",
+]
 
 
 # ── Idempotent in-place migrations ────────────────────────────────────────

@@ -11,13 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
+from core.worker_client import WORKER_URL, worker_client, worker_headers
 from core.config import settings
 from core.database import get_db
 from incidents.access import get_accessible_incident
@@ -34,7 +34,6 @@ from schemas import (
 
 logger = logging.getLogger("fenrir.yara")
 
-WORKER_URL      = "http://analysis-worker:8001"
 YARA_MAX_BYTES  = 512 * 1024   # 512 KB per rule file
 
 global_router   = APIRouter()
@@ -253,13 +252,14 @@ async def _run_scan(incident_id: uuid.UUID) -> YaraScanResult:
         errors:  list[str] = []
         now = datetime.now(timezone.utc)
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with worker_client(timeout=60) as client:
             for artifact in artifacts:
                 art_path = str(quarantine / str(incident_id) / artifact.stored_filename)
                 try:
                     resp = await client.post(
                         f"{WORKER_URL}/analyze/yara-inline",
                         json={"path": art_path, "rules": inline_rules},
+                        headers=worker_headers(),
                     )
                     resp.raise_for_status()
                     result = resp.json()

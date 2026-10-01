@@ -83,14 +83,9 @@ _EXCLUDED_PREFIXES: tuple[str, ...] = (
 
 
 def _client_ip(request: Request) -> str:
-    """Trust the rightmost X-Forwarded-For entry — Caddy appends the real client
-    IP to whatever the client sent, so the leftmost is attacker-controlled and
-    the rightmost is what our single trusted hop added."""
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        last = xff.rsplit(",", 1)[-1].strip()
-        if last:
-            return last
+    """Real client IP, as resolved by uvicorn's proxy-headers handling (it trusts
+    `X-Forwarded-For` only from Caddy's pinned address — FORWARDED_ALLOW_IPS).
+    Never parse the header here: a forged value would pick someone else's bucket."""
     if request.client and request.client.host:
         return request.client.host
     return "unknown"

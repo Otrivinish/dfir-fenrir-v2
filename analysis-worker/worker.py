@@ -4,6 +4,7 @@ Runs on the air-gapped fenrir-analysis network with no internet access,
 read-only mount of /quarantine, dropped capabilities, and noexec /tmp.
 """
 import hashlib
+import hmac
 import io
 import math
 import os
@@ -16,10 +17,43 @@ from pathlib import Path
 from typing import Any, Optional
 
 import magic as libmagic
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-app = FastAPI(title="DFIR-FENRIR v2 Analysis Worker", version="2.0.0")
+# No interactive docs / schema: this service is called by the backend only.
+app = FastAPI(title="DFIR-FENRIR v2 Analysis Worker", version="2.0.0",
+              docs_url=None, redoc_url=None, openapi_url=None)
+
+# Same cap as the backend's artifact/PCAP uploads — never parse more than this.
+MAX_INPUT_BYTES = 500 * 1024 * 1024
+
+
+def _load_token() -> bytes:
+    """The backend's credential for this service (compose secret `worker_token`).
+    Zero trust: being on the air-gapped network is not authentication. Refuse to
+    start without it (fail closed)."""
+    try:
+        with open("/run/secrets/worker_token", "rb") as f:
+            token = f.read().strip()
+    except OSError:
+        token = b""
+    if len(token) < 32:
+        raise RuntimeError("worker_token secret missing or too short — refusing to start")
+    return token
+
+
+_TOKEN = _load_token()
+
+
+@app.middleware("http")
+async def _require_backend_token(request: Request, call_next):
+    if request.url.path != "/health":
+        auth = request.headers.get("authorization", "")
+        presented = auth[7:].encode() if auth.startswith("Bearer ") else b""
+        if not hmac.compare_digest(presented, _TOKEN):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 @app.get("/health")
@@ -30,11 +64,13 @@ async def health():
 # ── PCAP Analysis ─────────────────────────────────────────────────────────────
 
 @app.post("/analyze/pcap")
-async def analyze_pcap(file: UploadFile = File(...)):
+def analyze_pcap(file: UploadFile = File(...)):
     """Analyze a PCAP/PCAPNG file — extract conversations, DNS, HTTP, TLS,
     top talkers, and suspicious patterns. Requires tshark for full analysis;
     falls back to a basic raw parser if tshark is absent."""
-    content = await file.read()
+    content = file.file.read(MAX_INPUT_BYTES + 1)
+    if len(content) > MAX_INPUT_BYTES:
+        raise HTTPException(413, "PCAP exceeds the 500 MiB analysis limit")
     if len(content) < 24:
         return {"error": "File too small to be a valid PCAP"}
 
@@ -405,17 +441,20 @@ class ArtifactPathRequest(BaseModel):
 def _read_artifact(path: str) -> bytes:
     p = Path(path).resolve()
     root = Path("/quarantine").resolve()
-    if not str(p).startswith(str(root)):
+    # Containment by path components, not string prefix ("/quarantine-x" would pass that).
+    if not p.is_relative_to(root):
         raise HTTPException(400, "Path outside quarantine")
     if not p.exists():
         raise HTTPException(404, "File not found")
+    if p.stat().st_size > MAX_INPUT_BYTES:
+        raise HTTPException(413, "Artifact exceeds the 500 MiB analysis limit")
     return p.read_bytes()
 
 
 # ── 1. File type ─────────────────────────────────────────────────────────────
 
 @app.post("/analyze/file-type")
-async def analyze_file_type(req: ArtifactPathRequest):
+def analyze_file_type(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     p   = Path(req.path)
     detected_mime = libmagic.from_buffer(raw[:2048], mime=True)
@@ -457,7 +496,7 @@ async def analyze_file_type(req: ArtifactPathRequest):
 # ── 2. Hashes ────────────────────────────────────────────────────────────────
 
 @app.post("/analyze/hashes")
-async def analyze_hashes(req: ArtifactPathRequest):
+def analyze_hashes(req: ArtifactPathRequest):
     raw  = _read_artifact(req.path)
     h1   = hashlib.sha1(raw).hexdigest()
     h256 = hashlib.sha256(raw).hexdigest()
@@ -485,7 +524,7 @@ async def analyze_hashes(req: ArtifactPathRequest):
 # ── 3. Entropy ───────────────────────────────────────────────────────────────
 
 @app.post("/analyze/entropy")
-async def analyze_entropy(req: ArtifactPathRequest):
+def analyze_entropy(req: ArtifactPathRequest):
     raw       = _read_artifact(req.path)
     n         = len(raw)
     CHUNK     = 256
@@ -526,7 +565,7 @@ async def analyze_entropy(req: ArtifactPathRequest):
 # ── 4. Strings ───────────────────────────────────────────────────────────────
 
 @app.post("/analyze/strings")
-async def analyze_strings(req: ArtifactPathRequest):
+def analyze_strings(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     result: dict[str, Any] = {
         "ascii": [], "unicode": [], "iocs": {}, "suspicious_apis": {}, "b64_candidates": [],
@@ -580,7 +619,7 @@ async def analyze_strings(req: ArtifactPathRequest):
 # ── 5. IOC Extract ───────────────────────────────────────────────────────────
 
 @app.post("/analyze/ioc-extract")
-async def analyze_ioc_extract(req: ArtifactPathRequest):
+def analyze_ioc_extract(req: ArtifactPathRequest):
     raw  = _read_artifact(req.path)
     text = raw.decode("utf-8", errors="replace")
 
@@ -616,7 +655,7 @@ async def analyze_ioc_extract(req: ArtifactPathRequest):
 # ── 6. PE Analysis ───────────────────────────────────────────────────────────
 
 @app.post("/analyze/pe")
-async def analyze_pe(req: ArtifactPathRequest):
+def analyze_pe(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     try:
         import pefile
@@ -704,7 +743,7 @@ async def analyze_pe(req: ArtifactPathRequest):
 # ── 7. Office / Macro Analysis ───────────────────────────────────────────────
 
 @app.post("/analyze/office")
-async def analyze_office(req: ArtifactPathRequest):
+def analyze_office(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     try:
         from oletools.olevba import VBA_Parser, TYPE_OLE, TYPE_OpenXML
@@ -756,7 +795,7 @@ async def analyze_office(req: ArtifactPathRequest):
 # ── 8. PDF Analysis ──────────────────────────────────────────────────────────
 
 @app.post("/analyze/pdf")
-async def analyze_pdf(req: ArtifactPathRequest):
+def analyze_pdf(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     if not raw.startswith(b"%PDF"):
         return {"error": "Not a PDF file"}
@@ -802,7 +841,7 @@ async def analyze_pdf(req: ArtifactPathRequest):
 # ── 9. EXIF / Metadata ───────────────────────────────────────────────────────
 
 @app.post("/analyze/exif")
-async def analyze_exif(req: ArtifactPathRequest):
+def analyze_exif(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     result: dict[str, Any] = {"fields": {}, "sensitive_fields": [], "tool": None}
 
@@ -849,7 +888,7 @@ async def analyze_exif(req: ArtifactPathRequest):
 # ── 10. Hex Dump ─────────────────────────────────────────────────────────────
 
 @app.post("/analyze/hexdump")
-async def analyze_hexdump(req: ArtifactPathRequest):
+def analyze_hexdump(req: ArtifactPathRequest):
     raw    = _read_artifact(req.path)
     offset = min(req.offset or 0, len(raw))
     length = min(req.length or 512, 65536, len(raw) - offset)
@@ -876,7 +915,7 @@ async def analyze_hexdump(req: ArtifactPathRequest):
 # ── 11. YARA ─────────────────────────────────────────────────────────────────
 
 @app.post("/analyze/yara")
-async def analyze_yara(req: ArtifactPathRequest):
+def analyze_yara(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     try:
         import yara
@@ -900,7 +939,7 @@ async def analyze_yara(req: ArtifactPathRequest):
         try:
             compiled = yara.compile(str(rf))
             loaded  += 1
-            for m in compiled.match(data=raw):
+            for m in compiled.match(data=raw, timeout=60):
                 matches.append({
                     "rule":      m.rule,
                     "namespace": m.namespace,
@@ -926,7 +965,7 @@ class YaraInlineRequest(BaseModel):
     rules: list[YaraInlineRule]
 
 @app.post("/analyze/yara-inline")
-async def analyze_yara_inline(req: YaraInlineRequest):
+def analyze_yara_inline(req: YaraInlineRequest):
     """Run caller-supplied YARA rules (as text) against a quarantine artifact."""
     raw = _read_artifact(req.path)
     try:
@@ -940,7 +979,7 @@ async def analyze_yara_inline(req: YaraInlineRequest):
     for rule in req.rules:
         try:
             compiled = yara.compile(source=rule.content)
-            for m in compiled.match(data=raw):
+            for m in compiled.match(data=raw, timeout=60):
                 strings = []
                 for s in m.strings:
                     for inst in s.instances:
