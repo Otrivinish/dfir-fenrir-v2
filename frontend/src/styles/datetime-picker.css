@@ -1,0 +1,240 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Date/time picker popup — components/LocalDateTimePicker.jsx
+   Month calendar + HH / MM / SS drums, zone switch, readout, Apply/Cancel.
+   Tokens only, so every theme applies; the trigger reuses .input.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.dtp {
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
+  width: 620px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  font-family: var(--font-body);
+}
+.dtp button { font-family: inherit; }
+.dtp :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Header: title + zone switch */
+.dtp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.dtp-title {
+  font-family: var(--font-heading);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: var(--heading-letter-spacing);
+  text-transform: var(--heading-transform);
+  color: var(--muted);
+}
+.dtp-zone {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.dtp-zone button {
+  height: 30px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.dtp-zone button:hover { color: var(--text); }
+.dtp-zone button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }
+
+/* Body: calendar | drums */
+.dtp-body {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: var(--space-6);
+  padding: var(--space-4);
+}
+
+.dtp-cal-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+.dtp-icon-btn {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.dtp-icon-btn:hover { background: var(--surface-2); }
+.dtp-month { font-family: var(--font-mono); font-size: 15px; font-weight: 700; }
+.dtp-month span {
+  margin-left: var(--space-2);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.dtp-wk, .dtp-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+.dtp-wk span {
+  padding: 4px 0;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.dtp-day {
+  height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  cursor: pointer;
+}
+.dtp-day:hover { background: var(--surface-2); }
+.dtp-day.is-today { border-color: var(--accent); font-weight: 700; }
+.dtp-day[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 700;
+}
+
+/* Drums */
+.dtp-time {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+}
+.dtp-drums { display: flex; justify-content: center; gap: var(--space-2); }
+.dtp-drum {
+  width: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.dtp-drum-label {
+  font-family: var(--font-heading);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: var(--heading-letter-spacing);
+  color: var(--muted);
+}
+.dtp-step {
+  width: 100%;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.dtp-step:hover { color: var(--text); background: var(--surface-2); }
+.dtp-list {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: var(--radius);
+}
+.dtp-opt {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.dtp-opt.is-near { font-size: 15px; }
+.dtp-opt:hover { background: var(--surface-2); color: var(--text); }
+.dtp-opt.is-sel {
+  height: 48px;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.dtp-quick { display: flex; gap: var(--space-2); }
+
+/* Readout: Fenrir TZ + stored UTC (or why the time is invalid) */
+.dtp-readout {
+  box-sizing: border-box;
+  min-height: 60px;
+  margin: 0 var(--space-4) var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: var(--space-4);
+  row-gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.dtp-readout-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.dtp-readout-label.is-entry { color: var(--accent); }
+.dtp-mono { font-family: var(--font-mono); font-size: 13px; white-space: nowrap; }
+.dtp-error { grid-column: 1 / -1; font-size: 13px; color: var(--high); }
+
+/* Footer */
+.dtp-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.dtp-foot .btn-link { margin-right: auto; }
+.dtp-foot-actions { display: flex; gap: var(--space-2); }
+
+/* Narrow screens: calendar above the drums */
+@media (max-width: 699px) {
+  .dtp { width: 340px; }
+  .dtp-body { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+  .dtp-readout { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
+  .dtp-readout .dtp-mono { margin-bottom: 6px; }
+}

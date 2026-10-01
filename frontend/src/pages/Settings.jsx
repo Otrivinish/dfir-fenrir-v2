@@ -11,7 +11,7 @@ export default function Settings() {
         <div>
           <h1 className="page-title">Settings</h1>
           <div className="page-sub">
-            Account{isAdmin ? ' · Users · Teams · Operational Roles · Stakeholder Matrix · Validated Tools · Feeds · Integrations · API Keys' : ''}
+            Account{isAdmin ? ' · Users · Teams · Operational Roles · Stakeholder Matrix · Validated Tools · Feeds · Integrations · API Keys · Incident Reference' : ''}
           </div>
         </div>
       </div>
@@ -29,6 +29,7 @@ export default function Settings() {
               <NavLink to="threat-intel"       className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}>Feeds</NavLink>
               <NavLink to="integrations"       className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}>Integrations</NavLink>
               <NavLink to="api-keys"           className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}>API Keys</NavLink>
+              <NavLink to="incident-reference" className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}>Incident Reference</NavLink>
             </>
           )}
         </nav>

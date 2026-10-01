@@ -26,6 +26,7 @@ import Integrations from './pages/settings/Integrations.jsx'
 import Backup from './pages/settings/Backup.jsx'
 import Users from './pages/settings/Users.jsx'
 import ValidatedTools from './pages/settings/ValidatedTools.jsx'
+import IncidentReference from './pages/settings/IncidentReference.jsx'
 import Admin from './pages/Admin.jsx'
 import GlobalAuditLog from './pages/admin/GlobalAuditLog.jsx'
 import AuditExports from './pages/admin/AuditExports.jsx'
@@ -200,6 +201,7 @@ export default function App() {
                 <Route path="operational-roles" element={<RequireAdmin><OperationalRoles /></RequireAdmin>} />
                 <Route path="stakeholder-matrix" element={<RequireAdmin><StakeholderMatrix /></RequireAdmin>} />
                 <Route path="api-keys"          element={<RequireAdmin><APIKeys /></RequireAdmin>} />
+                <Route path="incident-reference" element={<RequireAdmin><IncidentReference /></RequireAdmin>} />
                 <Route path="threat-intel"      element={<RequireAdmin><ThreatIntel /></RequireAdmin>} />
                 <Route path="integrations"      element={<RequireAdmin><Integrations /></RequireAdmin>} />
                 <Route path="users"             element={<RequireAdmin><Users /></RequireAdmin>} />

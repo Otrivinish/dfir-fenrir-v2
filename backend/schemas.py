@@ -2026,6 +2026,18 @@ class ApiKeyServiceOut(BaseModel):
     source:     Optional[str] = None   # "db" | "env" | None
 
 
+class IncidentRefSettings(BaseModel):
+    """Incident-reference settings. New incidents get PREFIX-YYYY-NNNNN; existing
+    references never change (incidents.ref is immutable)."""
+    prefix:           str = Field(description="Prefix for new incident references, e.g. INC or ACME")
+    format:           str = Field(default="{PREFIX}-{YYYY}-{NNNNN}", description="YYYY = UTC creation year; NNNNN = global sequence, zero-padded to 5, never resets")
+    next_ref_preview: str = Field(description="Reference the next incident would get (does not reserve it)")
+
+
+class IncidentRefSettingsUpdate(BaseModel):
+    prefix: str = Field(pattern=r"^[A-Z][A-Z0-9]{1,9}$", description="2–10 characters: A–Z then A–Z/0–9")
+
+
 class ApiKeySet(BaseModel):
     value: str = Field(min_length=1, max_length=512)
 

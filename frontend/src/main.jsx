@@ -9,6 +9,7 @@ import './styles/playbooks.css'
 import './styles/settings.css'
 import './styles/warroom.css'
 import './styles/notifications.css'
+import './styles/datetime-picker.css'
 import App from './App.jsx'
 
 ReactDOM.createRoot(document.getElementById('root')).render(

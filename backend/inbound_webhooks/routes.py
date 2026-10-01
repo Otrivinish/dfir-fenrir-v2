@@ -9,12 +9,13 @@ import uuid
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
 from core.database import get_db
 from core.security import decrypt_secret
+from incidents.reference import assign as assign_reference
 from models import Incident, PlatformSetting
 
 log = logging.getLogger(__name__)
@@ -67,10 +68,12 @@ async def _create_incident(
     severity: str,
     reporter: str,
 ) -> Incident:
-    inc_num = (await db.execute(text("SELECT nextval('incident_seq')"))).scalar()
+    inc_num, inc_ref, created_at = await assign_reference(db)
     inc = Incident(
         id=uuid.uuid4(),
         incident_number=inc_num,
+        ref=inc_ref,
+        created_at=created_at,
         title=title[:200],
         description=description or None,
         severity=severity,
@@ -82,7 +85,7 @@ async def _create_incident(
         db, "incident_create",
         outcome="success",
         resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
-        details={"severity": inc.severity, "reporter": reporter, "source": "siem_webhook"},
+        details={"ref": inc.ref, "severity": inc.severity, "reporter": reporter, "source": "siem_webhook"},
     )
     await db.commit()
     await db.refresh(inc)
