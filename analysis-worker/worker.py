@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import magic as libmagic
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
