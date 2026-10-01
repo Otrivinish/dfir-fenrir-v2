@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
+from core.worker_client import WORKER_URL, worker_client, worker_headers
 from core.database import get_db
 from incidents.access import get_accessible_incident
 from models import IOC, Incident, PCAPAnalysis, User
@@ -25,7 +26,6 @@ from pcap.dns_recon import DnsReconResponse, build_recon
 
 router = APIRouter()
 
-WORKER_URL = "http://analysis-worker:8001"
 
 # Cap PCAP uploads. Unlike artifacts/evidence this endpoint had no limit, so a
 # single large upload (or Content-Length-spoofed chunked body) was an easy OOM.
@@ -125,9 +125,10 @@ async def upload_pcap(
     content = await _read_capped(file, _MAX_PCAP_BYTES)
 
     try:
-        async with httpx.AsyncClient(timeout=300) as client:
+        async with worker_client(timeout=300) as client:
             resp = await client.post(
                 f"{WORKER_URL}/analyze/pcap",
+                headers=worker_headers(),
                 files={
                     "file": (
                         file.filename or "capture.pcap",

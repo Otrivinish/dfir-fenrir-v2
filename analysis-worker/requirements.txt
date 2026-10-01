@@ -1,0 +1,14 @@
+# Analysis worker — direct dependencies (hash-locked into requirements.lock by
+# scripts/lock-python.sh; the Dockerfile installs the lock with --require-hashes).
+# fastapi / uvicorn / python-multipart match backend/requirements.txt (the multipart
+# parser handles hostile uploads here: 0.0.20 had High-severity DoS advisories).
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+python-magic==0.4.27
+python-multipart==0.0.32
+pefile==2023.2.7
+oletools==0.60.2
+# 20231228 had High advisories (GHSA-f83h-ghpp-7wcc, GHSA-wf5f-4jwr-ppcp).
+pdfminer.six==20260107
+yara-python==4.5.1
+exifread==3.0.0

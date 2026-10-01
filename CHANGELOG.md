@@ -2,6 +2,62 @@
 
 All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
+## [Unreleased] — container security hardening (2026-10-01) — **breaking for upgrades**
+
+Zero-trust / least-privilege hardening of the Docker deployment. No change to the API, the data model or the UI — but upgrading an existing installation needs one manual step, and some clients may lose access (TLS 1.3 only). Decisions: [`docs/adr/`](docs/adr/README.md).
+
+### ⚠ Upgrading
+
+1. **Run `./setup.sh` once after pulling** (idempotent). `docker compose up -d --build` on its own fails. It moves your secrets out of `.env` into `./secrets/` (values preserved), creates the internal service certificates, applies the new database roles and prepares Caddy's volumes.
+2. **Set `BACKUP_AGE_RECIPIENT`** in `.env` to an age public key generated **offline** (`age-keygen -o fenrir-backup.agekey`). Unset = unencrypted dumps (with a warning). Existing dumps: `scripts/encrypt-legacy-backups.sh --apply`.
+3. **Back up the four keys that can never be regenerated — before storing any evidence** ([INSTALL.md §5.2](INSTALL.md#52-back-up-the-keys-offline--do-this-now) has the full procedure):
+
+   | Key | Lose it and… |
+   |---|---|
+   | `./secrets/evidence_kek` | all evidence and the evidence-backup mirror are unreadable |
+   | `./secrets/secret_key` | every user's TOTP and the stored integration API keys are lost |
+   | `./secrets/audit_signing_key` | past signed audit exports can no longer be verified |
+   | `fenrir-backup.agekey` (age identity) | every DB backup is unreadable |
+
+   In short: record fingerprints (`tr -d '\r\n' < secrets/<key> | sha256sum`), store the four files as **attachments** in your password manager plus a second offline copy, prove the copy with `AGE_IDENTITY=<exported key> make verify-restore`, and keep the age identity **off** the server. On a new host, put the three `./secrets/` files back **before** running `./setup.sh`.
+4. **The edge is TLS 1.3 only.** Browsers are fine; Windows 10 / Server 2019 PowerShell and `curl.exe`, Java < 11 and older HTTP clients are not. **Check that your SIEM webhook senders (Splunk / Sentinel / Elastic) support TLS 1.3** before upgrading.
+5. **Only `DOMAIN` is served.** Opening FENRIR by IP or another hostname now returns an empty page — use the `DOMAIN` name. Set `TLS_MODE` explicitly (`selfsigned` · `acme` · `duckdns` · `byo` · `internal`).
+6. Restores of age-encrypted dumps need the identity: `scripts/restore.sh --identity <key>`.
+
+### Security
+
+- **Edge (Caddy 2.11.4, pinned):** TLS 1.3 only in every TLS mode; new `TLS_MODE` incl. Let's Encrypt for public names; runs as uid 10001 with no capabilities and a read-only root filesystem; receives no application secrets; the local CA private key moved to `./ca/` (never mounted). Slow-header timeout (10 s), body limits (10 MiB JSON, 2.2 GiB multipart), `connect-src 'self'`, admin API off, one Caddyfile as the single source.
+- **Networks:** new internal-only `fenrir-data` tier (Postgres, Redis, backup, audit-monitor, migrate) — no internet, unreachable from the edge. The backend trusts `X-Forwarded-For` only from Caddy's pinned address; audit IPs can no longer be spoofed.
+- **Encryption in transit, internally:** a separate, name-constrained internal CA (`scripts/internal-pki.sh`, auto-renewal). Caddy → backend and backend → Redis use mutual TLS; Postgres is TLS 1.3 verify-full with plaintext refused; backend → analysis worker uses TLS plus a bearer token.
+- **Secrets:** Compose secret files in `./secrets/` (dir 0700), mounted only into the services that need them — no secret in any environment variable, `docker inspect` or child process. `.env` is mode 0600.
+- **Database least privilege:** per-service roles. The app role is DML-only: it cannot modify or delete audit-log rows, drop the append-only trigger, run DDL or `COPY … TO PROGRAM`. Schema changes run in a new one-shot `migrate` service. The bootstrap superuser can only connect over the container's local socket. Connections and DDL are logged.
+- **Redis:** ACL with the default user disabled; the app user is limited to its commands and key prefixes. RDB snapshots instead of AOF.
+- **Containers:** all non-root (the backup sidecar keeps only `CHOWN` + `FSETID`), every capability dropped, `no-new-privileges`, read-only root filesystems, memory/PID limits, rotated logs, healthchecks with health-gated startup.
+- **Analysis worker:** authenticates every call (token), serves TLS, no docs/OpenAPI, strict `/quarantine` path containment, 500 MiB input cap, YARA timeouts, analyzers off the event loop; dependencies updated (python-multipart, starlette, pdfminer.six advisories).
+- **Supply chain:** base images pinned by digest (`scripts/refresh-digests.sh`), node 20 → 24 LTS, nginx 1.27 → 1.30, Redis pinned to 7.4; Python dependencies hash-locked (`scripts/lock-python.sh`, 14-day cooldown); API-docs assets vendored and checksummed; `age` built from source; `make scan` (hadolint, Grype, Dockle) fails on fixable High/Critical without a dated exception (`.grype.yaml`); SBOMs (`make sbom`).
+- **Backups:** age public-key encryption (sidecar and manual), fail closed; evidence-mirror copies are root-owned read-only.
+
+### Fixed
+
+- Scheduled DB backups **silently stopped** after every restart (the loop slept 24 h before its first run); retention would then have deleted every older dump. Now: hourly check of a success marker, newest 14 always kept, failures leave no partial dump.
+- Manual backups made in the app could not be restored with `scripts/restore.sh` (`pg_dump` 17 vs a Postgres 16 server); the backend now ships `postgresql-client-16`.
+- The evidence-backup mirror was writable by the backend it is meant to protect.
+- The audit monitor ran a stale image (it was built separately from the backend).
+- The frontend healthcheck always failed (`localhost` resolved to IPv6).
+- The syslog forwarder left its client private key in `/tmp` on every reconnect.
+- The KEK-rotation runbook's command could not work as written.
+
+### Operations
+
+- New scripts / make targets: `make posture` (security posture check of the running stack), `make smoke` (functional smoke test), `make scan` / `make sbom`, `make verify-restore`, `make pki`, `make db-roles`, `make lock`, `make digests`.
+- Memory: the backend is capped at 6 GiB (a 1 GiB evidence upload peaks at ~4 GiB). Size hosts handling evidence near the cap at 12 GB+.
+- Developer notes: the backend container is read-only (write only to `/tmp`, the data volumes or `/app/data`); new Redis commands or key prefixes must be added to the ACL in `scripts/secrets.sh`; after changing a secret file, `docker compose up -d --force-recreate <service>`.
+
+### Known limits
+
+- Host-level controls stay with the operator: full-disk encryption for the Docker volumes and `./secrets`, and filtering published ports on the `DOCKER-USER` chain (Docker bypasses `ufw`).
+- The backend keeps direct internet egress (OSINT, webhooks, SMTP, syslog) — accepted risk, [ADR-0007](docs/adr/0007-backend-egress-accepted-risk.md).
+
 ## [0.3.0] — unreleased (branch `fix/post-incident`, merged with `main` through #25)
 
 Post-incident report remap, incident detection time, two UX standards (control sizing, date/time entry), a dependency refresh under a 14-day cooldown, and layout fixes.

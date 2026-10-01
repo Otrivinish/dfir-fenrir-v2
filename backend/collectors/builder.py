@@ -22,6 +22,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import secrets
 import shutil
 import subprocess
@@ -116,27 +117,53 @@ def _build_collector_exe(
     with tempfile.TemporaryDirectory() as td:
         spec_path = Path(td) / "collector_spec.yaml"
         spec_path.write_text(_spec_yaml(platform, artifacts, collector_name, cert_pem))
+        datastore = _scratch_datastore(Path(td) / "datastore")
         try:
             proc = subprocess.run(
                 [
                     settings.velociraptor_linux_bin, "--nobanner",
                     "collector", str(spec_path),
-                    "--datastore", settings.velociraptor_datastore,
+                    "--datastore", str(datastore),
                 ],
                 capture_output=True, text=True, timeout=_BUILD_TIMEOUT_S,
+                # Minimal environment: the repacker needs no app settings or credentials.
+                env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                     "HOME": os.environ.get("HOME", "/tmp"), "TMPDIR": tempfile.gettempdir()},
             )
         except (OSError, subprocess.TimeoutExpired) as e:
             raise CollectorBuildError(f"Velociraptor build failed to launch: {e}") from e
-    if proc.returncode != 0:
-        raise CollectorBuildError(
-            f"Velociraptor collector build failed (exit {proc.returncode}): "
-            f"{(proc.stderr or proc.stdout or '').strip()[:500]}"
-        )
-    # The collector lands in the datastore under the requested name; move it out.
-    produced = Path(settings.velociraptor_datastore) / collector_name
-    if not produced.is_file():
-        raise CollectorBuildError("Velociraptor reported success but produced no collector")
-    shutil.move(str(produced), str(out_path))
+        if proc.returncode != 0:
+            raise CollectorBuildError(
+                f"Velociraptor collector build failed (exit {proc.returncode}): "
+                f"{(proc.stderr or proc.stdout or '').strip()[:500]}"
+            )
+        # The collector lands in the (scratch) datastore under the requested name.
+        produced = datastore / collector_name
+        if not produced.is_file():
+            raise CollectorBuildError("Velociraptor reported success but produced no collector")
+        shutil.move(str(produced), str(out_path))
+
+
+def _scratch_datastore(dst: Path) -> Path:
+    """Per-build writable copy of the image's pre-warmed datastore — the image (and so
+    /opt/velociraptor) is read-only, and Velociraptor writes into its datastore. The
+    large cached tool binaries under public/ are symlinked (only read), not copied."""
+    src = Path(settings.velociraptor_datastore)
+
+    def _copy(s: str, d: str) -> None:
+        if Path(s).relative_to(src).parts[0] == "public":
+            os.symlink(s, d)
+        else:
+            shutil.copy2(s, d)
+
+    shutil.copytree(src, dst, copy_function=_copy)
+    # The warmed-up configs hard-code the datastore path (location, filestore_directory,
+    # tempdir_*, writeback_*) — point them at this scratch copy, not the read-only one.
+    for name in ("server.config.yaml", "client.config.yaml"):
+        cfg = dst / name
+        if cfg.is_file():
+            cfg.write_text(cfg.read_text().replace(str(src), str(dst)))
+    return dst
 
 
 # ─── Package assembly (sync — run in a thread via run_in_executor) ───────────

@@ -99,39 +99,27 @@ Most incident-response tooling is either a SaaS that wants your evidence in some
 
 ## 🏗 Architecture
 
-It's servered through Caddy as a pure TLS-terminating reverse proxy. The React SPA is served by a dedicated hardened **nginx** container; the API is the FastAPI **backend**. Everything reaches the edge only through Caddy.
+Everything reaches the edge only through **Caddy** (TLS 1.3 only). The React SPA is served by a hardened **nginx** container; the API is the FastAPI **backend**. Three networks keep the tiers apart, and every internal hop is encrypted and authenticated — no service trusts another because of where it sits on the network.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                       Internet / Browser                         │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ HTTPS :443  (TLS 1.3, HSTS, CSP)
-                   ┌─────────▼──────────┐
-                   │       Caddy        │  TLS termination + reverse proxy ONLY
-                   │    (pure proxy)    │ 
-                   └────┬──────────┬────┘
-              /  (SPA)  │          │  /api/*  ·  /download/*  ·  WS
-              ┌─────────▼──┐   ┌───▼─────────┐
-              │  Frontend  │   │   Backend   │  FastAPI async 
-              │ nginx :3000│   │    :8000    │  
-              │ static SPA │   └──┬───────┬──┘
-              │ non-root,  │      │       │
-              │ read-only  │  ┌───▼──┐ ┌──▼──────┐
-              └────────────┘  │ PG16 │ │ Redis 7 │  (sessions · rate-limit · cache)
-                              │ data │ └─────────┘
-                              └───┬──┘
-                  ┌───────────────┼──────────────────┐
-            ┌─────▼─────┐   ┌─────▼───────┐    ┌──────▼────────┐
-            │  Backup   │   │ Audit       │    │  (evidence    │
-            │ daily     │   │ monitor     │    │   vol, ro)    │
-            │ pg_dump   │   │ tamper anchor│   └───────────────┘
-            └───────────┘   └─────────────┘
-
-  ── fenrir-analysis network (internal=true — NO internet) ──────────────
-              ┌─────────────────────────┐
-              │     Analysis Worker     │  air-gapped · caps dropped · noexec /tmp
-              │   (malware tooling)     │  reachable only from Backend
-              └─────────────────────────┘
+                     Internet / Browser
+                            │ HTTPS :443 — TLS 1.3 only · HSTS · CSP
+                  ┌─────────▼──────────┐
+                  │       Caddy        │ uid 10001 · no capabilities · read-only
+                  └────┬──────────┬────┘                          fenrir-internal
+            /  (SPA)   │          │  /api/* · WS   — mutual TLS (client cert)
+              ┌────────▼───┐  ┌───▼─────────────────┐
+              │  Frontend  │  │       Backend       │ uid 1001 · read-only
+              │   nginx    │  │  FastAPI :8000 TLS  │ DML-only DB role
+              └────────────┘  └──┬──────┬────────┬──┘
+          TLS 1.3 verify-full    │      │ mTLS   │ TLS + token
+  ── fenrir-data (NO internet) ──┼──────┼────────┼── fenrir-analysis (NO internet) ──
+              ┌──────────┐  ┌────▼───┐ ┌▼──────┐ ┌▼─────────────────────┐
+              │ Backup   ├─►│ PG 16  │ │ Redis │ │   Analysis Worker    │
+              │ age-enc. │  │ roles  │ │  ACL  │ │ air-gapped · ro · 3G │
+              │ Audit-mon├─►│ pg_hba │ └───────┘ └──────────────────────┘
+              │ Migrate 1×├►│        │
+              └──────────┘  └────────┘
 ```
 
 ---
@@ -142,9 +130,11 @@ It's servered through Caddy as a pure TLS-terminating reverse proxy. The React S
 
 | Requirement | Notes |
 |---|---|
-| Windows or Linux (suggested 4vCPU, 8GB and 60GB disk)
+| Windows or Linux | Suggested 4 vCPU, **12 GB RAM** (the containers' memory limits total ~12 GiB) and 60 GB disk |
 | **Docker** + **Docker Compose v2** | Required |
-| `openssl` *or* `python3` | Required to run the `setup.sh` |
+| `openssl` | Required by `setup.sh` (internal TLS certificates) |
+| `age` | Required to create the backup key (`age-keygen`) and to restore backups — dumps are decrypted on the host |
+| `7zip` | Backs up the four irreplaceable keys as one AES-256 zip ([INSTALL.md](INSTALL.md#1-prerequisites), *Upgrading from 0.3.x*) |
 | `curl` *(optional)* | Used by `setup.sh` for the post-start health poll. |
 
 
@@ -193,13 +183,13 @@ It's servered through Caddy as a pure TLS-terminating reverse proxy. The React S
 
 **Python tools:** `pefile` (PE), `oletools` (Office macros), `pdfminer.six` (PDF), `yara-python`, `exifread`, `python-magic`.
 
-Runs as non-root uid `1002`, all capabilities dropped, `/tmp` mounted `noexec`, on a network with **no internet route**. Quarantine is mounted read-only.
+Runs as non-root uid `1002`, all capabilities dropped, read-only root filesystem, `/tmp` mounted `noexec`, memory/CPU/PID-capped, on a network with **no internet route**. It serves TLS and refuses any call without the backend's bearer token. Quarantine is mounted read-only.
 
 </details>
 
 ### Infrastructure images
 
-`postgres:16-alpine` · `redis:7-alpine` · `caddy` (custom build) · backend image reused for the daily `backup` and the `audit-monitor`.
+`postgres:16-alpine` · `redis:7.4-alpine` · `caddy` 2.11.4 (custom build) — all base images **pinned by digest** · backend image reused for the `audit-monitor` and the one-shot schema `migrate` · `backup` sidecar = Postgres 16 client + `age`.
 
 ---
 
@@ -213,11 +203,15 @@ cd dfir-fenrir-v2
 
 `setup.sh` is **idempotent and offline-safe**. It:
 
-1. Creates `.env` from `.env.example` if missing.
-2. Generates every required secret if absent — `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `SECRET_KEY`, `EVIDENCE_KEK`, `AUDIT_SIGNING_KEY` (never overwrites an existing value).
-3. Generates self-signed TLS certs (skipped for BYO-cert / DuckDNS modes).
-4. Builds + starts the whole stack and waits for the backend to become healthy.
-5. Prints the **first-run setup URL + bootstrap token**.
+1. Creates `.env` from `.env.example` if missing (mode `0600`).
+2. Generates every service secret as a **file** in `./secrets/` (never overwrites one) — no secret ever travels as an environment variable.
+3. Issues the internal service certificates (TLS / mutual TLS between containers).
+4. Generates self-signed edge certs (self-signed mode only).
+5. Builds the images, prepares Caddy's volumes, applies the least-privilege database roles, starts the stack and waits for it to become healthy.
+6. Prints the **first-run setup URL + bootstrap token**.
+
+> [!IMPORTANT]
+> Back up the four keys that can never be regenerated — `./secrets/evidence_kek`, `secret_key`, `audit_signing_key` and your backup age identity — **before storing any evidence**: [INSTALL.md §5.2](INSTALL.md#52-back-up-the-keys-offline--do-this-now). Set `BACKUP_AGE_RECIPIENT` in `.env` to get encrypted backups.
 
 Then open **`https://localhost/`** and visit `/setup` with the printed token to create the first admin.
 
@@ -238,6 +232,12 @@ Then open **`https://localhost/`** and visit `/setup` with the printed token to 
 | `make logs` | Tail backend logs |
 | `make token` | Re-show the first-run token |
 | `make ps` | Container status |
+| `make posture` | Container-security posture check (exit code = failed checks) |
+| `make smoke` | Functional smoke test (`FENRIR_TOKEN_FILE=<admin API token>`) |
+| `make scan` / `make sbom` | Supply-chain scan (hadolint · Grype · Dockle) / + SBOMs |
+| `make verify-restore` | Prove the newest backup restores (throwaway DB) |
+| `make pki` / `make db-roles` | Renew internal certs / re-apply DB roles |
+| `make lock` / `make digests` | Re-lock Python deps (hashes) / check base-image digests |
 
 ---
 
@@ -246,57 +246,44 @@ Then open **`https://localhost/`** and visit `/setup` with the printed token to 
 <details><summary><b>What <code>setup.sh</code> automates, step by step</b></summary>
 
 ```bash
-# 1. Create your env file
-cp .env.example .env
-
-# 2. Generate secrets and paste them into .env
-#    (EVIDENCE_KEK and AUDIT_SIGNING_KEY are MANDATORY — the backend
-#     refuses to start without them.)
-openssl rand -hex 24          # → POSTGRES_PASSWORD
-openssl rand -hex 24          # → REDIS_PASSWORD
-openssl rand -hex 64          # → SECRET_KEY
-openssl rand -hex 32          # → EVIDENCE_KEK   (32 bytes = AES-256 KEK)
-./scripts/generate-audit-key.sh   # → AUDIT_SIGNING_KEY (Ed25519 seed, base64)
-
-# 3. Generate local TLS certs (self-signed mode only)
-./generate-certs.sh
-
-# 4. Build and start
-docker compose up -d --build
-
-# 5. Verify
-curl -sk https://localhost/api/health
-# {"status":"ok","service":"fenrir-v2-backend"}
-
-# 6. Grab the first-run token, then visit https://localhost/setup
-docker compose logs backend | grep -i token
+cp .env.example .env && chmod 600 .env     # set DOMAIN, TLS_MODE, BACKUP_AGE_RECIPIENT
+scripts/secrets.sh --apply                 # ./secrets/* (dir 0700) + Redis ACL
+scripts/internal-pki.sh --apply            # internal CA + per-service TLS certs
+./generate-certs.sh                        # edge cert — self-signed mode only
+docker compose build
+scripts/caddy-volume-prep.sh --apply       # Caddy runs as uid 10001, no capabilities
+docker compose up -d postgres && scripts/db-roles.sh --apply
+docker compose up -d                       # migrate runs before the backend
+curl -sk https://localhost/api/health      # {"status":"ok",...}
+make posture                               # all security checks should pass
+./setup.sh --print-token                   # first-run token → https://localhost/setup
 ```
 
 </details>
 
-For a non-default deployment (custom domain, Let's Encrypt via DuckDNS, or bring-your-own cert), edit `.env` **before** running — the TLS modes are documented inline in [`.env.example`](.env.example) and in [`docs/deployment-runbook.md`](docs/deployment-runbook.md).
+For a non-default deployment (public domain via Let's Encrypt, DuckDNS, or bring-your-own cert), edit `.env` **before** running — the TLS modes are documented inline in [`.env.example`](.env.example) and in [`docs/deployment-runbook.md`](docs/deployment-runbook.md).
 
 ---
 
 ## ⚙ Configuration
 
-All configuration lives in `.env` (copied from [`.env.example`](.env.example)). Key settings:
+Settings live in `.env` (copied from [`.env.example`](.env.example)); **secrets live in `./secrets/`** as files, generated by `setup.sh` and mounted only into the containers that need them.
 
-| Variable | Default | Purpose |
+| Setting | Default | Purpose |
 |---|---|---|
-| `DOMAIN` | `localhost` | Hostname; drives Caddy's TLS mode auto-selection |
-| `POSTGRES_PASSWORD` · `REDIS_PASSWORD` · `SECRET_KEY` | _generated_ | Core secrets |
-| `EVIDENCE_KEK` | _generated_ | **Required.** AES-256 master KEK for evidence at rest |
-| `AUDIT_SIGNING_KEY` | _generated_ | **Required.** Ed25519 seed for signed audit exports |
+| `DOMAIN` | `localhost` | The exact name/IP users type — the only site served |
+| `TLS_MODE` | `auto` | `selfsigned` · `acme` (Let's Encrypt) · `duckdns` · `byo` · `internal` |
+| `BACKUP_AGE_RECIPIENT` | _empty_ | age public key — **set it**, or DB dumps are unencrypted |
 | `TOTP_REQUIRED` | `true` | Force 2FA enrolment on all users |
 | `INACTIVITY_TIMEOUT_MINUTES` | `30` | Idle session revocation |
-| `CORS_ORIGINS` · `ALLOWED_HOSTS` | `https://localhost` … | Browser origin / Host-header allowlists |
-| `TLS_CERT_FILE` / `TLS_KEY_FILE` | _empty_ | Bring-your-own cert mode |
-| `LETSENCRYPT_EMAIL` / `DUCKDNS_TOKEN` | _empty_ | Let's Encrypt-via-DuckDNS mode |
-| `TSA_URL` | _empty_ | Optional RFC 3161 timestamp authority for chain anchoring |
-| `ANCHOR_INTERVAL` | `3600` | Audit-monitor anchoring cadence (seconds) |
+| `CORS_ORIGINS` · `ALLOWED_HOSTS` | follow `DOMAIN` | Only set to add names deliberately |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | _empty_ | Bring-your-own cert mode (files in `./certs`) |
+| `LETSENCRYPT_EMAIL` | _empty_ | ACME / DuckDNS modes (DuckDNS token → `./secrets/duckdns_token`) |
+| `TSA_URL` · `ANCHOR_INTERVAL` | _empty_ · `3600` | Optional RFC 3161 anchoring of the audit chain |
+| `./secrets/evidence_kek` | _generated_ | **Required.** AES-256 master KEK for evidence — back it up offline |
+| `./secrets/audit_signing_key` · `secret_key` | _generated_ | Ed25519 audit-export seed · TOTP/session key |
 
-**TLS modes** (auto-selected by Caddy from what's set): **A** self-signed (default) · **B** Let's Encrypt via DuckDNS · **C** bring-your-own cert.
+The edge is **TLS 1.3 only** — Windows 10 / Server 2019 PowerShell and `curl.exe` cannot connect; use a browser or a newer host.
 
 ---
 
@@ -352,13 +339,13 @@ Hash-chained audit log (global + per-incident viewers) · signed audit-log expor
 
 ## 🔒 Security posture
 
-- **In transit:** TLS 1.3 at the Caddy edge; HSTS; hardened CSP (`object-src 'none'`, `frame-ancestors 'none'`, etc.); COOP/CORP/Permissions-Policy.
-- **At rest:** AES-256-GCM evidence encryption (KEK from env, fail-fast); Fernet-encrypted TOTP secrets & API keys.
+- **In transit:** TLS 1.3-only edge; HSTS; hardened CSP (`connect-src 'self'`, `object-src 'none'`, `frame-ancestors 'none'`, etc.); COOP/CORP/Permissions-Policy. Internally: mutual TLS Caddy→backend and backend→Redis, TLS 1.3 verify-full to Postgres, TLS + token to the worker — on a separate, name-constrained internal CA.
+- **At rest:** AES-256-GCM evidence encryption (fail-fast KEK); age-encrypted DB backups (identity kept offline); Fernet-encrypted TOTP secrets & API keys.
+- **Secrets & least privilege:** secrets are files mounted per service (never env vars); per-service Postgres roles (the app cannot alter the audit log or drop its trigger); Redis ACLs.
 - **Identity:** argon2id passwords, RFC 6238 TOTP 2FA (org-enforceable), opaque sessions with idle timeout, two-axis RBAC, Bearer API tokens role-capped to `min(user, token)`.
-- **Isolation:** non-root containers (backend 1001, worker 1002), read-only rootfs + tmpfs on frontend/worker, dropped capabilities, `no-new-privileges`, air-gapped analysis network (`internal: true`).
+- **Isolation:** every container non-root (bar the backup sidecar's two capabilities), read-only root filesystems, all capabilities dropped, `no-new-privileges`, memory/PID limits; tiered networks — the data tier and the analysis worker have no internet, and the edge has no route to the database.
+- **Supply chain:** digest-pinned base images, hash-locked Python dependencies, `make scan` (fails on fixable High/Critical), SBOMs. `make posture` verifies all of the above against the running stack.
 - **Integrity:** hash-chained tamper-evident audit log, Ed25519-signed exports, background audit-chain anchoring (+ optional RFC 3161 timestamps), per-IP/per-credential Redis rate limiting.
-
----
 
 ---
 
@@ -370,9 +357,9 @@ Hash-chained audit log (global + per-incident viewers) · signed audit-log expor
 |---|---|
 | [FEATURES.md](FEATURES.md) | Complete categorised feature inventory |
 | [docs/deployment-runbook.md](docs/deployment-runbook.md) | Bring-up, bootstrap, cert modes, full env reference |
-| [docs/threat-model.md](docs/threat-model.md) | Trust boundaries, encryption, air-gap, deviations |
+| [docs/threat-model.md](docs/threat-model.md) · [docs/adr/](docs/adr/) | Trust boundaries, encryption, air-gap, deviations · security decisions |
 | [docs/audit-integrity.md](docs/audit-integrity.md) | Hash chain, signed export, audited events |
-| [docs/backup-restore.md](docs/backup-restore.md) | Backup scope, retention, manual restore |
+| [docs/backup-restore.md](docs/backup-restore.md) | Encrypted backups, retention, scripted restore |
 | [docs/standards-map.md](docs/standards-map.md) · [docs/coc-procedure-27037.md](docs/coc-procedure-27037.md) | Standards & chain-of-custody procedure |
 | [docs/README.md](docs/README.md) | Full documentation index |
 

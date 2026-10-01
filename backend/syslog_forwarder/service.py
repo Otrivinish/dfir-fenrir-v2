@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 import ssl
 import tempfile
@@ -434,19 +435,20 @@ def _build_ssl_context(cfg: SyslogConfig) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     if cfg.ca_bundle_pem:
-        # cafile= API takes a path; use a temp file (clean up on close).
-        with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".pem") as f:
-            f.write(cfg.ca_bundle_pem)
-            ca_path = f.name
-        ctx.load_verify_locations(cafile=ca_path)
+        ctx.load_verify_locations(cadata=cfg.ca_bundle_pem)   # in memory — no temp file
     else:
         ctx.load_default_certs(ssl.Purpose.SERVER_AUTH)
     if cfg.client_cert_pem and cfg.client_key_pem:
-        with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".pem") as cf, \
-             tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".pem") as kf:
-            cf.write(cfg.client_cert_pem); cert_path = cf.name
-            kf.write(cfg.client_key_pem);  key_path  = kf.name
-        ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+        # load_cert_chain() only takes paths: write the pair into a private (0700) temp
+        # dir, load it, and let the directory — client KEY included — vanish at once.
+        # (Previously delete=False files were left in /tmp on every reconnect.)
+        with tempfile.TemporaryDirectory() as td:
+            cert_path, key_path = os.path.join(td, "client.pem"), os.path.join(td, "client.key")
+            with open(cert_path, "w") as cf:
+                cf.write(cfg.client_cert_pem)
+            with os.fdopen(os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as kf:
+                kf.write(cfg.client_key_pem)
+            ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
     ctx.check_hostname = cfg.verify_tls
     ctx.verify_mode = ssl.CERT_REQUIRED if cfg.verify_tls else ssl.CERT_NONE
     return ctx

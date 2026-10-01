@@ -24,7 +24,8 @@ router = APIRouter(prefix="/api/admin/backups", tags=["admin"])
 
 logger = logging.getLogger("backup")
 
-_BACKUP_RE = re.compile(r"^fenrir_backup_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.sql\.gz$")
+# .sql.gz = legacy/plaintext dump; .sql.gz.age = age-encrypted (BACKUP_AGE_RECIPIENT).
+_BACKUP_RE = re.compile(r"^fenrir_backup_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.sql\.gz(\.age)?$")
 
 # Process-local state (single worker per CLAUDE.md; resets on restart).
 _running = False                  # single-flight guard
@@ -119,7 +120,10 @@ async def _run_backup(started: Optional[datetime] = None) -> None:
         out_path = Path(settings.backup_path) / f"fenrir_backup_{ts}.sql.gz"
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        env = {**os.environ, "PGPASSWORD": pw}
+        # Minimal child environment: pg_dump gets its password and PATH, nothing else.
+        env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "PGPASSWORD": pw}
+        if settings.db_ssl_ca:   # same verify-full TLS as the app's own connections
+            env.update(PGSSLMODE="verify-full", PGSSLROOTCERT=settings.db_ssl_ca)
         proc = await asyncio.create_subprocess_exec(
             "pg_dump",
             "-h", host,
@@ -134,9 +138,31 @@ async def _run_backup(started: Optional[datetime] = None) -> None:
         if proc.returncode != 0:
             raise RuntimeError(f"pg_dump failed: {stderr.decode()[:500]}")
 
-        # Write gzipped
-        with gzip.open(str(out_path), "wb") as gz:
-            gz.write(stdout)
+        # Compress — and encrypt when a recipient is configured — OFF the event loop
+        # (single uvicorn worker), then write atomically via a .tmp that the listing
+        # regex never matches. A configured recipient fails CLOSED: no plaintext.
+        data = await asyncio.to_thread(gzip.compress, stdout)
+        recipient = settings.backup_age_recipient
+        if recipient:
+            age = await asyncio.create_subprocess_exec(
+                "age", "-r", recipient,
+                env={"PATH": env["PATH"]},
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            data, age_err = await age.communicate(data)
+            if age.returncode != 0:
+                raise RuntimeError(f"age encryption failed: {age_err.decode()[:300]}")
+            out_path = out_path.with_name(out_path.name + ".age")
+        else:
+            logger.warning("BACKUP_AGE_RECIPIENT not set — manual backup written UNENCRYPTED")
+        tmp_path = out_path.with_name(out_path.name + ".tmp")
+        try:
+            await asyncio.to_thread(tmp_path.write_bytes, data)
+            tmp_path.replace(out_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
         # Prune backups older than 14 days (match backup.sh behaviour).
         # /backups carries a sticky bit, so dumps written by the root sidecar

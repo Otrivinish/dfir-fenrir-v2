@@ -1,12 +1,16 @@
 .env
 .env.*
 !.env.example
+# Service secrets (scripts/secrets.sh) — never commit
+/secrets/
 
 # Certs (generated locally, never committed)
 certs/*.crt
 certs/*.key
 certs/*.csr
 certs/*.srl
+# Local CA private key — kept OUT of ./certs (which is mounted into Caddy)
+/ca/
 
 # Python
 __pycache__/
@@ -37,3 +41,5 @@ CLAUDE.md
 # Local revert log (working notes, not committed)
 REVERT.md
 TODO.md
+# Supply-chain scan output (scripts/scan.sh)
+/scan-reports/

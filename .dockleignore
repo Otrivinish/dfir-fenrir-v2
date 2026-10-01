@@ -1,0 +1,9 @@
+# dockle checkpoints ignored by scripts/scan.sh (`make scan`). Each is a false
+# positive raised by an UPSTREAM base-image layer, not by our Dockerfiles:
+#
+# python:3.12-slim cleans apt with the newer `apt-get dist-clean`, which dockle
+# does not recognise as clearing the lists (our own RUN lines rm -rf them).
+DKL-DI-0005
+# redis:7.4-alpine's own build line (it does use --no-cache; dockle trips on the
+# `apk add --no-network --virtual .redis-rundeps` in the same RUN).
+DKL-DI-0004
