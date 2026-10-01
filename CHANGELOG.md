@@ -2,7 +2,67 @@
 
 All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
-## [Unreleased] — container security hardening (2026-10-01) — **breaking for upgrades**
+## [Unreleased] — branch `feature/ux-002` (2026-10-01)
+
+### Changed
+
+- **New date/time picker** for every date+time field (16 fields on 10 pages): a month calendar next to HH / MM / SS wheels, a switch to enter the time in your timezone or in UTC, and a readout of both — including the UTC value that is stored.
+- **Changes are saved only with Apply.** Cancel, Esc or clicking outside discards them; previously every click saved immediately.
+- Keyboard: Enter applies; arrow keys move through the calendar; on a wheel, ↑/↓ step by 1, PgUp/PgDn by 10, Home/End jump to the ends. The mouse wheel steps a wheel too.
+- Daylight saving: a time skipped when the clocks go forward can't be applied, and the picker says why; a time that occurs twice shows which offset is selected.
+
+### Fixed
+
+- **Required date fields never blocked a form submit** (the hidden validation field was read-only, which browsers skip). Affects "Breach Detected At" when adding a legal deadline.
+
+### Verification
+
+- 49 headless-Chrome checks on the component in isolation — Apply/Cancel/Esc/outside click, keyboard, mouse wheel, timezone switch, `utc` fields, Clear, `required`, daylight-saving gap and repeat (Europe/Stockholm), a half-hour zone (Asia/Kolkata), placement at 390–1920 px, all three themes — 0 failures, 0 console errors. `npm run build` clean.
+- Not yet checked in the running app: the 10 pages that use it sit behind login.
+
+### Incidents — immutable incident reference
+
+- **References are now stored once, at creation, and can never change.** Before, `INC-0002` was recomputed from a counter on every read, so any format change would have renamed incidents in reports, LE packages and audit exports that had already been issued.
+  - **New column:** `incidents.ref` (NOT NULL, unique).
+  - **Enforcement:** a database trigger rejects any change. This covers the application's restricted role and a database superuser alike.
+- **New format for new incidents:** `PREFIX-YYYY-NNNNN`, e.g. `INC-2026-00011`.
+  - `YYYY` is the UTC creation year.
+  - `NNNNN` is the existing global counter, zero-padded to 5. It never resets, and grows past 99999 without truncation.
+- **Existing incidents keep their reference** (`INC-0001` … `INC-0010`): the backfill was checked to be byte-identical.
+- **Prefix:** the default is `INC`, and admins can change it under **Settings → Incident Reference**, or via `GET/PATCH /api/settings/incident-ref`.
+  - The page shows a preview of the next reference.
+  - Changes are audit-logged (`incident_ref_prefix_changed`) and apply only to incidents created afterwards.
+  - A valid prefix is 2–10 characters: a letter, then letters or digits.
+- **Lookup:**
+  - `GET /api/incidents?ref=…` is an exact, case-insensitive match for both formats.
+  - Global search now matches references; before, typing a reference into search found nothing.
+- **Both creation paths** use the new scheme: UI/API, and SIEM inbound webhooks.
+- **MCP server (`dfir-fenrir-mcp`, separate repository):** now accepts both reference formats, and resolves a new reference through `?ref=`. The old 200-incident scan remains as a fallback for older servers. Tests: 43 passed.
+
+### Security
+
+- **Defender PDF import never loads native PDFium.** `pdfplumber` also installs `pypdfium2` (native PDFium), but only uses it for page rendering, which FENRIR doesn't do.
+  - `defender_pdf/parser.py` now blocks that import, so an untrusted PDF can never reach native code; any rendering attempt fails loudly.
+  - The `requirements.txt` comment that claimed "no native PDF renderer" is corrected.
+
+### Upgrading
+
+- Rebuild and restart: `docker compose up -d --build backend audit-monitor frontend`. The `migrate` service adds and backfills `incidents.ref` and creates the trigger. It is safe to re-run.
+- Update `dfir-fenrir-mcp` too, for the new reference format. Older MCP versions can't resolve `PREFIX-YYYY-NNNNN` references; UUIDs keep working.
+
+### Verification — incident reference and PDF import
+
+- **Database:** all 10 existing references are identical after the backfill. The trigger blocks renames by both `fenrir_app` and the superuser; normal updates work; re-running `migrate` is a no-op.
+- **API:** 18/18 end-to-end checks through the real app pass: creation (UI/API and webhook), year, renaming blocked, `?ref=` and search for both formats, prefix validation, audit entry, prefix applies to new incidents only, report data and OpenAPI. They ran in a rolled-back transaction, with the counter restored.
+- **GUI:** the Settings → Incident Reference page was checked in a headless browser. Input is uppercased, an invalid prefix is blocked, and saving updates the preview.
+- **PDF:** the Defender PDF parser still works with PDFium blocked; `page.to_image()` raises.
+- **Gates:** `make posture` 72/72. Logs of backend, migrate, audit-monitor, frontend and Caddy were clean.
+
+### Known issues
+
+- **`make scan` currently fails (3 images).** Fixes for High OpenSSL / PCRE2 CVEs were published on 2026-10-01: Debian `openssl 3.5.7-1~deb13u3` and `pcre2 10.46-1~deb13u3`, and Alpine `libssl3 3.3.7-r2`. The backend and analysis-worker need a rebuild without the Docker cache to pick them up. The pinned `redis:7.4-alpine` digest needs updating. This is not caused by the changes above.
+
+## [0.3.1] — 2026-10-01 — container security hardening — **breaking for upgrades**
 
 Zero-trust / least-privilege hardening of the Docker deployment. No change to the API, the data model or the UI — but upgrading an existing installation needs one manual step, and some clients may lose access (TLS 1.3 only). Decisions: [`docs/adr/`](docs/adr/README.md).
 
@@ -58,7 +118,7 @@ Zero-trust / least-privilege hardening of the Docker deployment. No change to th
 - Host-level controls stay with the operator: full-disk encryption for the Docker volumes and `./secrets`, and filtering published ports on the `DOCKER-USER` chain (Docker bypasses `ufw`).
 - The backend keeps direct internet egress (OSINT, webhooks, SMTP, syslog) — accepted risk, [ADR-0007](docs/adr/0007-backend-egress-accepted-risk.md).
 
-## [0.3.0] — unreleased (branch `fix/post-incident`, merged with `main` through #25)
+## [0.3.0] — 2026-09-30
 
 Post-incident report remap, incident detection time, two UX standards (control sizing, date/time entry), a dependency refresh under a 14-day cooldown, and layout fixes.
 

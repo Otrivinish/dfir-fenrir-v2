@@ -261,11 +261,9 @@ class Incident(Base):
     title            = Column(String(200), nullable=False)
     description      = Column(Text)
 
-    @property
-    def ref(self) -> str | None:
-        if self.incident_number is None:
-            return None
-        return f"INC-{self.incident_number:04d}"
+    # Immutable incident reference, assigned once at creation (incidents/reference.py):
+    # PREFIX-YYYY-NNNNN; pre-existing incidents keep INC-NNNN. A DB trigger rejects changes.
+    ref              = Column(String(32), unique=True, nullable=False)
 
     # Standards-aligned enums (stored as strings; validated at the schema layer).
     # severity: internal Low/Medium/High/Critical (mapped to NCISS at report time).

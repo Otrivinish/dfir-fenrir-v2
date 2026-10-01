@@ -135,6 +135,30 @@ _INPLACE_MIGRATIONS: list[str] = [
     END $$
     """,
 
+    # Immutable incident reference (incidents/reference.py). Existing incidents keep the
+    # INC-NNNN they have always shown (lpad only below 1000: lpad() would truncate 10000).
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS ref VARCHAR(32)",
+    """
+    UPDATE incidents
+       SET ref = 'INC-' || CASE WHEN incident_number >= 1000 THEN incident_number::text
+                                ELSE lpad(incident_number::text, 4, '0') END
+     WHERE ref IS NULL AND incident_number IS NOT NULL
+    """,
+    "ALTER TABLE incidents ALTER COLUMN ref SET NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_incidents_ref ON incidents(ref)",
+    """
+    CREATE OR REPLACE FUNCTION incidents_ref_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.ref IS DISTINCT FROM OLD.ref THEN
+        RAISE EXCEPTION 'incidents.ref is immutable (% -> %)', OLD.ref, NEW.ref
+          USING ERRCODE = 'check_violation';
+      END IF;
+      RETURN NEW;
+    END $$
+    """,
+    "CREATE OR REPLACE TRIGGER trg_incidents_ref_immutable BEFORE UPDATE OF ref ON incidents "
+    "FOR EACH ROW EXECUTE FUNCTION incidents_ref_immutable()",
+
     # IOC enhancements: analyst-assessed malicious flag + optional entity link.
     "ALTER TABLE iocs ADD COLUMN IF NOT EXISTS malicious BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE iocs ADD COLUMN IF NOT EXISTS entity_id UUID REFERENCES entities(id) ON DELETE SET NULL",

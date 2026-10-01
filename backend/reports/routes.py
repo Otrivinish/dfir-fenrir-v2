@@ -278,7 +278,6 @@ async def get_report_data(
         })
 
     incident_out = jsonable_encoder(inc, exclude=_EXCLUDE)
-    incident_out["ref"] = inc.ref
 
     return {
         "generated_at":     now.isoformat(),

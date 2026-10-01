@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
@@ -23,6 +23,7 @@ from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.tags import normalize_tags
 from incidents.access import accessible_filter, get_accessible_incident
+from incidents.reference import assign as assign_reference
 from models import (AffectedSystem, Entity, Evidence, IOC, Incident,
                     IncidentAssignment, LessonsLearned, PlaybookTask, TimelineEvent, User,
                     incident_teams, utcnow)
@@ -90,6 +91,8 @@ async def list_incidents(
     tag:           Optional[str]           = Query(default=None,
                                                    description="Filter by tag (canonical lowercase-dashed)"),
     mine:          bool                    = Query(default=False),
+    ref:           Optional[str]           = Query(default=None, max_length=32,
+                                                   description="Exact incident reference, e.g. INC-2026-00009 or INC-0002 (case-insensitive)"),
     limit:         int                     = Query(default=50, ge=1, le=200),
     cursor:        Optional[str]           = Query(default=None),
 ) -> IncidentList:
@@ -97,8 +100,9 @@ async def list_incidents(
 
     Restricted to incidents visible to the caller via the team-based access
     filter (admins see all). Optional filters: status, severity, phase, tlp,
-    tag (canonical lowercase-dashed), and mine (only incidents the caller
-    created). Paginate with limit (1-200) and the opaque cursor. Returns
+    tag (canonical lowercase-dashed), mine (only incidents the caller
+    created) and ref (exact incident reference, legacy INC-NNNN or
+    PREFIX-YYYY-NNNNN). Paginate with limit (1-200) and the opaque cursor. Returns
     {items, next_cursor}.
     """
     offset = _decode_cursor(cursor)
@@ -110,6 +114,7 @@ async def list_incidents(
     if phase:         stmt = stmt.where(Incident.phase        == phase)
     if tlp:           stmt = stmt.where(Incident.tlp          == tlp)
     if mine:          stmt = stmt.where(Incident.created_by_id == user.id)
+    if ref:           stmt = stmt.where(Incident.ref == ref.strip().upper())
     if tag:
         # tags is a JSON list — case-folded match against the canonical form.
         # Cast to text and ILIKE keeps things index-free but readable; tag
@@ -139,10 +144,12 @@ async def create_incident(
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> IncidentOut:
-    inc_num = (await db.execute(text("SELECT nextval('incident_seq')"))).scalar()
+    inc_num, inc_ref, created_at = await assign_reference(db)
     inc = Incident(
         id=uuid.uuid4(),
         incident_number=inc_num,
+        ref=inc_ref,
+        created_at=created_at,
         title=req.title,
         description=req.description,
         severity=req.severity,
@@ -169,7 +176,7 @@ async def create_incident(
         db, "incident_create",
         outcome="success",
         resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
-        details={"severity": inc.severity, "phase": inc.phase, "tlp": inc.tlp},
+        details={"ref": inc.ref, "severity": inc.severity, "phase": inc.phase, "tlp": inc.tlp},
     )
     await db.commit()
     await db.refresh(inc)

@@ -89,7 +89,7 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'Jump to any incident, entity, or IOC from one box — open **Global Search** from the top bar.' },
           { type: 'section', title: 'Tips', items: [
-            'Search by incident ref (`INC-2026-0001`), title, hostname, username, or IOC value.',
+            'Search by incident ref (`INC-2026-00001`, or `INC-0001` for incidents created before October 2026), title, hostname, username, or IOC value.',
             'Results are scoped to what your role can see.',
           ] },
         ],
@@ -559,7 +559,7 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'The fixed area at the top of every incident page. Available everywhere you are inside an incident.' },
           { type: 'section', title: 'Top bar', items: [
-            '**← Incidents** link · ref code (e.g. `INC-2026-0001`) · incident title.',
+            '**← Incidents** link · ref code (e.g. `INC-2026-00001`) · incident title.',
             '**Handoff** — jump straight to the Handoffs tab to create a shift handover.',
             '**Edit** — switch the Details form to edit mode (title, severity, TLP, triage state, type, detection method, reporter, dates).',
             '**Resolve** — closes the incident (phase → Post-Incident; everything becomes read-only).',

@@ -177,7 +177,7 @@ async def list_actor_attributions(
             IncidentAttribution.created_at,
             IncidentAttribution.created_by_username,
             _Inc.id.label("incident_id"),
-            _Inc.incident_number,
+            _Inc.ref,
             _Inc.title,
             _Inc.status,
             _Inc.severity,
@@ -194,7 +194,7 @@ async def list_actor_attributions(
         ActorIncidentLink(
             attribution_id=r.attribution_id,
             incident_id=r.incident_id,
-            incident_ref=f"INC-{r.incident_number:04d}" if r.incident_number else None,
+            incident_ref=r.ref,
             incident_title=r.title,
             incident_status=r.status,
             severity=r.severity,

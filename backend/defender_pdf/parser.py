@@ -21,7 +21,15 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import pdfplumber
+import sys
+
+# pdfplumber depends on pypdfium2 (native PDFium) but only for page rendering
+# (page.to_image). FENRIR only extracts text, through pure-Python pdfminer.six, so
+# keep the native renderer out of this process: any import of it raises
+# ModuleNotFoundError instead of handing it an untrusted PDF.
+sys.modules.setdefault("pypdfium2", None)
+
+import pdfplumber  # noqa: E402  (must follow the pypdfium2 block above)
 
 MAX_PAGES = 50
 

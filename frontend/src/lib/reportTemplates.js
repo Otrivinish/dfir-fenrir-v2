@@ -1248,7 +1248,7 @@ export function generateSkeleton(opts = {}) {
       <ul>
         <li>Title · severity · TLP · phase · status badges: ${ph('incident.title / severity / tlp / phase / status', 'auto')}</li>
         <li>Logo: ${ph('Branding → Company logo', 'user')}</li>
-        <li>Incident ID: ${ph('incident.ref (INC-####)', 'auto')} · Opened: ${ph('incident.created_at', 'auto')} · Closed: ${ph('incident.closed_at', 'auto')} <span class="static">("Not closed" while open)</span> · Generated: ${ph('report time', 'auto')}</li>
+        <li>Incident ID: ${ph('incident.ref (e.g. INC-2026-00009)', 'auto')} · Opened: ${ph('incident.created_at', 'auto')} · Closed: ${ph('incident.closed_at', 'auto')} <span class="static">("Not closed" while open)</span> · Generated: ${ph('report time', 'auto')}</li>
         <li>Classification: ${ph('Advanced options → Classification marking', 'user')} or fallback ${ph('incident.tlp', 'auto')}</li>
         <li>Counts: ${ph('timeline events · IOCs (malicious) · entities · evidence items · playbook %', 'auto')}</li>
       </ul>

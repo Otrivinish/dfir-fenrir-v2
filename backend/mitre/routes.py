@@ -94,7 +94,7 @@ async def get_global_mitre_coverage(
         inc_rows = (await db.execute(
             select(
                 Incident.id,
-                Incident.incident_number,
+                Incident.ref,
                 Incident.title,
                 Incident.severity,
             ).where(Incident.id.in_(all_incident_ids))
@@ -102,7 +102,7 @@ async def get_global_mitre_coverage(
         for r in inc_rows:
             inc_map[r.id] = {
                 "id": r.id,
-                "ref": f"INC-{r.incident_number:04d}" if r.incident_number else None,
+                "ref": r.ref,
                 "title": r.title,
                 "severity": r.severity,
             }

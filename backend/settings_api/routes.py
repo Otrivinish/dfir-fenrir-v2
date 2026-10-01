@@ -19,7 +19,9 @@ from core.database import get_db
 from core.security import decrypt_secret, encrypt_secret
 from core.config import settings as env_settings
 from models import PlatformSetting, User
-from schemas import ApiKeyServiceOut, ApiKeySet, ApiKeysResponse, ENRICHMENT_SERVICES
+from incidents import reference as incident_ref
+from schemas import (ApiKeyServiceOut, ApiKeySet, ApiKeysResponse, ENRICHMENT_SERVICES,
+                     IncidentRefSettings, IncidentRefSettingsUpdate)
 
 router = APIRouter()
 
@@ -173,3 +175,40 @@ async def delete_api_key(
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
+
+
+# ─── Incident reference prefix ───────────────────────────────────────────────
+
+@router.get("/incident-ref", response_model=IncidentRefSettings,
+            summary="Get incident-reference settings")
+async def get_incident_ref_settings(
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> IncidentRefSettings:
+    """Current prefix for new incident references and a preview of the next
+    reference (PREFIX-YYYY-NNNNN). Admin only."""
+    prefix = await incident_ref.get_prefix(db)
+    return IncidentRefSettings(prefix=prefix, next_ref_preview=await incident_ref.preview_next(db, prefix))
+
+
+@router.patch("/incident-ref", response_model=IncidentRefSettings,
+              summary="Set the incident-reference prefix")
+async def update_incident_ref_settings(
+    req: IncidentRefSettingsUpdate,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> IncidentRefSettings:
+    """Change the prefix used for **new** incidents (2-10 chars, A-Z then A-Z/0-9).
+    Existing incident references never change. Audit-logged. Admin only."""
+    old = await incident_ref.get_prefix(db)
+    await incident_ref.set_prefix(db, req.prefix, user.id)
+    await write_audit(
+        db, "incident_ref_prefix_changed",
+        outcome="success", resource_type="platform_setting",
+        resource_id=incident_ref.PREFIX_KEY, resource_label="Incident reference prefix",
+        details={"old": old, "new": req.prefix},
+    )
+    await db.commit()
+    return IncidentRefSettings(prefix=req.prefix, next_ref_preview=await incident_ref.preview_next(db, req.prefix))
+

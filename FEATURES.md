@@ -20,7 +20,7 @@
 
 - Cursor-paginated incident list with severity/status/team/tag filters
 - Create incident with inline validation; detail page with edit-on-blur
-- Unique incident numbers (`INC-NNNN`, Postgres sequence)
+- Immutable incident references — `PREFIX-YYYY-NNNNN` assigned once at creation (configurable prefix, default `INC`; legacy `INC-NNNN` kept), DB-enforced, searchable and filterable (`?ref=`)
 - 800-61 R3 phase stepper — interactive, audit-logged transitions; phases colour-coded by NIST CSF 2.0 function
 - Severity scale (internal Low/Med/High/Critical → NCISS at report time)
 - TLP 2.0 marking · incident type · CSF 2.0 function tag · reporter field

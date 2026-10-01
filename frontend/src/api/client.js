@@ -763,6 +763,8 @@ export const api = {
   listApiKeyServices: ()               => request('GET',    '/api/settings/api-keys'),
   setApiKey:          (service, value) => request('PUT',    `/api/settings/api-keys/${service}`, { value }),
   deleteApiKey:       (service)        => request('DELETE', `/api/settings/api-keys/${service}`),
+  getIncidentRefSettings:    ()       => request('GET',   '/api/settings/incident-ref'),
+  updateIncidentRefSettings: (prefix) => request('PATCH', '/api/settings/incident-ref', { prefix }),
 
   // Browser history (per-incident)
   uploadWebHistory: async (incidentId, { file, browser, formHistoryFile }) => {

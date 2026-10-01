@@ -26,7 +26,7 @@ async def global_search(
     canonical = normalize_tag(q) or ""
     tag_needle = f'%"{canonical}"%' if canonical else None
 
-    inc_match = [Incident.title.ilike(term), Incident.description.ilike(term)]
+    inc_match = [Incident.ref.ilike(term), Incident.title.ilike(term), Incident.description.ilike(term)]
     if tag_needle:
         inc_match.append(cast(Incident.tags, Text).ilike(tag_needle))
 
@@ -78,18 +78,17 @@ async def global_search(
     inc_map: dict = {}
     if sub_ids:
         rows = (await db.execute(
-            select(Incident.id, Incident.incident_number, Incident.title)
+            select(Incident.id, Incident.ref, Incident.title)
             .where(Incident.id.in_(sub_ids))
         )).all()
         for row in rows:
-            ref = f"INC-{row.incident_number:04d}" if row.incident_number else "INC-????"
-            inc_map[row.id] = {"ref": ref, "title": row.title}
+            inc_map[row.id] = {"ref": row.ref, "title": row.title}
 
     return {
         "incidents": [
             {
                 "id":       str(r.id),
-                "ref":      r.ref or "INC-????",
+                "ref":      r.ref,
                 "title":    r.title,
                 "severity": r.severity,
                 "status":   r.status,
