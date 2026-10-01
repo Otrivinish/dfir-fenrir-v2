@@ -2,7 +2,7 @@
 
 All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
-## [Unreleased] — branch `feature/ux-002` (2026-10-01)
+## [Unreleased] — `feature/ux-002` (merged, #28) and branch `fix/ebm` (2026-10-01)
 
 ### Changed
 
@@ -19,6 +19,24 @@ All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
 - 49 headless-Chrome checks on the component in isolation — Apply/Cancel/Esc/outside click, keyboard, mouse wheel, timezone switch, `utc` fields, Clear, `required`, daylight-saving gap and repeat (Europe/Stockholm), a half-hour zone (Asia/Kolkata), placement at 390–1920 px, all three themes — 0 failures, 0 console errors. `npm run build` clean.
 - Not yet checked in the running app: the 10 pages that use it sit behind login.
+
+### Fixed — post-incident report
+
+- **Timestamps follow the ISO 8601 rule.** They used to follow the reader's browser language (`09/15/2026, 10:30 GMT+2`, or `15.09.2026, 10:30 MESZ` in German), so one report read differently on different machines.
+  - Now: `YYYY-MM-DD HH:MM:SS ±HH:MM`, 24 h, in the operator's Fenrir timezone, using the same formatter as the rest of the app.
+  - The Timeline appendix used the browser's timezone instead of Fenrir's, so events late in the day could land under the wrong date. Fixed too.
+- **Cost Tracking "Phase" column** was always blank: it read `phase`, but the cost data calls it `ir_phase`.
+- **Playbook tasks show their assignee.** The report data now includes `assignee_username` for each task; before, only the user ID was sent, and the report printed nothing.
+- **"Include sections" checkboxes work.** The 13 old checkboxes had no effect and partly named sections that no longer exist (e.g. "Entity graph").
+  - **New list:** one checkbox for each of the 19 report sections, plus "Key metrics strip (cover)". All of them come from one shared list (`REPORT_SECTIONS` in `reportTemplates.js`) that the report, "Show structure" and the Reports page all use.
+  - **Behaviour:** unticked sections are left out and the rest are renumbered. "Show structure" shows them greyed out as "Not included".
+  - **Executive mode** still leaves out its four full-report-only sections; their checkboxes are greyed out there.
+  - **Always printed:** the classification marking, TLP banner and cover are never left out.
+- **Verification:**
+  - **Generator:** report checks on the real generator all pass, in two browser languages (en-US, de-DE) and two browser timezones, with the same Fenrir timezone. All 12 timestamps are identical across runs.
+  - **Checkboxes:** every checkbox removes exactly its own section. "Show structure" matched the report's numbering in 64/64 random checkbox combinations.
+  - **API:** `assignee_username` was checked through the real report-data endpoint (rolled back).
+  - **GUI:** the Reports page was checked in a headless browser.
 
 ### Incidents — immutable incident reference
 

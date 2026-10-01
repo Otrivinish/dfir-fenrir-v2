@@ -129,7 +129,7 @@
 - Lessons learned (root cause, effectiveness ratings, observations, near-misses, timeline metrics, action items, control improvements; HTML export)
 - Response analytics (TTD/TTC/TTR, IOC/entity/timeline/playbook/respond/evidence breakdowns)
 - MITRE post-incident summary
-- **Post-incident report** — 4 layouts (Executive, Tactical, Forensic, Print); Executive / Full modes; auto-numbered sections incl. What happened, Markdown description, Decisions Log, Stakeholders, Legal & Regulatory Deadlines (met / violated), Attack Chain visual, Threat Actor Attribution, remediation plan anchored to close time; Appendix A Affected Systems / B Timeline; classification override; show-structure preview that mirrors the report; audit-grade history + verified re-download
+- **Post-incident report** — 4 layouts (Executive, Tactical, Forensic, Print); Executive / Full modes; auto-numbered sections incl. What happened, Markdown description, Decisions Log, Stakeholders, Legal & Regulatory Deadlines (met / violated), Attack Chain visual, Threat Actor Attribution, remediation plan anchored to close time; Appendix A Affected Systems / B Timeline; classification override; per-section include checkboxes; show-structure preview that mirrors the report; ISO 8601 timestamps in the operator's timezone; audit-grade history + verified re-download
 - Business-impact assessment (6 dimensions)
 - Cost tracking (line items, category/phase summaries)
 - **Legal & regulatory deadlines** — GDPR, NIS2, DORA, HIPAA, CCPA, PCI-DSS with live countdowns, status workflow, custom deadlines

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../../api/client.js'
-import { TEMPLATE_META, generateReport, generateSkeleton, injectReportSha256 } from '../../../lib/reportTemplates.js'
+import { REPORT_SECTION_OPTIONS, TEMPLATE_META, generateReport, generateSkeleton, injectReportSha256 } from '../../../lib/reportTemplates.js'
 import LePackage from './LePackage.jsx'
 
 // ── Cost category / phase display labels ──────────────────────────────────────
@@ -521,14 +521,9 @@ const SWATCH = {
 
 // ── Report generation ─────────────────────────────────────────────────────────
 
-// Default section-include flags. Defaults match the pre-toggle behaviour so
-// existing reports look unchanged unless the operator explicitly opts out.
-const DEFAULT_SECTIONS = {
-  overview: true, kpis: true, iocs: true, entities: true,
-  entity_graph: false,
-  timeline: true, actions: true, playbook: true, evidence: true,
-  mitre: true, lessons: true, remediation: true, closure: true,
-}
+// "Include sections": one checkbox per report section (+ the cover stats strip),
+// from the same list the report uses. Everything is included by default.
+const DEFAULT_SECTIONS = Object.fromEntries(REPORT_SECTION_OPTIONS.map(o => [o.key, true]))
 
 const TLP_OPTIONS = ['TLP:CLEAR', 'TLP:GREEN', 'TLP:AMBER', 'TLP:AMBER+STRICT', 'TLP:RED']
 
@@ -644,6 +639,7 @@ export default function Reports({ inc }) {
       classification, audience,
       includeInternalEvents,
       includeTimelineAppendix,
+      sections,
     })
     const w = window.open('', '_blank')
     if (!w) { setError('Pop-up blocked — please allow pop-ups for this site.'); return }
@@ -937,30 +933,23 @@ export default function Reports({ inc }) {
                 Include sections
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px' }}>
-                {[
-                  ['overview',  'Overview'],
-                  ['kpis',      'Key metrics'],
-                  ['iocs',      'IOCs'],
-                  ['entities',     'Entities'],
-                  ['entity_graph', 'Entity graph (optional)'],
-                  ['timeline',     'Timeline'],
-                  ['actions',   'Respond actions'],
-                  ['playbook',  'Playbook'],
-                  ['evidence',  'Evidence'],
-                  ['mitre',     'MITRE mapping'],
-                  ['lessons',     'Lessons learned'],
-                  ['remediation', 'Remediation plan'],
-                  ['closure',     'Closure checklist'],
-                ].map(([key, label]) => (
-                  <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={!!sections[key]}
-                      onChange={() => toggleSection(key)}
-                    />
-                    <span>{label}</span>
-                  </label>
-                ))}
+                {REPORT_SECTION_OPTIONS.map(o => {
+                  const execOnlyFull = mode === 'executive' && o.fullOnly
+                  return (
+                    <label key={o.key}
+                           title={execOnlyFull ? 'Not part of the executive report' : undefined}
+                           style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12,
+                                    cursor: execOnlyFull ? 'default' : 'pointer', opacity: execOnlyFull ? 0.5 : 1 }}>
+                      <input
+                        type="checkbox"
+                        checked={!!sections[o.key] && !execOnlyFull}
+                        disabled={execOnlyFull}
+                        onChange={() => toggleSection(o.key)}
+                      />
+                      <span>{o.title}{execOnlyFull ? ' (full report only)' : ''}</span>
+                    </label>
+                  )
+                })}
               </div>
               <button
                 type="button"

@@ -216,9 +216,11 @@ async def get_report_data(
             d["ti_matched"] = False
         iocs_out.append(d)
 
-    # Resolve assignee / decider UUIDs → usernames for respond actions + decisions
+    # Resolve assignee / decider UUIDs → usernames for respond actions, decisions
+    # and playbook tasks
     assignee_ids = {a.assignee_id for a in actions if a.assignee_id}
     assignee_ids |= {d.decided_by_id for d in decisions if d.decided_by_id}
+    assignee_ids |= {t.assignee_id for t in tasks if t.assignee_id}
     username_map = {}
     if assignee_ids:
         users = (await db.execute(
@@ -230,6 +232,12 @@ async def get_report_data(
         d = jsonable_encoder(a)
         d["performed_by"] = username_map.get(str(a.assignee_id), "") if a.assignee_id else ""
         actions_out.append(d)
+
+    tasks_out = []
+    for t in tasks:
+        d = jsonable_encoder(t)
+        d["assignee_username"] = username_map.get(str(t.assignee_id), "") if t.assignee_id else ""
+        tasks_out.append(d)
 
     decisions_out = []
     for dec in decisions:
@@ -286,7 +294,7 @@ async def get_report_data(
         "entities":         jsonable_encoder(list(entities)),
         "entity_relations": jsonable_encoder(list(entity_relations)),
         "timeline_events":  jsonable_encoder(list(timeline)),
-        "playbook_tasks":   jsonable_encoder(list(tasks)),
+        "playbook_tasks":   tasks_out,
         "respond_actions":  actions_out,
         "decisions":        decisions_out,
         "lessons_learned":  jsonable_encoder(ll) if ll else None,
