@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client.js'
 import { formatLocal, formatLocalShort } from '../lib/datetime.js'
-import { SEVERITY, STATUS, labelOf, pillOf } from '../lib/incidentVocab.js'
+import { SEVERITY, STATUS, byValue, labelOf, pillOf } from '../lib/incidentVocab.js'
 import IncidentCreateModal from '../components/IncidentCreateModal.jsx'
 import TagChip from '../components/TagChip.jsx'
 
@@ -150,7 +150,12 @@ export default function Incidents() {
                 <td className="num" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--accent)' }}>{inc.ref ?? '—'}</td>
                 <td><span className={`pill ${pillOf('severity', inc.severity)}`}>{labelOf('severity', inc.severity)}</span></td>
                 <td className="title">{inc.title}</td>
-                <td>{labelOf('phase', inc.phase)}</td>
+                <td>
+                  {byValue.phase[inc.phase] && (
+                    <span className="phase-glyph" aria-hidden="true" style={{ color: byValue.phase[inc.phase].color }}>{byValue.phase[inc.phase].glyph}</span>
+                  )}
+                  {labelOf('phase', inc.phase)}
+                </td>
                 <td><span className={`pill ${pillOf('tlp', inc.tlp)}`}>{labelOf('tlp', inc.tlp)}</span></td>
                 <td><span className={`pill ${pillOf('status', inc.status)}`}>{labelOf('status', inc.status)}</span></td>
                 <td onClick={(e) => e.stopPropagation()}>

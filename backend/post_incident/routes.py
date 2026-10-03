@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
+from core.errors import ApiError, ApiErrorBody
 from incidents.access import get_accessible_incident
 from models import (
     ClosureChecklistItem, Entity, Evidence, Incident,
@@ -204,6 +205,7 @@ async def delete_checklist_item(
 
 @router.patch("/{incident_id}/post-incident/checklist/{item_id}",
               response_model=ClosureChecklistItemOut,
+              responses={409: {"model": ApiErrorBody, "description": "incident_closed"}},
               summary="Toggle a closure checklist item")
 async def toggle_checklist_item(
     incident_id: uuid.UUID,
@@ -215,11 +217,14 @@ async def toggle_checklist_item(
 ) -> ClosureChecklistItemOut:
     """Check or uncheck a closure checklist item.
 
-    Requires the analyst role; returns 404 if the item is not found. Checking
-    records the current user and timestamp; unchecking clears them. The change
-    is audited and the updated item is returned.
+    Requires the analyst role; the incident must not be closed (409 code
+    incident_closed); returns 404 if the item is not found. Checking records the
+    current user and timestamp; unchecking clears them. The change is audited and
+    the updated item is returned.
     """
-    await _get_incident(db, incident_id, user)
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     item = (await db.execute(
         select(ClosureChecklistItem).where(
@@ -248,6 +253,7 @@ async def toggle_checklist_item(
 
 @router.patch("/{incident_id}/post-incident/checklist/{item_id}/meta",
               response_model=ClosureChecklistItemOut,
+              responses={409: {"model": ApiErrorBody, "description": "incident_closed"}},
               summary="Update checklist item notes and assignee")
 async def update_checklist_meta(
     incident_id: uuid.UUID,
@@ -259,12 +265,14 @@ async def update_checklist_meta(
 ) -> ClosureChecklistItemOut:
     """Update the notes and/or assignee of a closure checklist item.
 
-    Requires the analyst role; returns 404 if the item is not found, or if a
-    supplied assignee is not an active user. An explicit null `assigned_to_id`
-    clears the assignment. The change is audited and the updated item is
-    returned.
+    Requires the analyst role; the incident must not be closed (409 code
+    incident_closed); returns 404 if the item is not found, or if a supplied
+    assignee is not an active user. An explicit null `assigned_to_id` clears the
+    assignment. The change is audited and the updated item is returned.
     """
-    await _get_incident(db, incident_id, user)
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     item = (await db.execute(
         select(ClosureChecklistItem).where(
@@ -337,6 +345,7 @@ async def get_lessons(
 
 @router.patch("/{incident_id}/post-incident/lessons",
               response_model=LessonsLearnedOut,
+              responses={409: {"model": ApiErrorBody, "description": "incident_closed"}},
               summary="Save the lessons-learned record")
 async def save_lessons(
     incident_id: uuid.UUID,
@@ -350,10 +359,14 @@ async def save_lessons(
     Requires the analyst role. The record is upserted; only fields present in
     the request body are applied (covering narrative, root cause,
     effectiveness, observations, timeline metrics, action items, control
-    improvements and report sections). The save is audited and the full record
-    is returned.
+    improvements and report sections). Once the incident is closed only
+    `action_items` may be sent; any other field is 409 code incident_closed. The
+    save is audited and the full record is returned.
     """
-    await _get_incident(db, incident_id, user)
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed" and req.model_fields_set - {"action_items"}:
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed",
+                       "Incident is closed: only action_items can be changed. Re-open it to edit the rest.")
 
     row = (await db.execute(
         select(LessonsLearned).where(LessonsLearned.incident_id == incident_id)
@@ -772,7 +785,11 @@ async def get_incident_analytics(
     """Compute aggregate analytics for an incident.
 
     Requires the analyst role. Returns a JSON object covering response timing
-    (time-to-detect/contain/resolve in minutes), IOC and entity counts by type,
+    in minutes (ttd_mins: occurred_at → detected_at; ttc_mins: detected_at, else
+    created_at → contained_at; ttr_mins: detected_at, else created_at →
+    recovered_at, else closed_at; null when unset or negative; ttd_excluded /
+    ttc_excluded / ttr_excluded are true when both times are set but the interval is
+    negative, so it was left out), IOC and entity counts by type,
     timeline events by phase and MITRE coverage, playbook task completion,
     respond actions by category, and evidence counts by kind.
     """
@@ -784,10 +801,17 @@ async def get_incident_analytics(
         secs = (end - start).total_seconds()
         return round(secs / 60) if secs >= 0 else None
 
+    def negative(start, end):
+        return bool(start and end and end < start)
+
     # ── Timing
-    ttd = delta_mins(inc.occurred_at, inc.created_at)
-    ttc = delta_mins(inc.created_at, inc.contained_at)
-    ttr = delta_mins(inc.created_at, inc.closed_at)
+    start = inc.detected_at or inc.created_at
+    ttd = delta_mins(inc.occurred_at, inc.detected_at)
+    ttc = delta_mins(start, inc.contained_at)
+    ttr = delta_mins(start, inc.recovered_at or inc.closed_at)
+    excluded = {"ttd_excluded": negative(inc.occurred_at, inc.detected_at),
+                "ttc_excluded": negative(start, inc.contained_at),
+                "ttr_excluded": negative(start, inc.recovered_at or inc.closed_at)}
 
     # ── IOCs by type
     ioc_rows = (await db.execute(
@@ -860,7 +884,7 @@ async def get_incident_analytics(
     ev_by_kind = {r.kind: r.n for r in ev_rows}
 
     return {
-        "timing": {"ttd_mins": ttd, "ttc_mins": ttc, "ttr_mins": ttr},
+        "timing": {"ttd_mins": ttd, "ttc_mins": ttc, "ttr_mins": ttr, **excluded},
         "iocs":     {"total": sum(ioc_by_type.values()),    "by_type": ioc_by_type},
         "entities": {
             "total":       sum(entity_by_type.values()),

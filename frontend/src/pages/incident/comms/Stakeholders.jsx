@@ -544,6 +544,8 @@ function ImportModal({ csvText, setCsvText, preview, result, importing, onParse,
           <button className="modal-close" type="button" onClick={onClose}>✕</button>
         </div>
 
+        {/* .modal-body: the content scrolls inside the 90vh modal instead of spilling out of it */}
+        <div className="modal-body">
         {!result ? (
           <>
             <p style={{ fontSize: 12, color: 'var(--muted)', margin: '0 0 var(--space-2)' }}>
@@ -643,6 +645,7 @@ function ImportModal({ csvText, setCsvText, preview, result, importing, onParse,
             </div>
           </>
         )}
+        </div>
       </div>
     </div>
   )

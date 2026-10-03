@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import logging
 import re
 import uuid
 import zipfile
+from datetime import timezone
 from pathlib import Path
 from typing import Optional
 
@@ -26,17 +28,20 @@ from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
+from core.errors import ApiError, ApiErrorBody
 from email_analyzer.domain_check import check_dkim, check_spf_dmarc, evaluate_source_ip, fetch_domain_auth
 from email_analyzer.parser import (attachment_bytes, is_msg, msg_to_eml_bytes, parse_email,
                                    repair_wrapped_export)
 from email_analyzer.scoring import score as score_email
 from evidence.crypto import awrite_encrypted
+from evidence.hashing import ahashes_of
 from incidents.access import get_accessible_incident
 from models import Artifact, EmailAnalysis, Evidence, IOC, User, utcnow
 from schemas import (DomainCheckOut, EmailAnalysisList, EmailAnalysisOut, EmailBulkAnalyzeOut,
-                     PromoteIocsRequest)
+                     HopImportStatus, PromoteIocsRequest)
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 MAX_EMAIL_BYTES = 25 * 1024 * 1024
 MAX_BULK_FILES = 200
@@ -177,6 +182,42 @@ async def _auto_verify_auth(parsed: dict) -> Optional[dict]:
     return result
 
 
+def _dark_operation_on(inc) -> bool:
+    """Fail closed, like the outbound-notification guard: the automatic
+    SPF/DKIM/DMARC lookups run only when `dark_operation` is exactly False."""
+    try:
+        return inc.dark_operation is not False
+    except Exception:  # noqa: BLE001 -- fail closed
+        return True
+
+
+def _lookup_skipped(domain: str) -> dict:
+    """`auth_verified` for an automatic lookup skipped under Dark Operation.
+    `error` makes the scorer and the live badges treat it as unavailable, like
+    a DNS timeout; `skipped` says why."""
+    return {"domain": domain, "skipped": "dark_operation",
+            "error": "Live DNS checks skipped — Dark Operation."}
+
+
+async def _audit_lookups_suppressed(db: AsyncSession, inc, user: User, request: Request, n: int) -> None:
+    """One `outbound_lookup_suppressed` audit row per automatic lookup skipped
+    under Dark Operation: {kind, reason} only -- never the domain or message
+    content. Never raises; a failed write is logged and the lookup stays skipped."""
+    try:
+        # Savepoint: a failed audit write must not poison the request's transaction.
+        async with db.begin_nested():
+            for _ in range(n):
+                await write_audit(
+                    db, "outbound_lookup_suppressed", user_id=user.id, username=user.username,
+                    resource_type="incident", resource_id=str(inc.id), resource_label=inc.ref,
+                    outcome="success", details={"kind": "email_auth_dns", "reason": "dark_operation"},
+                    ip_address=request.client.host if request.client else None,
+                )
+    except Exception as exc:  # noqa: BLE001 -- never raise
+        log.warning("Dark Operation: email DNS lookups skipped for incident %s; audit row not written (%s)",
+                    getattr(inc, "id", "?"), type(exc).__name__)
+
+
 async def _incident(db, incident_id, user, *, writable=True):
     inc = await get_accessible_incident(db, incident_id, user)
     if writable and inc.status == "closed":
@@ -184,13 +225,56 @@ async def _incident(db, incident_id, user, *, writable=True):
     return inc
 
 
-async def _get_analysis(db, incident_id, aid) -> EmailAnalysis:
-    a = (await db.execute(
-        select(EmailAnalysis).where(EmailAnalysis.id == aid, EmailAnalysis.incident_id == incident_id)
-    )).scalar_one_or_none()
+async def _get_analysis(db, incident_id, aid, *, for_update=False) -> EmailAnalysis:
+    q = select(EmailAnalysis).where(EmailAnalysis.id == aid, EmailAnalysis.incident_id == incident_id)
+    if for_update:
+        q = q.with_for_update()
+    a = (await db.execute(q)).scalar_one_or_none()
     if not a:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Email analysis not found")
     return a
+
+
+def _hop_time(h: dict):
+    """A hop's timestamp when it parses -- only such hops go to the Timeline."""
+    from datetime import datetime
+    if not h.get("timestamp"):
+        return None
+    try:
+        return datetime.fromisoformat(h["timestamp"])
+    except Exception:
+        return None
+
+
+def _event_id(h: dict) -> uuid.UUID | None:
+    """The Timeline event an imported hop is marked with, if any."""
+    try:
+        return uuid.UUID(str(h.get("timeline_event_id")))
+    except ValueError:
+        return None
+
+
+async def _live_hop_events(db: AsyncSession, incident_id: uuid.UUID, hops: list) -> set:
+    """Ids of the hops' marked Timeline events that still exist."""
+    from models import TimelineEvent
+    marked = {e for e in map(_event_id, hops) if e}
+    if not marked:
+        return set()
+    return set((await db.execute(
+        select(TimelineEvent.id).where(TimelineEvent.incident_id == incident_id,
+                                       TimelineEvent.id.in_(marked))
+    )).scalars().all())
+
+
+async def _analysis_out(db: AsyncSession, analysis: EmailAnalysis) -> EmailAnalysisOut:
+    """A single analysis plus `hop_import`, the hop counts import_hops itself uses,
+    so a client can tell "all on the Timeline" from "some events deleted"."""
+    hops = [h for h in (analysis.headers or {}).get("hops") or [] if _hop_time(h)]
+    live = await _live_hop_events(db, analysis.incident_id, hops)
+    out = EmailAnalysisOut.model_validate(analysis)
+    out.hop_import = HopImportStatus(importable=len(hops),
+                                     already_imported=sum(_event_id(h) in live for h in hops))
+    return out
 
 
 def _store_quarantine(incident_id: uuid.UUID, filename: str, data: bytes) -> tuple[uuid.UUID, str]:
@@ -228,8 +312,9 @@ async def analyze_email(
     Accepts either pasted raw header text (form field) or an uploaded .eml/.msg file
     (capped at 25 MB); Outlook .msg is converted to RFC-822 first. Extracts headers,
     hops, auth results, URLs, and attachments, computes a verdict and score, and stores
-    the raw message as a quarantine artifact. Requires the analyst role and an open
-    incident. Returns the created email analysis.
+    the raw message as a quarantine artifact. Under Dark Operation the automatic live
+    SPF/DMARC/DKIM lookup is skipped (`auth_verified.skipped`) and audited. Requires the
+    analyst role and an open incident. Returns the created email analysis.
     """
     inc = await _incident(db, incident_id, user)
 
@@ -261,7 +346,11 @@ async def analyze_email(
             src_name = src_name[:-4] + ".eml"
 
     parsed = parse_email(data)
-    auth_verified = await _auto_verify_auth(parsed)
+    if _dark_operation_on(inc):
+        domain = _auth_check_domain(parsed)
+        auth_verified = _lookup_skipped(domain) if domain else None
+    else:
+        auth_verified = await _auto_verify_auth(parsed)
     verdict = score_email(parsed, auth_verified)
 
     # Persist the raw message as a quarantine Artifact (re-readable for extraction / evidence).
@@ -298,6 +387,8 @@ async def analyze_email(
     db.add(analysis)
     await db.flush()
 
+    if auth_verified and auth_verified.get("skipped"):
+        await _audit_lookups_suppressed(db, inc, user, request, 1)
     await write_audit(
         db, "email_analyze", user_id=user.id, username=user.username,
         resource_type="email_analysis", resource_id=str(analysis.id), outcome="success",
@@ -307,7 +398,7 @@ async def analyze_email(
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
-    return EmailAnalysisOut.model_validate(analysis)
+    return await _analysis_out(db, analysis)
 
 
 @router.post("/{incident_id}/email/analyze-bulk", response_model=EmailBulkAnalyzeOut,
@@ -331,8 +422,9 @@ async def analyze_email_bulk(
     timeout, so one slow or unreachable domain can't stall the whole batch.
     Nothing is silently dropped -- oversized/invalid members are reported back
     as `skipped`/`errors`. Requires the analyst role and an open incident.
+    Under Dark Operation the live lookups are skipped and audited.
     """
-    await _incident(db, incident_id, user)
+    inc = await _incident(db, incident_id, user)
     if len(files) > MAX_BULK_FILES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             f"Batch exceeds {MAX_BULK_FILES} files")
@@ -401,7 +493,11 @@ async def analyze_email_bulk(
                 result = {"domain": domain, "error": "Live DNS validation timed out or failed."}
             return domain, result
 
-    domain_cache = dict(await asyncio.gather(*(_fetch(d) for d in domains))) if domains else {}
+    dark = _dark_operation_on(inc)
+    if dark:
+        domain_cache = {d: _lookup_skipped(d) for d in domains}
+    else:
+        domain_cache = dict(await asyncio.gather(*(_fetch(d) for d in domains))) if domains else {}
 
     created: list[EmailAnalysis] = []
     for name, parsed, data, from_msg in parsed_items:
@@ -447,6 +543,8 @@ async def analyze_email_bulk(
         await db.flush()
         created.append(analysis)
 
+    if dark and domains:
+        await _audit_lookups_suppressed(db, inc, user, request, len(domains))
     await write_audit(
         db, "email_analyze_bulk", user_id=user.id, username=user.username,
         resource_type="email_analysis", resource_id=str(batch_id), outcome="success",
@@ -459,7 +557,7 @@ async def analyze_email_bulk(
 
     return EmailBulkAnalyzeOut(
         batch_id=str(batch_id),
-        analyzed=[EmailAnalysisOut.model_validate(a) for a in created],
+        analyzed=[await _analysis_out(db, a) for a in created],
         skipped=skipped, errors=errors,
     )
 
@@ -549,7 +647,7 @@ async def get_email_analysis(
     incident, otherwise the full analysis record.
     """
     await _incident(db, incident_id, user, writable=False)
-    return EmailAnalysisOut.model_validate(await _get_analysis(db, incident_id, aid))
+    return await _analysis_out(db, await _get_analysis(db, incident_id, aid))
 
 
 @router.post("/{incident_id}/email/{aid}/promote-iocs", response_model=EmailAnalysisOut,
@@ -586,7 +684,7 @@ async def promote_iocs(
                       details={"incident_id": str(incident_id), "created": created},
                       ip_address=request.client.host if request.client else None)
     await db.commit()
-    return EmailAnalysisOut.model_validate(analysis)
+    return await _analysis_out(db, analysis)
 
 
 @router.post("/{incident_id}/email/{aid}/attachments/{idx}/extract", response_model=EmailAnalysisOut,
@@ -646,7 +744,7 @@ async def extract_attachment(
                                "filename": filename, "sha256": sha256},
                       ip_address=request.client.host if request.client else None)
     await db.commit()
-    return EmailAnalysisOut.model_validate(analysis)
+    return await _analysis_out(db, analysis)
 
 
 @router.post("/{incident_id}/email/{aid}/import-hops", response_model=EmailAnalysisOut,
@@ -658,51 +756,74 @@ async def import_hops(
     """Import the email's Received (relay hop) chain as timeline events.
 
     Each parsed hop with a valid timestamp becomes a Detection & Analysis phase event
-    sourced from "email"; hops without a usable timestamp are skipped. Requires the
-    analyst role and an open incident. Returns the email analysis.
+    sourced from "email"; hops without a usable timestamp are skipped. Idempotent: each
+    imported hop records its `timeline_event_id`, and hops whose event still exists are
+    skipped, so a repeat call adds only hops whose event was deleted. Requires the
+    analyst role and an open incident. Returns the email analysis; its `hop_import`
+    counts importable hops and those already on the Timeline.
     """
-    from datetime import datetime
     from models import TimelineEvent
     await _incident(db, incident_id, user)
-    analysis = await _get_analysis(db, incident_id, aid)
+    # Row lock: two concurrent imports of the same analysis serialise here, so the
+    # second sees the first one's markers instead of importing the hops again.
+    analysis = await _get_analysis(db, incident_id, aid, for_update=True)
+
+    headers = analysis.headers or {}
+    hops = [dict(h) for h in headers.get("hops") or []]
+    live = await _live_hop_events(db, incident_id, hops)
     n = 0
-    for h in (analysis.headers or {}).get("hops") or []:
-        if not h.get("timestamp"):
+    already = 0
+    for h in hops:
+        et = _hop_time(h)
+        if et is None:
             continue
-        try:
-            et = datetime.fromisoformat(h["timestamp"])
-        except Exception:
+        if _event_id(h) in live:
+            already += 1
             continue
         desc = f"Mail hop: {h.get('from') or '?'} → {h.get('by') or '?'}"
         if h.get("ip"):
             desc += f" [{h['ip']}]"
+        ev_id = uuid.uuid4()
+        # raw_log keeps the parsed hop exactly as before (without the new marker)
+        raw = {k: v for k, v in h.items() if k != "timeline_event_id"}
         db.add(TimelineEvent(
-            incident_id=incident_id, event_time=et, source="email",
+            id=ev_id, incident_id=incident_id, event_time=et, source="email",
             event_type="Mail relay hop", hostname=h.get("by"),
-            description=desc, raw_log=str(h)[:4000], ir_phase="detection_and_analysis",
+            description=desc, raw_log=str(raw)[:4000], ir_phase="detection_and_analysis",
             origin="forensic_import", external_safe=False, created_by_id=user.id,
         ))
+        h["timeline_event_id"] = str(ev_id)
         n += 1
+    if n:
+        # New list of new dicts, reassigned: the JSON column change is detected.
+        analysis.headers = {**headers, "hops": hops}
     await write_audit(db, "email_import_hops", user_id=user.id, username=user.username,
                       resource_type="email_analysis", resource_id=str(aid), outcome="success",
-                      details={"incident_id": str(incident_id), "events": n},
+                      details={"incident_id": str(incident_id), "events": n,
+                               "already_imported": already},
                       ip_address=request.client.host if request.client else None)
     await db.commit()
-    return EmailAnalysisOut.model_validate(analysis)
+    return await _analysis_out(db, analysis)
 
 
 @router.post("/{incident_id}/email/{aid}/mint-evidence", response_model=EmailAnalysisOut,
-             summary="Mint the email as chain-of-custody evidence")
+             operation_id="mint_email_evidence",
+             summary="Mint the email as chain-of-custody evidence",
+             responses={409: {"model": ApiErrorBody,
+                              "description": "artifact_hash_mismatch (or already minted)"}})
 async def mint_evidence(
     incident_id: uuid.UUID, aid: uuid.UUID, request: Request,
     user: User = Depends(require_analyst), db: AsyncSession = Depends(get_db),
 ) -> EmailAnalysisOut:
     """Mint the analyzed email's raw message as an encrypted chain-of-custody evidence item.
 
-    Reads the source message from quarantine, writes it AES-encrypted to evidence storage,
-    records hashes and custody (collector/custodian = caller), and links the evidence to the
-    analysis. Fails if already minted or the source message is unavailable. Requires the
-    analyst role and an open incident. Returns the email analysis.
+    Reads the source message from quarantine and re-hashes it: if its SHA-256 no longer
+    matches the hash recorded at upload, nothing is minted (409 `artifact_hash_mismatch`,
+    audited as `evidence_collect_rejected`). Otherwise writes it AES-encrypted to evidence
+    storage, records hashes, custody (collector/custodian = caller) and `acquired_at` = the
+    upload time, audits `evidence_collect` (details.method = email_mint), and links the
+    evidence to the analysis. Fails if already minted or the source message is unavailable.
+    Requires the analyst role and an open incident. Returns the email analysis.
     """
     await _incident(db, incident_id, user)
     analysis = await _get_analysis(db, incident_id, aid)
@@ -713,7 +834,21 @@ async def mint_evidence(
     src = (await db.execute(select(Artifact).where(Artifact.id == analysis.source_artifact_id))).scalar_one_or_none()
     if not src:
         raise HTTPException(status.HTTP_410_GONE, "Source message artifact missing")
-    raw = _read_quarantine(incident_id, src.stored_filename)
+    raw = await asyncio.to_thread(_read_quarantine, incident_id, src.stored_filename)
+    sha256, sha1, md5 = await ahashes_of(raw)
+    # C3 — the quarantined copy must still be the bytes hashed at upload.
+    if sha256 != (src.sha256_hash or "").lower():
+        await write_audit(db, "evidence_collect_rejected", user_id=user.id, username=user.username,
+                          resource_type="evidence", outcome="failure",
+                          details={"incident_id": str(incident_id), "method": "email_mint",
+                                   "email_analysis_id": str(aid), "artifact_id": str(src.id),
+                                   "reason": "artifact_hash_mismatch",
+                                   "recorded_sha256": src.sha256_hash, "computed_sha256": sha256},
+                          ip_address=request.client.host if request.client else None)
+        await db.commit()
+        raise ApiError(status.HTTP_409_CONFLICT, "artifact_hash_mismatch",
+                       "The stored message no longer matches the SHA-256 recorded when it was "
+                       "uploaded; it was not minted as evidence.")
 
     ev_id = uuid.uuid4()
     rel = f"emails/{ev_id}.eml.enc"
@@ -726,17 +861,22 @@ async def mint_evidence(
         identifier=f"EMAIL-{short}",
         original_filename="message.eml", storage_path=rel, nonce_hex=nonce,
         file_size_bytes=len(raw), mime_type="message/rfc822",
-        sha256=hashlib.sha256(raw).hexdigest(), sha1=hashlib.sha1(raw).hexdigest(),
-        md5=hashlib.md5(raw).hexdigest(),
+        sha256=sha256, sha1=sha1, md5=md5,
         current_custodian_id=user.id, collected_by_id=user.id, collected_at=utcnow(),
+        acquired_at=src.uploaded_at, upload_hash_check="not_checked",
     )
     db.add(ev)
     await db.flush()          # persist evidence before linking it, so the FK on
     analysis.evidence_id = ev_id   # email_analysis can't reference a not-yet-inserted row
-    await write_audit(db, "email_mint_evidence", user_id=user.id, username=user.username,
+    await write_audit(db, "evidence_collect", user_id=user.id, username=user.username,
                       resource_type="evidence", resource_id=str(ev_id), outcome="success",
-                      details={"incident_id": str(incident_id), "email_analysis_id": str(aid),
-                               "sha256": ev.sha256},
+                      details={"incident_id": str(incident_id), "method": "email_mint",
+                               "email_analysis_id": str(aid), "artifact_id": str(src.id),
+                               "kind": "digital_file", "identifier": ev.identifier, "name": ev.name,
+                               "sha256": ev.sha256, "file_size_bytes": ev.file_size_bytes,
+                               "acquired_at": ev.acquired_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                                               if ev.acquired_at else None,
+                               "artifact_hash_verified": True},
                       ip_address=request.client.host if request.client else None)
     await db.commit()
-    return EmailAnalysisOut.model_validate(analysis)
+    return await _analysis_out(db, analysis)

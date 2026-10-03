@@ -32,6 +32,15 @@ function Cite({ type, label }) {
   )
 }
 
+// C4 — internal custody changes (evidence_transfer to a FENRIR user). Since C4 the recipient
+// writes each one (accept, or a return from external custody) with acknowledged = true.
+// Older rows carry no acknowledgement: the 4.2 / 4.3 checks then stay manual (paper record).
+const internalTransfers = (events) =>
+  events.filter(e => e.event_type === 'evidence_transfer' && e.details && e.details.to_user_id)
+const hasLegacyTransfer = (transfers) => transfers.some(e => !('acknowledged' in e.details))
+const conditionRecorded = (e) =>
+  !!(e.details.condition_on_receipt || '').trim() && typeof e.details.seals_intact === 'boolean'
+
 // ─── SOP content definition ───────────────────────────────────────────────────
 // Each phase has an id, title, summary, citations, and steps.
 // Each step has: id, title, citations, body, autoCheck (fn(items, events) → bool|null, null=manual)
@@ -307,7 +316,16 @@ const PHASES = [
           { type: 'swgde', label: 'SWGDE §6.2' },
           { type: 'iso',   label: 'ISO 27037 §9.3.2' },
         ],
-        autoCheck: () => null,
+        autoCheck: (items, events) => {
+          const t = internalTransfers(events)
+          if (!t.length || hasLegacyTransfer(t)) return null
+          return t.every(conditionRecorded)
+        },
+        autoLabel: 'every internal transfer records the condition on receipt and the seals (external handovers: confirm on paper)',
+        autoWarnLabel: (items, events) => {
+          const n = internalTransfers(events).filter(e => !conditionRecorded(e)).length
+          return `${n} internal transfer${n !== 1 ? 's' : ''} without a recorded condition on receipt`
+        },
       },
       {
         id: '4.3',
@@ -317,7 +335,16 @@ const PHASES = [
           { type: 'swgde', label: 'SWGDE §6.3' },
           { type: 'acpo',  label: 'ACPO Principle 3' },
         ],
-        autoCheck: () => null,
+        autoCheck: (items, events) => {
+          const t = internalTransfers(events)
+          if (!t.length || hasLegacyTransfer(t)) return null
+          return t.every(e => e.details.acknowledged === true)
+        },
+        autoLabel: 'every internal transfer was accepted by the recipient in FENRIR (external parties: signature on paper)',
+        autoWarnLabel: (items, events) => {
+          const n = internalTransfers(events).filter(e => e.details.acknowledged !== true).length
+          return `${n} internal transfer${n !== 1 ? 's' : ''} without the recipient's acceptance`
+        },
       },
       {
         id: '4.4',

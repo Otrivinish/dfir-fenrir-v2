@@ -16,12 +16,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from affected_systems.routes import compromised_systems
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
 from incidents.access import get_accessible_incident
 from models import (
-    AffectedSystem, BusinessImpact, ClosureChecklistItem, Decision, Entity, EntityRelation,
+    BusinessImpact, ClosureChecklistItem, Decision, Entity, EntityRelation,
     Evidence, GeneratedReport, Incident, IncidentAssignment, IncidentAttribution,
     IncidentCost, IncidentStakeholder, IOC, LessonsLearned, PlaybookTask,
     RegulatoryDeadline, ReportAccess, RespondAction, ThreatActor, ThreatIntelIOC,
@@ -160,11 +161,8 @@ async def get_report_data(
         .order_by(IncidentAttribution.created_at)
     )).all()
 
-    affected_systems = (await db.execute(
-        select(AffectedSystem)
-        .where(AffectedSystem.incident_id == incident_id)
-        .order_by(AffectedSystem.created_at)
-    )).scalars().all()
+    # C2: affected systems = the incident's compromised entities, in the old row shape.
+    affected_systems = await compromised_systems(db, incident_id)
 
     # TI-match enrichment for IOCs — same single-query pattern as list_iocs.
     ti_map: dict[tuple, str] = {}

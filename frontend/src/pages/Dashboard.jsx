@@ -63,7 +63,7 @@ function ActivityCard({ item }) {
         <span style={{ color: 'var(--dim)', flexShrink: 0 }} title={formatLocal(item.ts)}>{relative(item.ts)}</span>
       </div>
       <Link
-        to={`/incidents/${item.incident_id}/details`}
+        to={`/incidents/${item.incident_id}`}
         title={item.incident_title}
         style={{ display: 'block', marginTop: 4, fontSize: 12, fontWeight: 600, color: 'var(--text)',
                  textDecoration: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
@@ -135,7 +135,7 @@ function ActivityModal({ mine, onClose }) {
                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--dim)' }}>{formatLocal(it.ts).slice(11)}</span>
                     <span style={{ color: cfg.dot, fontWeight: 600 }}>{cfg.label}</span>
                     <span style={{ minWidth: 0 }}>
-                      <Link to={`/incidents/${it.incident_id}/details`} onClick={onClose}
+                      <Link to={`/incidents/${it.incident_id}`} onClick={onClose}
                             style={{ color: 'var(--text)', fontWeight: 600, textDecoration: 'none' }}>
                         {it.incident_title}
                       </Link>
@@ -196,9 +196,9 @@ function SevBar({ bySev, total }) {
 
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
 
-function KPICard({ title, value, sub, accent, children }) {
+function KPICard({ title, value, sub, accent, hint, children }) {
   return (
-    <div style={{
+    <div title={hint} style={{
       background: 'var(--surface)',
       border: '1px solid var(--border)',
       borderRadius: 'var(--radius)',
@@ -266,7 +266,7 @@ function IncidentRow({ inc, legal }) {
   const navigate = useNavigate()
   return (
     <tr
-      onClick={() => navigate(`/incidents/${inc.id}/details`)}
+      onClick={() => navigate(`/incidents/${inc.id}`)}
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
       style={{ background: hov ? 'var(--surface-2)' : 'transparent', transition: 'background 0.1s', cursor: 'pointer' }}
@@ -276,7 +276,7 @@ function IncidentRow({ inc, legal }) {
       </td>
       <td style={{ ...TD, maxWidth: 260 }}>
         <Link
-          to={`/incidents/${inc.id}/details`}
+          to={`/incidents/${inc.id}`}
           style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', textDecoration: 'none', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
           title={inc.title}
         >
@@ -388,11 +388,12 @@ export default function Dashboard() {
     ws.onmessage = (ev) => {
       try {
         const m = JSON.parse(ev.data)
-        if (m.type !== 'notification') return
+        const n = m.notification
+        if (m.type !== 'notification' || !n) return
         // Refresh on lifecycle events. Comment/mention notifications don't
         // change any visible counter so we skip them to stay quiet.
-        if (['incident_created', 'phase_changed', 'handoff_pending'].includes(m.notification_type || m.type) ||
-            (typeof m.title === 'string' && /opened|reopened|resolved|phase/i.test(m.title))) {
+        if (['incident_created', 'phase_changed', 'handoff_pending'].includes(n.type) ||
+            (typeof n.title === 'string' && /opened|reopened|resolved|phase/i.test(n.title))) {
           reload()
         }
       } catch { /* ignore */ }
@@ -454,6 +455,8 @@ export default function Dashboard() {
 
   const sample = (n, label) =>
     n > 0 ? `${n} incident${n !== 1 ? 's' : ''}` : `No data — ${label}`
+  // Incidents left out of a mean (a time missing, or an interval that runs backwards).
+  const excluded = (n) => n > 0 ? ` · ${n} excluded` : ''
 
   return (
     <div style={{ maxWidth: 1280 }}>
@@ -530,19 +533,22 @@ export default function Dashboard() {
         <KPICard
           title="MTTD"
           value={fmtMinutes(summary?.mttd_minutes)}
-          sub={sample(summary?.mttd_sample, 'need occurred_at set')}
+          sub={`occurred → detected · ${sample(summary?.mttd_sample, 'need both times set')}${excluded(summary?.mttd_excluded)}`}
+          hint="Mean time to detect: Occurred → Detected, incidents opened in the last 30 days. Excluded: no Occurred or Detected time, or Detected before Occurred."
           accent="var(--accent)"
         />
         <KPICard
           title="MTTR"
           value={fmtMinutes(summary?.mttr_minutes)}
-          sub={sample(summary?.mttr_sample, 'no closed incidents')}
+          sub={`detected → recovered · ${sample(summary?.mttr_sample, 'none recovered or closed')}${excluded(summary?.mttr_excluded)}`}
+          hint="Mean time to recover: Detected (else created) → Recovered (else closed), last 30 days. Excluded: recovered or closed before Detected."
           accent="var(--accent)"
         />
         <KPICard
           title="MTTC"
           value={fmtMinutes(summary?.mttc_minutes)}
-          sub={sample(summary?.mttc_sample, 'need CER phase reached')}
+          sub={`detected → contained · ${sample(summary?.mttc_sample, 'none declared contained')}${excluded(summary?.mttc_excluded)}`}
+          hint="Mean time to contain: Detected (else created) → Contained, last 30 days. Excluded: Contained before Detected."
           accent="var(--accent)"
         />
       </div>
@@ -555,7 +561,8 @@ export default function Dashboard() {
           items={byPhase}
           orderedKeys={['preparation', 'detection_and_analysis', 'containment_eradication_recovery', 'post_incident']}
           labelOf={(k) => labelOf('phase', k)}
-          colorOf={() => 'var(--accent)'}
+          colorOf={(k) => byValue.phase[k]?.color}
+          glyphOf={(k) => byValue.phase[k]?.glyph}
         />
         <DistributionCard
           title="Active Severity"
@@ -714,7 +721,8 @@ function ContextStrip({ oncall, staleCount, overdueTotal }) {
 
 // ─── Distribution card — stacked bar + per-bucket count list ─────────────────
 
-function DistributionCard({ title, subtitle, items, orderedKeys, labelOf, colorOf }) {
+// glyphOf (optional): the legend mark is that glyph in the bucket colour instead of a swatch.
+function DistributionCard({ title, subtitle, items, orderedKeys, labelOf, colorOf, glyphOf }) {
   const total = orderedKeys.reduce((s, k) => s + (items[k] || 0), 0)
   return (
     <div className="panel" style={{ padding: 'var(--space-3) var(--space-4)' }}>
@@ -743,7 +751,9 @@ function DistributionCard({ title, subtitle, items, orderedKeys, labelOf, colorO
               const color = n ? colorOf(k) : 'var(--dim)'
               return (
                 <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                  <span style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0 }} />
+                  {glyphOf
+                    ? <span className="phase-glyph" aria-hidden="true" style={{ color, marginRight: 0, width: 12, textAlign: 'center', flexShrink: 0 }}>{glyphOf(k)}</span>
+                    : <span style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0 }} />}
                   <span style={{ flex: 1, color: n ? 'var(--text)' : 'var(--dim)' }}>{labelOf(k)}</span>
                   <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--muted)', fontSize: 11 }}>
                     {n} · {pct}%

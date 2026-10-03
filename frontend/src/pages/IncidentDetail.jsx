@@ -1,19 +1,24 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { useParams, Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { useParams, Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { api, notifyUnauthorized } from '../api/client.js'
 import { formatTitle } from '../hooks/useDocumentTitle.jsx'
 import { labelOf, pillOf } from '../lib/incidentVocab.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 import PhaseStepper from '../components/PhaseStepper.jsx'
 import PhaseChangeModal from '../components/PhaseChangeModal.jsx'
+import DeclareMilestoneModal, { MILESTONES } from '../components/DeclareMilestoneModal.jsx'
+import { CloseIncidentModal, ReopenIncidentModal } from '../components/IncidentClosureModals.jsx'
 import WarRoomDrawer from '../components/WarRoomDrawer.jsx'
+import ClockChips from '../components/ClockChips.jsx'
+import IncidentRail from '../components/IncidentRail.jsx'
 import SevBadge from '../components/SevBadge.jsx'
 import TagChip from '../components/TagChip.jsx'
 
 // Fields that flow through the Save button (form-style editing).
 // `phase` is intentionally excluded — it has its own action path via the
 // status-band stepper, with confirmation and audit logging.
-// `occurred_at`, `detected_at` and `contained_at` are handled separately (datetime entry).
+// `occurred_at`, `detected_at` and the milestones (`contained_at`, `eradicated_at`,
+// `recovered_at`) are handled separately (datetime entry).
 const EDITABLE = ['title', 'description', 'severity', 'tlp', 'triage_state', 'incident_type', 'detection_method', 'reporter']
 
 // Value for the datetime entry field: the canonical ISO-8601 (`…Z`) string
@@ -31,64 +36,82 @@ function toEpoch(v) {
   return isNaN(t) ? null : t
 }
 
-// Left-rail nav, grouped by NIST SP 800-61 R3 phase (matches the project's
-// Standards alignment in CLAUDE.md). Order is analyst-first: Details to orient,
-// then process/meta tabs, then the substantive Detection & Analysis tabs, then
-// response, then close-out. Admin-only group appended at runtime.
+// A rail count badge: hidden when there is nothing to count.
+const badge = (n, title) => (n ? { text: String(n), title } : null)
+
+// Left rail (IncidentRail), in NIST SP 800-61 R3 order: Situation and Details to orient, then
+// Command and Notify (who runs the response, who must be told), then Detection &
+// Analysis with evidence before the analysis built on it, then response and
+// close-out. `phase` gives a group label that phase's glyph and --phase-* colour
+// (Notify is not a phase: neutral). `count(snapshot)` is the item's live count.
+// Labels only: the route segments never change, so bookmarks and links still work.
 const NAV_GROUPS = [
   {
     label: null,                       // orient row — ungrouped at the top
     items: [
-      { to: 'details', label: 'Details' },
+      { to: 'situation', label: 'Situation' },
+      { to: 'details',   label: 'Details' },
     ],
   },
   {
-    label: 'Process',
+    label: 'Command',
+    phase: 'preparation',
     items: [
-      { to: 'playbook',    label: 'Playbook' },
-      { to: 'assignments', label: 'Assignments' },
+      { to: 'assignments', label: 'Team',           count: s => badge(s.assignments, `${s.assignments} assigned`) },
+      { to: 'playbook',    label: 'Playbook',       count: s => s.playbook_total > 0
+        ? { text: `${s.playbook_done}/${s.playbook_total}`, title: `${s.playbook_done} of ${s.playbook_total} tasks done` } : null },
+      { to: 'handoffs',    label: 'Shift handoffs', count: s => badge(s.handoffs_pending, `${s.handoffs_pending} awaiting acknowledgement`) },
+    ],
+  },
+  {
+    label: 'Notify',
+    items: [
+      { to: 'comms', label: 'Comms & stakeholders' },
+      { to: 'legal', label: 'Legal & regulatory' },
     ],
   },
   {
     label: 'Detection & Analysis',
+    phase: 'detection_and_analysis',
     items: [
-      { to: 'timeline', label: 'Timeline' },
-      { to: 'iocs',     label: 'IOCs' },
-      { to: 'entities', label: 'Entities' },
-      { to: 'files',    label: 'Files' },
+      { to: 'evidence', label: 'Evidence',             count: s => badge(s.evidence, `${s.evidence} evidence items`) },
+      { to: 'files',    label: 'Supporting documents', count: s => badge(s.files, `${s.files} files`) },
+      { to: 'forensic', label: 'Examine' },
+      { to: 'timeline', label: 'Timeline',             count: s => badge(s.timeline, `${s.timeline} events`) },
+      { to: 'entities', label: 'Entities',             count: s => badge(s.entities, `${s.entities} entities`) },
+      { to: 'iocs',     label: 'IOCs',                 count: s => badge(s.iocs, `${s.iocs} IOCs`) },
+      { to: 'mitre',    label: 'ATT&CK & attribution' },
       { to: 'notes',    label: 'Notes' },
-      { to: 'evidence', label: 'Evidence' },
-      { to: 'forensic', label: 'Forensic' },
-      { to: 'mitre',    label: 'MITRE ATT&CK' },
     ],
   },
   {
-    label: 'Containment / Recovery',
+    label: 'Containment, Eradication & Recovery',
+    phase: 'containment_eradication_recovery',
     items: [
-      { to: 'respond', label: 'Respond' },
-      { to: 'comms',   label: 'Comms' },
+      { to: 'respond', label: 'Respond', count: s => badge(s.respond_open, `${s.respond_open} of ${s.respond_total} actions open or in progress`) },
     ],
   },
   {
-    label: 'Post-Incident',
+    label: 'Post-Incident Activity',
+    phase: 'post_incident',
     items: [
-      { to: 'legal',         label: 'Legal' },
-      { to: 'handoffs',      label: 'Handoffs' },
       { to: 'post-incident', label: 'Post-Incident' },
     ],
   },
 ]
-const ADMIN_GROUP = {
-  label: 'Admin',
+// Appended when GET …/access grants read_audit_log (admins, and the incident's
+// IC / Deputy, E3). Not a phase: neutral label.
+const RECORD_GROUP = {
+  label: 'Record',
   items: [
-    { to: 'audit-log', label: 'Audit Log' },
+    { to: 'audit-log', label: 'Audit log' },
   ],
 }
 
 // section path-segment -> label, derived from the nav above so the tab title
 // stays in sync with the left rail. Used for document.title.
 const SECTION_LABELS = Object.fromEntries(
-  [...NAV_GROUPS, ADMIN_GROUP].flatMap(g => g.items.map(i => [i.to, i.label]))
+  [...NAV_GROUPS, RECORD_GROUP].flatMap(g => g.items.map(i => [i.to, i.label]))
 )
 
 function wsBase() {
@@ -175,19 +198,36 @@ export default function IncidentDetail() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const navGroups = user?.role === 'admin' ? [...NAV_GROUPS, ADMIN_GROUP] : NAV_GROUPS
   const [inc, setInc]         = useState(null)
+  // My rights on this incident beyond my platform role (E3): {is_lead, capabilities[]}
+  // from the API. null while loading; no capabilities if it can't be loaded.
+  const [access, setAccess]   = useState(null)
+  const can = (cap) => !!access?.capabilities?.includes(cap)
+  const canReadAudit = can('read_audit_log')
+  // Stable while the capability is unchanged, so the memoised rail skips this page's re-renders.
+  const navGroups = useMemo(() => canReadAudit ? [...NAV_GROUPS, RECORD_GROUP] : NAV_GROUPS, [canReadAudit])
   const [draft, setDraft]     = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState('')
   const [saving, setSaving]   = useState(false)
-  const [closing, setClosing] = useState(false)
+  const [closureModal, setClosureModal] = useState(null)   // 'close' | 'reopen' | null
   const [savedAt, setSavedAt] = useState(0)
   const [editing, setEditing] = useState(false)
   const [phaseTarget, setPhaseTarget] = useState(null)
   const [occurredAt,  setOccurredAt]  = useState('')
   const [detectedAt,  setDetectedAt]  = useState('')
   const [containedAt, setContainedAt] = useState('')
+  const [eradicatedAt, setEradicatedAt] = useState('')
+  const [recoveredAt,  setRecoveredAt]  = useState('')
+  // Sent as triage_reason with a triage change (the API requires it for a false / benign
+  // positive outside Detection & Analysis: 422 triage_reason_required).
+  const [triageReason, setTriageReason] = useState('')
+  const [declaring, setDeclaring] = useState(null)   // MILESTONES entry whose modal is open
+  const [legalRev, setLegalRev] = useState(0)        // bumped by the Legal tab → ClockChips refetch
+  const bumpLegal = useCallback(() => setLegalRev(r => r + 1), [])
+  // Bumped by a tab after a write that can change the rail's counts → IncidentRail re-reads the snapshot.
+  const [railRev, setRailRev] = useState(0)
+  const bumpRail = useCallback(() => setRailRev(r => r + 1), [])
   const [presenceUsers, setPresenceUsers] = useState([])
   const presenceWsRef  = useRef(null)
   const presencePingRef = useRef(null)
@@ -201,6 +241,8 @@ export default function IncidentDetail() {
       setOccurredAt(toEntryValue(r.occurred_at))
       setDetectedAt(toEntryValue(r.detected_at))
       setContainedAt(toEntryValue(r.contained_at))
+      setEradicatedAt(toEntryValue(r.eradicated_at))
+      setRecoveredAt(toEntryValue(r.recovered_at))
     } catch (e) {
       setError(e.message || 'Incident not found.')
     } finally {
@@ -209,10 +251,22 @@ export default function IncidentDetail() {
   }, [id])
   useEffect(() => { refresh() }, [refresh])
 
+  // Re-read after anything that can change them (an assignment added or removed). Only the
+  // newest request may set them: a slow /access for incident A can't land after B's.
+  const accessSeq = useRef(0)
+  const refreshAccess = useCallback(async () => {
+    const n = ++accessSeq.current
+    let next
+    try { next = await api.getIncidentAccess(id) }
+    catch { next = { is_lead: false, capabilities: [] } }
+    if (n === accessSeq.current) setAccess(next)
+  }, [id])
+  useEffect(() => { setAccess(null); refreshAccess() }, [refreshAccess])
+
   // Tab title: "<case ref> · <section> · FENRIR". Falls back to the title when
   // the incident has no human ref, and to a neutral label while loading.
   useEffect(() => {
-    const section = SECTION_LABELS[location.pathname.split('/')[3]] || 'Details'
+    const section = SECTION_LABELS[location.pathname.split('/')[3]] || 'Situation'
     const ref = inc ? (inc.ref || inc.title || 'Incident') : 'Incident'
     document.title = formatTitle(`${ref} · ${section}`)
   }, [location.pathname, inc])
@@ -245,9 +299,11 @@ export default function IncidentDetail() {
 
   const changes = useMemo(() => diff(draft, inc), [draft, inc])
   // Compare by instant (epoch ms), not display string — entry is canonical UTC ISO.
-  const dtDirty = toEpoch(occurredAt)  !== toEpoch(inc?.occurred_at) ||
-                  toEpoch(detectedAt)  !== toEpoch(inc?.detected_at) ||
-                  toEpoch(containedAt) !== toEpoch(inc?.contained_at)
+  const dtDirty = toEpoch(occurredAt)   !== toEpoch(inc?.occurred_at) ||
+                  toEpoch(detectedAt)   !== toEpoch(inc?.detected_at) ||
+                  toEpoch(containedAt)  !== toEpoch(inc?.contained_at) ||
+                  toEpoch(eradicatedAt) !== toEpoch(inc?.eradicated_at) ||
+                  toEpoch(recoveredAt)  !== toEpoch(inc?.recovered_at)
   const dirty   = Object.keys(changes).length > 0 || dtDirty
 
   // Guard navigation when the form is dirty.
@@ -275,12 +331,22 @@ export default function IncidentDetail() {
       if (toEpoch(containedAt) !== toEpoch(inc.contained_at)) {
         dtChanges.contained_at = containedAt || null
       }
-      const updated = await api.updateIncident(id, { ...changes, ...dtChanges })
+      if (toEpoch(eradicatedAt) !== toEpoch(inc.eradicated_at)) {
+        dtChanges.eradicated_at = eradicatedAt || null
+      }
+      if (toEpoch(recoveredAt) !== toEpoch(inc.recovered_at)) {
+        dtChanges.recovered_at = recoveredAt || null
+      }
+      const triage = changes.triage_state && triageReason.trim() ? { triage_reason: triageReason.trim() } : {}
+      const updated = await api.updateIncident(id, { ...changes, ...dtChanges, ...triage })
+      setTriageReason('')
       setInc(updated)
       setDraft(pickEditable(updated))
       setOccurredAt(toEntryValue(updated.occurred_at))
       setDetectedAt(toEntryValue(updated.detected_at))
       setContainedAt(toEntryValue(updated.contained_at))
+      setEradicatedAt(toEntryValue(updated.eradicated_at))
+      setRecoveredAt(toEntryValue(updated.recovered_at))
       setSavedAt(Date.now())
       setEditing(false)
     } catch (e) {
@@ -291,52 +357,97 @@ export default function IncidentDetail() {
   }
 
   const onDiscard = () => {
+    setTriageReason('')
     setDraft(pickEditable(inc))
     setOccurredAt(toEntryValue(inc.occurred_at))
     setDetectedAt(toEntryValue(inc.detected_at))
     setContainedAt(toEntryValue(inc.contained_at))
+    setEradicatedAt(toEntryValue(inc.eradicated_at))
+    setRecoveredAt(toEntryValue(inc.recovered_at))
     setEditing(false)
     setError('')
   }
 
-  const confirmPhaseChange = async (nextPhase) => {
-    const updated = await api.updateIncident(id, { phase: nextPhase })
+  // Latest incident, for applyUpdate: it runs after an await, when the
+  // closure's `inc` may be stale.
+  const incRef = useRef(null)
+  useEffect(() => { incRef.current = inc }, [inc])
+
+  // Sync the incident from a side-panel save (Tags, Teams) and rebase the
+  // drafts per field: a field you changed keeps your value; every other field
+  // takes the server value, so another responder's change shows and is not
+  // reverted by your next Save. Not editing, this is a full re-seed.
+  const applyUpdate = useCallback((r) => {
+    const prev = incRef.current
+    const base = pickEditable(prev)
+    const next = pickEditable(r)
+    setDraft(d => {
+      const out = {}
+      for (const k of EDITABLE) out[k] = d[k] !== base[k] ? d[k] : next[k]
+      return out
+    })
+    const rebaseDate = (k) => (v) => toEpoch(v) !== toEpoch(prev?.[k]) ? v : toEntryValue(r[k])
+    setOccurredAt(rebaseDate('occurred_at'))
+    setDetectedAt(rebaseDate('detected_at'))
+    setContainedAt(rebaseDate('contained_at'))
+    setEradicatedAt(rebaseDate('eradicated_at'))
+    setRecoveredAt(rebaseDate('recovered_at'))
+    incRef.current = r
+    setInc(r)
+  }, [])
+
+  // `extra` = { phase_reason?, override_gate? } from the modal (gates: the API decides).
+  const confirmPhaseChange = async (nextPhase, extra = {}) => {
+    const updated = await api.updateIncident(id, { phase: nextPhase, ...extra })
     setInc(updated)
     setDraft(pickEditable(updated))
     setOccurredAt(toEntryValue(updated.occurred_at))
     setDetectedAt(toEntryValue(updated.detected_at))
     setContainedAt(toEntryValue(updated.contained_at))
+    setEradicatedAt(toEntryValue(updated.eradicated_at))
+    setRecoveredAt(toEntryValue(updated.recovered_at))
     setPhaseTarget(null)
   }
 
-  const onResolve = async () => {
-    if (!confirm('Resolve this incident? Phase will move to Post-Incident.')) return
-    setClosing(true); setError('')
-    try {
-      const r = await api.closeIncident(id)
-      setInc(r)
-      setDraft(pickEditable(r))
-      setEditing(false)
-    } catch (e) {
-      setError(e.message || 'Resolve failed.')
-    } finally {
-      setClosing(false)
-    }
+  // Declare a milestone: a plain PATCH of that one field (the API adds the timeline event).
+  const confirmDeclare = async (field, value) => {
+    const updated = await api.updateIncident(id, { [field]: value })
+    applyUpdate(updated)
+    setDeclaring(null)
   }
 
-  const onReopen = async () => {
-    if (!confirm('Re-open this incident? Phase will move to Containment / Eradication / Recovery.')) return
-    setClosing(true); setError('')
-    try {
-      const r = await api.reopenIncident(id)
-      setInc(r)
-      setDraft(pickEditable(r))
-    } catch (e) {
-      setError(e.message || 'Re-open failed.')
-    } finally {
-      setClosing(false)
-    }
+  // Close / Re-open: the modal does the POST via these; errors stay in the modal.
+  const confirmClose = async (reason, overrideGate) => {
+    applyUpdate(await api.closeIncident(id, reason, overrideGate))
+    setClosureModal(null)
   }
+
+  const confirmReopen = async (reason, phase) => {
+    applyUpdate(await api.reopenIncident(id, reason, phase))
+    setClosureModal(null)
+  }
+
+  // Edit opens the Details form in edit mode (the header Edit and the board's "Edit details").
+  const onDetails = location.pathname.endsWith('/details')
+  const startEdit = useCallback(() => {
+    setEditing(true)
+    if (!onDetails) navigate('details')
+  }, [onDetails, navigate])
+
+  const isClosed  = inc?.status === 'closed'
+  const readOnly  = isClosed || !editing
+  const canWrite  = user?.role !== 'viewer'
+  const canEdit   = canWrite && !isClosed
+
+  // Memoised so state that only the header uses (presence avatars, modals) doesn't re-render
+  // the active tab: the Outlet's consumers re-render only when a value here changes.
+  const outletContext = useMemo(() => ({
+    inc, draft, setField, readOnly, editing, isClosed, refresh, applyUpdate,
+    occurredAt, setOccurredAt, detectedAt, setDetectedAt, containedAt, setContainedAt,
+    eradicatedAt, setEradicatedAt, recoveredAt, setRecoveredAt, triageReason, setTriageReason,
+    bumpLegal, bumpRail, access, refreshAccess, startEdit, canEdit,
+  }), [inc, draft, setField, readOnly, editing, isClosed, refresh, applyUpdate, occurredAt, detectedAt,
+       containedAt, eradicatedAt, recoveredAt, triageReason, bumpLegal, bumpRail, access, refreshAccess, startEdit, canEdit])
 
   if (loading && !inc) return (
     <div className="panel"><div className="panel-empty">Loading…</div></div>
@@ -352,9 +463,12 @@ export default function IncidentDetail() {
   )
   if (!inc) return null
 
-  const isClosed  = inc.status === 'closed'
-  const readOnly  = isClosed || !editing
   const justSaved = !dirty && savedAt > 0 && Date.now() - savedAt < 4000
+  // Only the next undeclared milestone is offered; none once all three are set.
+  const nextMilestone = canWrite ? MILESTONES.find(m => !inc[m.field]) : undefined
+  // Close is offered in Post-Incident, and in any phase for a false / benign positive
+  // (the API enforces the same rule). Resolve = move to Post-Incident via the phase modal.
+  const canClose  = inc.phase === 'post_incident' || ['false_positive', 'benign_positive'].includes(inc.triage_state)
 
   return (
     <div
@@ -384,31 +498,48 @@ export default function IncidentDetail() {
           {justSaved && <span className="saved-tag">SAVED</span>}
           {!isClosed && !editing && (
             <>
+              {nextMilestone && (
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() => setDeclaring(nextMilestone)}
+                >Declare {nextMilestone.label}</button>
+              )}
               <button
                 className="btn"
                 type="button"
                 onClick={() => navigate('handoffs')}
-              >Handoff</button>
-              <button
-                className="btn"
-                type="button"
-                onClick={() => setEditing(true)}
-              >Edit</button>
-              <button
-                className="btn primary"
-                type="button"
-                onClick={onResolve}
-                disabled={closing}
-              >{closing ? 'Resolving…' : 'Resolve'}</button>
+              >Shift handoff</button>
+              {canWrite && (
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={startEdit}
+                >Edit</button>
+              )}
+              {canWrite && inc.phase !== 'post_incident' && (
+                <button
+                  className="btn"
+                  type="button"
+                  title="Move to Post-Incident; the incident stays open"
+                  onClick={() => setPhaseTarget('post_incident')}
+                >Resolve</button>
+              )}
+              {canWrite && canClose && (
+                <button
+                  className="btn primary"
+                  type="button"
+                  onClick={() => setClosureModal('close')}
+                >Close</button>
+              )}
             </>
           )}
-          {isClosed && (
+          {isClosed && canWrite && (
             <button
               className="btn primary"
               type="button"
-              onClick={onReopen}
-              disabled={closing}
-            >{closing ? 'Re-opening…' : 'Re-open'}</button>
+              onClick={() => setClosureModal('reopen')}
+            >Re-open</button>
           )}
           {!isClosed && editing && (
             <>
@@ -432,9 +563,10 @@ export default function IncidentDetail() {
       <div className={`status-band ${isClosed ? 'closed' : ''}`}>
         <PhaseStepper
           current={inc.phase}
-          disabled={isClosed}
-          onPhaseClick={isClosed ? undefined : setPhaseTarget}
+          disabled={isClosed || !canWrite}
+          onPhaseClick={isClosed || !canWrite ? undefined : setPhaseTarget}
         />
+        <ClockChips incidentId={inc.id} rev={legalRev} />
         <span className="pills">
           <SevBadge value={inc.severity} />
           <span className={`pill ${pillOf('status',   inc.status)}`}>{labelOf('status',   inc.status)}</span>
@@ -464,26 +596,9 @@ export default function IncidentDetail() {
       )}
 
       <div className="sub-layout">
-        <nav className="sub-nav" aria-label="Incident sections">
-          {navGroups.map((group, gi) => (
-            <div key={group.label || `g${gi}`} className="sub-group">
-              {group.label && (
-                <div className="sub-group-label" aria-hidden="true">{group.label}</div>
-              )}
-              {group.items.map(item => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}
-                >
-                  {item.label}
-                </NavLink>
-              ))}
-            </div>
-          ))}
-        </nav>
+        <IncidentRail key={inc.id} incidentId={inc.id} groups={navGroups} rev={railRev} />
         <div className="sub-content">
-          <Outlet context={{ inc, draft, setField, readOnly, editing, isClosed, refresh, occurredAt, setOccurredAt, detectedAt, setDetectedAt, containedAt, setContainedAt }} />
+          <Outlet context={outletContext} />
         </div>
       </div>
 
@@ -491,10 +606,35 @@ export default function IncidentDetail() {
 
       {phaseTarget && (
         <PhaseChangeModal
+          incidentId={inc.id}
           currentPhase={inc.phase}
           targetPhase={phaseTarget}
+          canOverride={can('override_gate')}
           onConfirm={confirmPhaseChange}
           onClose={() => setPhaseTarget(null)}
+        />
+      )}
+
+      {declaring && (
+        <DeclareMilestoneModal
+          milestone={declaring}
+          onConfirm={confirmDeclare}
+          onClose={() => setDeclaring(null)}
+        />
+      )}
+
+      {closureModal === 'close' && (
+        <CloseIncidentModal
+          inc={inc}
+          canOverride={can('override_gate')}
+          onConfirm={confirmClose}
+          onClose={() => setClosureModal(null)}
+        />
+      )}
+      {closureModal === 'reopen' && (
+        <ReopenIncidentModal
+          onConfirm={confirmReopen}
+          onClose={() => setClosureModal(null)}
         />
       )}
     </div>

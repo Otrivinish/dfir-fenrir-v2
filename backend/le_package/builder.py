@@ -13,15 +13,18 @@ route layer owns those side effects.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import csv
 import hashlib
 import io
 import json
 import secrets
+import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pyzipper
@@ -39,7 +42,7 @@ from le_package.manifest import Manifest, hmac_manifest
 from le_package.readme import render_readme
 from le_package.sop import CHAIN_OF_CUSTODY_SOP
 from models import (Artifact, AuditLog, Comment, CustodyExport, Evidence,
-                    IOC, Incident, IncidentStakeholder, LessonsLearned,
+                    ForensicImport, IOC, Incident, IncidentStakeholder, LessonsLearned,
                     OOBLog, PCAPAnalysis, TimelineEvent, User, YaraMatch,
                     ClosureChecklistItem)
 
@@ -77,6 +80,67 @@ def _safe_filename(s: str, max_len: int = 60) -> str:
         elif ch.isspace():
             out.append("_")
     return ("".join(out) or "file")[:max_len].strip("._-") or "file"
+
+
+# ── Blocking helpers (run via asyncio.to_thread, one call at a time per ZipFile) ──
+# The backend runs one event loop: zipping, hashing and encrypting evidence-sized blobs inline
+# froze every request for the whole build. Big blobs also go into a ZIP in slices, because
+# zlib's output join and BytesIO.write copy a whole blob while holding the GIL, so a single
+# writestr() of a 300 MB file stalls the loop even from a worker thread.
+
+_ZIP_CHUNK = 8 * 1024 * 1024
+
+
+def _zip_add_chunked(zf: zipfile.ZipFile, arcname: str, data) -> None:
+    """`zf.writestr(arcname, data)`, written in 8 MiB slices: same entry metadata (time,
+    compression, mode 0600, ZIP64 decided from the size up front)."""
+    zinfo = getattr(zf, "zipinfo_cls", zipfile.ZipInfo)(arcname, date_time=time.localtime(time.time())[:6])
+    zinfo.compress_type = zf.compression
+    zinfo.external_attr = 0o600 << 16
+    with memoryview(data) as view:
+        zinfo.file_size = len(view)
+        with zf.open(zinfo, "w") as dest:
+            for i in range(0, len(view), _ZIP_CHUNK):
+                dest.write(view[i:i + _ZIP_CHUNK])
+
+
+def _add_file(zf: zipfile.ZipFile, manifest: Manifest, path: str, data: bytes, mime: str, source: str) -> dict:
+    """Write one (large) file into the bundle and record it in the manifest (hashes it)."""
+    _zip_add_chunked(zf, path, data)
+    return manifest.add(path=path, data=data, mime=mime, source=source)
+
+
+def _artifacts_zip(inc_dir: Path, files: list[tuple[str, str]]) -> bytes:
+    """The quarantined files [(stored_filename, arcname)] in an `infected`-password AES ZIP;
+    files missing from disk are skipped."""
+    inner = io.BytesIO()
+    with pyzipper.AESZipFile(inner, "w",
+                             compression=pyzipper.ZIP_DEFLATED,
+                             encryption=pyzipper.WZ_AES) as iz:
+        iz.setpassword(b"infected")
+        for stored, arcname in files:
+            src = inc_dir / stored
+            if not src.exists():
+                continue
+            iz.write(str(src), arcname=arcname)
+    return inner.getvalue()
+
+
+def _seal(inner: io.BytesIO, bundle_password: str) -> tuple[bytes, str]:
+    """Wrap the plaintext inner ZIP in the outer AES-256 password ZIP (WinZip AE-2) and hash it.
+    Reads the inner buffer through a zero-copy view and frees it once sealed."""
+    outer = io.BytesIO()
+    with pyzipper.AESZipFile(
+        outer, "w",
+        compression=pyzipper.ZIP_DEFLATED,
+        encryption=pyzipper.WZ_AES,
+    ) as oz:
+        oz.setpassword(bundle_password.encode("utf-8"))
+        with inner.getbuffer() as plaintext_zip:
+            _zip_add_chunked(oz, "le_package.zip", plaintext_zip)
+    inner.close()
+    bundle = outer.getvalue()
+    return bundle, hashlib.sha256(bundle).hexdigest()
 
 
 # ── Section builders ───────────────────────────────────────────────────────
@@ -145,15 +209,24 @@ async def _section_incident(db: AsyncSession, inc: Incident, manifest: Manifest,
 
 
 async def _section_timeline(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
+    # C5 provenance, appended after the original columns (readers that go by position keep
+    # working): the exhibit an imported event came from (its identifier), the SHA-256 of the bytes
+    # it was parsed from (the exhibit's, else the uploaded file's), the parser version, and how its
+    # time was worked out (explicit | assumed_tz | inferred_year; empty = analyst-entered / legacy).
     events = (await db.execute(
-        select(TimelineEvent).where(TimelineEvent.incident_id == inc_id)
+        select(TimelineEvent, Evidence.identifier, Evidence.sha256,
+               ForensicImport.parser_version, ForensicImport.sha256_hash)
+        .outerjoin(Evidence, Evidence.id == TimelineEvent.evidence_id)
+        .outerjoin(ForensicImport, ForensicImport.id == TimelineEvent.forensic_import_id)
+        .where(TimelineEvent.incident_id == inc_id)
         .order_by(TimelineEvent.event_time.asc(), TimelineEvent.id.asc())
-    )).scalars().all()
+    )).all()
 
     header = ["event_time_utc", "hostname", "source", "event_type", "description",
               "ir_phase", "mitre_tactic_id", "mitre_tactic_name",
               "mitre_technique_id", "mitre_technique_name", "origin",
-              "is_system", "external_safe", "raw_log"]
+              "is_system", "external_safe", "raw_log",
+              "source_exhibit", "source_sha256", "parser_version", "time_basis"]
     rows = [[
         _iso_z(e.event_time), e.hostname or "", e.source or "", e.event_type or "",
         e.description or "", e.ir_phase or "",
@@ -161,7 +234,8 @@ async def _section_timeline(db: AsyncSession, inc_id: uuid.UUID, manifest: Manif
         e.mitre_technique_id or "", e.mitre_technique_name or "",
         e.origin, e.is_system, e.external_safe,
         (e.raw_log or "")[:4000],
-    ] for e in events]
+        ev_ident or "", ev_sha or imp_sha or "", parser_version or "", e.time_basis or "",
+    ] for e, ev_ident, ev_sha, parser_version, imp_sha in events]
     data = _csv_bytes(header, rows)
     zf.writestr("02_Timeline/Timeline.csv", data)
     manifest.add(path="02_Timeline/Timeline.csv", data=data,
@@ -273,11 +347,11 @@ async def _section_evidence(
         in_zip = f"04_Evidence/Files/{ev.id}__{fname_safe}"
 
         if plaintext is not None:
-            zf.writestr(in_zip, plaintext)
-            sha256_now = hashlib.sha256(plaintext).hexdigest()
-            manifest.add(path=in_zip, data=plaintext,
-                         mime=ev.mime_type or "application/octet-stream",
-                         source=f"evidence.storage_path={ev.storage_path}")
+            entry = await asyncio.to_thread(
+                _add_file, zf, manifest, in_zip, plaintext,
+                ev.mime_type or "application/octet-stream", f"evidence.storage_path={ev.storage_path}")
+            plaintext = None      # don't hold this file while the next one is decrypted
+            sha256_now = entry["sha256"]
             integrity_note = "hash_at_export_matches_recorded" if sha256_now == ev.sha256 else "HASH_MISMATCH_AT_EXPORT"
         else:
             sha256_now = None
@@ -331,25 +405,16 @@ async def _section_artifacts(
 
     # The artifact files themselves — wrapped in an `infected`-password ZIP per
     # malware-analyst convention. Skip silently if no quarantine volume.
-    quar = __import__("pathlib").Path(settings_quarantine_path)
+    quar = Path(settings_quarantine_path)
     if not quar.exists() or not arts:
         return
-    inner = io.BytesIO()
-    with pyzipper.AESZipFile(inner, "w",
-                             compression=pyzipper.ZIP_DEFLATED,
-                             encryption=pyzipper.WZ_AES) as iz:
-        iz.setpassword(b"infected")
-        for a in arts:
-            src = quar / str(inc_id) / a.stored_filename
-            if not src.exists():
-                continue
-            iz.write(str(src), arcname=a.original_filename or a.stored_filename)
-    blob = inner.getvalue()
+    blob = await asyncio.to_thread(
+        _artifacts_zip, quar / str(inc_id),
+        [(a.stored_filename, a.original_filename or a.stored_filename) for a in arts])
     if blob:
-        zf.writestr("05_Artifacts/Files.zip", blob)
-        manifest.add(path="05_Artifacts/Files.zip", data=blob,
-                     mime="application/zip",
-                     source=f"quarantine volume @ {settings_quarantine_path}")
+        await asyncio.to_thread(
+            _add_file, zf, manifest, "05_Artifacts/Files.zip", blob,
+            "application/zip", f"quarantine volume @ {settings_quarantine_path}")
 
 
 async def _section_forensic(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
@@ -698,21 +763,10 @@ async def build_le_package(
         )
         zf.writestr("README.md", readme.encode("utf-8"))
 
-    plaintext_zip = inner.getvalue()
-
     # Outer envelope — AES-256 password-protected ZIP (WinZip AE-2 via pyzipper).
     # Operators open with any standard archive tool — macOS Finder, 7-Zip,
     # WinRAR, `unzip -P` — no Python or `cryptography` library required.
-    outer = io.BytesIO()
-    with pyzipper.AESZipFile(
-        outer, "w",
-        compression=pyzipper.ZIP_DEFLATED,
-        encryption=pyzipper.WZ_AES,
-    ) as oz:
-        oz.setpassword(bundle_password.encode("utf-8"))
-        oz.writestr("le_package.zip", plaintext_zip)
-    bundle = outer.getvalue()
-    bundle_sha256 = hashlib.sha256(bundle).hexdigest()
+    bundle, bundle_sha256 = await asyncio.to_thread(_seal, inner, bundle_password)
 
     return BuildResult(
         encrypted_bundle=bundle,

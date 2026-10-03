@@ -1,9 +1,9 @@
 """All ORM models. Single file while the count stays manageable."""
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (Boolean, Column, Date, DateTime, Float, ForeignKey,
-                        Integer, JSON, Numeric, String, Table, Text,
+                        Integer, JSON, Numeric, SmallInteger, String, Table, Text,
                         UniqueConstraint)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -14,6 +14,11 @@ from core.database import Base
 def utcnow() -> datetime:
     """Timezone-aware UTC now. Use for new timestamptz columns."""
     return datetime.now(timezone.utc)
+
+
+def utc_today() -> date:
+    """Today's date in UTC: the one "today" for date-only columns (e.g. the on-call rota)."""
+    return utcnow().date()
 
 
 # ─── Association: user ↔ team ────────────────────────────────────────────────
@@ -293,9 +298,14 @@ class Incident(Base):
     created_at    = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
     updated_at    = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     closed_at     = Column(DateTime(timezone=True))
+    # Who signed the incident off as closed (POST …/close); cleared on re-open.
+    closed_by_id  = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     occurred_at   = Column(DateTime(timezone=True))   # analyst-supplied: when the incident actually occurred
     detected_at   = Column(DateTime(timezone=True))   # analyst-supplied: when the incident was detected
-    contained_at  = Column(DateTime(timezone=True))   # auto-set on CER phase; editable
+    # Response milestones — analyst-declared (never auto-set); see incidents/routes.py.
+    contained_at  = Column(DateTime(timezone=True))
+    eradicated_at = Column(DateTime(timezone=True))
+    recovered_at  = Column(DateTime(timezone=True))
 
     # Detection and affected scope
     detection_method = Column(String(32))   # siem_alert | user_report | threat_hunting | external_notification | automated_scan | pen_test | other
@@ -309,6 +319,10 @@ class Incident(Base):
 
 
 # ─── Affected systems (per-incident) ─────────────────────────────────────────
+# Frozen legacy table (C2): Entities is the single scope list and "affected systems" are
+# its compromised entities. Nothing writes here any more; each row was copied once into
+# entities by the C2 migration and stamped with the entity it became, so old ids still
+# resolve through the /affected-systems compatibility layer. Kept for rollback.
 
 class AffectedSystem(Base):
     __tablename__ = "affected_systems"
@@ -320,6 +334,7 @@ class AffectedSystem(Base):
     notes               = Column(Text)
     created_at          = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     created_by_username = Column(String(64))
+    migrated_entity_id  = Column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="SET NULL"), nullable=True)
 
 
 # ─── IOC (per-incident indicator of compromise) ──────────────────────────────
@@ -347,6 +362,9 @@ class IOC(Base):
     confidence    = Column(Integer,      nullable=False, default=50)   # 0–100; UI bands <30 / 30–70 / >70
     tags          = Column(JSON,         nullable=False, default=list) # freeform list[str]; auto-source tag injected on auto-create
     entity_id     = Column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="SET NULL"), nullable=True, index=True)
+    # C5 — the exhibit (evidence item, same incident) the indicator was found in. Partial index in
+    # core/database.py.
+    evidence_id   = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
 
     added_by_id   = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     added_at      = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
@@ -540,6 +558,12 @@ class Evidence(Base):
     current_custodian_external_name    = Column(String(256))
     current_custodian_external_org     = Column(String(256))
     current_custodian_external_contact = Column(String(256))
+    # C4 — an internal custody transfer awaiting the recipient's acceptance. Custody changes
+    # only when the recipient accepts; all three are NULL when nothing is pending (CHECK and
+    # partial indexes in core/database.py).
+    pending_custodian_id          = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    pending_transfer_by_id        = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    pending_transfer_requested_at = Column(DateTime(timezone=True))
     collected_by_id      = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     collected_as_role    = Column(String(8))   # GS-12 — defr | des (ISO/IEC 27037 §3.7/§3.8)
     collected_at         = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
@@ -564,6 +588,14 @@ class Evidence(Base):
     acquisition_params        = Column(Text)
     acquisition_hash_source   = Column(String(64))     # source hash before imaging
     acquisition_hash_target   = Column(String(64))     # destination hash after imaging (must match source)
+    # C3 — when the image was taken / item seized (operator-stated; collected_at = registered
+    # in FENRIR). No backfill: a legacy row without one stays NULL rather than an invented time.
+    acquired_at               = Column(DateTime(timezone=True))
+    # C3 — typed target hash vs the server's hash of the uploaded bytes (same algorithm):
+    # match | mismatch (legacy rows only; new mismatches are refused) | not_checked |
+    # container_media (the hash covers an E01/AFF4 container's media, not the file). CHECK in
+    # core/database.py.
+    upload_hash_check         = Column(String(16))
     write_blocker_used        = Column(Boolean)        # null = unknown, true/false = recorded
     write_blocker_serial      = Column(String(128))
     system_state              = Column(String(16))     # powered_off | live | live_critical | unknown
@@ -598,6 +630,8 @@ class Evidence(Base):
     has_examination           = False   # GS-3: ≥1 evidence_examine audit row
     has_examination_findings  = False   # GS-3: an examination recorded findings (27042 item 8)
     has_examination_scope     = False   # GS-3: an examination recorded scope limitations (item 12)
+    internal_transfers_acknowledged = 0  # C4: internal custody changes the recipient accepted
+    internal_transfers_legacy       = 0  # C4: internal custody changes recorded before acceptance existed
 
     # Sealing: once set true, the wizard-captured fields are locked. Subsequent
     # changes go through update with separate audit entries flagged "amended-after-seal".
@@ -790,7 +824,9 @@ class LePackage(Base):
     delivery_channel      = Column(String(32))     # download_url | sealed_usb | encrypted_email | other
     delivery_notes        = Column(Text)
     sender_declaration    = Column(Text)            # the operator's signed declaration text
-    signature_kind        = Column(String(32),  default="ed25519")  # ed25519 today; eidas_qes hook
+    # INTEGRITY.sig is an HMAC-SHA-256 (eidas_qes hook reserved). Rows created before 2026-10-03
+    # say "ed25519": a wrong label, kept as recorded (docs/reports.md §3).
+    signature_kind        = Column(String(32),  default="hmac-sha256")
 
     # Receipt loop — recipient hits an ack URL (QR code on the printed handoff
     # form). Single-use token, audit-logged when consumed.
@@ -960,6 +996,13 @@ class RespondAction(Base):
     reverted_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     revert_reason  = Column(Text)
 
+    # C1: the entity / IOC the action targets (same incident, checked by the route)
+    # and the template it was made from. Deleting the entity/IOC unlinks the action.
+    # Partial indexes (WHERE ... IS NOT NULL) are created in core/database.py.
+    entity_id   = Column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="SET NULL"), nullable=True)
+    ioc_id      = Column(UUID(as_uuid=True), ForeignKey("iocs.id", ondelete="SET NULL"), nullable=True)
+    template_id = Column(String(64), nullable=True)
+
 
 # ─── Decisions log (per-incident) ────────────────────────────────────────────
 # Records choices made during the response — distinct from tasks (work items).
@@ -1121,6 +1164,8 @@ class TimelineEvent(Base):
 
     event_time   = Column(DateTime(timezone=True), nullable=False, index=True)
     hostname     = Column(String(256))
+    # The in-scope entity (host, account, …) this event happened on — same incident only.
+    entity_id    = Column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="SET NULL"), nullable=True)
     source       = Column(String(128))    # e.g. "Sysmon", "Windows Security Log"
     event_type   = Column(String(128))    # e.g. "Process Execution", "Logon"
     description  = Column(Text, nullable=False)
@@ -1136,6 +1181,20 @@ class TimelineEvent(Base):
     mitre_technique_name = Column(String(128))
 
     origin        = Column(String(16), nullable=False, default="manual")  # manual | forensic_import | system
+
+    # C5 — provenance of an event promoted from a Timeline Import run (forensic/routes.py promote):
+    # the exhibit, the run and the event's index in its stored parse (partial UNIQUE
+    # (forensic_import_id, import_event_index) in core/database.py, so re-promoting is a no-op), and
+    # how the UTC time was worked out: explicit | assumed_tz | inferred_year (CHECK). NULL on legacy,
+    # analyst-entered and /timeline/batch events. An event with forensic_import_id, evidence_id or
+    # time_basis keeps its facts (time, host, source, type, description, raw log) immutable —
+    # timeline/routes.py.
+    evidence_id        = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
+    # RESTRICT (Wave C fix-up M3): the import is the event's provenance record and keeps its facts
+    # immutable; it can't be deleted while events promoted from it exist (SET NULL would unlock them).
+    forensic_import_id = Column(UUID(as_uuid=True), ForeignKey("forensic_imports.id", ondelete="RESTRICT"), nullable=True)
+    import_event_index = Column(Integer)
+    time_basis         = Column(String(16))
 
     # System timeline events — auto-generated by the platform or manually marked as a system note.
     # system_source: respond_action | legal_deadline | decision | manual
@@ -1392,9 +1451,20 @@ class ForensicImport(Base):
     mime_type         = Column(String(128))
     sha256_hash       = Column(String(64))                 # of the uploaded file
 
+    # C5 — the exhibit these bytes are: set by from-evidence (hash re-verified against the stored
+    # SHA-256) or by an upload whose SHA-256 equals exactly one exhibit of the incident. The parser
+    # version and the IANA source timezone used for zone-less times. NULL on pre-C5 imports.
+    evidence_id       = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
+    parser_version    = Column(String(32))
+    source_tz         = Column(String(64))
+
     detected_format   = Column(String(32))                  # evtx / json / syslog / ...
     event_count       = Column(Integer, nullable=False, default=0)
     suspicious_count  = Column(Integer, nullable=False, default=0)
+    # M1 — True when a parser cap cut the output; total_seen = source records the parser read
+    # (rows / records / matched lines), so the UI can say "N of M". NULL on imports made before.
+    truncated         = Column(Boolean)
+    total_seen        = Column(Integer)
 
     # Parsed events keyed to the ParsedEventOut schema. Bounded by parser
     # MAX_EVENTS (2 000) × ~2 KB raw_log ≈ ~4 MiB JSON per row, comfortably
@@ -1599,6 +1669,9 @@ class RegulatoryDeadline(Base):
     created_by_id     = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     created_at        = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at        = Column(DateTime(timezone=True), onupdate=utcnow)
+    # Last in-app reminder sent (legal/reminders.py): 0 none, 1 T-12h, 2 T-2h, 3 overdue.
+    # Reset to 0 when the deadline is re-anchored.
+    reminder_stage    = Column(SmallInteger, nullable=False, default=0, server_default="0")
 
 
 # ─── Post-Incident: business impact assessment ────────────────────────────────

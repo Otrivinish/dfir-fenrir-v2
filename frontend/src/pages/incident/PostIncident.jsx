@@ -36,7 +36,7 @@ function ClosureChecklist({ inc }) {
     } finally {
       setLoading(false)
     }
-  }, [inc.id])
+  }, [inc.id, isClosed])   // reload on close / re-open: the API ticks / unticks "incident formally closed"
 
   useEffect(() => { load() }, [load])
 
@@ -491,7 +491,9 @@ function LessonsLearned({ inc }) {
   async function save() {
     setSaving(true); setError(null)
     try {
-      const updated = await api.saveLessonsLearned(inc.id, llToPayload(form))
+      // Closed: the API accepts action_items only (409 incident_closed otherwise).
+      const payload = isClosed ? { action_items: form.action_items } : llToPayload(form)
+      const updated = await api.saveLessonsLearned(inc.id, payload)
       setForm(llFromApi(updated))
       setSaved(true)
       clearTimeout(savedTimer.current)
@@ -509,7 +511,7 @@ function LessonsLearned({ inc }) {
 
   if (loading) return <div className="pi-loading">Loading…</div>
 
-  const disabled = isClosed
+  const disabled = isClosed   // everything except action items, which stay editable after Close
 
   // ── effectiveness helpers
   function setEff(dimId, key, val) {
@@ -722,37 +724,33 @@ function LessonsLearned({ inc }) {
         )}
         {form.action_items.map(ai => (
           <div key={ai.id} style={{ display: 'grid', gridTemplateColumns: '1fr 120px 110px 90px 90px 32px', gap: 'var(--space-1)', marginBottom: 'var(--space-2)', alignItems: 'center' }}>
-            <input className="input" value={ai.action} maxLength={512} disabled={disabled}
+            <input className="input" value={ai.action} maxLength={512}
               placeholder="Action…" style={{ fontSize: 12 }}
               onChange={e => updateAI(ai.id, 'action', e.target.value)} />
-            <input className="input" value={ai.owner} maxLength={128} disabled={disabled}
+            <input className="input" value={ai.owner} maxLength={128}
               placeholder="Owner" style={{ fontSize: 12 }}
               onChange={e => updateAI(ai.id, 'owner', e.target.value)} />
-            <input type="date" className="input" value={ai.due_date || ''} disabled={disabled}
+            <input type="date" className="input" value={ai.due_date || ''}
               style={{ fontSize: 12 }}
               onChange={e => updateAI(ai.id, 'due_date', e.target.value)} />
-            <select className="select" value={ai.priority} disabled={disabled} style={{ fontSize: 12 }}
+            <select className="select" value={ai.priority} style={{ fontSize: 12 }}
               onChange={e => updateAI(ai.id, 'priority', e.target.value)}>
               {AI_PRIORITIES.map(p => <option key={p} value={p} style={{ textTransform: 'capitalize' }}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>)}
             </select>
-            <select className="select" value={ai.status} disabled={disabled} style={{ fontSize: 12 }}
+            <select className="select" value={ai.status} style={{ fontSize: 12 }}
               onChange={e => updateAI(ai.id, 'status', e.target.value)}>
               {AI_STATUSES.map(s => <option key={s} value={s}>{s.replace('_', ' ')}</option>)}
             </select>
-            {!disabled && (
-              <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '0 6px' }}
-                onClick={() => removeAI(ai.id)}>✕</button>
-            )}
+            <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '0 6px' }}
+              onClick={() => removeAI(ai.id)}>✕</button>
           </div>
         ))}
-        {!disabled && (
-          <div style={{ marginTop: 'var(--space-1)', display: 'flex', gap: 'var(--space-2)', fontSize: 11, color: 'var(--dim)', flexWrap: 'wrap', alignItems: 'center' }}>
-            <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={addAI}>+ Add action item</button>
-            {form.action_items.length > 0 && (
-              <span>Action · Owner · Due date · Priority · Status</span>
-            )}
-          </div>
-        )}
+        <div style={{ marginTop: 'var(--space-1)', display: 'flex', gap: 'var(--space-2)', fontSize: 11, color: 'var(--dim)', flexWrap: 'wrap', alignItems: 'center' }}>
+          <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={addAI}>+ Add action item</button>
+          {form.action_items.length > 0 && (
+            <span>Action · Owner · Due date · Priority · Status</span>
+          )}
+        </div>
       </LLSection>
 
       {/* ── Control improvements ──────────────────────────────────────────── */}
@@ -787,14 +785,12 @@ function LessonsLearned({ inc }) {
       {/* ── Footer ───────────────────────────────────────────────────────── */}
       {error && <div className="pi-error" style={{ marginBottom: 'var(--space-3)' }}>{error}</div>}
 
-      {!disabled && (
-        <div className="pi-lessons-footer">
-          {saved && <span className="pi-saved-flash">Saved</span>}
-          <button className="btn primary pi-save-btn" onClick={save} disabled={saving}>
-            {saving ? 'Saving…' : 'Save lessons learned'}
-          </button>
-        </div>
-      )}
+      <div className="pi-lessons-footer">
+        {saved && <span className="pi-saved-flash">Saved</span>}
+        <button className="btn primary pi-save-btn" onClick={save} disabled={saving}>
+          {saving ? 'Saving…' : isClosed ? 'Save action items' : 'Save lessons learned'}
+        </button>
+      </div>
     </div>
   )
 }

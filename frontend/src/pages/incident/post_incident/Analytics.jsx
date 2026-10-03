@@ -109,17 +109,18 @@ export default function Analytics() {
         <StatCard
           label="Time to Detect"
           value={fmtMins(timing.ttd_mins)}
-          sub="occurred → created"
+          sub={`occurred → detected${timing.ttd_excluded ? ' · excluded (Detected before Occurred)' : ''}`}
         />
+        {/* The API measures from Detected, else Created; to Recovered, else Closed. */}
         <StatCard
           label="Time to Contain"
           value={fmtMins(timing.ttc_mins)}
-          sub="created → contained"
+          sub={`${inc.detected_at ? 'detected' : 'created'} → contained${timing.ttc_excluded ? ' · excluded (runs backwards)' : ''}`}
         />
         <StatCard
-          label="Time to Resolve"
+          label="Time to Recover"
           value={fmtMins(timing.ttr_mins)}
-          sub="created → closed"
+          sub={`${inc.detected_at ? 'detected' : 'created'} → ${inc.recovered_at ? 'recovered' : 'closed'}${timing.ttr_excluded ? ' · excluded (runs backwards)' : ''}`}
         />
         <StatCard label="IOCs" value={iocs.total} />
         <StatCard

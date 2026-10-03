@@ -11,7 +11,7 @@ import base64
 import hashlib
 import json as _json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +23,9 @@ from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
+from core.errors import ApiError, ApiErrorBody
 from evidence.crypto import awrite_encrypted
+from evidence.hashing import ahashes_of
 from incidents.access import get_accessible_incident
 from models import (Artifact, BrowserHistoryDownload, BrowserHistorySearchTerm,
                     BrowserHistoryUpload, BrowserHistoryVisit, Evidence, User, utcnow)
@@ -312,7 +314,9 @@ async def delete_upload(
 # ─── Mint quarantined file as Evidence (mirrors email_analyzer) ────────────
 
 @router.post("/{incident_id}/webhistory/{upload_id}/mint-evidence",
-             response_model=BrowserHistoryUploadOut, summary="Mint the raw history file as Evidence")
+             response_model=BrowserHistoryUploadOut, summary="Mint the raw history file as Evidence",
+             operation_id="mint_webhistory_evidence",
+             responses={409: {"model": ApiErrorBody, "description": "artifact_hash_mismatch"}})
 async def mint_evidence(
     incident_id: uuid.UUID,
     upload_id: uuid.UUID,
@@ -320,6 +324,14 @@ async def mint_evidence(
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> BrowserHistoryUploadOut:
+    """Mint the uploaded raw history database as an encrypted chain-of-custody evidence item.
+
+    Re-hashes the quarantined file first: if its SHA-256 no longer matches the hash recorded
+    at upload, nothing is minted (409 `artifact_hash_mismatch`, audited as
+    `evidence_collect_rejected`). Otherwise stores it AES-encrypted with `acquired_at` = the
+    upload time and audits `evidence_collect` (details.method = webhistory_mint). 400 if
+    already minted, 410 if the source file is gone. Requires the analyst role.
+    """
     await _incident(db, incident_id, user)
     upload = await _get_upload(db, incident_id, upload_id)
     if upload.evidence_id:
@@ -330,7 +342,24 @@ async def mint_evidence(
     src = (await db.execute(select(Artifact).where(Artifact.id == upload.source_artifact_id))).scalar_one_or_none()
     if not src:
         raise HTTPException(status.HTTP_410_GONE, "Source artifact missing")
-    raw = _read_quarantine(incident_id, src.stored_filename)
+    raw = await asyncio.to_thread(_read_quarantine, incident_id, src.stored_filename)
+    sha256, sha1, md5 = await ahashes_of(raw)
+    # C3 — the quarantined copy must still be the bytes hashed at upload.
+    if sha256 != (src.sha256_hash or "").lower():
+        await write_audit(
+            db, "evidence_collect_rejected",
+            user_id=user.id, username=user.username,
+            resource_type="evidence", outcome="failure",
+            details={"incident_id": str(incident_id), "method": "webhistory_mint",
+                     "upload_id": str(upload_id), "artifact_id": str(src.id),
+                     "reason": "artifact_hash_mismatch",
+                     "recorded_sha256": src.sha256_hash, "computed_sha256": sha256},
+            ip_address=request.client.host if request.client else None,
+        )
+        await db.commit()
+        raise ApiError(status.HTTP_409_CONFLICT, "artifact_hash_mismatch",
+                       "The stored history file no longer matches the SHA-256 recorded when it "
+                       "was uploaded; it was not minted as evidence.")
 
     ev_id = uuid.uuid4()
     rel = f"webhistory/{ev_id}.db.enc"
@@ -343,18 +372,24 @@ async def mint_evidence(
         identifier=f"WEBHIST-{short}",
         original_filename=upload.original_filename, storage_path=rel, nonce_hex=nonce,
         file_size_bytes=len(raw), mime_type="application/vnd.sqlite3",
-        sha256=hashlib.sha256(raw).hexdigest(), sha1=hashlib.sha1(raw).hexdigest(),
-        md5=hashlib.md5(raw).hexdigest(),
+        sha256=sha256, sha1=sha1, md5=md5,
         current_custodian_id=user.id, collected_by_id=user.id, collected_at=utcnow(),
+        acquired_at=src.uploaded_at, upload_hash_check="not_checked",
     )
     db.add(ev)
     await db.flush()
     upload.evidence_id = ev_id
     await write_audit(
-        db, "webhistory_mint_evidence",
+        db, "evidence_collect",
         user_id=user.id, username=user.username,
         resource_type="evidence", resource_id=str(ev_id), outcome="success",
-        details={"incident_id": str(incident_id), "upload_id": str(upload_id), "sha256": ev.sha256},
+        details={"incident_id": str(incident_id), "method": "webhistory_mint",
+                 "upload_id": str(upload_id), "artifact_id": str(src.id),
+                 "kind": "digital_file", "identifier": ev.identifier, "name": ev.name,
+                 "sha256": ev.sha256, "file_size_bytes": ev.file_size_bytes,
+                 "acquired_at": ev.acquired_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                                 if ev.acquired_at else None,
+                 "artifact_hash_verified": True},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()

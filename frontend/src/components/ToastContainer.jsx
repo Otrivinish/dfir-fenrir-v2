@@ -15,6 +15,9 @@ const TYPE_COLOR = {
   comment:          'muted',
   comment_mention:  'high',
   handoff_pending:  'med',
+  custody_transfer: 'med',
+  assignment:       'med',
+  le_package:       'high',
 }
 
 let toastId = 0
@@ -31,7 +34,9 @@ export default function ToastContainer() {
 
   const addToast = useCallback((notification) => {
     const id = ++toastId
-    setToasts(prev => [{ id, ...notification }, ...prev].slice(0, 5))
+    // The toast's own id last: the notification's id must not replace it, or the
+    // auto-dismiss timer (keyed on the toast id) never finds the toast.
+    setToasts(prev => [{ ...notification, id }, ...prev].slice(0, 5))
     timers.current[id] = setTimeout(() => dismiss(id), DISMISS_MS)
   }, [dismiss])
 
@@ -41,8 +46,9 @@ export default function ToastContainer() {
 
     ws.onmessage = (ev) => {
       try {
+        // Frame: {type: 'notification', notification: <same shape as GET /api/notifications items>}
         const msg = JSON.parse(ev.data)
-        if (msg.type === 'notification') addToast(msg)
+        if (msg.type === 'notification' && msg.notification) addToast(msg.notification)
       } catch {}
     }
 

@@ -26,6 +26,7 @@ from auth.bootstrap import bootstrap_on_startup
 from auth.routes import router as auth_router
 from core.config import settings
 from core.database import SessionLocal
+from core.errors import ApiError, api_error_handler
 from entities.routes import router as entities_router
 from files.routes import router as files_router
 from notes.routes import router as notes_router
@@ -50,6 +51,7 @@ from comms.routes import router as comms_router
 from mitre.routes import router as mitre_router, global_router as mitre_global_router
 from respond.routes import router as respond_router
 from forensic.routes import router as forensic_router
+from forensic.parser import sweep_parse_tmp
 from defender_pdf.routes import router as defender_pdf_router
 from osint.routes import router as osint_router
 from osint.session_routes import router as osint_session_router
@@ -119,6 +121,10 @@ async def lifespan(app: FastAPI):
     assert_kek_configured()
     # Fail-fast on audit-export misconfig — refuse to serve without Ed25519 key.
     assert_signing_key_configured()
+    # Parser scratch (RAM tmpfs): drop decrypted-evidence temp files a crashed parse left behind.
+    swept = sweep_parse_tmp()
+    if swept:
+        logging.getLogger("fenrir.forensic").warning("startup: removed %d stale parser temp file(s)", swept)
     # Schema DDL is NOT run here: the `migrate` one-shot (python -m core.migrate) runs
     # it as the owner role before the backend starts, so the long-running app
     # connects as fenrir_app with data privileges only.
@@ -131,9 +137,13 @@ async def lifespan(app: FastAPI):
     # via /api/integrations/syslog PUT calling forwarder.reload().
     from syslog_forwarder import start_forwarder, stop_forwarder
     await start_forwarder()
+    # Legal deadline reminders (T-12h, T-2h, overdue) — in-app only; one loop (one worker).
+    from legal.reminders import start_reminders, stop_reminders
+    await start_reminders()
     try:
         yield
     finally:
+        await stop_reminders()
         await stop_forwarder()
 
 
@@ -154,6 +164,8 @@ app = FastAPI(
     lifespan=lifespan,
     generate_unique_id_function=_operation_id,
 )
+# Flat {detail, code} error body for routes that raise core.errors.ApiError.
+app.add_exception_handler(ApiError, api_error_handler)
 
 _allowed_hosts = [h.strip() for h in settings.allowed_hosts.split(",") if h.strip()]
 if not _allowed_hosts:

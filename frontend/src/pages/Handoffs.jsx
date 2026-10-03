@@ -87,7 +87,7 @@ export default function Handoffs() {
       <div className="page-head">
         <div>
           <div className="page-sub">Commander</div>
-          <h1 className="page-title">Pending Handoffs</h1>
+          <h1 className="page-title">Shift handoffs</h1>
         </div>
       </div>
 

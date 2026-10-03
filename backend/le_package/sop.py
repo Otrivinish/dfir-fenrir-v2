@@ -45,6 +45,12 @@ When a control in one standard is stricter than another, the strictest wins.
   • Digital-file evidence is hashed (SHA-256, SHA-1, MD5) at the moment of
     upload, before any processing. Hashes are persisted on the Evidence row
     and re-checked at every transfer / examination / disposition.
+  • The target hash reported by the imaging tool (MD5, SHA-1 or SHA-256) is
+    compared with the hash of the uploaded bytes before anything is stored;
+    a mismatch is refused and logged (evidence_collect_rejected). A hash that
+    covers an E01/AFF4 container's media is recorded as advisory, not compared.
+  • The acquisition time (when the image was taken or the item seized) is
+    recorded separately from the time the item was registered.
   • Physical evidence is photographed and described before any movement.
 
 ## At-rest protection (ISO 27037 §6.9)
@@ -61,8 +67,19 @@ When a control in one standard is stricter than another, the strictest wins.
 Every action that touches an Evidence row writes a row to the platform's
 tamper-evident audit log. Actions tracked include:
 
-    evidence_collect        Initial upload / registration
-    evidence_transfer       Custody handover between users
+    evidence_collect        Initial upload / registration (incl. items minted
+                            from the Email or Browser-history tools; older
+                            mints are logged as email_mint_evidence /
+                            webhistory_mint_evidence)
+    evidence_collect_rejected  Upload refused: target hash ≠ uploaded bytes
+                            (nothing stored)
+    evidence_transfer_request  Custody transfer requested (internal: custody does
+                            not change until the recipient accepts)
+    evidence_transfer       Custody changed hands: the recipient accepted and
+                            recorded the condition on receipt and the seals, or
+                            a handover to / return from an external party
+    evidence_transfer_declined  Pending transfer declined by the recipient or
+                            cancelled by the requester or an admin
     evidence_examine        Read or analyse the evidence
     evidence_verify         Hash recomputation against the recorded SHA-256
     evidence_dispose        Destruction / return / archival

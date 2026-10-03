@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client.js'
-import { SEVERITY, PHASE, TLP, INCIDENT_TYPE } from '../lib/incidentVocab.js'
+import { SEVERITY, PHASE, TLP, INCIDENT_TYPE, DETECTION_METHOD, TRIAGE_STATE } from '../lib/incidentVocab.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 import TagInput from './TagInput.jsx'
 import LocalDateTimePicker from './LocalDateTimePicker.jsx'
@@ -12,9 +12,16 @@ const INITIAL = {
   phase: 'detection_and_analysis',
   tlp: 'amber',
   incident_type: '',
+  detection_method: '',
+  triage_state: 'suspected',
   reporter: '',
   occurred_at: '',
+  detected_at: '',
+  dark_operation: false,
 }
+
+// An incident is opened because something was detected: the API accepts only these start phases.
+const START_PHASES = PHASE.filter(p => p.value === 'detection_and_analysis' || p.value === 'containment_eradication_recovery')
 
 export default function IncidentCreateModal({ open, onClose, onCreated }) {
   const { user } = useAuth()
@@ -27,7 +34,8 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
   const [tags, setTags] = useState([])
 
   useEffect(() => {
-    if (open) { setForm(INITIAL); setError(''); setBusy(false); setSelectedTeamIds([]); setTags([]) }
+    // Detected defaults to now (editable); the API never fills it in itself.
+    if (open) { setForm({ ...INITIAL, detected_at: new Date().toISOString() }); setError(''); setBusy(false); setSelectedTeamIds([]); setTags([]) }
   }, [open])
 
   useEffect(() => {
@@ -60,10 +68,14 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
         phase: form.phase,
         tlp: form.tlp,
         incident_type: form.incident_type || null,
+        detection_method: form.detection_method || null,
+        triage_state: form.triage_state,
         reporter: form.reporter.trim() || null,
         occurred_at: form.occurred_at || null,
+        detected_at: form.detected_at,
         team_ids: selectedTeamIds,
         tags,
+        dark_operation: form.dark_operation,
       })
       onCreated(created)
     } catch (err) {
@@ -121,8 +133,24 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
               <div className="field">
                 <label className="field-label" htmlFor="inc-phase">Phase (800-61 R3)</label>
                 <select id="inc-phase" className="select" value={form.phase} onChange={set('phase')}>
-                  {PHASE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  {START_PHASES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
+              </div>
+
+              <div className="form-row">
+                <div className="field">
+                  <label className="field-label" htmlFor="inc-method">How detected (optional)</label>
+                  <select id="inc-method" className="select" value={form.detection_method} onChange={set('detection_method')}>
+                    <option value="">— not set —</option>
+                    {DETECTION_METHOD.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="inc-triage">Triage state</label>
+                  <select id="inc-triage" className="select" value={form.triage_state} onChange={set('triage_state')}>
+                    {TRIAGE_STATE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </div>
               </div>
 
               <div className="field">
@@ -163,10 +191,30 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
               </div>
 
               <div className="field">
+                <label className="field-label" htmlFor="inc-detected">Detected</label>
+                <LocalDateTimePicker id="inc-detected" value={form.detected_at} required
+                       onChange={v => setForm(f => ({ ...f, detected_at: v }))} />
+                <span className="field-hint">
+                  When the alert fired or the report came in. Pre-filled with now; change it if detection was earlier.
+                </span>
+              </div>
+
+              <div className="field">
                 <label className="field-label">Tags (optional)</label>
                 <TagInput value={tags} onChange={setTags} scope="incident" placeholder="Add tag and press Enter…" />
                 <span style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, display: 'block' }}>
                   Lowercase-dashed (e.g. <code>credential-theft</code>, <code>apt28</code>). Max 20 per incident. Suggestions pull from existing tags.
+                </span>
+              </div>
+
+              <div className="field">
+                <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', cursor: 'pointer', fontSize: 13 }}>
+                  <input id="inc-dark" type="checkbox" checked={form.dark_operation} aria-describedby="inc-dark-hint"
+                         onChange={e => setForm(f => ({ ...f, dark_operation: e.target.checked }))} />
+                  Open as Dark Operation
+                </label>
+                <span id="inc-dark-hint" className="field-hint">
+                  Nothing about this incident goes to Teams, Slack or the alert mailbox, from the moment it is created. In-app notifications still reach people who can see it.
                 </span>
               </div>
 

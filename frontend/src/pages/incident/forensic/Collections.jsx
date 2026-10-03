@@ -297,7 +297,7 @@ export default function Collections() {
                       <>
                         <Link to={`../timeline-import?artifact=${p.result_artifact_id}`} relative="path"
                               className="btn ghost" style={{ fontSize: 11, textDecoration: 'none', marginRight: 6 }}>
-                          Review in Timeline Import
+                          Review in Logs & triage
                         </Link>
                         <Link to="../artifacts" relative="path" className="btn ghost" style={{ fontSize: 11, textDecoration: 'none', marginRight: 6 }}>
                           View artifact ↗

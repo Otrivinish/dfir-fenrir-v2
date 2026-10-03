@@ -680,7 +680,7 @@ function HandoffModal({ incidentId, currentUser, onClose, onCreated }) {
 // ── Main component ────────────────────────────────────────────────────────
 
 export default function IncidentHandoffs() {
-  const { inc: incident } = useOutletContext()
+  const { inc: incident, bumpRail } = useOutletContext()
   const { user } = useAuth()
   const incidentId = incident?.id
   const isClosed   = incident?.status === 'closed'
@@ -748,7 +748,7 @@ export default function IncidentHandoffs() {
           incidentId={incidentId}
           currentUser={user}
           onClose={() => setModal(null)}
-          onCreated={(h) => setItems(prev => [h, ...prev])}
+          onCreated={(h) => { setItems(prev => [h, ...prev]); bumpRail?.() }}
         />
       )}
       {modal && modal !== 'create' && (
@@ -756,7 +756,7 @@ export default function IncidentHandoffs() {
           incidentId={incidentId}
           handoff={modal}
           onClose={() => setModal(null)}
-          onAcked={(updated) => setItems(prev => prev.map(h => h.id === updated.id ? updated : h))}
+          onAcked={(updated) => { setItems(prev => prev.map(h => h.id === updated.id ? updated : h)); bumpRail?.() }}
         />
       )}
     </section>

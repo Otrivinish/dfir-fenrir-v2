@@ -276,25 +276,25 @@ function CostTracking({ inc }) {
 
   return (
     <div>
-      {/* Summary strip */}
-      {summary && (
-        <div style={{ display: 'flex', gap: 'var(--space-4)', padding: 'var(--space-3)', background: 'var(--surface-2)', borderRadius: 'var(--radius)', marginBottom: 'var(--space-3)', flexWrap: 'wrap' }}>
+      {/* Summary strip — one per currency (amounts in different currencies are never added) */}
+      {summary && (Object.keys(summary.by_currency).length ? Object.entries(summary.by_currency) : [[summary.currency, summary]]).map(([cur, t]) => (
+        <div key={cur} style={{ display: 'flex', gap: 'var(--space-4)', padding: 'var(--space-3)', background: 'var(--surface-2)', borderRadius: 'var(--radius)', marginBottom: 'var(--space-3)', flexWrap: 'wrap' }}>
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-mono)' }}>{summary.currency} {summary.total_realised.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-mono)' }}>{cur} {t.total_realised.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
             <div style={{ fontSize: 11, color: 'var(--muted)' }}>Realised</div>
           </div>
           <div style={{ width: 1, background: 'var(--border)' }} />
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--muted)' }}>{summary.currency} {summary.total_estimated.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--muted)' }}>{cur} {t.total_estimated.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
             <div style={{ fontSize: 11, color: 'var(--muted)' }}>Estimated</div>
           </div>
           <div style={{ width: 1, background: 'var(--border)' }} />
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{summary.currency} {summary.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{cur} {t.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
             <div style={{ fontSize: 11, color: 'var(--muted)' }}>Total</div>
           </div>
         </div>
-      )}
+      ))}
 
       {/* Table */}
       {costs.length > 0 ? (
@@ -385,6 +385,7 @@ const EMPTY_LR = Object.fromEntries(
 )
 
 function LessonsAndRemediation({ inc }) {
+  const isClosed = inc?.status === 'closed'   // the API rejects these fields once closed
   const [form,    setForm]    = useState(EMPTY_LR)
   const [loading, setLoading] = useState(true)
   const [saving,  setSaving]  = useState(false)
@@ -448,6 +449,7 @@ function LessonsAndRemediation({ inc }) {
               rows={3}
               value={form[f.key]}
               onChange={e => set(f.key, e.target.value)}
+              readOnly={isClosed}
               maxLength={16384}
               placeholder={f.placeholder}
               style={{ resize: 'vertical', fontSize: 13 }}
@@ -470,6 +472,7 @@ function LessonsAndRemediation({ inc }) {
               rows={3}
               value={form[f.key]}
               onChange={e => set(f.key, e.target.value)}
+              readOnly={isClosed}
               maxLength={16384}
               placeholder={f.placeholder}
               style={{ resize: 'vertical', fontSize: 13 }}
@@ -479,12 +482,14 @@ function LessonsAndRemediation({ inc }) {
       </div>
 
       {error && <div className="alert error" style={{ marginBottom: 'var(--space-2)' }}><span className="alert-icon">!</span><span>{error}</span></div>}
-      <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
-        {saved && <span style={{ fontSize: 12, color: 'var(--ok)' }}>Saved</span>}
-        <button type="button" className="btn primary" onClick={save} disabled={saving} style={{ fontSize: 13 }}>
-          {saving ? 'Saving…' : 'Save lessons & remediation'}
-        </button>
-      </div>
+      {!isClosed && (
+        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+          {saved && <span style={{ fontSize: 12, color: 'var(--ok)' }}>Saved</span>}
+          <button type="button" className="btn primary" onClick={save} disabled={saving} style={{ fontSize: 13 }}>
+            {saving ? 'Saving…' : 'Save lessons & remediation'}
+          </button>
+        </div>
+      )}
     </div>
   )
 }

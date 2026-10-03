@@ -11,10 +11,12 @@ Failure modes (all return 410 Gone to avoid leaking which case applied):
   - Past expires_at
   - Revoked (phase 3)
 """
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +24,7 @@ from audit.service import write_audit
 from core.database import get_db
 from models import CustodyExport
 
-from evidence.exports import is_expired, open_bundle_for_download
+from evidence.exports import is_expired, iter_bundle, open_bundle_for_download
 
 router = APIRouter()
 
@@ -90,7 +92,7 @@ async def download_export(
         )
 
     try:
-        body, suggested = open_bundle_for_download(exp)
+        bundle, size, suggested = await asyncio.to_thread(open_bundle_for_download, exp)
     except FileNotFoundError:
         await write_audit(
             db, "evidence_export_download_denied",
@@ -122,11 +124,13 @@ async def download_export(
     )
     await db.commit()
 
-    return Response(
-        content=body,
+    # Streamed from disk in chunks (reads in a worker thread): a bundle can be GiBs.
+    return StreamingResponse(
+        iter_bundle(bundle),
         media_type="application/octet-stream",
         headers={
             "Content-Disposition": f'attachment; filename="{suggested}"',
+            "Content-Length":      str(size),
             "X-Bundle-SHA256":     exp.bundle_sha256 or "",
             "Cache-Control":       "no-store",
         },

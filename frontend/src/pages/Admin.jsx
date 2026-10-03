@@ -10,7 +10,7 @@ export default function Admin() {
       <div className="page-head">
         <div>
           <h1 className="page-title">Admin</h1>
-          <div className="page-sub">Audit Log · Audit Exports · Sessions · Storage · Metrics · Backup · API Docs</div>
+          <div className="page-sub">Audit Log · Audit Exports · Sessions · Storage · Backup · API Docs</div>
         </div>
       </div>
 
@@ -20,7 +20,6 @@ export default function Admin() {
           <NavLink to="audit-exports" className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}>Audit Exports</NavLink>
           <NavLink to="sessions"  className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}>Sessions</NavLink>
           <NavLink to="storage"   className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}>Storage</NavLink>
-          <NavLink to="metrics"   className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}>Metrics</NavLink>
           <NavLink to="backup"    className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}>Backup</NavLink>
           <NavLink to="api-docs"  className={({ isActive }) => `sub-item ${isActive ? 'active' : ''}`}>API Docs</NavLink>
         </nav>

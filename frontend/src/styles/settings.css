@@ -24,7 +24,8 @@
 }
 
 /* Phase-grouped nav (used by the incident sub-nav). Pure visual grouping —
-   styled to match .settings-table th so it feels native across themes. */
+   styled like .settings-table th, but in --muted so a neutral group label stays
+   legible (4.5:1) beside the --phase-* coloured ones (IncidentRail sets those inline). */
 .sub-group {
   display: flex;
   flex-direction: column;
@@ -39,12 +40,14 @@
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--dim);
+  color: var(--muted);
   padding: 6px 10px 2px;
 }
 
 .sub-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   padding: 8px 10px;
   color: var(--muted);
   font-size: 13px;
@@ -65,6 +68,44 @@
 }
 
 .sub-content { min-width: 0; }
+
+/* Live count on an incident rail item (IncidentRail). Takes the item's own text
+   colour, so it is never less legible than the label beside it. */
+.sub-count {
+  margin-left: auto;
+  flex-shrink: 0;
+  min-width: 20px;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.sub-item.active .sub-count { border-color: currentColor; }
+
+/* Narrow screens: one column, and the rail becomes one horizontally scrolling
+   row (incident rail, Settings and Admin). */
+@media (max-width: 759px) {
+  .sub-layout { grid-template-columns: minmax(0, 1fr); }
+  .sub-nav {
+    flex-direction: row;
+    align-items: center;
+    overflow-x: auto;
+    position: static;
+  }
+  .sub-group { flex-direction: row; align-items: center; flex-shrink: 0; }
+  .sub-group + .sub-group { margin-top: 0; margin-left: var(--space-2); }
+  .sub-group-label { padding: 0 6px; white-space: nowrap; }
+  .sub-item {
+    flex-shrink: 0;
+    white-space: nowrap;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+  .sub-item.active { border-bottom-color: var(--accent); }
+}
 
 /* Vertically stacked panels inside a settings sub-page */
 .settings-stack {

@@ -6,11 +6,12 @@ from collections import defaultdict
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.deps import require_analyst
 from core.database import get_db
+from incidents.access import accessible_filter
 from models import (
     Incident, IncidentAssignment, IOC, PlaybookTask, TimelineEvent, User, utcnow,
 )
@@ -36,12 +37,28 @@ async def portfolio_metrics(
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ):
+    """Portfolio metrics over the last window_days (7-365).
+
+    ttx_by_week: incidents closed in the window, grouped by ISO week of closing;
+    mean minutes per week (null when there is no sample):
+    - mttd: occurred_at → detected_at
+    - mttc: detected_at (else created_at) → contained_at
+    - mttr: detected_at (else created_at) → recovered_at (else closed_at)
+    Negative intervals are left out, and so are incidents missing a time;
+    mttd_excluded / mttc_excluded / mttr_excluded count, per week, the closed
+    incidents left out of that mean for either reason.
+
+    Every figure counts only incidents the caller can see (the team rule of GET
+    /api/incidents; admins see all).
+    """
     cutoff = utcnow() - timedelta(days=window_days)
+    visible = accessible_filter(user)
 
     # ── 1. Status summary ────────────────────────────────────────────────────
 
     status_rows = (await db.execute(
         select(Incident.status, func.count().label("n"))
+        .where(visible)
         .group_by(Incident.status)
     )).all()
     total        = sum(r.n for r in status_rows)
@@ -50,13 +67,14 @@ async def portfolio_metrics(
 
     phase_rows = (await db.execute(
         select(Incident.phase, func.count().label("n"))
-        .where(Incident.status == "open")
+        .where(Incident.status == "open", visible)
         .group_by(Incident.phase)
     )).all()
     open_by_phase = {r.phase: r.n for r in phase_rows}
 
     sev_rows = (await db.execute(
         select(Incident.severity, func.count().label("n"))
+        .where(visible)
         .group_by(Incident.severity)
     )).all()
     by_severity = {r.severity: r.n for r in sev_rows}
@@ -66,7 +84,7 @@ async def portfolio_metrics(
     _wk_opened = func.date_trunc("week", Incident.created_at)
     opened_rows = (await db.execute(
         select(_wk_opened.label("wk"), func.count().label("n"))
-        .where(Incident.created_at >= cutoff)
+        .where(Incident.created_at >= cutoff, visible)
         .group_by(_wk_opened)
         .order_by(_wk_opened)
     )).all()
@@ -77,6 +95,7 @@ async def portfolio_metrics(
         .where(
             Incident.closed_at.isnot(None),
             Incident.closed_at >= cutoff,
+            visible,
         )
         .group_by(_wk_closed)
         .order_by(_wk_closed)
@@ -94,7 +113,7 @@ async def portfolio_metrics(
     _wk_sev = func.date_trunc("week", Incident.created_at)
     sev_trend_rows = (await db.execute(
         select(_wk_sev.label("wk"), Incident.severity, func.count().label("n"))
-        .where(Incident.created_at >= cutoff)
+        .where(Incident.created_at >= cutoff, visible)
         .group_by(_wk_sev, Incident.severity)
         .order_by(_wk_sev)
     )).all()
@@ -105,25 +124,30 @@ async def portfolio_metrics(
     severity_trend = [{"week": w, **d} for w, d in sorted(sev_week.items())]
 
     # ── 4. TTx by week (for closed incidents) ─────────────────────────────
+    # MTTD occurred → detected; MTTC detected (else created) → contained;
+    # MTTR detected (else created) → recovered (else closed). Negative
+    # intervals are left out of the averages.
 
     _wk_ttx = func.date_trunc("week", Incident.closed_at)
+    _start = func.coalesce(Incident.detected_at, Incident.created_at)
+    _ttd = func.extract("epoch", Incident.detected_at - Incident.occurred_at)
+    _ttr = func.extract("epoch", func.coalesce(Incident.recovered_at, Incident.closed_at) - _start)
+    _ttc = func.extract("epoch", Incident.contained_at - _start)
     ttx_rows = (await db.execute(
         select(
             _wk_ttx.label("wk"),
-            func.avg(
-                func.extract("epoch", Incident.created_at - Incident.occurred_at)
-            ).label("mttd_s"),
-            func.avg(
-                func.extract("epoch", Incident.closed_at - Incident.created_at)
-            ).label("mttr_s"),
-            func.avg(
-                func.extract("epoch", Incident.contained_at - Incident.created_at)
-            ).label("mttc_s"),
+            func.avg(_ttd).filter(_ttd >= 0).label("mttd_s"),
+            func.avg(_ttr).filter(_ttr >= 0).label("mttr_s"),
+            func.avg(_ttc).filter(_ttc >= 0).label("mttc_s"),
+            func.count().filter(or_(_ttd.is_(None), _ttd < 0)).label("mttd_x"),
+            func.count().filter(or_(_ttr.is_(None), _ttr < 0)).label("mttr_x"),
+            func.count().filter(or_(_ttc.is_(None), _ttc < 0)).label("mttc_x"),
         )
         .where(
             Incident.status == "closed",
             Incident.closed_at.isnot(None),
             Incident.closed_at >= cutoff,
+            visible,
         )
         .group_by(_wk_ttx)
         .order_by(_wk_ttx)
@@ -135,6 +159,9 @@ async def portfolio_metrics(
             "mttd": _minutes(r.mttd_s),
             "mttr": _minutes(r.mttr_s),
             "mttc": _minutes(r.mttc_s),
+            "mttd_excluded": r.mttd_x,
+            "mttr_excluded": r.mttr_x,
+            "mttc_excluded": r.mttc_x,
         }
         for r in ttx_rows
     ]
@@ -143,7 +170,7 @@ async def portfolio_metrics(
 
     type_rows = (await db.execute(
         select(Incident.incident_type, func.count().label("n"))
-        .where(Incident.incident_type.isnot(None))
+        .where(Incident.incident_type.isnot(None), visible)
         .group_by(Incident.incident_type)
         .order_by(func.count().desc())
         .limit(10)
@@ -158,7 +185,8 @@ async def portfolio_metrics(
             TimelineEvent.mitre_tactic_name,
             func.count().label("n"),
         )
-        .where(TimelineEvent.mitre_tactic_id.isnot(None))
+        .join(Incident, Incident.id == TimelineEvent.incident_id)
+        .where(TimelineEvent.mitre_tactic_id.isnot(None), visible)
         .group_by(TimelineEvent.mitre_tactic_id, TimelineEvent.mitre_tactic_name)
         .order_by(func.count().desc())
         .limit(10)
@@ -176,6 +204,8 @@ async def portfolio_metrics(
 
     ioc_rows = (await db.execute(
         select(IOC.type, func.count().label("n"))
+        .join(Incident, Incident.id == IOC.incident_id)
+        .where(visible)
         .group_by(IOC.type)
         .order_by(func.count().desc())
     )).all()
@@ -189,7 +219,7 @@ async def portfolio_metrics(
             func.count(func.distinct(IncidentAssignment.incident_id)).label("n"),
         )
         .join(Incident, Incident.id == IncidentAssignment.incident_id)
-        .where(Incident.status == "open")
+        .where(Incident.status == "open", visible)
         .group_by(IncidentAssignment.username)
         .order_by(func.count(func.distinct(IncidentAssignment.incident_id)).desc())
         .limit(15)
@@ -204,6 +234,8 @@ async def portfolio_metrics(
             PlaybookTask.status,
             func.count().label("n"),
         )
+        .join(Incident, Incident.id == PlaybookTask.incident_id)
+        .where(visible)
         .group_by(PlaybookTask.incident_id, PlaybookTask.status)
     )).all()
 

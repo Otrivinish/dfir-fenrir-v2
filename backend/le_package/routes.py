@@ -1,12 +1,14 @@
 """LE-package routes.
 
 Endpoints:
-  POST   /api/incidents/{id}/le-package   — generate. Admin only.
+  POST   /api/incidents/{id}/le-package   — generate. Incident lead only (admin,
+                                            or an analyst assigned IC / Deputy IC).
                                             Returns LePackagePrepared with the
                                             bundle KEK shown ONCE + download URL.
   GET    /api/incidents/{id}/le-packages  — list history for the incident.
-                                            Admin only (LE packages are sensitive).
-  GET    /api/incidents/{id}/le-packages/{lp_id} — single row metadata.
+                                            Incident lead only (LE packages are sensitive).
+  GET    /api/incidents/{id}/le-packages/{lp_id} — single row metadata (incident lead).
+  POST   /api/incidents/{id}/le-packages/{lp_id}/manual-ack — incident lead.
 
 The encrypted bundle itself is downloaded via the existing single-use
 `/api/exports/{token}` endpoint (mounted by `evidence/download.py`). The
@@ -14,6 +16,7 @@ LE-package builder reuses that CustodyExport lifecycle — no new download path.
 """
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -24,12 +27,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
-from auth.deps import require_admin
 from core.config import settings
 from core.database import get_db
-from incidents.access import get_accessible_incident
+from core.errors import ApiErrorBody
+from incidents.access import LeadAccess, require_incident_lead
 from le_package.builder import build_le_package
-from models import AuditLog, CustodyExport, Evidence, LePackage, User
+from models import AuditLog, CustodyExport, Evidence, LePackage
+from notifications.service import notify_le_package_built
 from schemas import (LePackageAckRequest, LePackageAckResponse,
                      LePackageList, LePackageManualAckRequest,
                      LePackageOut, LePackagePrepare, LePackagePrepared)
@@ -94,21 +98,26 @@ def _row_to_out(lp: LePackage, cust: CustodyExport,
 
 
 @router.post("/{incident_id}/le-package", response_model=LePackagePrepared,
-             summary="Build a law-enforcement package")
+             summary="Build a law-enforcement package",
+             responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}})
 async def prepare_le_package(
     incident_id: uuid.UUID,
     req:         LePackagePrepare,
-    user:        User = Depends(require_admin),
+    lead:        LeadAccess = Depends(require_incident_lead),
     db:          AsyncSession = Depends(get_db),
 ) -> LePackagePrepared:
     """Build a court-ready, encrypted law-enforcement handoff bundle for the
-    incident and anchor it in the hash-chained audit log. Admin only.
+    incident and anchor it in the hash-chained audit log. Incident lead only: an
+    admin, or an analyst (effective role) assigned as Incident Commander or Deputy
+    Incident Commander on this incident (403 code not_incident_lead; not visible:
+    404). When a non-admin builds it, every active admin gets an in-app
+    notification (incident ref only).
 
     The bundle KEK is returned exactly once. The download URL is the standard
     one-time `/api/exports/{token}` link (single use, 24-hour expiry). When
     acknowledgment is enabled, a single-use ack URL is also returned.
     """
-    inc = await get_accessible_incident(db, incident_id, user)
+    user, inc = lead
 
     # 1. Build the encrypted bundle (in-memory). Does not commit DB writes.
     build = await build_le_package(
@@ -129,7 +138,7 @@ async def prepare_le_package(
     rel_path  = f"exports/{export_id}.zip"
     target    = Path(settings.evidence_path) / rel_path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(build.encrypted_bundle)
+    await asyncio.to_thread(target.write_bytes, build.encrypted_bundle)   # not on the event loop
 
     # 3. Create the CustodyExport row (owns the download token + lifecycle).
     token      = secrets.token_urlsafe(32)
@@ -230,12 +239,19 @@ async def prepare_le_package(
         delivery_channel       = req.delivery_channel,
         delivery_notes         = req.delivery_notes,
         sender_declaration     = req.sender_declaration,
-        signature_kind         = "ed25519",
+        # What protects the manifest: INTEGRITY.sig = HMAC-SHA-256 (no public-key signature).
+        # Rows created before 2026-10-03 say "ed25519": a wrong label (docs/reports.md §3).
+        signature_kind         = "hmac-sha256",
         acknowledgment_token   = ack_token,
     )
     db.add(lp)
     await db.flush()
-    await db.commit()
+    if user.role != "admin":
+        # Delegated (IC / Deputy) build: every active admin hears about it.
+        await notify_le_package_built(      # commits, then pushes
+            db, incident_id=inc.id, incident_ref=inc.ref or str(inc.id), builder_username=user.username)
+    else:
+        await db.commit()
 
     base = _row_to_out(lp, cust, anchor_hash=anchor_row.row_hash)
     return LePackagePrepared(
@@ -247,15 +263,17 @@ async def prepare_le_package(
 
 
 @router.get("/{incident_id}/le-packages", response_model=LePackageList,
-            summary="List law-enforcement packages")
+            summary="List law-enforcement packages",
+            responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}})
 async def list_le_packages(
     incident_id: uuid.UUID,
-    _: User = Depends(require_admin),
+    _: LeadAccess = Depends(require_incident_lead),
     db: AsyncSession = Depends(get_db),
 ) -> LePackageList:
     """List all law-enforcement packages prepared for the incident, newest
-    first, with their custody-export status and audit anchor hash. Admin only
-    (LE packages are sensitive). Returns `{items: [...]}`."""
+    first, with their custody-export status and audit anchor hash. Incident lead
+    only (LE packages are sensitive): an admin, or an analyst assigned as Incident
+    Commander or Deputy here (403 code not_incident_lead). Returns `{items: [...]}`."""
     rows = (await db.execute(
         select(LePackage, CustodyExport, AuditLog.row_hash)
         .join(CustodyExport, CustodyExport.id == LePackage.custody_export_id)
@@ -268,16 +286,18 @@ async def list_le_packages(
 
 
 @router.get("/{incident_id}/le-packages/{lp_id}", response_model=LePackageOut,
-            summary="Get a law-enforcement package")
+            summary="Get a law-enforcement package",
+            responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}})
 async def get_le_package(
     incident_id: uuid.UUID,
     lp_id:       uuid.UUID,
-    _: User = Depends(require_admin),
+    _: LeadAccess = Depends(require_incident_lead),
     db: AsyncSession = Depends(get_db),
 ) -> LePackageOut:
     """Fetch metadata for a single law-enforcement package by id within the
-    incident, including custody-export status and audit anchor hash. Admin only.
-    Returns the package record; 404 if not found."""
+    incident, including custody-export status and audit anchor hash. Incident lead
+    only (admin, or an analyst assigned as Incident Commander or Deputy here; 403
+    code not_incident_lead). Returns the package record; 404 if not found."""
     row = (await db.execute(
         select(LePackage, CustodyExport, AuditLog.row_hash)
         .join(CustodyExport, CustodyExport.id == LePackage.custody_export_id)
@@ -292,29 +312,32 @@ async def get_le_package(
 
 # ── Sender-mediated ("manual") acknowledgment ───────────────────────────────
 # For external recipients who cannot reach the URL-based ack page (offline
-# LE agencies, paper-only handoffs). Admin-only — they attest receipt on
-# the recipient's behalf. Audit row records `details.method = "manual:..."`
+# LE agencies, paper-only handoffs). Incident lead only (admin or IC / Deputy
+# analyst) — they attest receipt on the recipient's behalf. Audit row records `details.method = "manual:..."`
 # so a regulator can distinguish from URL-based acks.
 
 @router.post(
     "/{incident_id}/le-packages/{lp_id}/manual-ack",
     response_model=LePackageAckResponse,
     summary="Manually acknowledge a law-enforcement package",
+    responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}},
 )
 async def manual_ack_le_package(
     incident_id: uuid.UUID,
     lp_id:       uuid.UUID,
     req:         LePackageManualAckRequest,
     request:     Request,
-    user:        User = Depends(require_admin),
+    lead:        LeadAccess = Depends(require_incident_lead),
     db:          AsyncSession = Depends(get_db),
 ) -> LePackageAckResponse:
-    """Record an admin-attested receipt for an LE package on behalf of an
-    external recipient who cannot use the URL ack page (offline / paper-only
-    handoffs). Admin only; optionally links a scanned-receipt Evidence id.
-    Burns the URL ack token, audit-logs the attestation as `manual:...`, and
-    rejects already-acknowledged packages. Returns the acknowledgment summary."""
-    await get_accessible_incident(db, incident_id, user)
+    """Record an attested receipt for an LE package on behalf of an external
+    recipient who cannot use the URL ack page (offline / paper-only handoffs).
+    Incident lead only (admin, or an analyst assigned as Incident Commander or
+    Deputy here; 403 code not_incident_lead); optionally links a scanned-receipt
+    Evidence id. Burns the URL ack token, audit-logs the attestation as
+    `manual:...`, and rejects already-acknowledged packages. Returns the
+    acknowledgment summary."""
+    user = lead.user
 
     lp = (await db.execute(
         select(LePackage).where(

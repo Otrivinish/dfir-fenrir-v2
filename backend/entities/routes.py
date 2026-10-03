@@ -16,9 +16,11 @@ from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
+from core.errors import ApiError
 from evidence.crypto import adecrypt_file_bytes, aencrypt_file_bytes
 from incidents.access import get_accessible_incident
-from models import Entity, EntityEvent, EntityFile, EntityRelation, Incident, User, utcnow
+from models import Entity, EntityEvent, EntityFile, EntityRelation, Incident, RespondAction, User, utcnow
+from respond.containment import containment_map
 from schemas import (Criticality, EntityCreate, EntityEventCreate,
                      EntityEventList, EntityEventOut, EntityFileList, EntityFileOut,
                      EntityList, EntityOut,
@@ -86,15 +88,20 @@ async def list_entities(
     db: AsyncSession = Depends(get_db),
     type:        Optional[EntityType]  = Query(default=None),
     criticality: Optional[Criticality] = Query(default=None),
+    compromised: Optional[bool]        = Query(default=None,
+                                               description="true = only compromised entities (the incident's "
+                                                           "affected systems); false = only the others"),
     limit:       int                   = Query(default=50, ge=1, le=200),
     cursor:      Optional[str]         = Query(default=None),
 ) -> EntityList:
     """List entities (hosts, accounts, etc.) for an incident, newest first.
 
-    Supports optional filtering by `type` and `criticality`, plus cursor-based
-    pagination via `limit` and `cursor`. Each item includes a `file_count` of
-    attached files. Requires an authenticated user with access to the incident.
-    Returns a paginated `EntityList` with `items` and `next_cursor`.
+    Supports optional filtering by `type`, `criticality` and `compromised`, plus
+    cursor-based pagination via `limit` and `cursor`. Each item includes a `file_count` of
+    attached files and its `containment` state from the Respond board (isolated /
+    disabled / blocked / pending, or null). Requires an authenticated user with
+    access to the incident. Returns a paginated `EntityList` with `items` and
+    `next_cursor`.
     """
     await _get_incident(db, incident_id, user)
     offset = _decode_cursor(cursor)
@@ -106,6 +113,7 @@ async def list_entities(
     )
     if type:        stmt = stmt.where(Entity.type        == type)
     if criticality: stmt = stmt.where(Entity.criticality == criticality)
+    if compromised is not None: stmt = stmt.where(Entity.compromised == compromised)
 
     stmt = stmt.offset(offset).limit(limit + 1)
     rows = (await db.execute(stmt)).scalars().all()
@@ -121,9 +129,11 @@ async def list_entities(
         .group_by(EntityFile.entity_id)
     )).all() if entity_ids else []
     count_map = {str(r.entity_id): r.cnt for r in count_rows}
+    containment = await containment_map(db, RespondAction.entity_id, entity_ids)
 
     items = [
-        EntityOut.model_validate(e).model_copy(update={"file_count": count_map.get(str(e.id), 0)})
+        EntityOut.model_validate(e).model_copy(update={"file_count": count_map.get(str(e.id), 0),
+                                                       "containment": containment.get(e.id)})
         for e in page
     ]
     next_cursor = _encode_cursor(offset + limit) if has_more else None
@@ -144,13 +154,14 @@ async def create_entity(
     db: AsyncSession = Depends(get_db),
 ) -> EntityOut:
     """Create a new entity on an incident and record a system event in its asset
-    log. Returns 409 if the incident is closed or if an identical entity already
+    log. `compromised: true` adds it straight to the incident's affected systems.
+    Returns 409 if the incident is closed or if an identical entity already
     exists on it. Requires the analyst role and access to the incident. Returns
     the created `EntityOut`.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     ent = Entity(
         id=uuid.uuid4(),
@@ -161,6 +172,7 @@ async def create_entity(
         description=req.description,
         criticality=req.criticality,
         attributes=req.attributes or {},
+        compromised=req.compromised,
         added_by_id=user.id,
     )
     db.add(ent)
@@ -172,11 +184,14 @@ async def create_entity(
                             "This entity already exists on this incident")
 
     await _add_system_event(db, ent, "Entity added", actor_id=user.id)
+    if ent.compromised:
+        await _add_system_event(db, ent, "Marked as compromised", actor_id=user.id)
     await write_audit(
         db, "entity_create",
         user_id=user.id, username=user.username,
         resource_type="entity", resource_id=str(ent.id),
-        details={"incident_id": str(incident_id), "type": ent.type, "value": ent.value},
+        details={"incident_id": str(incident_id), "type": ent.type, "value": ent.value,
+                 "compromised": ent.compromised},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -203,7 +218,7 @@ async def update_entity(
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     ent = (await db.execute(
         select(Entity).where(Entity.id == entity_id, Entity.incident_id == incident_id)
@@ -256,7 +271,7 @@ async def delete_entity(
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     ent = (await db.execute(
         select(Entity).where(Entity.id == entity_id, Entity.incident_id == incident_id)
@@ -329,7 +344,7 @@ async def create_entity_event(
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     ent = (await db.execute(
         select(Entity).where(Entity.id == entity_id, Entity.incident_id == incident_id)
@@ -378,7 +393,7 @@ async def delete_entity_event(
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     ev = (await db.execute(
         select(EntityEvent).where(
@@ -452,7 +467,7 @@ async def upload_entity_file(
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     ent = (await db.execute(
         select(Entity).where(Entity.id == entity_id, Entity.incident_id == incident_id)
@@ -556,7 +571,7 @@ async def delete_entity_file(
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     ef = (await db.execute(
         select(EntityFile).where(
@@ -627,7 +642,7 @@ async def create_entity_relation(
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
     if req.from_entity_id == req.to_entity_id:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             "An entity cannot relate to itself")
@@ -690,7 +705,7 @@ async def delete_entity_relation(
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     rel = (await db.execute(
         select(EntityRelation).where(

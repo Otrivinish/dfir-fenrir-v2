@@ -153,8 +153,8 @@ function EditProfileModal({ entry, onClose, onSaved }) {
             </label>
           </div>
           <div className="modal-footer">
-            <button type="button" className="btn btn-ghost" onClick={onClose}>Cancel</button>
-            <button type="submit" className="btn btn-primary" disabled={saving}>
+            <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+            <button type="submit" className="btn primary" disabled={saving}>
               {saving ? 'Saving…' : 'Save'}
             </button>
           </div>
@@ -192,8 +192,8 @@ function ResponderCard({ entry, canEdit, onEdit }) {
         </div>
         {canEdit && (
           <button
-            className="btn btn-ghost"
-            style={{ fontSize: 11, padding: '2px 8px', flexShrink: 0 }}
+            className="btn ghost"
+            style={{ flexShrink: 0 }}
             onClick={() => onEdit(entry)}
           >Edit</button>
         )}

@@ -1,29 +1,16 @@
-import { useState, useEffect, useCallback } from 'react'
+import { Fragment, useState, useEffect, useCallback } from 'react'
 import { useOutletContext, Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { formatLocal } from '../../lib/datetime.js'
-import { SEVERITY, TLP, TRIAGE_STATE, INCIDENT_TYPE, DETECTION_METHOD, SYSTEM_TYPE, byValue } from '../../lib/incidentVocab.js'
-import { useAuth } from '../../hooks/useAuth.jsx'
+import { SEVERITY, TLP, TRIAGE_STATE, INCIDENT_TYPE, DETECTION_METHOD, ENTITY_TYPE, labelOf } from '../../lib/incidentVocab.js'
 import { api } from '../../api/client.js'
+import { matchEntity } from '../../lib/entityMatch.js'
 import TagChip from '../../components/TagChip.jsx'
 import TagInput from '../../components/TagInput.jsx'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
-import StakeholderMatrixBanner from '../../components/StakeholderMatrixBanner.jsx'
+import ClassificationStrip, { TeamChip } from '../../components/ClassificationStrip.jsx'
 
-function TeamChip({ team }) {
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 4,
-      padding: '2px 8px', borderRadius: 'var(--radius-sm)',
-      fontSize: 12, fontWeight: 500,
-      background: team.color + '22', color: team.color,
-      border: `1px solid ${team.color}55`,
-    }}>
-      <span style={{ width: 7, height: 7, borderRadius: '50%', background: team.color, flexShrink: 0 }} />
-      {team.name}
-    </span>
-  )
-}
+const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
 
 function TeamsSection({ inc, onUpdated }) {
   const [allTeams, setAllTeams]     = useState(null)
@@ -56,7 +43,10 @@ function TeamsSection({ inc, onUpdated }) {
       onUpdated(updated)
       setEditing(false)
     } catch (e) {
-      setError(e.message || 'Save failed.')
+      // The API's 409 would_lock_out / would_unrestrict (and 422 team_not_found) explain
+      // themselves but name teams by id: show their names instead.
+      const names = new Map((allTeams ?? []).map(t => [String(t.id).toLowerCase(), t.name]))
+      setError((e.message || 'Save failed.').replace(UUID_RE, id => names.has(id.toLowerCase()) ? `“${names.get(id.toLowerCase())}”` : id))
     } finally {
       setBusy(false)
     }
@@ -90,7 +80,7 @@ function TeamsSection({ inc, onUpdated }) {
                 ))}
               </div>
             )}
-            {error && <span style={{ fontSize: 12, color: 'var(--crit)' }}>{error}</span>}
+            {error && <div className="team-picker-error" role="alert"><span className="team-picker-error-mark" aria-hidden="true">!</span><span>{error}</span></div>}
             <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <button type="button" className="btn ghost" style={{ fontSize: 12 }}
                 onClick={() => setEditing(false)} disabled={busy}>Cancel</button>
@@ -173,144 +163,59 @@ function TagsSection({ inc, readOnly, onUpdated }) {
   )
 }
 
-// ─── Sidebar summary widgets ──────────────────────────────────────────────────
+const BLANK_SYSTEM = { value: '', type: 'host', notes: '' }
 
-function AssignmentsWidget({ assignments }) {
-  if (!assignments || assignments.length === 0) return null
-  const shown = assignments.slice(0, 3)
-  const rest  = assignments.length - shown.length
-  return (
-    <>
-      <dt>Responders</dt>
-      <dd style={{ minWidth: 0 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-          {shown.map(a => (
-            <div key={a.id} style={{ display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 12 }}>
-              <span style={{ fontWeight: 600 }}>{a.username}</span>
-              <span style={{ color: 'var(--muted)', fontSize: 11 }}>{a.role_label}</span>
-            </div>
-          ))}
-          {rest > 0 && (
-            <span style={{ fontSize: 11, color: 'var(--dim)' }}>+{rest} more</span>
-          )}
-        </div>
-      </dd>
-    </>
-  )
-}
-
-function PlaybookWidget({ tasks }) {
-  if (tasks === null) return null
-  if (tasks.length === 0) return null
-  const done    = tasks.filter(t => t.status === 'done').length
-  const skipped = tasks.filter(t => t.status === 'skipped').length
-  const total   = tasks.length - skipped
-  const pct     = total > 0 ? Math.round((done / total) * 100) : 0
-  const color   = pct === 100 ? 'var(--ok)' : pct > 0 ? 'var(--accent)' : 'var(--muted)'
-  return (
-    <>
-      <dt>Playbook</dt>
-      <dd style={{ minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color }}>
-            {done} / {total}
-          </span>
-          <span style={{ fontSize: 11, color: 'var(--muted)' }}>tasks done</span>
-        </div>
-      </dd>
-    </>
-  )
-}
-
-function LegalWidget({ deadlines }) {
-  if (!deadlines) return null
-  const active = deadlines.filter(d => d.status !== 'completed' && d.status !== 'waived')
-  if (active.length === 0) return null
-  const nearest = active.reduce((a, b) => a.hours_remaining < b.hours_remaining ? a : b)
-  const h = nearest.hours_remaining
-  const overdue  = h < 0
-  const urgent   = !overdue && h < 24
-  const color    = overdue ? 'var(--crit)' : urgent ? 'var(--high)' : 'var(--ok)'
-  const label    = overdue
-    ? `${nearest.regulation} · OVERDUE`
-    : h < 1
-      ? `${nearest.regulation} · <1h`
-      : h < 48
-        ? `${nearest.regulation} · ${Math.round(h)}h`
-        : `${nearest.regulation} · ${Math.round(h / 24)}d`
-  return (
-    <>
-      <dt>Legal</dt>
-      <dd style={{ minWidth: 0 }}>
-        <span style={{
-          display: 'inline-block', fontSize: 11, fontWeight: 600,
-          padding: '2px 7px', borderRadius: 'var(--radius-sm)',
-          background: `color-mix(in srgb, ${color} 15%, transparent)`,
-          color, border: `1px solid color-mix(in srgb, ${color} 40%, transparent)`,
-        }}>
-          {label}
-        </span>
-        {active.length > 1 && (
-          <span style={{ fontSize: 11, color: 'var(--dim)', marginLeft: 6 }}>
-            +{active.length - 1} more
-          </span>
-        )}
-      </dd>
-    </>
-  )
-}
-
-const BLANK_SYSTEM = { name: '', system_type: '', notes: '' }
-
+// Affected systems = this incident's compromised entities (C2): one scope list, kept on the
+// Entities tab. Add marks an existing entity compromised or creates a new one; Clear removes
+// the flag only (the entity stays). Everything else about an entity is edited in Entities.
 function AffectedSystemsSection({ incidentId, readOnly }) {
   const [systems, setSystems] = useState(null)
   const [loading, setLoading] = useState(false)
-  const [modal, setModal]     = useState(null)  // null | 'add' | {id, name, system_type, notes}
+  const [adding, setAdding]   = useState(false)
+  const [scope, setScope]     = useState([])     // every entity of the incident, for the Add picker
   const [form, setForm]       = useState(BLANK_SYSTEM)
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState('')
-  const [selected, setSelected] = useState(() => new Set())
-  const [promoteResult, setPromoteResult] = useState(null)
-  const [promoting, setPromoting] = useState(false)
-
-  const toggleSelected = (id) => setSelected(prev => {
-    const next = new Set(prev)
-    if (next.has(id)) next.delete(id); else next.add(id)
-    return next
-  })
-
-  const allSelected = systems && systems.length > 0 && selected.size === systems.length
-  const toggleSelectAll = () => {
-    if (allSelected) setSelected(new Set())
-    else setSelected(new Set((systems || []).map(s => s.id)))
-  }
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const r = await api.listAffectedSystems(incidentId)
-      setSystems(r.items)
+      setSystems(await api.listAllEntities(incidentId, { compromised: true }))
     } catch { setSystems([]) }
     finally { setLoading(false) }
   }, [incidentId])
 
   useEffect(() => { load() }, [load])
 
-  const openAdd = () => { setForm(BLANK_SYSTEM); setError(''); setModal('add') }
-  const openEdit = (s) => { setForm({ name: s.name, system_type: s.system_type ?? '', notes: s.notes ?? '' }); setError(''); setModal(s) }
+  const openAdd = async () => {
+    setForm(BLANK_SYSTEM); setError(''); setScope([]); setAdding(true)
+    try { setScope(await api.listAllEntities(incidentId)) } catch { /* picker stays empty; typing still works */ }
+  }
+
+  const value    = form.value.trim()
+  // Case-insensitive (M6): "dc01" flags the existing "DC01" instead of adding a duplicate.
+  const existing = matchEntity(scope.filter(e => e.type === form.type), value)
+
+  // Picking a known value takes that entity's type, so it is flagged instead of duplicated.
+  const onValueChange = (v) => {
+    const match = matchEntity(scope, v.trim())
+    setForm(f => ({ ...f, value: v, ...(match ? { type: match.type } : {}) }))
+  }
 
   const handleSave = async () => {
-    if (!form.name.trim()) { setError('Name is required.'); return }
+    if (!value) { setError('Enter the host, account or service.'); return }
     setBusy(true); setError('')
     try {
-      const payload = { name: form.name.trim(), system_type: form.system_type || null, notes: form.notes || null }
-      if (modal === 'add') {
-        await api.createAffectedSystem(incidentId, payload)
+      if (existing) {
+        await api.updateEntity(incidentId, existing.id, { compromised: true })
       } else {
-        await api.updateAffectedSystem(incidentId, modal.id, payload)
+        await api.createEntity(incidentId, {
+          type: form.type, value, description: form.notes.trim() || null,
+          criticality: 'high', compromised: true,
+        })
       }
+      setAdding(false)
       await load()
-      setModal(null)
     } catch (e) {
       setError(e.message || 'Save failed.')
     } finally {
@@ -318,83 +223,34 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
     }
   }
 
-  const handleDelete = async (s) => {
-    if (!confirm(`Remove "${s.name}" from affected systems?`)) return
+  const handleClear = async (s) => {
+    if (!confirm(`Clear the compromised flag on "${s.value}"?\n\nIt stays in Entities.`)) return
     try {
-      await api.deleteAffectedSystem(incidentId, s.id)
+      await api.updateEntity(incidentId, s.id, { compromised: false })
       setSystems(prev => prev.filter(x => x.id !== s.id))
-      setSelected(prev => {
-        const next = new Set(prev); next.delete(s.id); return next
-      })
     } catch (e) {
-      alert(e.message || 'Delete failed.')
-    }
-  }
-
-  const handlePromote = async () => {
-    const ids = Array.from(selected)
-    const scope = ids.length > 0
-      ? `${ids.length} selected system${ids.length === 1 ? '' : 's'}`
-      : `all ${systems?.length || 0} affected systems`
-    if (!confirm(
-      `Promote ${scope} to Entities tagged "compromised"?\n\n` +
-      `Existing entities for the same name will be marked compromised without duplicates.`
-    )) return
-    setPromoting(true); setPromoteResult(null)
-    try {
-      const res = await api.promoteAffectedSystemsToEntities(incidentId, {
-        system_ids: ids.length > 0 ? ids : null,
-      })
-      setPromoteResult(res)
-      setSelected(new Set())
-    } catch (e) {
-      alert(e.message || 'Promote failed.')
-    } finally {
-      setPromoting(false)
+      alert(e.message || 'Could not clear the flag.')
     }
   }
 
   return (
     <section className="panel" style={{ marginTop: 'var(--space-4)' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-3)', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-        <h2 className="panel-h" style={{ margin: 0 }}>Affected systems</h2>
-        {!readOnly && (
-          <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
-            {(systems?.length ?? 0) > 0 && (
-              <button
-                type="button"
-                className="btn ghost"
-                style={{ fontSize: 12 }}
-                onClick={handlePromote}
-                disabled={promoting}
-                title={selected.size > 0
-                  ? `Promote ${selected.size} selected to Entities (compromised)`
-                  : 'Promote all to Entities (compromised)'}
-              >
-                {promoting
-                  ? 'Promoting…'
-                  : selected.size > 0
-                    ? `⚠ Promote ${selected.size} → Entities`
-                    : '⚠ Promote all → Entities'}
-              </button>
-            )}
+        <div>
+          <h2 className="panel-h" style={{ margin: 0 }}>Affected systems</h2>
+          <div style={{ color: 'var(--muted)', fontSize: 12 }}>Entities marked compromised</div>
+        </div>
+        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+          <Link to={`/incidents/${incidentId}/entities`} className="btn ghost" style={{ fontSize: 12, textDecoration: 'none' }}>
+            Manage in Entities →
+          </Link>
+          {!readOnly && (
             <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={openAdd}>
               + Add system
             </button>
-          </div>
-        )}
-      </div>
-
-      {promoteResult && (
-        <div className="alert info" role="status" style={{ marginBottom: 'var(--space-3)' }}>
-          <span className="alert-icon">i</span>
-          <span>
-            Promoted {promoteResult.created} new entit{promoteResult.created === 1 ? 'y' : 'ies'}
-            {promoteResult.skipped > 0 && `, ${promoteResult.skipped} already existed (marked compromised)`}
-            . See Forensic → Entities.
-          </span>
+          )}
         </div>
-      )}
+      </div>
 
       {loading && <div style={{ color: 'var(--muted)', fontSize: 13 }}>Loading…</div>}
 
@@ -406,17 +262,7 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
         <table className="data-table" style={{ width: '100%' }}>
           <thead>
             <tr>
-              {!readOnly && (
-                <th style={{ width: 28 }}>
-                  <input
-                    type="checkbox"
-                    checked={allSelected}
-                    onChange={toggleSelectAll}
-                    aria-label="Select all affected systems"
-                  />
-                </th>
-              )}
-              <th>Name</th>
+              <th>System</th>
               <th>Type</th>
               <th>Notes</th>
               {!readOnly && <th style={{ width: 80 }} />}
@@ -425,26 +271,24 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
           <tbody>
             {systems.map(s => (
               <tr key={s.id}>
-                {!readOnly && (
-                  <td style={{ width: 28 }}>
-                    <input
-                      type="checkbox"
-                      checked={selected.has(s.id)}
-                      onChange={() => toggleSelected(s.id)}
-                      aria-label={`Select ${s.name}`}
-                    />
-                  </td>
-                )}
-                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.name}</td>
-                <td>{s.system_type ? byValue.system_type?.[s.system_type]?.label ?? s.system_type : <span style={{ color: 'var(--muted)' }}>—</span>}</td>
-                <td style={{ color: s.notes ? 'inherit' : 'var(--muted)', fontSize: 12 }}>{s.notes || '—'}</td>
+                <td>
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.value}</div>
+                  {s.name && s.name !== s.value && (
+                    <div style={{ color: 'var(--muted)', fontSize: 11 }}>{s.name}</div>
+                  )}
+                </td>
+                <td>
+                  {labelOf('entity_type', s.type)}
+                  {s.attributes?.system_type && (
+                    <span style={{ color: 'var(--muted)' }}> · {labelOf('system_type', s.attributes.system_type)}</span>
+                  )}
+                </td>
+                <td style={{ color: s.description ? 'inherit' : 'var(--muted)', fontSize: 12 }}>{s.description || '—'}</td>
                 {!readOnly && (
                   <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                     <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '1px 6px' }}
-                      onClick={() => openEdit(s)}>Edit</button>
-                    {' '}
-                    <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '1px 6px', color: 'var(--crit)' }}
-                      onClick={() => handleDelete(s)}>Remove</button>
+                      title="Clear the compromised flag; the entity stays in Entities"
+                      onClick={() => handleClear(s)}>Clear</button>
                   </td>
                 )}
               </tr>
@@ -453,34 +297,51 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
         </table>
       )}
 
-      {modal && (
-        <div className="modal-backdrop" onClick={() => setModal(null)}>
+      {adding && (
+        <div className="modal-backdrop" onClick={() => setAdding(false)}>
           <div className="modal" style={{ maxWidth: 420 }} onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <span>{modal === 'add' ? 'Add affected system' : 'Edit affected system'}</span>
-              <button type="button" className="modal-close" onClick={() => setModal(null)}>×</button>
+              <span>Add affected system</span>
+              <button type="button" className="modal-close" onClick={() => setAdding(false)}>×</button>
             </div>
             <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
               <div className="field">
-                <label className="field-label" htmlFor="as-name">Name <span style={{ color: 'var(--crit)' }}>*</span></label>
-                <input id="as-name" className="input" value={form.name}
-                  onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                  placeholder="hostname, IP, service name…" maxLength={255} autoFocus />
+                <label className="field-label" htmlFor="as-value">System <span style={{ color: 'var(--crit)' }}>*</span></label>
+                <input id="as-value" className="input" value={form.value} list="as-entity-options"
+                  onChange={e => onValueChange(e.target.value)}
+                  placeholder="Pick from Entities or type a hostname, account, service…" maxLength={2048} autoFocus />
+                <datalist id="as-entity-options">
+                  {scope.filter(e => !e.compromised).map(e => (
+                    <option key={e.id} value={e.value}>
+                      {labelOf('entity_type', e.type)}{e.name && e.name !== e.value ? ` · ${e.name}` : ''}
+                    </option>
+                  ))}
+                </datalist>
               </div>
               <div className="field">
-                <label className="field-label" htmlFor="as-type">System type</label>
-                <select id="as-type" className="select" value={form.system_type}
-                  onChange={e => setForm(f => ({ ...f, system_type: e.target.value }))}>
-                  <option value="">— unclassified —</option>
-                  {SYSTEM_TYPE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                <label className="field-label" htmlFor="as-type">Entity type</label>
+                <select id="as-type" className="select" value={form.type}
+                  onChange={e => setForm(f => ({ ...f, type: e.target.value }))}>
+                  {ENTITY_TYPE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
               </div>
-              <div className="field">
-                <label className="field-label" htmlFor="as-notes">Notes</label>
-                <textarea id="as-notes" className="input" value={form.notes}
-                  onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
-                  rows={3} placeholder="Optional context…" />
-              </div>
+              {!existing && (
+                <div className="field">
+                  <label className="field-label" htmlFor="as-notes">Notes</label>
+                  <textarea id="as-notes" className="input" value={form.notes}
+                    onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
+                    rows={3} placeholder="Optional context…" />
+                </div>
+              )}
+              {value && (
+                <div role="status" style={{ color: 'var(--muted)', fontSize: 12 }}>
+                  {existing?.compromised
+                    ? 'Already marked compromised.'
+                    : existing
+                      ? `Already in Entities${existing.value !== value ? ` as “${existing.value}”` : ''}: Add marks it compromised.`
+                      : `New entity (${labelOf('entity_type', form.type)}), marked compromised.`}
+                </div>
+              )}
               {error && (
                 <div className="alert error" role="alert">
                   <span className="alert-icon">!</span><span>{error}</span>
@@ -488,9 +349,9 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
               )}
             </div>
             <div className="modal-foot">
-              <button type="button" className="btn ghost" onClick={() => setModal(null)} disabled={busy}>Cancel</button>
-              <button type="button" className="btn primary" onClick={handleSave} disabled={busy}>
-                {busy ? 'Saving…' : modal === 'add' ? 'Add system' : 'Save changes'}
+              <button type="button" className="btn ghost" onClick={() => setAdding(false)} disabled={busy}>Cancel</button>
+              <button type="button" className="btn primary" onClick={handleSave} disabled={busy || existing?.compromised}>
+                {busy ? 'Saving…' : 'Add system'}
               </button>
             </div>
           </div>
@@ -500,34 +361,12 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
   )
 }
 
-// ─── Snapshot chip strip (at-a-glance counts) ────────────────────────────────
-
-function SnapshotChip({ to, label, value, accent = 'var(--accent)' }) {
-  const inner = (
-    <>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 16, fontWeight: 600, color: accent, lineHeight: 1 }}>
-        {value}
-      </span>
-      <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 0.4 }}>
-        {label}
-      </span>
-    </>
-  )
-  const style = {
-    display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4,
-    padding: '8px 14px', borderRadius: 'var(--radius-sm)',
-    background: 'var(--surface-2)', border: '1px solid var(--border)',
-    textDecoration: 'none', minWidth: 78,
-  }
-  if (to) return <Link to={to} style={style}>{inner}</Link>
-  return <div style={style}>{inner}</div>
-}
-
-// Resolution summary -- required before an incident can be resolved/closed.
-// Backed by the existing LessonsLearned record (incident_narrative /
-// root_cause_description / report_security_recommendations) rather than a
-// separate field, so there's one narrative, not two. `close_incident` 409s
-// with the exact same "what's missing" wording used here if any are blank.
+// Resolution summary -- one of the Gate 2 (close) conditions (Close in the
+// header; Resolve only moves it to Post-Incident). Backed by the existing
+// LessonsLearned record (incident_narrative / root_cause_description /
+// report_security_recommendations) rather than a separate field, so there's one
+// narrative, not two. The close gate (`lessons_summary_incomplete`) uses the
+// same "what's missing" wording as here.
 function ResolutionSection({ incidentId, isClosed }) {
   const [ll,      setLl]      = useState(null)
   const [entities, setEntities] = useState(null)
@@ -584,10 +423,10 @@ function ResolutionSection({ incidentId, isClosed }) {
         <h2 className="panel-h" style={{ margin: 0 }}>Resolution summary</h2>
         {missing.length > 0 ? (
           <span style={{ color: 'var(--high)', fontSize: 12 }}>
-            Required to resolve — missing: {missing.join(', ')}
+            Required to close — missing: {missing.join(', ')}
           </span>
         ) : (
-          <span style={{ color: 'var(--ok)', fontSize: 12 }}>✓ Complete — ready to resolve</span>
+          <span style={{ color: 'var(--ok)', fontSize: 12 }}>✓ Complete</span>
         )}
       </div>
 
@@ -640,62 +479,24 @@ function ResolutionSection({ incidentId, isClosed }) {
   )
 }
 
-function SnapshotStrip({ incidentId }) {
-  const [snap, setSnap] = useState(null)
-  useEffect(() => {
-    let cancelled = false
-    api.getIncidentSnapshot(incidentId)
-      .then(r => { if (!cancelled) setSnap(r) })
-      .catch(() => { if (!cancelled) setSnap(null) })
-    return () => { cancelled = true }
-  }, [incidentId])
-  if (!snap) return null
-  const pbLabel = snap.playbook_total > 0
-    ? `${snap.playbook_done} / ${snap.playbook_total}`
-    : '—'
-  return (
-    <div style={{
-      display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)',
-      marginBottom: 'var(--space-4)',
-    }}>
-      <SnapshotChip to="../iocs" label="IOCs"     value={snap.iocs} />
-      <SnapshotChip to="../entities"      label="Entities" value={snap.entities} />
-      <SnapshotChip to="../evidence"      label="Evidence" value={snap.evidence} />
-      <SnapshotChip to="../timeline"      label="Timeline" value={snap.timeline} />
-      <SnapshotChip to="../playbook"      label="Playbook" value={pbLabel}
-        accent={snap.playbook_total > 0 && snap.playbook_done === snap.playbook_total ? 'var(--ok)' : 'var(--accent)'} />
-      <SnapshotChip to="../assignments"   label="Responders" value={snap.assignments} />
-    </div>
-  )
-}
-
-
 export default function Details() {
-  const { inc, draft, setField, readOnly, isClosed, occurredAt, setOccurredAt, detectedAt, setDetectedAt, containedAt, setContainedAt, refresh } = useOutletContext()
-  const { user } = useAuth()
+  const { inc, draft, setField, readOnly, isClosed, occurredAt, setOccurredAt, detectedAt, setDetectedAt, containedAt, setContainedAt, eradicatedAt, setEradicatedAt, recoveredAt, setRecoveredAt, triageReason, setTriageReason, applyUpdate, access } = useOutletContext()
+  // A change to False / Benign Positive asks for a reason (the API requires one outside
+  // Detection & Analysis, since the incident can then be closed without Gate 2).
+  const askTriageReason = !readOnly && setTriageReason && draft.triage_state !== inc.triage_state &&
+    ['false_positive', 'benign_positive'].includes(draft.triage_state)
   const [preview, setPreview] = useState(false)
-  const isAdmin = user?.role === 'admin'
-
-  const [assignments, setAssignments] = useState(null)
-  const [tasks,       setTasks]       = useState(null)
-  const [deadlines,   setDeadlines]   = useState(null)
-
-  useEffect(() => {
-    Promise.allSettled([
-      api.listAssignments(inc.id),
-      api.listPlaybookTasks(inc.id),
-      api.listDeadlines(inc.id),
-    ]).then(([a, p, d]) => {
-      setAssignments(a.status === 'fulfilled' ? (a.value.items ?? a.value) : [])
-      setTasks(p.status === 'fulfilled' ? p.value : [])
-      setDeadlines(d.status === 'fulfilled' ? d.value : [])
-    })
-  }, [inc.id])
+  // Team picker: the set_teams capability from GET …/access (admins and the incident's IC / Deputy).
+  const canSetTeams = !!access?.capabilities?.includes('set_teams')
 
   return (
     <>
-    <StakeholderMatrixBanner severity={inc.severity} />
-    <SnapshotStrip incidentId={inc.id} />
+    {readOnly ? (
+    <section className="panel classification-band">
+      <h2 className="panel-h">Classification</h2>
+      <ClassificationStrip inc={inc} />
+    </section>
+    ) : (
     <section className="panel classification-band">
       <h2 className="panel-h">Classification</h2>
       <div className="classification-grid">
@@ -728,6 +529,18 @@ export default function Details() {
             {TRIAGE_STATE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
+        {askTriageReason && (
+          <div className="field" style={{ gridColumn: '1 / -1' }}>
+            <label className="field-label" htmlFor="cls-triage-reason">Reason for the triage change</label>
+            <textarea id="cls-triage-reason" className="input" rows={2} maxLength={2000}
+                      value={triageReason} onChange={e => setTriageReason(e.target.value)}
+                      placeholder="e.g. Alert fired on the scheduled pen test (ticket SEC-1234)…" />
+            <span className="field-hint">
+              Required outside Detection &amp; Analysis (at least 10 characters): a false or benign
+              positive can be closed without Gate 2. Saved to the audit log and the Timeline.
+            </span>
+          </div>
+        )}
         <div className="field">
           <label className="field-label" htmlFor="cls-detection">Detection method</label>
           <select id="cls-detection" className="select" disabled={readOnly}
@@ -758,8 +571,23 @@ export default function Details() {
                                  disabled={readOnly} clearable />
           </div>
         )}
+        {eradicatedAt !== undefined && (
+          <div className="field">
+            <label className="field-label" htmlFor="cls-eradicated">Eradicated</label>
+            <LocalDateTimePicker id="cls-eradicated" value={eradicatedAt} onChange={setEradicatedAt}
+                                 disabled={readOnly} clearable />
+          </div>
+        )}
+        {recoveredAt !== undefined && (
+          <div className="field">
+            <label className="field-label" htmlFor="cls-recovered">Recovered</label>
+            <LocalDateTimePicker id="cls-recovered" value={recoveredAt} onChange={setRecoveredAt}
+                                 disabled={readOnly} clearable />
+          </div>
+        )}
       </div>
     </section>
+    )}
     <div className="detail-grid">
       <div className="panel">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-2)' }}>
@@ -821,9 +649,19 @@ export default function Details() {
                 </dd>
               </>
             )}
-            <TagsSection inc={inc} readOnly={readOnly} onUpdated={refresh} />
-            {isAdmin ? (
-              <TeamsSection inc={inc} onUpdated={refresh} />
+            {/* Outside edit mode the classification strip replaces the form, so its times are listed here. */}
+            {readOnly && [['Occurred', inc.occurred_at], ['Detected', inc.detected_at], ['Contained', inc.contained_at],
+                          ['Eradicated', inc.eradicated_at], ['Recovered', inc.recovered_at]].map(([label, at]) => (
+              <Fragment key={label}>
+                <dt>{label}</dt>
+                <dd className={`ts kv-time${at ? '' : ' none'}`}>
+                  {at ? formatLocal(at) : '—'}
+                </dd>
+              </Fragment>
+            ))}
+            <TagsSection inc={inc} readOnly={readOnly} onUpdated={applyUpdate} />
+            {canSetTeams ? (
+              <TeamsSection inc={inc} onUpdated={applyUpdate} />
             ) : (inc.teams ?? []).length > 0 && (
               <>
                 <dt>Teams</dt>
@@ -835,9 +673,6 @@ export default function Details() {
               </>
             )}
 
-            <AssignmentsWidget assignments={assignments} />
-            <PlaybookWidget tasks={tasks} />
-            <LegalWidget deadlines={deadlines} />
           </dl>
         </section>
       </aside>

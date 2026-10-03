@@ -1,6 +1,6 @@
 """On-call schedule — org-wide rota. Admin CRUD; anyone can read."""
 import uuid
-from datetime import date, timezone
+from datetime import timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.deps import current_user, require_admin
 from core.database import get_db
-from models import OnCallEntry, User
+from models import OnCallEntry, User, utc_today
 from schemas import OnCallEntryCreate, OnCallEntryList, OnCallEntryOut, OnCallEntryUpdate
 
 router = APIRouter()
@@ -16,10 +16,6 @@ router = APIRouter()
 
 def _to_out(e: OnCallEntry) -> OnCallEntryOut:
     return OnCallEntryOut.model_validate(e)
-
-
-def _today() -> date:
-    return date.today()
 
 
 async def _get_entry(db: AsyncSession, entry_id: uuid.UUID) -> OnCallEntry:
@@ -38,18 +34,18 @@ async def list_on_call(
     db: AsyncSession = Depends(get_db),
 ) -> OnCallEntryList:
     """List on-call rota entries ordered by start date. Any authenticated user
-    may read. By default only entries ending today or later are returned; set
-    `include_past=true` to include past entries. Also returns the entry covering
+    may read. By default only entries ending today (UTC date) or later are returned;
+    set `include_past=true` to include past entries. Also returns the entry covering
     today as `current`, if any.
     """
     q = select(OnCallEntry)
     if not include_past:
-        today = _today()
+        today = utc_today()
         q = q.where(OnCallEntry.end_date >= today)
     q = q.order_by(OnCallEntry.start_date)
     rows = (await db.execute(q)).scalars().all()
 
-    today = _today()
+    today = utc_today()
     current = next(
         (r for r in rows if r.start_date <= today <= r.end_date), None
     )
@@ -65,10 +61,10 @@ async def get_current_on_call(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return the on-call entry covering today, or null if none is in effect.
+    """Return the on-call entry covering today (UTC date), or null if none is in effect.
     Any authenticated user may read.
     """
-    today = _today()
+    today = utc_today()
     row = (await db.execute(
         select(OnCallEntry)
         .where(OnCallEntry.start_date <= today, OnCallEntry.end_date >= today)

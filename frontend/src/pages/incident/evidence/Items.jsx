@@ -6,7 +6,8 @@ import { formatLocal } from '../../../lib/datetime.js'
 import { TLP, labelOf, pillOf } from '../../../lib/incidentVocab.js'
 import AcquisitionWizard from './AcquisitionWizard.jsx'
 import ExaminationWizard from './ExaminationWizard.jsx'
-import { scoreEvidence, severityColor, aggregateIntegrity } from '../../../lib/evidenceProvenance.js'
+import { scoreEvidence, severityColor, aggregateIntegrity, hashAlgorithm } from '../../../lib/evidenceProvenance.js'
+import { SEV_PALETTE } from '../../../components/SevBadge.jsx'
 
 const KIND_LABEL = { digital_file: 'Digital file', physical_item: 'Physical item' }
 const STATUS_LABEL = {
@@ -24,6 +25,23 @@ const STATUS_PILL = {
   archived:      'pill-gray',
 }
 
+// C3 — how the imaging tool's target hash compared with the uploaded bytes.
+function hashCheckView(item) {
+  const algo = hashAlgorithm(item.acquisition_hash_target)
+  switch (item.upload_hash_check) {
+    case 'match':
+      return { color: 'var(--ok)', text: `✓ Target hash (${algo}) matches the uploaded file` }
+    case 'mismatch':
+      return { color: 'var(--crit)', text: `✗ Target hash (${algo || 'unrecognised'}) does not match the uploaded file — registered before uploads were checked` }
+    case 'container_media':
+      return { color: 'var(--med)', text: `Advisory — the target hash (${algo}) covers the container's media, not the uploaded file; not compared` }
+    case 'not_checked':
+      return { color: 'var(--muted)', text: 'Not checked — no target hash given' }
+    default:
+      return { color: 'var(--muted)', text: 'Not checked — no target hash recorded' }
+  }
+}
+
 function fmtBytes(n) {
   if (!n && n !== 0) return '—'
   const units = ['B', 'KiB', 'MiB', 'GiB']
@@ -37,8 +55,21 @@ function shorten(s, n = 12) {
   return s.length > n ? `${s.slice(0, n)}…` : s
 }
 
+// C4 — "awaiting acceptance by X" while an internal custody transfer is pending (SEV_PALETTE.medium).
+function PendingTransferBadge({ item, usernameOf }) {
+  if (!item.pending_custodian_id) return null
+  const p = SEV_PALETTE.medium
+  return (
+    <span className="pill" data-pending-transfer={item.pending_custodian_id}
+          title={`Requested by ${usernameOf(item.pending_transfer_by_id)} at ${formatLocal(item.pending_transfer_requested_at)}. Custody changes when the recipient accepts.`}
+          style={{ fontSize: 10, whiteSpace: 'nowrap', background: p.bg, color: p.text, borderColor: p.border }}>
+      Awaiting acceptance by {usernameOf(item.pending_custodian_id)}
+    </span>
+  )
+}
+
 export default function Items() {
-  const { inc } = useOutletContext()
+  const { inc, bumpRail } = useOutletContext()
   const { user } = useAuth()
   const isClosed = inc?.status === 'closed'
   const isAdmin  = user?.role === 'admin'
@@ -74,6 +105,8 @@ export default function Items() {
   }, [inc.id, kindFilter, statusFilter])
 
   useEffect(() => { load() }, [load])
+  // After a write: re-read the list and the rail's counts.
+  const reload = useCallback(() => { bumpRail?.(); return load() }, [bumpRail, load])
 
   // Use the non-admin-safe assignable endpoint so the Transfer picker works
   // for every analyst, not just admins. Returns {id, username, full_name}
@@ -257,6 +290,9 @@ export default function Items() {
                     </td>
                     <td style={{ fontSize: 12 }}>
                       {renderCustodian(ev)}
+                      {ev.pending_custodian_id && (
+                        <div style={{ marginTop: 2 }}><PendingTransferBadge item={ev} usernameOf={usernameOf} /></div>
+                      )}
                     </td>
                     <td>
                       <span className={`pill ${pillOf('tlp', ev.tlp)}`}>{labelOf('tlp', ev.tlp)}</span>
@@ -286,7 +322,7 @@ export default function Items() {
           incidentId={inc.id}
           entities={entities}
           onClose={() => setModal(null)}
-          onSaved={() => { setModal(null); load() }}
+          onSaved={() => { setModal(null); reload() }}
         />
       )}
       {modal?.mode === 'wizard' && (
@@ -295,7 +331,7 @@ export default function Items() {
           entities={entities}
           users={users}
           onClose={() => setModal(null)}
-          onSaved={() => { setModal(null); load() }}
+          onSaved={() => { setModal(null); reload() }}
         />
       )}
       {modal?.mode === 'detail' && (
@@ -304,10 +340,11 @@ export default function Items() {
           item={modal.item}
           users={users}
           entities={entities}
+          me={user}
           isAdmin={isAdmin}
           isClosed={isClosed}
           onClose={() => setModal(null)}
-          onChanged={async () => { await load() }}
+          onChanged={async () => { await reload() }}
           onReplaceItem={replaceItem}
         />
       )}
@@ -587,7 +624,7 @@ function WorkingCopiesPanel({ incidentId, item, usernameOf, isClosed, onChanged 
   )
 }
 
-function DetailModal({ incidentId, item, users, entities, isAdmin, isClosed, onClose, onChanged, onReplaceItem }) {
+function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed, onClose, onChanged, onReplaceItem }) {
   const entityLabel = item.entity_id
     ? (() => { const e = entities.find(x => x.id === item.entity_id); return e ? `${e.type}: ${e.name || e.value}` : null })()
     : null
@@ -687,11 +724,17 @@ function DetailModal({ incidentId, item, users, entities, isAdmin, isClosed, onC
                     </span>
                   )
                   : <span style={{ color: 'var(--dim)' }}>—</span>}
+              {item.pending_custodian_id && (
+                <div style={{ marginTop: 4 }}><PendingTransferBadge item={item} usernameOf={usernameOf} /></div>
+              )}
             </dd>
             <dt>Collected by</dt><dd style={{ fontFamily: 'var(--font-mono)' }}>{usernameOf(item.collected_by_id)}</dd>
             {item.collected_as_role && (
               <><dt>Collected as</dt><dd>{item.collected_as_role === 'defr' ? 'DEFR — first responder' : 'DES — specialist'}</dd></>
             )}
+            <dt>Acquired at</dt><dd style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+              {item.acquired_at ? formatLocal(item.acquired_at) : <span style={{ color: 'var(--dim)' }}>Not recorded</span>}
+            </dd>
             <dt>Collected at</dt><dd style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{formatLocal(item.collected_at)}</dd>
             {item.collected_location && <><dt>Location</dt><dd>{item.collected_location}</dd></>}
             {item.description && <><dt>Description</dt><dd style={{ whiteSpace: 'pre-wrap' }}>{item.description}</dd></>}
@@ -702,6 +745,14 @@ function DetailModal({ incidentId, item, users, entities, isAdmin, isClosed, onC
                 <dt>SHA-256</dt><dd style={{ fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all' }}>{item.sha256 || '—'}</dd>
                 <dt>SHA-1</dt><dd style={{ fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all' }}>{item.sha1 || '—'}</dd>
                 <dt>MD5</dt><dd style={{ fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all' }}>{item.md5 || '—'}</dd>
+                <dt>Hash check</dt><dd data-hash-check={item.upload_hash_check || ''}>
+                  <span style={{ color: hashCheckView(item).color }}>{hashCheckView(item).text}</span>
+                  {item.acquisition_hash_target && (
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', wordBreak: 'break-all' }}>
+                      target {item.acquisition_hash_target}
+                    </div>
+                  )}
+                </dd>
                 <dt>Encryption</dt><dd>{item.status === 'destroyed' ? 'File deleted (hashes retained)' : 'AES-256-GCM at rest'}</dd>
               </>
             )}
@@ -726,6 +777,11 @@ function DetailModal({ incidentId, item, users, entities, isAdmin, isClosed, onC
               </>
             )}
           </dl>
+
+          {item.pending_custodian_id && (
+            <PendingTransferPanel incidentId={incidentId} item={item} me={me} isAdmin={isAdmin}
+              usernameOf={usernameOf} onDone={async () => { await reload(); await onChanged() }} />
+          )}
 
           {error && (
             <div className="alert error" role="alert" style={{ marginTop: 'var(--space-3)' }}>
@@ -760,11 +816,20 @@ function DetailModal({ incidentId, item, users, entities, isAdmin, isClosed, onC
             const externalTip = isExternal
               ? `Blocked while in external custody (${item.current_custodian_external_name}). Transfer back to an internal user first.`
               : null
+            // C4 — only the custodian or an admin hands an item over; anyone (not read-only) can
+            // take an item back from external custody into their own. A pending transfer blocks
+            // another transfer, Seal and Dispose until it is accepted or declined.
+            const pending = !!item.pending_custodian_id
+            const pendingTip = pending ? 'Blocked while a custody transfer awaits acceptance' : null
+            const canTransfer = !pending && (isAdmin || (!!me && item.current_custodian_id === me.id)
+              || (isExternal && !!me && me.role !== 'viewer'))
             return !isClosed && finalActive && (
               <>
-                <button type="button" className="btn" onClick={() => setAction('transfer')} disabled={busy}>
-                  {isExternal ? 'Transfer (take back)' : 'Transfer'}
-                </button>
+                {canTransfer && (
+                  <button type="button" className="btn" onClick={() => setAction('transfer')} disabled={busy}>
+                    {isExternal ? 'Take back' : 'Request transfer'}
+                  </button>
+                )}
                 <button type="button" className="btn"
                         onClick={() => setAction('examine')}
                         disabled={busy || isExternal}
@@ -797,13 +862,14 @@ function DetailModal({ incidentId, item, users, entities, isAdmin, isClosed, onC
                               setError(e.message || 'Could not seal evidence')
                             }
                           }}
-                          disabled={busy || isExternal}
-                          title={externalTip || 'Seal acquisition (locks ISO 27037 + GDPR fields)'}>
+                          disabled={busy || isExternal || pending}
+                          title={externalTip || pendingTip || 'Seal acquisition (locks ISO 27037 + GDPR fields)'}>
                     🔒 Seal
                   </button>
                 )}
                 {isAdmin && (
-                  <button type="button" className="btn primary" onClick={() => setAction('dispose')} disabled={busy}>Dispose</button>
+                  <button type="button" className="btn primary" onClick={() => setAction('dispose')}
+                          disabled={busy || pending} title={pendingTip || undefined}>Dispose</button>
                 )}
               </>
             )
@@ -820,6 +886,7 @@ function DetailModal({ incidentId, item, users, entities, isAdmin, isClosed, onC
             incidentId={incidentId}
             item={item}
             users={users}
+            me={me}
             isAdmin={isAdmin}
             onClose={() => setAction(null)}
             onSaved={async () => { setAction(null); await reload(); await onChanged() }}
@@ -859,7 +926,12 @@ function DetailModal({ incidentId, item, users, entities, isAdmin, isClosed, onC
 
 const ACTION_COLOR = {
   evidence_collect:        'var(--ok)',
+  evidence_collect_rejected: 'var(--crit)',
+  email_mint_evidence:     'var(--ok)',
+  webhistory_mint_evidence: 'var(--ok)',
+  evidence_transfer_request: 'var(--med)',
   evidence_transfer:       'var(--accent)',
+  evidence_transfer_declined: 'var(--high)',
   evidence_examine:        'var(--med)',
   evidence_verify:         'var(--ok)',
   evidence_verify_failed:  'var(--crit)',
@@ -872,7 +944,12 @@ const ACTION_COLOR = {
 
 const ACTION_LABEL = {
   evidence_collect:       'Collected',
+  evidence_collect_rejected: 'Collection REFUSED',
+  email_mint_evidence:    'Collected (from Email)',
+  webhistory_mint_evidence: 'Collected (from Browser history)',
+  evidence_transfer_request: 'Transfer requested',
   evidence_transfer:      'Transferred',
+  evidence_transfer_declined: 'Transfer declined',
   evidence_examine:       'Examined',
   evidence_verify:        'Verified',
   evidence_verify_failed: 'Verify FAILED',
@@ -936,12 +1013,116 @@ function CustodyTimeline({ events, usernameOf }) {
 
 // ── Sub-modals ────────────────────────────────────────────────────────────
 
-function TransferModal({ incidentId, item, users, onClose, onSaved }) {
+// C4 — a pending internal transfer: who asked, for whom, and the recipient's Accept form
+// (condition on receipt + seals) or Decline; the requester or an admin can cancel it. The API
+// enforces who may do what; this only shows each person their own controls.
+function PendingTransferPanel({ incidentId, item, me, isAdmin, usernameOf, onDone }) {
+  const isRecipient = !!me && me.id === item.pending_custodian_id
+  const canCancel   = !isRecipient && !!me && (me.id === item.pending_transfer_by_id || isAdmin)
+  const [declining, setDeclining] = useState(false)
+  const [condition, setCondition] = useState('')
+  const [seals, setSeals]         = useState('')   // '' | 'intact' | 'broken'
+  const [reason, setReason]       = useState('')
+  const [busy, setBusy]           = useState(false)
+  const [error, setError]         = useState(null)
+
+  const run = async (call, failMsg) => {
+    setBusy(true); setError(null)
+    try { await call(); await onDone() }
+    catch (e) { setError(e.message || failMsg) }
+    finally { setBusy(false) }
+  }
+  const onAccept = (e) => {
+    e.preventDefault()
+    if (!condition.trim()) { setError('Record the condition of the item on receipt.'); return }
+    if (!seals) { setError('State whether the seals are intact.'); return }
+    run(() => api.acceptEvidenceTransfer(incidentId, item.id,
+      { condition_on_receipt: condition.trim(), seals_intact: seals === 'intact' }), 'Could not accept the transfer')
+  }
+  const onDecline = (e) => {
+    e.preventDefault()
+    if (!reason.trim()) { setError('A reason is required (audit log).'); return }
+    run(() => api.declineEvidenceTransfer(incidentId, item.id, { reason: reason.trim() }), 'Could not decline the transfer')
+  }
+
+  return (
+    <div data-pending-panel={isRecipient ? 'recipient' : canCancel ? 'requester' : 'other'} style={{
+      marginTop: 'var(--space-3)', padding: 'var(--space-3)',
+      background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)',
+    }}>
+      <h3 className="panel-h" style={{ margin: 0 }}>Pending custody transfer</h3>
+      <div style={{ fontSize: 13, marginTop: 'var(--space-1)' }}>
+        Requested by <b>{usernameOf(item.pending_transfer_by_id)}</b> at{' '}
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{formatLocal(item.pending_transfer_requested_at)}</span>{' '}
+        for <b>{usernameOf(item.pending_custodian_id)}</b>. Custody stays with the current custodian until the recipient accepts.
+      </div>
+
+      {isRecipient && !declining && (
+        <form onSubmit={onAccept} className="form" style={{ marginTop: 'var(--space-2)' }}>
+          <div className="field">
+            <label className="field-label" htmlFor="ev-acc-cond">Condition on receipt (required, audited)</label>
+            <textarea id="ev-acc-cond" className="input" rows={3} maxLength={4096} value={condition}
+                      onChange={(e) => setCondition(e.target.value)}
+                      placeholder="Inspect the item first. e.g. Bag #4471 sealed, laptop powered off, matches the description" />
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="ev-acc-seals">Seals / tamper-evident packaging</label>
+            <select id="ev-acc-seals" className="select" value={seals} onChange={(e) => setSeals(e.target.value)}>
+              <option value="">Choose…</option>
+              <option value="intact">Intact</option>
+              <option value="broken">Broken or missing (describe it above)</option>
+            </select>
+          </div>
+          <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+            <button type="submit" className="btn primary" disabled={busy}>{busy ? 'Accepting…' : 'Accept custody'}</button>
+            <button type="button" className="btn ghost" disabled={busy} onClick={() => { setDeclining(true); setError(null) }}>Decline…</button>
+          </div>
+        </form>
+      )}
+
+      {canCancel && !declining && (
+        <div style={{ marginTop: 'var(--space-2)' }}>
+          <button type="button" className="btn ghost" disabled={busy} onClick={() => { setDeclining(true); setError(null) }}>Cancel request…</button>
+        </div>
+      )}
+
+      {declining && (
+        <form onSubmit={onDecline} className="form" style={{ marginTop: 'var(--space-2)' }}>
+          <div className="field">
+            <label className="field-label" htmlFor="ev-dec-reason">
+              {isRecipient ? 'Why are you declining? (required, audited)' : 'Why cancel the request? (required, audited)'}
+            </label>
+            <textarea id="ev-dec-reason" className="input" rows={2} maxLength={2048} value={reason}
+                      onChange={(e) => setReason(e.target.value)} autoFocus />
+          </div>
+          <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+            <button type="submit" className="btn primary" disabled={busy}>
+              {busy ? 'Saving…' : (isRecipient ? 'Decline transfer' : 'Cancel request')}
+            </button>
+            <button type="button" className="btn ghost" disabled={busy} onClick={() => { setDeclining(false); setError(null) }}>Back</button>
+          </div>
+        </form>
+      )}
+
+      {error && (
+        <div className="alert error" role="alert" style={{ marginTop: 'var(--space-2)' }}>
+          <span className="alert-icon">!</span><span>{error}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TransferModal({ incidentId, item, users, me, isAdmin, onClose, onSaved }) {
   // Two-mode picker per ISO/IEC 27037 §9.3 chain coverage:
-  //   internal — recipient has a Fenrir account (picker reuses /users/assignable)
+  //   internal — recipient has a Fenrir account (picker reuses /users/assignable). C4: a
+  //              REQUEST — custody changes only when the recipient accepts. From external
+  //              custody it is a take-back: you receive the item and record its condition.
   //   external — recipient is a real-world party (courier, external counsel, LE
   //              officer pre-formal-handoff, vendor IR team). Captured as
-  //              free-text {name, organisation, contact}.
+  //              free-text {name, organisation, contact}; one step.
+  const isExternalNow = !item.current_custodian_id && !!item.current_custodian_external_name
+  const canExternal   = !isExternalNow || isAdmin   // external → external: admin only
   const [mode, setMode]       = useState('internal')
   const [toUserId, setToUserId] = useState('')
   const [extName, setExtName] = useState('')
@@ -952,11 +1133,16 @@ function TransferModal({ incidentId, item, users, onClose, onSaved }) {
   const [transportMethod, setTransportMethod] = useState('')
   const [sealId, setSealId]   = useState('')
   const [courierRef, setCourierRef] = useState('')
+  // Take-back from external custody: what you found on receipt (required).
+  const [condition, setCondition] = useState('')
+  const [seals, setSeals]     = useState('')
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState(null)
+  const isReturn = mode === 'internal' && isExternalNow
 
-  // Filter out the current holder so the picker doesn't offer it back to itself.
-  const candidates = (users || []).filter(u => u.id !== item.current_custodian_id)
+  // Filter out the current holder so the picker doesn't offer it back to itself, and yourself:
+  // the API refuses a transfer to the requester (recipient_is_requester, two-person control).
+  const candidates = (users || []).filter(u => u.id !== item.current_custodian_id && u.id !== me?.id)
 
   const onSubmit = async (e) => {
     e.preventDefault()
@@ -970,7 +1156,12 @@ function TransferModal({ incidentId, item, users, onClose, onSaved }) {
     }
 
     let payload
-    if (mode === 'internal') {
+    if (isReturn) {
+      if (!condition.trim()) { setError('Record the condition of the item on receipt.'); return }
+      if (!seals) { setError('State whether the seals are intact.'); return }
+      payload = { to_user_id: me?.id, reason: reason.trim(), ...transport,
+                  condition_on_receipt: condition.trim(), seals_intact: seals === 'intact' }
+    } else if (mode === 'internal') {
       if (!toUserId) { setError('Choose a recipient user.'); return }
       payload = { to_user_id: toUserId, reason: reason.trim(), ...transport }
     } else {
@@ -997,11 +1188,14 @@ function TransferModal({ incidentId, item, users, onClose, onSaved }) {
     }
   }
 
+  const title = mode === 'external' ? 'Hand over to an external party'
+    : isReturn ? 'Take back into your custody' : 'Request custody transfer'
+
   return (
     <div className="modal-backdrop" style={{ background: 'rgba(0,0,0,0.4)' }}>
       <div className="modal" role="dialog" aria-labelledby="ev-transfer-title">
         <div className="modal-head">
-          <h2 id="ev-transfer-title">Transfer custody</h2>
+          <h2 id="ev-transfer-title">{title}</h2>
           <button type="button" className="modal-close" onClick={onClose} disabled={busy}>×</button>
         </div>
         <form onSubmit={onSubmit}>
@@ -1019,27 +1213,31 @@ function TransferModal({ incidentId, item, users, onClose, onSaved }) {
                     className={`btn ${mode === 'internal' ? 'primary' : 'ghost'}`}
                     style={{ borderRadius: 0, fontSize: 12, padding: '4px 12px' }}
                     onClick={() => setMode('internal')}>
-                    Internal user (Fenrir account)
+                    {isExternalNow ? 'You (take it back)' : 'Internal user (Fenrir account)'}
                   </button>
-                  <button type="button"
-                    className={`btn ${mode === 'external' ? 'primary' : 'ghost'}`}
-                    style={{ borderRadius: 0, borderLeft: '1px solid var(--border)',
-                             fontSize: 12, padding: '4px 12px' }}
-                    onClick={() => setMode('external')}>
-                    External party (courier / counsel / LE)
-                  </button>
+                  {canExternal && (
+                    <button type="button"
+                      className={`btn ${mode === 'external' ? 'primary' : 'ghost'}`}
+                      style={{ borderRadius: 0, borderLeft: '1px solid var(--border)',
+                               fontSize: 12, padding: '4px 12px' }}
+                      onClick={() => setMode('external')}>
+                      External party (courier / counsel / LE)
+                    </button>
+                  )}
                 </div>
                 <div className="field-hint">
-                  {mode === 'internal'
-                    ? 'Hands off to another Fenrir analyst. They become the recorded custodian.'
-                    : 'Records that the item is in the hands of a real-world party without a Fenrir account. ' +
-                      'While external, examine / verify / seal are blocked — transfer back to an internal user first.'}
+                  {mode === 'external'
+                    ? 'Records that the item is in the hands of a real-world party without a Fenrir account. ' +
+                      'While external, examine / verify / seal are blocked — take it back first.'
+                    : isReturn
+                      ? `You record that you received the item back from ${item.current_custodian_external_name}. Inspect it first — the condition and seals are required and audited.`
+                      : 'The recipient must accept it and record the condition and seals. Custody stays with the current custodian until then.'}
                 </div>
               </div>
 
-              {mode === 'internal' && (
+              {mode === 'internal' && !isReturn && (
                 <div className="field">
-                  <label className="field-label" htmlFor="ev-to">Transfer to</label>
+                  <label className="field-label" htmlFor="ev-to">Recipient</label>
                   {candidates.length === 0 ? (
                     <div style={{ fontSize: 12, color: 'var(--muted)' }}>
                       No other users available to receive custody.
@@ -1056,6 +1254,25 @@ function TransferModal({ incidentId, item, users, onClose, onSaved }) {
                     </select>
                   )}
                 </div>
+              )}
+
+              {isReturn && (
+                <>
+                  <div className="field">
+                    <label className="field-label" htmlFor="ev-ret-cond">Condition on receipt (required, audited)</label>
+                    <textarea id="ev-ret-cond" className="input" rows={3} maxLength={4096} value={condition}
+                              onChange={(e) => setCondition(e.target.value)}
+                              placeholder="e.g. Bag #4471 seal intact, contents match the description" />
+                  </div>
+                  <div className="field">
+                    <label className="field-label" htmlFor="ev-ret-seals">Seals / tamper-evident packaging</label>
+                    <select id="ev-ret-seals" className="select" value={seals} onChange={(e) => setSeals(e.target.value)}>
+                      <option value="">Choose…</option>
+                      <option value="intact">Intact</option>
+                      <option value="broken">Broken or missing (describe it above)</option>
+                    </select>
+                  </div>
+                </>
               )}
 
               {mode === 'external' && (
@@ -1086,9 +1303,10 @@ function TransferModal({ incidentId, item, users, onClose, onSaved }) {
                 <label className="field-label" htmlFor="ev-reason">Reason (required, audited)</label>
                 <textarea id="ev-reason" className="input" value={reason}
                           onChange={(e) => setReason(e.target.value)} rows={3} maxLength={2048}
-                          placeholder={mode === 'internal'
-                            ? 'e.g. Handoff to malware analyst for static analysis'
-                            : 'e.g. Sealed in evidence bag #4471 (tamper-evident), handed to courier for transport to Stockholm Police HQ'} />
+                          placeholder={mode === 'external'
+                            ? 'e.g. Sealed in evidence bag #4471 (tamper-evident), handed to courier for transport to Stockholm Police HQ'
+                            : isReturn ? 'e.g. Returned by courier after the LE review'
+                              : 'e.g. Handoff to malware analyst for static analysis'} />
               </div>
 
               {/* Structured tamper-evident transport (ISO/IEC 27037 §6.9.4) — optional. */}
@@ -1123,7 +1341,7 @@ function TransferModal({ incidentId, item, users, onClose, onSaved }) {
           <div className="modal-foot">
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
             <button type="submit" className="btn primary" disabled={busy}>
-              {busy ? 'Transferring…' : (mode === 'internal' ? 'Transfer (internal)' : 'Transfer (external)')}
+              {busy ? 'Sending…' : (mode === 'external' ? 'Transfer (external)' : isReturn ? 'Take back' : 'Request transfer')}
             </button>
           </div>
         </form>

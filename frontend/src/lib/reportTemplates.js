@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import ReactMarkdown from 'react-markdown'
-import { DETECTION_METHOD, SYSTEM_TYPE } from './incidentVocab.js'
+import { DETECTION_METHOD, SYSTEM_TYPE, labelOf } from './incidentVocab.js'
 import { MITRE_TACTICS } from './mitre.js'
 import { formatLocal } from './datetime.js'
 
@@ -619,7 +619,7 @@ function generateProReport(data, opts = {}) {
         <thead><tr><th>System</th><th>Type</th><th>Notes</th><th>Added By</th><th>Added At</th></tr></thead>
         <tbody>${affected.map(s => `<tr>
           <td class="mono" style="font-weight:600">${esc(s.name)}</td>
-          <td>${esc(SYSTEM_TYPE_LABEL[s.system_type] || s.system_type || '—')}</td>
+          <td>${esc(SYSTEM_TYPE_LABEL[s.system_type] || s.system_type || labelOf('entity_type', s.entity_type) || '—')}</td>
           <td class="small">${esc(s.notes || '—')}</td>
           <td class="mono small">${esc(s.created_by_username || '—')}</td>
           <td class="mono small">${s.created_at ? esc(fmtTs(s.created_at)) : '—'}</td>
@@ -666,15 +666,18 @@ function generateProReport(data, opts = {}) {
     else                    buckets.long.push(it)
   }
 
-  // Cost summary
-  let costTotal = 0
-  const costByCat = {}
+  // Cost summary — totalled per currency; amounts in different currencies are never added.
+  const costByCur = {}
   for (const c of costs) {
     const amt = Number(c.amount) || 0
-    costTotal += amt
-    costByCat[c.category] = (costByCat[c.category] || 0) + amt
+    if (!costByCur[c.currency]) costByCur[c.currency] = { total: 0, byCat: {} }
+    const cur = costByCur[c.currency]
+    cur.total += amt
+    cur.byCat[c.category] = (cur.byCat[c.category] || 0) + amt
   }
+  const costCurs = Object.keys(costByCur).sort()
   const costCurrency = (n) => n.toLocaleString(undefined, { maximumFractionDigits: 2 })
+  const costMoney = (cur, n) => `${cur} ${costCurrency(n)}`
 
   // TLP message
   const tlpUpper = tlp.toUpperCase()
@@ -694,6 +697,7 @@ function generateProReport(data, opts = {}) {
 
   const descriptionHtml = markdownToHtml(inc.description)
   const notClosed = '<span style="color:#d97706">Not closed</span>'
+  const pending   = '<span style="color:#d97706">Pending</span>'
 
   // ── Sections ─────────────────────────────────────────────────────────────
   // KEEP IN SYNC: keys/titles/fullOnly come from REPORT_SECTIONS; "Show structure"
@@ -718,7 +722,9 @@ function generateProReport(data, opts = {}) {
     <div class="info-card"><div class="label">Reporter</div><div class="value">${esc(inc.reporter || '—')}</div></div>
     <div class="info-card"><div class="label">Occurred At</div><div class="value mono">${inc.occurred_at ? esc(fmtTs(inc.occurred_at)) : '—'}</div></div>
     <div class="info-card"><div class="label">Detected At</div><div class="value mono">${inc.detected_at ? esc(fmtTs(inc.detected_at)) : '—'}</div></div>
-    <div class="info-card"><div class="label">Contained At</div><div class="value mono">${inc.contained_at ? esc(fmtTs(inc.contained_at)) : '<span style="color:#d97706">Pending</span>'}</div></div>
+    <div class="info-card"><div class="label">Contained At</div><div class="value mono">${inc.contained_at ? esc(fmtTs(inc.contained_at)) : pending}</div></div>
+    <div class="info-card"><div class="label">Eradicated At</div><div class="value mono">${inc.eradicated_at ? esc(fmtTs(inc.eradicated_at)) : pending}</div></div>
+    <div class="info-card"><div class="label">Recovered At</div><div class="value mono">${inc.recovered_at ? esc(fmtTs(inc.recovered_at)) : pending}</div></div>
     <div class="info-card"><div class="label">Closed At</div><div class="value mono">${inc.closed_at ? esc(fmtTs(inc.closed_at)) : notClosed}</div></div>
   </div>
   <h3>Incident Description</h3>
@@ -854,11 +860,11 @@ function generateProReport(data, opts = {}) {
     ? `<h3>Financial Impact Narrative</h3><div class="prose" style="white-space:pre-wrap">${esc(bia.financial)}</div>`
     : ''}
   ${costs.length
-    ? `<h3>Cost Summary — Total: <span class="mono">${esc(costCurrency(costTotal))}</span></h3>
+    ? `<h3>Cost Summary — Total: <span class="mono">${esc(costCurs.map(cur => costMoney(cur, costByCur[cur].total)).join(' · '))}</span></h3>
        <div class="two-col" style="margin-bottom:16px">
-         ${Object.entries(costByCat).sort((a, b) => b[1] - a[1]).map(([cat, sum]) =>
-           `<div class="info-card"><div class="label">${esc(cat.replace(/_/g, ' '))}</div><div class="value mono">${esc(costCurrency(sum))}</div></div>`
-         ).join('')}
+         ${costCurs.flatMap(cur => Object.entries(costByCur[cur].byCat).sort((a, b) => b[1] - a[1]).map(([cat, sum]) =>
+           `<div class="info-card"><div class="label">${esc(cat.replace(/_/g, ' '))}</div><div class="value mono">${esc(costMoney(cur, sum))}</div></div>`
+         )).join('')}
        </div>
        <h3>Itemised Costs</h3>
        <div class="table-wrap"><table>
@@ -866,7 +872,7 @@ function generateProReport(data, opts = {}) {
          <tbody>${costs.map(c => `<tr>
            <td style="text-transform:capitalize">${esc((c.category || '').replace(/_/g, ' '))}</td>
            <td>${esc(c.description || '')}</td>
-           <td class="mono" style="text-align:right">${esc(costCurrency(Number(c.amount) || 0))}</td>
+           <td class="mono" style="text-align:right">${esc(costMoney(c.currency, Number(c.amount) || 0))}</td>
            <td style="text-transform:capitalize">${esc((c.ir_phase || '').replace(/_/g, ' '))}</td>
          </tr>`).join('')}</tbody>
        </table></div>`
@@ -1164,22 +1170,23 @@ function _skeletonSections() {
     { key: 'details', items: [
       `Type · Severity · TLP · Triage state · Reporter: ${ph('incident.incident_type / severity / tlp / triage_state / reporter', 'auto')} ${where('Details → Classification')}`,
       `Current phase: ${ph('incident.phase', 'auto')} ${where('phase stepper in the incident header')}`,
-      `Occurred · Detected · Contained at: ${ph('incident.occurred_at / detected_at / contained_at', 'auto')} ${where('Details → Classification')}`,
-      `Closed at: ${ph('incident.closed_at', 'auto')} ${where('set when the incident is resolved')} <span class="static">— "Not closed" while open</span>`,
+      `Occurred · Detected at: ${ph('incident.occurred_at / detected_at', 'auto')} ${where('Details → Classification')}`,
+      `Contained · Eradicated · Recovered at: ${ph('incident.contained_at / eradicated_at / recovered_at', 'auto')} ${where('Declare … in the incident header, or Details → Classification')} <span class="static">— "Pending" until declared</span>`,
+      `Closed at: ${ph('incident.closed_at', 'auto')} ${where('set when the incident is closed')} <span class="static">— "Not closed" while open</span>`,
       `Incident description (rendered as Markdown): ${ph('incident.description', 'auto')} ${where('Details → Description')}`,
       `Tags (when set): ${ph('incident.tags[]', 'auto')} ${where('Details → Snapshot → Tags')}`,
     ]},
     { key: 'assignments', items: [
-      `Table: ${ph('assignments[*] (role, analyst, assigned by, assigned at, notes)', 'auto')} ${where('Assignments tab')}`,
+      `Table: ${ph('assignments[*] (role, analyst, assigned by, assigned at, notes)', 'auto')} ${where('Team')}`,
     ]},
     { key: 'stakeholders', items: [
-      `Table: ${ph('stakeholders[*] (name, title, organization, type)', 'auto')} ${where('Comms → Stakeholders')}`,
+      `Table: ${ph('stakeholders[*] (name, title, organization, type)', 'auto')} ${where('Comms & stakeholders → Stakeholders')}`,
       `<span class="static">Contact methods and notes are never printed.</span>`,
     ]},
     { key: 'detection', items: [
       `Detection method (friendly label): ${ph('incident.detection_method', 'auto')} ${where('Details → Classification')}`,
       `Timeline of key events: ${ph('timeline_events[*] (time, hostname, event type, description, MITRE technique)', 'auto')} ${where('Timeline tab')}`,
-      `IOCs summary: ${ph('iocs[*] (type, value, malicious, confidence, TI match / source, tags)', 'auto')} ${where('Forensic → IOCs')}`,
+      `IOCs summary: ${ph('iocs[*] (type, value, malicious, confidence, TI match / source, tags)', 'auto')} ${where('IOCs')}`,
     ]},
     { key: 'cer', items: [
       `Containment / Eradication / Recovery tables (aligned columns): ${ph('respond_actions[*] (title, description, status, occurred at, notes, assignee = "By")', 'auto')} ${where('Respond → actions')}`,
@@ -1189,10 +1196,10 @@ function _skeletonSections() {
     ]},
     { key: 'impact', items: [
       `Financial · Operational · Data exposure · Reputational · Regulatory · Notes: ${ph('business_impact.*', 'auto')} ${where('Post-Incident → Reports → Business Impact Assessment')}`,
-      `Legal obligations: ${ph('regulatory_deadlines[*] regulation + article', 'auto')} + ${ph('business_impact.legal', 'auto')} <span class="static">— empty ("—") unless legal deadlines have been initialized</span> ${where('Legal → Initialize deadlines')}`,
+      `Legal obligations: ${ph('regulatory_deadlines[*] regulation + article', 'auto')} + ${ph('business_impact.legal', 'auto')} <span class="static">— empty ("—") unless legal deadlines have been initialized</span> ${where('Legal & regulatory → Initialize deadlines')}`,
     ]},
     { key: 'legal', items: [
-      `Table: ${ph('regulatory_deadlines[*] (regulation, article, obligation, recipient, deadline, status, completed)', 'auto')} ${where('Legal tab')}`,
+      `Table: ${ph('regulatory_deadlines[*] (regulation, article, obligation, recipient, deadline, status, completed)', 'auto')} ${where('Legal & regulatory')}`,
       `Compliance: ${ph('met / violated (late or overdue) / pending / waived', 'auto')} <span class="static">— computed by the server</span>`,
     ]},
     { key: 'root_cause', items: [
@@ -1203,7 +1210,7 @@ function _skeletonSections() {
       `Swimlane per tactic (ATT&amp;CK kill-chain order), one dot per event by time: ${ph('timeline_events[*] (mitre_tactic_id, technique, event_time)', 'auto')} ${where('Timeline tab → MITRE tactic / technique')}`,
     ]},
     { key: 'attribution', items: [
-      `Table: ${ph('attributions[*] (actor, MITRE ID, country, confidence, score, motivation, supporting IOCs/events, notes, attributed by/at)', 'auto')} ${where('Forensic → Attribution')}`,
+      `Table: ${ph('attributions[*] (actor, MITRE ID, country, confidence, score, motivation, supporting IOCs/events, notes, attributed by/at)', 'auto')} ${where('ATT&CK & attribution → Attribution')}`,
     ]},
     { key: 'entities', items: [
       `Table: ${ph('entities[*] (type, name / value, criticality, compromised, description)', 'auto')} ${where('Entities tab (compromised: entity drawer)')}`,
@@ -1231,7 +1238,7 @@ function _skeletonSections() {
     ]},
     { key: 'costs', items: [
       `Financial impact narrative: ${ph('business_impact.financial', 'auto')} ${where('Post-Incident → Reports → Business Impact')}`,
-      `Totals by category + itemised costs: ${ph('costs[*] (category, description, amount)', 'auto')} ${where('Post-Incident → Reports → Cost Tracking')}`,
+      `Totals per currency and by category + itemised costs: ${ph('costs[*] (category, description, amount, currency)', 'auto')} ${where('Post-Incident → Reports → Cost Tracking')}`,
     ]},
   ]
   return list.map(s => ({ ...SECTION_BY_KEY[s.key], ...s }))

@@ -167,7 +167,7 @@ export default function Storage() {
             </span>
           )}
           <button
-            className="btn btn-ghost btn-sm"
+            className="btn ghost"
             onClick={load}
             disabled={loading}
           >{loading ? 'Scanning…' : 'Refresh'}</button>
@@ -220,7 +220,7 @@ export default function Storage() {
                   superseded, and consumed packages.
                 </div>
               </div>
-              <button className="btn btn-ghost btn-sm" onClick={reclaim}
+              <button className="btn ghost" onClick={reclaim}
                       disabled={reclaiming || data.collections.reclaimable_bytes <= 0}>
                 {reclaiming ? 'Reclaiming…' : 'Reclaim now'}
               </button>

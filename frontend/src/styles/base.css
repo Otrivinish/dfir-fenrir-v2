@@ -29,7 +29,10 @@ input, select, textarea { font: inherit; color: inherit; }
       (outside toolbars) keep the standard 14px / ~43px size.
    3. Scrollbars are thin and theme-coloured everywhere.
    4. A wide table never widens the page: wrap it in .table-scroll so only the
-      table scrolls sideways, inside its own panel. */
+      table scrolls sideways, inside its own panel.
+   5. A dropdown or input inside a card or row (not a toolbar) uses
+      .select.compact / .input.compact: the toolbar size (12px, ~30px tall),
+      keeping the field's normal width. No inline font-size/padding. */
 .panel-toolbar .btn { white-space: nowrap; flex-shrink: 0; }
 .panel-toolbar,
 .panel-toolbar > div { flex-wrap: wrap; }
@@ -41,6 +44,12 @@ input, select, textarea { font: inherit; color: inherit; }
   font-size: 12px;
 }
 .panel-toolbar .input { min-width: 160px; }
+
+.select.compact,
+.input.compact {
+  padding: 6px 10px;
+  font-size: 12px;
+}
 
 * {
   scrollbar-width: thin;

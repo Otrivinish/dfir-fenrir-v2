@@ -17,15 +17,17 @@ Safety, on top of what `forensic/parser.py` already does:
     so no image-decoding library is ever in the path.
   - A defensive row cap (`_MAX_ROWS`) guards against a pathological/crafted
     file, not real-world profiles -- real histories are nowhere near it.
-  - The temp file is always unlinked in a `finally`, success or exception.
+  - The temp file goes only to the RAM-only parser tmpfs (forensic.parser's
+    `_parse_tmp_file`, PARSE_TMP_DIR = /run/fenrir-parse; fails closed if it is
+    missing) and is always unlinked in a `finally`, success or exception.
 """
 import contextlib
-import os
 import sqlite3
-import tempfile
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
+
+from forensic.parser import _parse_tmp_file
 
 SQLITE_MAGIC = b"SQLite format 3\x00"
 
@@ -85,27 +87,17 @@ def _host_of(url: str) -> Optional[str]:
 
 @contextlib.contextmanager
 def _readonly_sqlite(content: bytes):
-    """Write `content` to a throwaway temp file and open it read-only +
-    immutable via a `file:` URI -- shared by every entry point in this
-    module so the safety-critical bits (no writable handle, no execution,
-    always cleaned up) live in exactly one place."""
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            f.write(content)
-            tmp_path = f.name
+    """Write `content` to a throwaway file on the parser tmpfs and open it
+    read-only + immutable via a `file:` URI -- shared by every entry point in
+    this module so the safety-critical bits (no writable handle, no execution,
+    RAM-only, always cleaned up) live in exactly one place."""
+    with _parse_tmp_file(content, ".db") as tmp_path:
         conn = sqlite3.connect(f"file:{tmp_path}?mode=ro&immutable=1", uri=True)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
         finally:
             conn.close()
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
 
 
 def parse_history_db(content: bytes) -> dict:

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
+import { formatLocal } from '../../lib/datetime.js'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -79,12 +80,18 @@ function CountdownDisplay({ deadline_at, status, regColor }) {
 }
 
 // ── Initialize panel ──────────────────────────────────────────────────────────
+// The default anchor is the incident's Detected time; each selected regulation can
+// have its own anchor (awareness differs between GDPR Art. 33, NIS2 Art. 23 and DORA).
+// The API defaults to detected_at too, returns 422 anchor_required when there is no
+// anchor at all, and skips template rows the incident already has.
 
-function InitPanel({ incId, onDone }) {
+function InitPanel({ inc, onDone }) {
   const [selected, setSelected]     = useState(['GDPR'])
-  const [breachAt, setBreachAt]     = useState(() => new Date().toISOString())  // canonical UTC ISO
+  const [breachAt, setBreachAt]     = useState(() => inc.detected_at || '')  // canonical UTC ISO
+  const [own, setOwn]               = useState({})   // regulation → own anchor ('' = default)
   const [loading, setLoading]       = useState(false)
   const [error,   setError]         = useState(null)
+  const [info,    setInfo]          = useState(null)
 
   function toggleReg(reg) {
     setSelected(prev =>
@@ -94,11 +101,17 @@ function InitPanel({ incId, onDone }) {
 
   async function init() {
     if (!selected.length) { setError('Select at least one regulation.'); return }
-    if (!breachAt) { setError('Breach detected-at is required.'); return }
-    setLoading(true); setError(null)
+    setLoading(true); setError(null); setInfo(null)
     try {
-      await api.initializeDeadlines(incId, { regulations: selected, breach_detected_at: breachAt })
-      onDone()
+      const anchors = Object.fromEntries(selected.filter(r => own[r]).map(r => [r, own[r]]))
+      const payload = { regulations: selected, anchors }
+      if (breachAt) payload.breach_detected_at = breachAt
+      const created = await api.initializeDeadlines(inc.id, payload)
+      if (Array.isArray(created) && created.length === 0) {
+        setInfo('Nothing new: the selected regulations are already initialised.')
+      } else {
+        onDone()
+      }
     } catch (e) {
       setError(e.message || 'Failed to initialize')
     } finally {
@@ -118,7 +131,7 @@ function InitPanel({ incId, onDone }) {
         Initialize Regulatory Deadlines
       </div>
       <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 'var(--space-3)' }}>
-        Select the applicable regulations and set the breach detection time. Notification deadlines will be calculated automatically.
+        Select the applicable regulations and check the anchor (when the organisation became aware of the breach). Notification deadlines are calculated from it.
       </div>
 
       <div style={{ marginBottom: 'var(--space-3)' }}>
@@ -153,20 +166,49 @@ function InitPanel({ incId, onDone }) {
       </div>
 
       <div style={{ marginBottom: 'var(--space-3)' }}>
-        <label style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--muted)', display: 'block', marginBottom: 'var(--space-1)' }}>
-          Breach Detected At
+        <label htmlFor="legal-anchor" style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--muted)', display: 'block', marginBottom: 'var(--space-1)' }}>
+          Anchor (breach awareness)
         </label>
         <div style={{ maxWidth: 260 }}>
-          <LocalDateTimePicker value={breachAt} onChange={setBreachAt} required />
+          <LocalDateTimePicker id="legal-anchor" value={breachAt} onChange={setBreachAt} required />
         </div>
         <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4 }}>
-          All deadlines are calculated from this timestamp.
+          {inc.detected_at
+            ? `Defaults to the incident's Detected time (${formatLocal(inc.detected_at)}). Used for every regulation without its own anchor.`
+            : 'This incident has no Detected time: enter the anchor here, or set Detected on Details.'}
         </div>
       </div>
+
+      {selected.length > 0 && (
+        <div style={{ marginBottom: 'var(--space-3)' }}>
+          <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--muted)', marginBottom: 'var(--space-1)' }}>
+            Own anchor per regulation (optional)
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            {REGULATIONS.filter(r => selected.includes(r)).map(reg => (
+              <div key={reg} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                <label htmlFor={`legal-anchor-${reg}`} style={{ width: 72, fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>
+                  {REG_LABELS[reg]}
+                </label>
+                <div style={{ maxWidth: 260, flex: 1 }}>
+                  <LocalDateTimePicker id={`legal-anchor-${reg}`} value={own[reg] || ''} clearable hint={false}
+                    placeholder="Same as the anchor above"
+                    onChange={v => setOwn(o => ({ ...o, [reg]: v }))} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="alert error" style={{ marginBottom: 'var(--space-3)' }}>
           <span className="alert-icon">!</span><span>{error}</span>
+        </div>
+      )}
+      {info && (
+        <div className="alert info" role="status" style={{ marginBottom: 'var(--space-3)' }}>
+          <span className="alert-icon">i</span><span>{info}</span>
         </div>
       )}
 
@@ -182,13 +224,113 @@ function InitPanel({ incId, onDone }) {
   )
 }
 
+// ── Waive / delete / re-anchor dialog ──────────────────────────────────────────
+// Each needs a written justification of at least REASON_MIN characters (the API
+// checks it too: 422 notes_required / reason_required). Errors stay in the dialog.
+
+const REASON_MIN = 10
+const ACTIONS = {
+  waive: {
+    title: 'Waive deadline', label: 'Justification', button: 'Waive',
+    hint: 'Why this obligation does not apply, and on whose authority. Saved as the completion notes and in the audit log.',
+    placeholder: 'e.g. DPO assessment: data encrypted at rest, no risk to individuals (Art. 34(3)(a))…',
+  },
+  delete: {
+    title: 'Delete deadline', label: 'Reason', button: 'Delete deadline',
+    hint: 'The audit log keeps the reason and a full copy of the deadline.',
+    placeholder: 'e.g. Duplicate of the GDPR Art. 33 row created by an earlier initialise…',
+  },
+  reanchor: {
+    title: 'Re-anchor deadline', label: 'Reason', button: 'Re-anchor',
+    hint: 'The deadline is recalculated from the new anchor. The old and new times and the reason go into the audit log.',
+    placeholder: 'e.g. Awareness confirmed by the DPO at 09:12, not at detection…',
+  },
+}
+
+function DeadlineActionModal({ mode, d, onConfirm, onClose }) {
+  const cfg = ACTIONS[mode]
+  const [text, setText]     = useState('')
+  const [anchor, setAnchor] = useState(d.breach_detected_at || '')
+  const [busy, setBusy]     = useState(false)
+  const [error, setError]   = useState(null)
+  const n = text.trim().length
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [busy, onClose])
+
+  const submit = async (e) => {
+    e.preventDefault()
+    setError(null); setBusy(true)
+    try {
+      await onConfirm(text.trim(), anchor)
+    } catch (err) {
+      setError(err.message || 'Request failed.')
+      setBusy(false)
+    }
+    // success path: parent unmounts the dialog
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" role="dialog" aria-labelledby="legal-action-title">
+        <div className="modal-head">
+          <h2 id="legal-action-title">{cfg.title}</h2>
+          <button type="button" className="modal-close" onClick={onClose} disabled={busy} aria-label="Close">×</button>
+        </div>
+        <form onSubmit={submit}>
+          <div className="modal-body">
+            <div className="form">
+              <p style={{ margin: 0, color: 'var(--text)', fontSize: 14, lineHeight: 1.6 }}>
+                <b>{REG_LABELS[d.regulation] || d.regulation}</b>{(d.article_label || d.article) ? ` ${d.article_label || d.article}` : ''}: {d.obligation}
+              </p>
+              {mode === 'reanchor' && (
+                <div className="field">
+                  <label className="field-label" htmlFor="legal-reanchor-at">New anchor</label>
+                  <LocalDateTimePicker id="legal-reanchor-at" value={anchor} onChange={setAnchor} required />
+                  <span className="field-hint">Currently {formatLocal(d.breach_detected_at)}; due {formatLocal(d.deadline_at)}.</span>
+                </div>
+              )}
+              <div className="field">
+                <label className="field-label" htmlFor="legal-action-reason">{cfg.label}</label>
+                <textarea id="legal-action-reason" className="input" rows={4} maxLength={2000} required autoFocus
+                          placeholder={cfg.placeholder} value={text} onChange={e => setText(e.target.value)} />
+                <span className="field-hint">
+                  {cfg.hint}{n < REASON_MIN ? ` At least ${REASON_MIN} characters (${n} so far).` : ''}
+                </span>
+              </div>
+              {error && (
+                <div className="alert error" role="alert">
+                  <span className="alert-icon">!</span><span>{error}</span>
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="modal-foot">
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn primary"
+                    disabled={busy || n < REASON_MIN || (mode === 'reanchor' && !anchor)}>
+              {busy ? 'Saving…' : cfg.button}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 // ── Deadline card ──────────────────────────────────────────────────────────────
 
-function DeadlineCard({ d, incId, onUpdated, onDeleted }) {
+function DeadlineCard({ d, incId, isClosed, onUpdated, onDeleted }) {
   const [expanded,  setExpanded]  = useState(false)
   const [notesDraft, setNotesDraft] = useState(d.completion_notes || '')
+  // Follow the server's notes when they change (e.g. a waiver justification saved via the dialog).
+  useEffect(() => { setNotesDraft(d.completion_notes || '') }, [d.completion_notes])
   const [saving,    setSaving]    = useState(false)
   const [error,     setError]     = useState(null)
+  const [action,    setAction]    = useState(null)   // 'waive' | 'delete' | 'reanchor' | null
 
   const overdue = d.is_overdue
   const done    = d.status === 'completed' || d.status === 'waived'
@@ -224,14 +366,21 @@ function DeadlineCard({ d, incId, onUpdated, onDeleted }) {
     }
   }
 
-  async function remove() {
-    if (!confirm('Delete this deadline?')) return
-    try {
-      await api.deleteDeadline(incId, d.id)
+  // Waive / delete / re-anchor: confirmed in DeadlineActionModal with a justification.
+  // Errors throw back into the dialog, which stays open.
+  async function confirmAction(text, anchor) {
+    if (action === 'delete') {
+      await api.deleteDeadline(incId, d.id, text)
+      setAction(null)
       onDeleted(d.id)
-    } catch (e) {
-      setError(e.message || 'Delete failed')
+      return
     }
+    const payload = action === 'waive'
+      ? { status: 'waived', completion_notes: text }
+      : { breach_detected_at: anchor, reason: text }
+    const updated = await api.updateDeadline(incId, d.id, payload)
+    setAction(null)
+    onUpdated(updated)
   }
 
   return (
@@ -259,17 +408,23 @@ function DeadlineCard({ d, incId, onUpdated, onDeleted }) {
           {REG_LABELS[d.regulation] || d.regulation}
         </span>
 
-        {/* Article */}
-        {d.article && (
-          <span style={{ fontSize: 11, color: 'var(--dim)', flexShrink: 0, alignSelf: 'center' }}>
-            {d.article}
+        {/* Article (display label; NIS2 rows show their Art. 23(4) point) */}
+        {(d.article_label || d.article) && (
+          <span className="legal-article" style={{ fontSize: 11, color: 'var(--dim)', flexShrink: 0, alignSelf: 'center' }}>
+            {d.article_label || d.article}
           </span>
         )}
 
-        {/* Mandatory badge */}
+        {/* Mandatory / internal-target badge */}
         {d.is_mandatory && (
           <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--high)', marginLeft: 'auto', flexShrink: 0 }}>
             MANDATORY
+          </span>
+        )}
+        {d.internal_target && (
+          <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', marginLeft: d.is_mandatory ? 0 : 'auto', flexShrink: 0 }}
+                title="The law sets no fixed window (&quot;without undue delay&quot;): this time is an internal target, not a statutory deadline.">
+            INTERNAL TARGET
           </span>
         )}
       </div>
@@ -296,10 +451,18 @@ function DeadlineCard({ d, incId, onUpdated, onDeleted }) {
         </div>
         <div>
           <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--dim)', marginBottom: 2 }}>
-            Deadline
+            {d.internal_target ? 'Internal target' : 'Deadline'}
           </div>
-          <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>
-            {new Date(d.deadline_at).toLocaleString()}
+          <span className="legal-deadline-at" style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>
+            {formatLocal(d.deadline_at)}
+          </span>
+        </div>
+        <div>
+          <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--dim)', marginBottom: 2 }}>
+            Anchor{d.deadline_months ? ` + ${d.deadline_months} calendar month${d.deadline_months > 1 ? 's' : ''}` : ` + ${d.deadline_hours}h`}
+          </div>
+          <span className="legal-anchor-at" style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--muted)' }}>
+            {formatLocal(d.breach_detected_at)}
           </span>
         </div>
         <div style={{ marginLeft: 'auto' }}>
@@ -332,7 +495,7 @@ function DeadlineCard({ d, incId, onUpdated, onDeleted }) {
         )}
         {!done && (
           <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px', color: 'var(--dim)' }}
-            onClick={() => setStatus('waived')} disabled={saving}>
+            onClick={() => setAction('waive')} disabled={saving}>
             Waive
           </button>
         )}
@@ -342,10 +505,18 @@ function DeadlineCard({ d, incId, onUpdated, onDeleted }) {
             Reopen
           </button>
         )}
-        <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px', color: 'var(--crit)', marginLeft: 'auto' }}
-          onClick={remove} disabled={saving}>
-          Delete
-        </button>
+        {!isClosed && (
+          <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px' }}
+            onClick={() => setAction('reanchor')} disabled={saving}>
+            Re-anchor
+          </button>
+        )}
+        {!isClosed && (
+          <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px', color: 'var(--crit)', marginLeft: 'auto' }}
+            onClick={() => setAction('delete')} disabled={saving}>
+            Delete
+          </button>
+        )}
       </div>
 
       {/* Completion notes panel */}
@@ -380,20 +551,24 @@ function DeadlineCard({ d, incId, onUpdated, onDeleted }) {
       {error && (
         <div style={{ fontSize: 12, color: 'var(--crit)', marginTop: 'var(--space-1)' }}>{error}</div>
       )}
+
+      {action && (
+        <DeadlineActionModal mode={action} d={d} onConfirm={confirmAction} onClose={() => setAction(null)} />
+      )}
     </div>
   )
 }
 
 // ── Add custom deadline modal ──────────────────────────────────────────────────
 
-function AddDeadlineModal({ incId, onCreated, onClose }) {
+function AddDeadlineModal({ inc, onCreated, onClose }) {
   const [form, setForm] = useState({
     regulation: 'GDPR',
     article: '',
     obligation: '',
     recipient: '',
     deadline_hours: 72,
-    breach_detected_at: new Date().toISOString(),   // canonical UTC ISO
+    breach_detected_at: inc.detected_at || '',   // canonical UTC ISO; defaults to Detected
     is_mandatory: true,
     notes: '',
   })
@@ -409,13 +584,13 @@ function AddDeadlineModal({ incId, onCreated, onClose }) {
     try {
       const payload = {
         ...form,
-        breach_detected_at: form.breach_detected_at,
         deadline_hours: parseInt(form.deadline_hours, 10),
         article: form.article.trim() || null,
         recipient: form.recipient.trim() || null,
         notes: form.notes.trim() || null,
       }
-      const created = await api.createDeadline(incId, payload)
+      if (!payload.breach_detected_at) delete payload.breach_detected_at   // API: incident detected_at
+      const created = await api.createDeadline(inc.id, payload)
       onCreated(created)
     } catch (e) {
       setError(e.message || 'Failed to create')
@@ -458,12 +633,13 @@ function AddDeadlineModal({ incId, onCreated, onClose }) {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-3)' }}>
             <div className="field">
-              <label className="field-label">Deadline (hours from breach)</label>
+              <label className="field-label">Deadline (hours from anchor)</label>
               <input type="number" className="input" min={1} value={form.deadline_hours} onChange={e => set('deadline_hours', e.target.value)} />
             </div>
             <div className="field">
-              <label className="field-label">Breach Detected At</label>
-              <LocalDateTimePicker value={form.breach_detected_at} onChange={v => set('breach_detected_at', v)} required />
+              <label className="field-label" htmlFor="legal-add-anchor">Anchor (breach awareness)</label>
+              <LocalDateTimePicker id="legal-add-anchor" value={form.breach_detected_at} onChange={v => set('breach_detected_at', v)} required />
+              <span className="field-hint">{inc.detected_at ? "Defaults to the incident's Detected time." : 'The incident has no Detected time: enter the anchor.'}</span>
             </div>
           </div>
 
@@ -494,7 +670,7 @@ function AddDeadlineModal({ incId, onCreated, onClose }) {
 // ── Main Legal page ────────────────────────────────────────────────────────────
 
 export default function Legal() {
-  const { inc } = useOutletContext()
+  const { inc, isClosed, bumpLegal } = useOutletContext()
 
   const [deadlines,    setDeadlines]    = useState([])
   const [loading,      setLoading]      = useState(true)
@@ -516,17 +692,27 @@ export default function Legal() {
 
   useEffect(() => { load() }, [load])
 
+  // After any change: refetch (a change can move other rows too — completing the NIS2 72h
+  // notification re-anchors the NIS2 final report) and refresh the header clock chips.
+  function changed() {
+    load()
+    bumpLegal?.()
+  }
+
   function onUpdated(updated) {
     setDeadlines(prev => prev.map(d => d.id === updated.id ? updated : d))
+    changed()
   }
 
   function onDeleted(id) {
     setDeadlines(prev => prev.filter(d => d.id !== id))
+    changed()
   }
 
   function onCreated(d) {
     setDeadlines(prev => [...prev, d].sort((a, b) => new Date(a.deadline_at) - new Date(b.deadline_at)))
     setShowAdd(false)
+    changed()
   }
 
   if (loading) return <div className="panel"><div className="panel-empty">Loading…</div></div>
@@ -558,14 +744,23 @@ export default function Legal() {
               {overdueCount} OVERDUE
             </span>
           )}
-          <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={() => setShowAdd(true)}>
-            + Add custom
-          </button>
+          {!isClosed && (
+            <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={() => setShowAdd(true)}>
+              + Add custom
+            </button>
+          )}
         </div>
       </div>
 
+      {isClosed && (
+        <div className="alert info" role="status" style={{ marginBottom: 'var(--space-3)' }}>
+          <span className="alert-icon">i</span>
+          <span>The incident is closed. Deadlines can still be completed, waived or annotated; adding, deleting and re-anchoring need the incident re-opened.</span>
+        </div>
+      )}
+
       {deadlines.length === 0 ? (
-        <InitPanel incId={inc.id} onDone={load} />
+        isClosed ? <div className="panel-empty">No regulatory deadlines.</div> : <InitPanel inc={inc} onDone={changed} />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
           {Object.entries(grouped).map(([reg, items]) => (
@@ -588,6 +783,7 @@ export default function Legal() {
                     key={d.id}
                     d={d}
                     incId={inc.id}
+                    isClosed={isClosed}
                     onUpdated={onUpdated}
                     onDeleted={onDeleted}
                   />
@@ -596,21 +792,23 @@ export default function Legal() {
             </div>
           ))}
 
-          <div style={{ marginTop: 'var(--space-2)' }}>
-            {showMoreInit ? (
-              <InitPanel incId={inc.id} onDone={() => { setShowMoreInit(false); load() }} />
-            ) : (
-              <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={() => setShowMoreInit(true)}>
-                + Initialize additional regulation
-              </button>
-            )}
-          </div>
+          {!isClosed && (
+            <div style={{ marginTop: 'var(--space-2)' }}>
+              {showMoreInit ? (
+                <InitPanel inc={inc} onDone={() => { setShowMoreInit(false); changed() }} />
+              ) : (
+                <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={() => setShowMoreInit(true)}>
+                  + Initialize additional regulation
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
 
       {showAdd && (
         <AddDeadlineModal
-          incId={inc.id}
+          inc={inc}
           onCreated={onCreated}
           onClose={() => setShowAdd(false)}
         />

@@ -8,16 +8,22 @@ Usage:
     # Direct to backend:
     python scripts/testdata/seed_demo_data.py --url http://localhost:8000 --user admin --password <pw>
 
-NOT idempotent — running twice creates duplicates. Check first: GET /api/incidents
+Idempotent: an incident whose title already exists is skipped, so running it
+twice creates nothing new (a run that died half-way leaves that incident as it was).
 
 Creates per incident:
-  - Incident core (severity, TLP, phase, type, detection method, occurred_at)
+  - Incident core (severity, TLP, type, detection method, occurred_at, detected_at),
+    opened in Containment, Eradication & Recovery
+  - Response milestones: detected ≤ contained ≤ eradicated ≤ recovered, all in the past
   - Affected systems
   - Containment / eradication / recovery actions
   - Timeline events (batch)
   - IOCs (IP, domain, hash with correct v2 type enum)
   - Post-incident lessons (narrative, RCA, contributing factors)
-  - Closed status where applicable
+  - Closed incidents, last: Resolve (→ Post-Incident, Gate 1), then the close-out
+    (lessons learned Final with date, participants, recommendations and owned action
+    items; closure checklist ticked; one cost) and Close with a sign-off reason (Gate 2).
+    The gates are met, never overridden, so the demo has no "Gate overridden" events.
 
 Cross-incident IOC overlaps preserved for correlation testing:
   185.220.101.34  — Colonial Pipeline (DarkSide) + MOVEit (Cl0p)
@@ -26,6 +32,9 @@ Cross-incident IOC overlaps preserved for correlation testing:
 """
 import argparse
 import sys
+import time
+import uuid
+
 import urllib3
 
 try:
@@ -53,7 +62,16 @@ def login(session: "requests.Session", base: str, username: str, password: str) 
 
 
 def api(session: "requests.Session", method: str, base: str, path: str, data=None):
-    r = getattr(session, method)(f"{base}{path}", json=data, timeout=30)
+    for _ in range(30):
+        r = getattr(session, method)(f"{base}{path}", json=data, timeout=30)
+        if r.status_code != 429:
+            break
+        # Rate limited (10 requests/s per credential after a burst): wait as told, then retry.
+        try:
+            wait = float(r.json().get("retry_after") or 1)
+        except (ValueError, AttributeError):
+            wait = 1.0
+        time.sleep(min(max(wait, 0.5), 30))
     if r.status_code >= 400:
         print(f"  WARN {method.upper()} {path} → {r.status_code}: {r.text[:200]}")
         return None
@@ -162,12 +180,33 @@ INCIDENTS = [
             "incident_type": "supply_chain",
             "detection_method": "external_notification",
             "occurred_at": "2024-03-15T02:30:00Z",
-            "phase": "post_incident",
+            "detected_at": "2024-12-13T09:15:00Z",
+            "phase": "containment_eradication_recovery",
         },
         "patch": {
             "contained_at": "2024-12-14T16:00:00Z",
+            "eradicated_at": "2024-12-28T18:00:00Z",
+            "recovered_at": "2025-01-08T12:00:00Z",
         },
-        "close": True,
+        "close": {
+            "conducted_at": "2025-01-15T10:00:00Z",
+            "participants": ["IR lead", "CISO", "Identity team", "Infrastructure team"],
+            "recommendations": (
+                "Treat vendor updates as untrusted: stage and monitor them before production. "
+                "Remove domain-admin rights from monitoring service accounts. Alert on ADFS "
+                "token-signing certificate export and anomalous SAML token issuance. Allowlist "
+                "applications on Tier 0 servers."
+            ),
+            "action_items": [
+                {"action": "Remove excessive AD privileges from monitoring service accounts",
+                 "owner": "Identity team", "due_date": "2025-02-15"},
+                {"action": "Detect SAML token forging (ADFS token issuance anomalies)",
+                 "owner": "SOC", "due_date": "2025-03-01"},
+            ],
+            "cost": {"category": "external_ir", "amount": 2400000, "currency": "USD", "ir_phase": "eradication",
+                     "description": "DFIR retainer: SUNBURST investigation and rebuild support"},
+            "reason": "Recovery verified (DC replication healthy, mail flow restored); lessons learned final; CISO sign-off.",
+        },
         "affected_systems": (
             "SolarWinds Orion Server (SVRORION01), Exchange Server (SVRMAIL01), "
             "Domain Controllers (DC01, DC02), ADFS Server (SVRADFS01)"
@@ -314,6 +353,7 @@ INCIDENTS = [
             "incident_type": "ransomware",
             "detection_method": "user_report",
             "occurred_at": "2025-05-02T04:12:00Z",
+            "detected_at": "2025-05-07T05:30:00Z",
             "phase": "containment_eradication_recovery",
         },
         "patch": {
@@ -433,12 +473,32 @@ INCIDENTS = [
             "incident_type": "data_breach",
             "detection_method": "threat_hunting",
             "occurred_at": "2025-05-27T18:00:00Z",
-            "phase": "post_incident",
+            "detected_at": "2025-06-01T10:30:00Z",
+            "phase": "containment_eradication_recovery",
         },
         "patch": {
             "contained_at": "2025-06-01T14:00:00Z",
+            "eradicated_at": "2025-06-03T12:00:00Z",
+            "recovered_at": "2025-06-05T09:00:00Z",
         },
-        "close": True,
+        "close": {
+            "conducted_at": "2025-06-12T13:00:00Z",
+            "participants": ["IR lead", "DPO", "MOVEit application owner", "Legal counsel"],
+            "recommendations": (
+                "Patch internet-facing file-transfer systems within 48 h of a critical CVE. Put "
+                "MOVEit behind a WAF with SQL-injection rules. Monitor web roots for new .aspx "
+                "files. Keep as little data on the transfer server as the workflow allows."
+            ),
+            "action_items": [
+                {"action": "Place MOVEit Transfer behind the WAF with SQLi rules enabled",
+                 "owner": "Network team", "due_date": "2025-07-01"},
+                {"action": "File-integrity monitoring on the MOVEit web root",
+                 "owner": "SOC", "due_date": "2025-07-15"},
+            ],
+            "cost": {"category": "legal_counsel", "amount": 380000, "currency": "USD", "ir_phase": "post_incident",
+                     "description": "Breach counsel and notification of 47,000 affected employees"},
+            "reason": "Webshell removed, server patched and verified; employees notified; lessons learned final; DPO sign-off.",
+        },
         "affected_systems": (
             "MOVEit Transfer Server (MOVEIT01), SQL Server backend (SQLMOVEIT01)"
         ),
@@ -552,6 +612,7 @@ INCIDENTS = [
             "incident_type": "vulnerability_exploitation",
             "detection_method": "siem_alert",
             "occurred_at": "2025-12-10T06:00:00Z",
+            "detected_at": "2025-12-10T08:30:00Z",
             "phase": "containment_eradication_recovery",
         },
         "patch": {
@@ -672,6 +733,7 @@ INCIDENTS = [
             "incident_type": "ransomware",
             "detection_method": "user_report",
             "occurred_at": "2025-02-12T03:00:00Z",
+            "detected_at": "2025-02-21T05:30:00Z",
             "phase": "containment_eradication_recovery",
         },
         "patch": {
@@ -783,12 +845,33 @@ INCIDENTS = [
             "incident_type": "supply_chain",
             "detection_method": "siem_alert",
             "occurred_at": "2025-07-02T14:00:00Z",
-            "phase": "post_incident",
+            "detected_at": "2025-07-02T15:30:00Z",
+            "phase": "containment_eradication_recovery",
         },
         "patch": {
             "contained_at": "2025-07-02T17:00:00Z",
+            "eradicated_at": "2025-07-04T12:00:00Z",
+            "recovered_at": "2025-07-09T18:00:00Z",
         },
-        "close": True,
+        "close": {
+            "conducted_at": "2025-07-16T09:00:00Z",
+            "participants": ["IR lead", "MSP account manager", "Endpoint team"],
+            "recommendations": (
+                "Reach the RMM console only from a management network with MFA. Require staged, "
+                "vendor-signed rollouts for RMM agent procedures. Keep offline, immutable backups "
+                "of every site and test restores quarterly."
+            ),
+            "action_items": [
+                {"action": "Move Kaseya VSA behind the management VPN with MFA",
+                 "owner": "MSP liaison", "due_date": "2025-08-01"},
+                {"action": "Quarterly restore test from the offline backups",
+                 "owner": "Infrastructure team", "due_date": "2025-09-30"},
+            ],
+            "cost": {"category": "downtime_revenue", "amount": 650000, "currency": "USD", "ir_phase": "recovery",
+                     "is_estimated": True,
+                     "description": "Sites offline during REvil encryption and restore"},
+            "reason": "All sites restored from offline backups and verified; VSA isolated; lessons learned final; IT director sign-off.",
+        },
         "affected_systems": (
             "MSP Kaseya VSA Server (MSP-VSA01), Workstation (WS-ACC-001), "
             "Workstation (WS-ACC-002), Workstation (WS-ACC-003), Workstation (WS-ACC-004), "
@@ -894,12 +977,32 @@ INCIDENTS = [
             "incident_type": "vulnerability_exploitation",
             "detection_method": "external_notification",
             "occurred_at": "2025-01-06T04:00:00Z",
-            "phase": "post_incident",
+            "detected_at": "2025-01-20T14:00:00Z",
+            "phase": "containment_eradication_recovery",
         },
         "patch": {
             "contained_at": "2025-01-20T18:00:00Z",
+            "eradicated_at": "2025-01-22T12:00:00Z",
+            "recovered_at": "2025-01-25T09:00:00Z",
         },
-        "close": True,
+        "close": {
+            "conducted_at": "2025-02-03T14:00:00Z",
+            "participants": ["IR lead", "Messaging team", "Legal counsel", "CISO"],
+            "recommendations": (
+                "Apply out-of-band Exchange security updates within 24 h. Publish OWA only through "
+                "a reverse proxy with pre-authentication. Hunt web roots and IIS logs after every "
+                "critical Exchange CVE. Alert on mailbox exports (New-MailboxExportRequest)."
+            ),
+            "action_items": [
+                {"action": "Publish OWA through a pre-authenticating reverse proxy",
+                 "owner": "Messaging team", "due_date": "2025-03-01"},
+                {"action": "Alert on New-MailboxExportRequest",
+                 "owner": "SOC", "due_date": "2025-02-20"},
+            ],
+            "cost": {"category": "remediation_infra", "amount": 185000, "currency": "USD", "ir_phase": "eradication",
+                     "description": "Exchange rebuild and emergency patching overtime"},
+            "reason": "Webshells removed, Exchange rebuilt and patched; executives briefed; lessons learned final; CISO sign-off.",
+        },
         "affected_systems": (
             "Exchange Server 2019 (EXCH01), Active Directory (DC01)"
         ),
@@ -1006,8 +1109,58 @@ INCIDENTS = [
 
 # ── Seeding logic ─────────────────────────────────────────────────────────────
 
-def seed_incident(session, base, n, total, inc):
-    print(f"[{n}/{total}] {inc['incident']['title']}")
+def existing_titles(session, base) -> set:
+    """Titles of the incidents already in FENRIR (every page), for the idempotency check."""
+    titles, cursor = set(), None
+    while True:
+        page = api(session, "get", base, "/api/incidents?limit=200" + (f"&cursor={cursor}" if cursor else ""))
+        if page is None:
+            print("Could not list incidents — aborting so nothing is duplicated.")
+            sys.exit(1)
+        titles.update(i["title"] for i in page.get("items", []))
+        cursor = page.get("next_cursor")
+        if not cursor:
+            return titles
+
+
+def close_out(session, base, inc_id, c):
+    """Resolve (→ Post-Incident, Gate 1), complete what Gate 2 checks, then Close with a
+    sign-off reason. Meets the gates; never overrides them."""
+    i = f"/api/incidents/{inc_id}"
+    if api(session, "patch", base, i, {"phase": "post_incident"}) is None:
+        print("  ✗ Gate 1 not met — left in C/E/R")
+        return
+    print("  ✓ Resolved: Post-Incident (Gate 1 met)")
+
+    api(session, "patch", base, f"{i}/post-incident/lessons", {
+        "status": "final",
+        "conducted_at": c["conducted_at"],
+        "facilitated_by": c["participants"][0],
+        "participants": c["participants"],
+        "report_security_recommendations": c["recommendations"],
+        "action_items": [{"id": str(uuid.uuid4()), "priority": "high", "status": "open", **a}
+                         for a in c["action_items"]],
+    })
+    checklist = api(session, "get", base, f"{i}/post-incident/checklist") or {"items": []}
+    for item in checklist["items"]:
+        # "Incident formally closed" is ticked by the close itself.
+        if item["item_key"] != "incident_closed" and not item["checked"]:
+            api(session, "patch", base, f"{i}/post-incident/checklist/{item['id']}", {"checked": True})
+    api(session, "post", base, f"{i}/costs", c["cost"])
+    print("  ✓ Close-out: lessons learned final, closure checklist ticked, cost recorded")
+
+    if api(session, "post", base, f"{i}/close", {"reason": c["reason"]}) is None:
+        print("  ✗ Gate 2 not met — left open in Post-Incident")
+        return
+    print("  ✓ Closed (Gate 2 met)")
+
+
+def seed_incident(session, base, n, total, inc, titles=frozenset()):
+    title = inc["incident"]["title"]
+    print(f"[{n}/{total}] {title}")
+    if title in titles:
+        print("  ↷ Already seeded — skipped\n")
+        return
 
     # Create core incident
     result = api(session, "post", base, "/api/incidents", inc["incident"])
@@ -1017,15 +1170,10 @@ def seed_incident(session, base, n, total, inc):
     inc_id = result["id"]
     print(f"  ✓ Created ({inc_id[:8]}…)")
 
-    # Patch contained_at if present
+    # Declare the response milestones (detected ≤ contained ≤ eradicated ≤ recovered)
     if inc.get("patch"):
-        api(session, "patch", base, f"/api/incidents/{inc_id}", inc["patch"])
-        print("  ✓ Patched contained_at")
-
-    # Close if applicable
-    if inc.get("close"):
-        api(session, "post", base, f"/api/incidents/{inc_id}/close")
-        print("  ✓ Closed")
+        if api(session, "patch", base, f"/api/incidents/{inc_id}", inc["patch"]) is not None:
+            print(f"  ✓ Declared {', '.join(k.removesuffix('_at') for k in inc['patch'])}")
 
     # Affected systems
     systems = parse_systems(inc.get("affected_systems", ""))
@@ -1064,6 +1212,10 @@ def seed_incident(session, base, n, total, inc):
         api(session, "patch", base, f"/api/incidents/{inc_id}/post-incident/lessons", lessons)
         print("  ✓ Lessons learned")
 
+    # Close last, once everything the gates check is in place
+    if inc.get("close"):
+        close_out(session, base, inc_id, inc["close"])
+
     print()
 
 
@@ -1085,9 +1237,10 @@ def main():
     login(session, args.url, args.user, args.password)
     print("  ✓ Authenticated\n")
 
+    titles = existing_titles(session, args.url)
     total = len(INCIDENTS)
     for i, inc in enumerate(INCIDENTS, 1):
-        seed_incident(session, args.url, i, total, inc)
+        seed_incident(session, args.url, i, total, inc, titles)
 
     print("═" * 60)
     print("Cross-incident IOC overlaps to verify in Correlations view:")

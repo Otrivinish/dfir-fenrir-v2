@@ -191,7 +191,7 @@ function WebhookPanel() {
     <section className="panel">
       <h2 className="panel-h">Outbound webhooks</h2>
       <p className="field-hint" style={{ marginBottom: 'var(--space-3)' }}>
-        Posts to Teams / Slack on: incident created, phase changed, severity changed, resolved.
+        Posts to Teams / Slack on: incident created, phase changed, severity changed, closed.
       </p>
       <form className="settings-form" onSubmit={handleSave}>
         <FieldRow label={`Microsoft Teams webhook URL${cfg.teams_url_set ? ` (${cfg.teams_url_preview})` : ''}`}>

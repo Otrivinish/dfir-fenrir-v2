@@ -14,6 +14,10 @@ const TYPE_LABEL = {
   comment:          'Comment',
   comment_mention:  'Mention',
   handoff_pending:  'Handoff',
+  custody_transfer: 'Custody',
+  legal_deadline:   'Legal Clock',
+  assignment:       'Assignment',
+  le_package:       'LE Package',
 }
 
 export default function NotificationBell() {
@@ -43,9 +47,10 @@ export default function NotificationBell() {
 
     ws.onmessage = (ev) => {
       try {
+        // Frame: {type: 'notification', notification: <same shape as GET /api/notifications items>}
         const msg = JSON.parse(ev.data)
-        if (msg.type === 'notification') {
-          setNotifications(prev => [msg, ...prev].slice(0, 40))
+        if (msg.type === 'notification' && msg.notification) {
+          setNotifications(prev => [msg.notification, ...prev].slice(0, 40))
           setUnreadCount(c => c + 1)
         }
       } catch {}
