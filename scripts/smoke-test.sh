@@ -5,7 +5,7 @@
 # → analysis-worker, PCAP, evidence collect/verify/seal/export/download,
 # Velociraptor collector generation (all platforms), forensic timeline + web
 # history imports (/tmp users), manual backup, signed audit export, audit
-# anchors and WebSocket routing.
+# anchors, readiness and WebSocket routing.
 #
 # Idempotent: reuses ONE incident titled "[SMOKE] container hardening" and only
 # appends test records to it (the wrong-target-hash upload is refused and stores
@@ -255,6 +255,16 @@ if check 201 "signed audit-log export" "$c"; then
 fi
 c=$(api GET /api/admin/audit/anchors); check 200 "list audit anchors" "$c" \
   && { n="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("items",[])))' "$TMP/body")"; [ "$n" -gt 0 ] && pass "$n audit anchor(s) recorded" || fail "no audit anchors"; }
+
+# ── Readiness (read-only; computed fresh, shown never enforced) ────────────
+c=$(api GET /api/readiness); check 200 "GET readiness" "$c" \
+  && { [ "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); c=d.get("checks",[]); print(len(c) >= 11 and all({"id","level","status","csf"} <= set(x) for x in c) and "blockers_failing" in d.get("summary",{}))' "$TMP/body")" = "True" ] \
+         && pass "readiness lists its checks with a summary" || fail "readiness body: $(detail)"; }
+
+# ── Contacts directory (E2; read-only list) ────────────────────────────────
+c=$(api GET /api/contacts); check 200 "GET contacts directory" "$c" \
+  && { [ "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(set(d) == {"items","next_cursor"})' "$TMP/body")" = "True" ] \
+         && pass "contacts directory returns {items, next_cursor}" || fail "contacts body: $(detail)"; }
 
 # ── WebSocket routing through Caddy (no cookie → must reach backend, not 404/502) ─
 c=$("${CURL[@]}" -o /dev/null -w '%{http_code}' --http1.1 --max-time 5 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \

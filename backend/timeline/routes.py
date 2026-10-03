@@ -57,6 +57,16 @@ async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) ->
     return await get_accessible_incident(db, incident_id, user)
 
 
+# system_source values only the server writes (M2): closure, gate_override, milestone and triage
+# (incidents/routes.py), respond_action, respond_action_revert and decision (respond/routes.py),
+# legal_deadline (legal/routes.py). A client-made event may not claim one, so an analyst's event can
+# never pass for the server's record. Compared trimmed and case-insensitively. "manual" (the Timeline
+# "Annotate" modal) and any other label stay allowed. Add a new server source here too.
+RESERVED_SYSTEM_SOURCES = frozenset({
+    "closure", "gate_override", "milestone", "triage",
+    "respond_action", "respond_action_revert", "decision", "legal_deadline",
+})
+
 _ENTITY_ERRORS = {404: {"model": ApiErrorBody, "description": "entity_not_found"},
                   409: {"model": ApiErrorBody, "description": "incident_closed"},
                   422: {"model": ApiErrorBody, "description": "entity_other_incident (or a validation error)"}}
@@ -172,7 +182,9 @@ async def list_timeline_events(
 @router.post("/{incident_id}/timeline",
              response_model=TimelineEventOut,
              status_code=status.HTTP_201_CREATED,
-             responses=_ENTITY_ERRORS,
+             responses={**_ENTITY_ERRORS,
+                        422: {"model": ApiErrorBody,
+                              "description": "entity_other_incident, reserved_system_source (or a validation error)"}},
              summary="Create a timeline event")
 async def create_timeline_event(
     incident_id: uuid.UUID,
@@ -185,12 +197,20 @@ async def create_timeline_event(
 
     `entity_id` links the event to the in-scope entity (host, account, …) it happened on: 404
     `entity_not_found`, 422 `entity_other_incident`. An empty `hostname` takes the entity's
-    value. Rejects events on a closed incident with 409. Requires the analyst role and write
-    access to the incident; the action is audit-logged. Returns the created TimelineEventOut.
+    value. `is_system=true` makes it an analyst annotation (shown with the system events);
+    its `system_source` is a free label such as "manual", but the sources the server writes
+    itself (closure, gate_override, milestone, triage, respond_action, respond_action_revert,
+    decision, legal_deadline) are refused with 422 `reserved_system_source`. Rejects events on
+    a closed incident with 409. Requires the analyst role and write access to the incident;
+    the action is audit-logged. Returns the created TimelineEventOut.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
+    if req.system_source and req.system_source.strip().lower() in RESERVED_SYSTEM_SOURCES:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "reserved_system_source",
+                       f"system_source \"{req.system_source.strip()}\" is reserved for events the server "
+                       "writes itself; use \"manual\" (or leave it out) for an analyst annotation.")
     ent = await _entity(db, incident_id, req.entity_id) if req.entity_id else None
 
     ev = TimelineEvent(
@@ -357,7 +377,8 @@ async def batch_create_timeline_events(
 
     Each event is inserted independently; per-item failures are collected rather than aborting the
     batch. An item whose `entity_id` is not an entity of this incident is skipped with an error;
-    an empty `hostname` takes the linked entity's value. Rejects imports on a closed incident with
+    an empty `hostname` takes the linked entity's value. Imported events are never system events:
+    an item's `is_system` / `system_source` are ignored. Rejects imports on a closed incident with
     409. Requires the analyst role and write access; the import is audit-logged. Returns a
     TimelineEventBatchResult with the created count and any errors.
     """

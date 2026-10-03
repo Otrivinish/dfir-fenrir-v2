@@ -10,6 +10,7 @@ import './styles/settings.css'
 import './styles/warroom.css'
 import './styles/notifications.css'
 import './styles/datetime-picker.css'
+import './styles/readiness.css'
 import App from './App.jsx'
 
 ReactDOM.createRoot(document.getElementById('root')).render(

@@ -31,7 +31,7 @@ const CATEGORIES = [
             '**Operate** — **Dashboard** (your live operational view of all incidents) · **Incidents** (the list; open one to enter the per-incident workspace) · **Shift handoffs** · **On-call**.',
             '**Investigate** — **Correlations** · **ATT&CK coverage**.',
             '**Intel** — **Threat intel** · **Threat actors**: reference databases.',
-            '**Prepare** — **Playbooks** (playbook templates and tasks) · **IR roster**, plus **Stakeholder matrix** · **Validated tools** for admins.',
+            '**Prepare** — **Readiness** (admins and analysts) · **Playbooks** (playbook templates and tasks) · **IR roster** · **Contacts** (admins and analysts), plus **Stakeholder matrix** · **Validated tools** for admins.',
             '**Report** — **Metrics**: cross-incident analytics (admins and analysts).',
             '**Admin** — **Admin** (admins only) · **Settings**: your account, plus admin sections (Users / Teams / Roles / Stakeholder Matrix / Feeds / Integrations / API Keys).',
             'At the bottom: **Help** and **Account**.',
@@ -119,6 +119,32 @@ const CATEGORIES = [
             '**Operate → On-call** — the current on-call schedule and who to escalate to.',
             '**Prepare → IR roster** — the responder roster and contact list.',
           ] },
+          { type: 'section', title: 'Out-of-band contact', items: [
+            'How to reach a responder when email or chat may be compromised — a mobile number, Signal, and so on.',
+            'Record yours in **Prepare → IR roster** → **Edit** on your card. An admin can edit anyone\'s.',
+            'Admins and analysts see it on **On-call** and in the Dashboard on-call strip. Viewers don\'t.',
+          ] },
+          { type: 'note', text: 'It is personal data: it never goes into reports or the LE package. Readiness blocks while anyone on call in the next 14 days has none.' },
+        ],
+      },
+      {
+        id: 'gs-readiness',
+        title: 'Readiness',
+        tags: ['readiness', 'preparation', 'prepare', 'blocker', 'csf', 'on-call', 'backup', 'totp'],
+        body: [
+          { type: 'p', text: 'Readiness checks whether the organisation is prepared for the next incident. Open it from **Prepare → Readiness** (admins and analysts).' },
+          { type: 'section', title: 'What it shows', items: [
+            'Each check as **Pass**, **Fail** or **Unknown**, its level (**Blocker** or **Warning**), its NIST CSF 2.0 ID, and a **Fix** link to the page where it is fixed. Most fixes need an admin.',
+            '**Blockers:** at least 2 active admins · TOTP enforced and every admin enrolled · Incident Commander, Communications Lead and Legal Liaison roles active · someone on call every UTC day of the next 14 · required Stakeholder matrix rules for High and Critical · a backup under 26 h old and not failing · an audit-chain anchor that verified · a Data Protection Officer role · an out-of-band contact for everyone on call in the next 14 days.',
+            '**Warnings:** Ransomware and Data-breach playbooks updated within 12 months · a threat-intel API key and every enabled feed pulled within 24 h · email configured · at least one validated tool · an audit-chain anchor that is missing or over 26 h old · the six key contacts in the Contacts directory, each verified within 90 days ([[co-contacts]]).',
+            '**Unknown** means Fenrir could not check it (for example, the backup directory is not mounted). It never counts as a pass.',
+          ] },
+          { type: 'section', title: 'Where else it appears', items: [
+            'The **Dashboard** shows a banner while any blocker fails.',
+            '**+ New incident** lists the failing blockers. It never stops you creating the incident.',
+            'MCP: `fenrir_dashboard(view="readiness")` · API: `GET /api/readiness`.',
+          ] },
+          { type: 'note', text: 'A pass means the record exists, not that it works. Readiness does not check restore tests, tabletop exercises or whether a test email arrives.' },
         ],
       },
     ],
@@ -854,14 +880,16 @@ const CATEGORIES = [
       {
         id: 'iw-files',
         title: 'Supporting Documents',
-        tags: ['files', 'supporting documents', 'screenshot', 'upload', 'attachment', 'link entity'],
+        tags: ['files', 'supporting documents', 'screenshot', 'upload', 'attachment', 'link entity', 'include in report', 'report figure', 'caption'],
         body: [
           { type: 'p', text: 'A working store for non-malicious supporting material: screenshots, exported logs, notes. Encrypted at rest.' },
           { type: 'section', title: 'On the page', items: [
             '**+ Upload files** — add one or more files.',
             'Per file: name · type · size · added · added by · linked entity.',
             '**Download** · **Link** / **Re-link** to an entity · **Rename** · **Delete**.',
+            '**Report → Include** (PNG, JPEG, GIF or WebP only) — makes the screenshot a numbered figure in generated reports, with an optional caption (**Caption** to change it) and its SHA-256. See [[pi-reports]].',
           ] },
+          { type: 'note', text: 'Screenshots can show personal data or TLP:RED material, and an included image goes into every report for the incident. Check it first; upload a cropped or redacted copy if needed.' },
           { type: 'note', text: 'Not chain-of-custody evidence, and not for suspected-malicious samples: register those in **Evidence** ([[iw-evidence]]) or quarantine them in **Examine → Malware quarantine** ([[fo-artifacts]]).' },
         ],
       },
@@ -1247,12 +1275,34 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'Per-incident contact list. Track who to notify and how, per incident.' },
           { type: 'section', title: 'Per-stakeholder', items: [
-            '**Type** — internal / legal / regulatory / law enforcement / media / vendor / IR firm / customer / insurer / board / other.',
+            '**Type** — internal / legal / regulatory / law enforcement / media / vendor / IR firm / customer / insurer / board / supervisory authority / CSIRT / other.',
             '**Contact methods** — multiple (phone, email, Signal, etc.).',
             '**Available hours** — free-text (e.g. "24/7 hotline").',
             '**Notes** — free-text.',
           ] },
           { type: 'note', text: 'Bulk import via CSV (header row required). Preview before commit.' },
+          { type: 'note', text: '**Add from directory** copies a contact from the Contacts directory into the incident — see [[co-contacts]].' },
+        ],
+      },
+      {
+        id: 'co-contacts',
+        title: 'Contacts Directory',
+        tags: ['contacts', 'directory', 'supervisory authority', 'csirt', 'police', 'insurer', 'retainer', 'pr', 'verify', 'prepare'],
+        body: [
+          { type: 'p', text: 'The organisation\'s external contacts, prepared before an incident: open **Prepare → Contacts**. Admins and analysts can read it; only admins add, edit, verify or delete.' },
+          { type: 'section', title: 'The six key contacts', items: [
+            'Supervisory authority · national CSIRT · police cyber unit (type **Law Enforcement**) · insurer · IR retainer (type **IR Firm**) · PR (type **Media / PR**).',
+            'Readiness warns while one is missing or any of them was not verified in the last 90 days (NIST CSF 2.0 `RS.CO-03`).',
+          ] },
+          { type: 'steps', items: [
+            'Check that the entry is still right: call the number or confirm the address.',
+            'Click **Mark verified** on its card. Fenrir records the server time and your name; neither can be typed in.',
+          ] },
+          { type: 'section', title: 'Using it on an incident', items: [
+            'Incident → **Comms & stakeholders** → **Stakeholders** → **Add from directory**, then **Add** on a contact.',
+            'The incident gets its own copy. Editing or deleting the directory entry later does not change the case record.',
+          ] },
+          { type: 'note', text: 'MCP: `fenrir_people_list(view="contacts")`, `fenrir_people_write(action="contact_add" / "contact_update" / "contact_verify")`, `fenrir_comms_write(action="stakeholder_add", data={contact_id})` · API: `/api/contacts`.' },
         ],
       },
       {
@@ -1364,7 +1414,7 @@ const CATEGORIES = [
       {
         id: 'pi-reports',
         title: 'Reports',
-        tags: ['report', 'pdf', 'html', 'executive', 'full', 'post-incident', 'le package', 'sha-256', 'template'],
+        tags: ['report', 'pdf', 'html', 'executive', 'full', 'post-incident', 'le package', 'sha-256', 'template', 'figures', 'screenshots', 'communications log', 'sign-off', 'csf', 'nciss'],
         body: [
           { type: 'p', text: 'Generate, preview, and download incident reports. All persist to history.' },
           { type: 'section', title: 'Template picker', items: [
@@ -1378,6 +1428,12 @@ const CATEGORIES = [
             'Custom footer text.',
             '**Remediation roadmap** is split into Short-term (0–30 days) · Medium-term (30–90 days) · Long-term (90+ days).',
             '**Preview structure** button shows the report skeleton with autogen-field placeholders.',
+          ] },
+          { type: 'section', title: 'Figures, comms log, sign-off, standards', items: [
+            '**Figures** — screenshots ticked **Include in report** in Supporting documents ([[iw-files]]), numbered, with caption and the SHA-256 of the original file. Images over 1.5 MB are downscaled to 1920 px; embedded images are capped at 7 MiB, and you are warned before saving if figures go over it.',
+            '**Communications & Notification Log** (full report only) — the out-of-band log. Never the passphrase or anyone\'s contact details.',
+            '**Approval & Sign-off** — who closed the incident, when, the close statement, and a signature line for Incident Commander, Deputy, Legal Liaison and DPO.',
+            'Every section shows its **NIST CSF 2.0** subcategory IDs. Severity also shows the **NCISS** level: Critical → Emergency, High → Severe, Medium → Medium, Low → Low.',
           ] },
           { type: 'section', title: 'Report History', items: [
             'Every generated report is persisted with template ID and SHA-256 footer for tamper-evidence.',
@@ -1439,7 +1495,8 @@ const CATEGORIES = [
             'Reset passwords. Force-rotate sessions.',
           ] },
           { type: 'section', title: 'Operational roles', items: [
-            'Distinct from RBAC. These are *response* roles assignable per incident — Incident Commander, Communications Lead, Forensic Lead, Containment Lead, Recovery Lead, Scribe.',
+            'Distinct from RBAC. These are *response* roles assignable per incident. Seeded on every install: Incident Commander, Deputy Incident Commander, Lead Investigator, Communications Lead, Legal Liaison, Recorder, Data Protection Officer.',
+            '**Data Protection Officer** — assesses personal-data impact and advises on GDPR breach notification. Readiness blocks while the role is inactive.',
           ] },
         ],
       },

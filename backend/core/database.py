@@ -590,4 +590,18 @@ _INPLACE_MIGRATIONS: list[str] = [
     # never the raw attacker HTML -- see email_analyzer/parser.py).
     "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS body_text TEXT",
     "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS body_html TEXT",
+
+    # E2: a responder's out-of-band contact methods (ContactMethod list, as incident stakeholders).
+    # Existing profiles get the empty list from the DEFAULT; no backfill. org_contacts (the
+    # contacts directory) is a new table, created by create_all.
+    "ALTER TABLE responder_profiles ADD COLUMN IF NOT EXISTS oob_contact_methods JSON NOT NULL DEFAULT '[]'",
+
+    # E4: Files screenshots selectable as report figures. Existing files default to not included.
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS include_in_report BOOLEAN NOT NULL DEFAULT false",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS report_caption VARCHAR(512)",
+
+    # E-fix L5: a report figure's SHA-256 and image type, stored when it is picked. Existing figures
+    # stay NULL (report data hashes those on the fly); no backfill.
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS report_sha256 VARCHAR(64)",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS report_mime VARCHAR(16)",
 ]

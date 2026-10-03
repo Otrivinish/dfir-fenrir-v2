@@ -5,7 +5,9 @@ Also exposes the audit-grade history flow:
   GET    /{incident_id}/reports/history            — list saved reports for the incident
   POST   /{incident_id}/reports/{report_id}/download — re-download with mandatory access_reason
 """
+import asyncio
 import hashlib
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -20,19 +22,47 @@ from affected_systems.routes import compromised_systems
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
+from files.routes import report_file_present, report_image_digest
 from incidents.access import get_accessible_incident
 from models import (
-    BusinessImpact, ClosureChecklistItem, Decision, Entity, EntityRelation,
+    AuditLog, BusinessImpact, ClosureChecklistItem, Decision, Entity, EntityFile, EntityRelation,
     Evidence, GeneratedReport, Incident, IncidentAssignment, IncidentAttribution,
-    IncidentCost, IncidentStakeholder, IOC, LessonsLearned, PlaybookTask,
-    RegulatoryDeadline, ReportAccess, RespondAction, ThreatActor, ThreatIntelIOC,
-    TimelineEvent, User,
+    IncidentCost, IncidentStakeholder, IOC, LessonsLearned, OOBLog, OperationalRole,
+    PlaybookTask, RegulatoryDeadline, ReportAccess, RespondAction, ThreatActor,
+    ThreatIntelIOC, TimelineEvent, User,
 )
+from schemas import nciss_severity
 from sqlalchemy import tuple_
 
 router = APIRouter()
 
 _EXCLUDE = {"oob_passphrase"}
+
+# E4: the roles that sign the report off (operational role key → default label), in print order.
+SIGN_OFF_ROLES = (
+    ("incident_commander",      "Incident Commander"),
+    ("deputy_commander",        "Deputy Incident Commander"),
+    ("legal_liaison",           "Legal Liaison"),
+    ("data_protection_officer", "Data Protection Officer"),
+)
+
+
+def _utc_z(dt: Optional[datetime]) -> Optional[str]:
+    """ISO 8601 in UTC with a Z suffix (sub-second precision kept); a naive value is UTC."""
+    if dt is None:
+        return None
+    dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _passphrase_redactor(passphrase: Optional[str]):
+    """text → text with the incident's OOB passphrase replaced by "[passphrase]" (case-insensitive;
+    its words may be joined by hyphens, spaces or underscores). Identity when there is none."""
+    words = [w for w in re.split(r"[\s\-_]+", passphrase or "") if w]
+    if not words:
+        return lambda text: text
+    pat = re.compile(r"[\s\-_]*".join(map(re.escape, words)), re.IGNORECASE)
+    return lambda text: pat.sub("[passphrase]", text) if text else text
 
 
 def _deadline_compliance(d: RegulatoryDeadline, now: datetime) -> tuple[str, Optional[float]]:
@@ -68,6 +98,29 @@ async def get_report_data(
     role only), threat-actor attributions and affected systems. Sensitive fields (e.g.
     oob_passphrase, stakeholder contact details) are excluded. Requires read access to the
     incident (returns 404 otherwise).
+
+    E4 additions:
+    - `incident.nciss_severity`: the NCISS value for the internal severity
+      (critical→emergency, high→severe, medium→medium, low→low).
+    - `report_files[]`: the Supporting-documents files picked as report figures, oldest
+      first: {id, name, mime, size, sha256, caption, integrity}. Metadata only, never the
+      image bytes; sha256 is of the original file, stored when it was picked (a figure
+      picked before that is hashed now). integrity is "ok", or "failed" when the stored
+      data is missing, the wrong size, or fails decryption/authentication; sha256 and mime
+      are then null and the figure must not be embedded. The renderer fetches each image
+      from …/files/{id}/download (409 file_integrity_failed for tampered bytes) and checks
+      its SHA-256 against this one.
+    - `oob_log[]`: the out-of-band communications log, oldest first (stakeholder, channel,
+      direction, summary, verified, verification method, logged by, time). The OOB
+      passphrase and responders' out-of-band contact details are never included; the
+      incident's current passphrase typed into a free-text field shows as "[passphrase]".
+    - `closure`: {closed, closed_at, closed_by, reason} from the close sign-off (reason =
+      the statement given at Close, read from that close's audit row; null while open).
+      Timeline events never supply it.
+    - The E4 timestamps (`oob_log[].created_at`, `closure.closed_at`) are UTC ISO 8601
+      with a Z suffix.
+    - `sign_offs[]`: Incident Commander, Deputy, Legal Liaison and DPO, each with the
+      users assigned to that role on this incident ({username, name}; empty if none).
     """
     # Access gate — returns 404 (not 403) for incidents the caller can't see,
     # matching the rest of the per-incident routers. Without this any analyst
@@ -164,6 +217,29 @@ async def get_report_data(
     # C2: affected systems = the incident's compromised entities, in the old row shape.
     affected_systems = await compromised_systems(db, incident_id)
 
+    # E4: report figures (metadata + the SHA-256 of the original) and the OOB log. The hash stored when
+    # the figure was picked is used after a cheap size check; a figure picked before hashes were
+    # stored is decrypted and hashed here. Both in a thread; a bad figure is (None, None), never a 500.
+    report_files = (await db.execute(
+        select(EntityFile)
+        .where(EntityFile.incident_id == incident_id, EntityFile.include_in_report.is_(True))
+        .order_by(EntityFile.uploaded_at, EntityFile.id)
+    )).scalars().all()
+    figure_rows = [(f.file_path, f.nonce_hex, f.file_size, f.report_sha256, f.report_mime) for f in report_files]
+    digests = await asyncio.to_thread(lambda: [
+        ((sha, mime) if report_file_present(path, size) else (None, None)) if sha
+        else report_image_digest(path, nonce)
+        for path, nonce, size, sha, mime in figure_rows])
+
+    oob_log = (await db.execute(
+        select(OOBLog).where(OOBLog.incident_id == incident_id).order_by(OOBLog.created_at)
+    )).scalars().all()
+
+    sign_off_roles = {key: (rid, label) for rid, key, label in (await db.execute(
+        select(OperationalRole.id, OperationalRole.key, OperationalRole.label)
+        .where(OperationalRole.key.in_([k for k, _ in SIGN_OFF_ROLES]))
+    )).all()}
+
     # TI-match enrichment for IOCs — same single-query pattern as list_iocs.
     ti_map: dict[tuple, str] = {}
     if iocs:
@@ -219,12 +295,19 @@ async def get_report_data(
     assignee_ids = {a.assignee_id for a in actions if a.assignee_id}
     assignee_ids |= {d.decided_by_id for d in decisions if d.decided_by_id}
     assignee_ids |= {t.assignee_id for t in tasks if t.assignee_id}
+    # E4: OOB log authors, the closer and the assignees (sign-off names).
+    assignee_ids |= {o.created_by_id for o in oob_log if o.created_by_id}
+    assignee_ids |= {a.user_id for a in assignments if a.user_id}
+    if inc.closed_by_id:
+        assignee_ids.add(inc.closed_by_id)
     username_map = {}
+    fullname_map = {}
     if assignee_ids:
         users = (await db.execute(
-            select(User.id, User.username).where(User.id.in_(assignee_ids))
+            select(User.id, User.username, User.full_name).where(User.id.in_(assignee_ids))
         )).all()
         username_map = {str(u.id): u.username for u in users}
+        fullname_map = {str(u.id): u.full_name for u in users}
     actions_out = []
     for a in actions:
         d = jsonable_encoder(a)
@@ -284,6 +367,60 @@ async def get_report_data(
         })
 
     incident_out = jsonable_encoder(inc, exclude=_EXCLUDE)
+    incident_out["nciss_severity"] = nciss_severity(inc.severity)
+
+    report_files_out = [
+        {"id": str(f.id), "name": f.original_name, "mime": mime, "size": f.file_size,
+         "sha256": sha, "caption": f.report_caption, "integrity": "ok" if sha else "failed"}
+        for f, (sha, mime) in zip(report_files, digests)
+    ]
+
+    redact = _passphrase_redactor(inc.oob_passphrase)
+    oob_log_out = [
+        {
+            "stakeholder_name":    redact(o.stakeholder_name),
+            "channel":             o.channel,
+            "direction":           o.direction,
+            "summary":             redact(o.summary),
+            "verified":            o.verified,
+            "verification_method": redact(o.verification_method),
+            "created_by_username": username_map.get(str(o.created_by_id)) if o.created_by_id else None,
+            "created_at":          _utc_z(o.created_at),
+        }
+        for o in oob_log
+    ]
+
+    # Close sign-off: the reason from the latest incident_close audit row. Only close_incident writes
+    # that row and audit_logs is append-only, so a client can't forge it (a timeline event can be).
+    close_reason = None
+    if inc.status == "closed":
+        details = (await db.execute(
+            select(AuditLog.details)
+            .where(AuditLog.action == "incident_close", AuditLog.resource_type == "incident",
+                   AuditLog.resource_id == str(inc.id))
+            .order_by(AuditLog.timestamp.desc()).limit(1)
+        )).scalar_one_or_none()
+        if isinstance(details, dict) and isinstance(details.get("reason"), str):
+            close_reason = details["reason"]
+    closure = {
+        "closed":    inc.status == "closed",
+        "closed_at": _utc_z(inc.closed_at),
+        "closed_by": username_map.get(str(inc.closed_by_id)) if inc.closed_by_id else None,
+        "reason":    close_reason,
+    }
+
+    sign_offs = []
+    for key, default_label in SIGN_OFF_ROLES:
+        rid, label = sign_off_roles.get(key, (None, default_label))
+        sign_offs.append({
+            "role_key":   key,
+            "role_label": label,
+            "assignees":  [
+                {"username": a.username,
+                 "name": (fullname_map.get(str(a.user_id)) if a.user_id else None) or a.username}
+                for a in assignments if rid is not None and a.role_id == rid
+            ],
+        })
 
     return {
         "generated_at":     now.isoformat(),
@@ -312,6 +449,10 @@ async def get_report_data(
         "stakeholders":     stakeholders_out,
         "attributions":     attributions_out,
         "affected_systems": jsonable_encoder(list(affected_systems)),
+        "report_files":     report_files_out,
+        "oob_log":          oob_log_out,
+        "closure":          closure,
+        "sign_offs":        sign_offs,
     }
 
 

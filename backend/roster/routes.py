@@ -4,6 +4,9 @@ Global:
   GET  /api/roster                      — list all analyst+admin users with profile + load
   PATCH /api/roster/{user_id}           — upsert own profile (or any for admin)
 
+Out-of-band contact methods (E2) are personal data: returned to analysts and admins only; the
+key is left out of the response for viewers (response_model_exclude_unset + never set).
+
 Per-incident (mounted at /api/incidents):
   GET  /{incident_id}/roster/coverage   — all CISA roles + who is assigned to each
 """
@@ -14,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
 from incidents.access import get_accessible_incident
@@ -30,6 +34,7 @@ router          = APIRouter()
 incident_router = APIRouter()
 
 _AVAILABLE_ROLES = {"admin", "analyst"}
+_OOB_READERS = {"admin", "analyst"}          # effective role (an API token's cap applies)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -47,7 +52,8 @@ async def _get_or_create_profile(db: AsyncSession, user_id: uuid.UUID) -> Respon
 
 # ─── Global roster ────────────────────────────────────────────────────────────
 
-@router.get("", response_model=RosterList, summary="List the responder roster")
+@router.get("", response_model=RosterList, response_model_exclude_unset=True,
+            summary="List the responder roster")
 async def list_roster(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
@@ -58,6 +64,8 @@ async def list_roster(
     (skills, availability, notes) and current active (non-closed) incident
     count. Any authenticated user may read. Optionally filter by `availability`
     and a free-text `q` matched against username and full name.
+    Analysts and admins also get each responder's `oob_contact_methods`; for
+    viewers that key is omitted.
     """
     # Active incident count per user (incidents not closed).
     load_subq = (
@@ -95,8 +103,10 @@ async def list_roster(
         )
 
     rows = (await db.execute(stmt)).all()
+    show_oob = user.role in _OOB_READERS
     items = []
     for u, profile, count in rows:
+        extra = {"oob_contact_methods": (profile.oob_contact_methods or []) if profile else []} if show_oob else {}
         items.append(RosterEntry(
             user_id=u.id,
             username=u.username,
@@ -106,6 +116,7 @@ async def list_roster(
             availability=profile.availability if profile else "available",
             notes=profile.notes if profile else None,
             active_incident_count=int(count),
+            **extra,
         ))
     return RosterList(items=items)
 
@@ -118,10 +129,11 @@ async def update_roster_profile(
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> RosterEntry:
-    """Update a responder profile's skills, availability, and notes (creating
-    the profile if absent). Requires the analyst role; you may only update your
-    own profile unless you are an admin. Returns the updated roster entry with
-    its active incident count.
+    """Update a responder profile's skills, availability, notes and out-of-band
+    contact methods (creating the profile if absent). Requires the analyst role;
+    you may only update your own profile unless you are an admin. A change to
+    `oob_contact_methods` is audited (`responder_oob_update`, a count only, never
+    the values). Returns the updated roster entry with its active incident count.
     """
     if user.id != user_id and user.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Can only update your own profile")
@@ -139,6 +151,15 @@ async def update_roster_profile(
         profile.availability = req.availability
     if req.notes is not None:
         profile.notes = req.notes or None
+    if req.oob_contact_methods is not None:
+        oob = [m.model_dump() for m in req.oob_contact_methods]
+        if oob != (profile.oob_contact_methods or []):
+            profile.oob_contact_methods = oob
+            await write_audit(
+                db, "responder_oob_update",
+                resource_type="user", resource_id=str(user_id), resource_label=target.username,
+                details={"methods": len(oob), "own_profile": user.id == user_id},
+            )
     profile.updated_at = utcnow()
 
     await db.commit()
@@ -162,6 +183,7 @@ async def update_roster_profile(
         availability=profile.availability,
         notes=profile.notes,
         active_incident_count=int(count),
+        oob_contact_methods=profile.oob_contact_methods or [],
     )
 
 

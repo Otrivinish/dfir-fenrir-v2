@@ -12,6 +12,8 @@ import Correlations from './pages/Correlations.jsx'
 import ThreatIntelHub from './pages/ThreatIntelHub.jsx'
 import ThreatActors from './pages/ThreatActors.jsx'
 import Metrics from './pages/Metrics.jsx'
+import Readiness from './pages/Readiness.jsx'
+import Contacts from './pages/Contacts.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import Incidents from './pages/Incidents.jsx'
 import Playbooks from './pages/Playbooks.jsx'
@@ -231,6 +233,8 @@ export default function App() {
               {/* Metrics left Admin (D5); old bookmarks redirect. Outside RequireAdmin so analysts get through. */}
               <Route path="/admin/metrics"     element={<Navigate to="/metrics" replace />} />
               <Route path="/metrics"           element={<RequireAnalyst><Metrics /></RequireAnalyst>} />
+              <Route path="/readiness"         element={<RequireAnalyst><Readiness /></RequireAnalyst>} />
+              <Route path="/contacts"          element={<RequireAnalyst><Contacts /></RequireAnalyst>} />
               <Route path="/on-call"           element={<OnCall />} />
               <Route path="/handoffs"          element={<Handoffs />} />
               <Route path="/roster"            element={<Roster />} />

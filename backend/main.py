@@ -98,6 +98,8 @@ from roster.routes import router as roster_router, incident_router as roster_inc
 from integrations.routes import router as integrations_router
 from inbound_webhooks.routes import router as inbound_webhooks_router
 from metrics.routes import router as metrics_router
+from readiness.routes import router as readiness_router
+from contacts.routes import router as contacts_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -325,6 +327,8 @@ app.include_router(threat_actors_incident_router, prefix="/api/incidents",      
 app.include_router(warroom_router,           prefix="/api/incidents",           tags=["War Room"])
 app.include_router(dashboard_router,       prefix="/api/dashboard",      tags=["Dashboard"])
 app.include_router(metrics_router,         prefix="/api/metrics",         tags=["Metrics"])
+app.include_router(readiness_router,       prefix="/api/readiness",       tags=["Readiness"])
+app.include_router(contacts_router,        prefix="/api/contacts",        tags=["Contacts"])
 app.include_router(correlations_router,    prefix="/api/correlations",   tags=["Correlations"])
 app.include_router(threat_intel_router,    prefix="/api/threat-intel",   tags=["Threat Intel"])
 # Notifications: REST under /api, WebSocket at /api/notifications/ws

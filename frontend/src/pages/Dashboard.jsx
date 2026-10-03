@@ -6,6 +6,8 @@ import { relative, formatLocal } from '../lib/datetime.js'
 import SevBadge, { SEV_PALETTE } from '../components/SevBadge.jsx'
 import IncidentCreateModal from '../components/IncidentCreateModal.jsx'
 import TagChip from '../components/TagChip.jsx'
+import ReadinessBanner from '../components/ReadinessBanner.jsx'
+import OobContact from '../components/OobContact.jsx'
 
 const STALE_DAYS = 7
 const LS_MINE = 'fenrir.dashboard.mine'
@@ -497,6 +499,9 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Readiness blockers (E1) — only while one fails */}
+      <ReadinessBanner />
+
       {/* Context strip — single line with on-call, stale, overdue legal */}
       <ContextStrip
         oncall={oncall}
@@ -673,6 +678,13 @@ function ContextStrip({ oncall, staleCount, overdueTotal }) {
         <div style={{ fontSize: 12 }}>
           <span style={{ color: 'var(--dim)' }}>On-call: </span>
           <span style={{ color: 'var(--text)', fontWeight: 600 }}>{name}</span>
+          {'oob_contact_methods' in oncall && (
+            <span className="ctx-oob">
+              <span aria-hidden="true" style={{ color: 'var(--muted)' }}> · </span>
+              <span className="ctx-oob-label" style={{ color: 'var(--text)' }}>Out-of-band: </span>
+              <OobContact methods={oncall.oob_contact_methods} compact />
+            </span>
+          )}
         </div>
       </div>
     )

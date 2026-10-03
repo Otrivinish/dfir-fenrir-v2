@@ -524,7 +524,120 @@ const SWATCH = {
   tactical:        '#dc2626',
 }
 
+// ── Report figures (E4) ───────────────────────────────────────────────────────
+// Each file picked in Supporting documents (report data `report_files`) is fetched
+// from the download endpoint, hashed (SHA-256 of the original bytes) and embedded
+// as a data: URI. Images over 1.5 MB are downscaled to at most 1920 px (JPEG).
+// Embedded images are capped at 7 MiB in total: a saved report is a JSON body and
+// Caddy caps those at 10 MiB. Figures past the cap are listed without the image.
+
+const FIG_DOWNSCALE_BYTES = 1.5 * 1024 * 1024
+const FIG_MAX_PX          = 1920
+const FIG_CAP_CHARS       = 7 * 1024 * 1024
+// The whole saved-report JSON body (HTML + metadata) must stay under Caddy's 10 MiB request limit.
+const SAVE_MAX_BYTES      = 9.5 * 1024 * 1024
+const INTEGRITY_FAILED_NOTE = 'Integrity check failed: the stored file is missing, tampered with or does not match its recorded SHA-256, so it is not embedded.'
+
+// Raster formats a report may embed, from the magic bytes (never the stored type).
+function sniffImage(b) {
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png'
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif'
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
+      && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp'
+  return null
+}
+
+function hexOf(buf) {
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(r.result)
+    r.onerror = () => reject(r.error)
+    r.readAsDataURL(blob)
+  })
+}
+
+async function downscaleToJpeg(blob) {
+  const bmp = await createImageBitmap(blob)
+  const scale = Math.min(1, FIG_MAX_PX / Math.max(bmp.width, bmp.height))
+  const w = Math.max(1, Math.round(bmp.width * scale))
+  const h = Math.max(1, Math.round(bmp.height * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  ctx.fillStyle = '#ffffff'   // JPEG has no alpha: flatten transparent screenshots onto white
+  ctx.fillRect(0, 0, w, h)
+  ctx.drawImage(bmp, 0, 0, w, h)
+  bmp.close()
+  return { src: canvas.toDataURL('image/jpeg', 0.85), w, h }
+}
+
+async function prepareFigures(incId, files) {
+  let total = 0
+  const figures = []
+  for (const [i, f] of files.entries()) {
+    const fig = { n: i + 1, name: f.name, caption: f.caption, mime: f.mime, size: f.size, sha256: f.sha256, integrity: f.integrity, src: null, note: null }
+    figures.push(fig)
+    // The server could not verify the stored file: never fetch or embed it.
+    if (f.integrity === 'failed') { fig.sha256 = null; fig.note = INTEGRITY_FAILED_NOTE; continue }
+    try {
+      const res = await fetch(api.incidentFileDownloadUrl(incId, f.id), { credentials: 'same-origin' })
+      if (res.status === 409) { fig.integrity = 'failed'; fig.sha256 = null; fig.note = INTEGRITY_FAILED_NOTE; continue }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const buf = await res.arrayBuffer()
+      const sha = hexOf(await crypto.subtle.digest('SHA-256', buf))
+      if (f.sha256 && sha !== f.sha256) {
+        fig.integrity = 'failed'
+        fig.sha256 = null
+        fig.note = INTEGRITY_FAILED_NOTE
+        continue
+      }
+      fig.sha256 = sha
+      const mime = sniffImage(new Uint8Array(buf.slice(0, 12)))
+      if (!mime) { fig.note = 'Not embedded: the file is not a PNG, JPEG, GIF or WebP image.'; continue }
+      let src
+      if (buf.byteLength > FIG_DOWNSCALE_BYTES) {
+        const d = await downscaleToJpeg(new Blob([buf], { type: mime }))
+        src = d.src
+        fig.note = `Downscaled for the report to ${d.w}×${d.h} px (JPEG); the SHA-256 is of the original file.`
+      } else {
+        src = await blobToDataUrl(new Blob([buf], { type: mime }))
+      }
+      if (total + src.length > FIG_CAP_CHARS) {
+        fig.overCap = true
+        fig.note = 'Not embedded: the report’s 7 MiB limit for embedded images was reached. Open the original in Supporting documents.'
+        continue
+      }
+      total += src.length
+      fig.src = src
+    } catch (e) {
+      fig.note = `Not embedded: the image could not be loaded (${e.message || 'error'}).`
+    }
+  }
+  return { figures, total, overCap: figures.filter(f => f.overCap).length }
+}
+
 // ── Report generation ─────────────────────────────────────────────────────────
+
+// The preview tab is opened inside the click (a tab opened after an await is a blocked pop-up in
+// most browsers) and the report is written into it once ready. null when the browser blocked it.
+function openPreviewWindow() {
+  const w = window.open('', '_blank')
+  if (w) {
+    w.document.write('<!doctype html><title>Generating report…</title><p>Generating the report…</p>')
+    w.document.close()
+  }
+  return w
+}
+
+function closeWindow(w) {
+  if (w && !w.closed) w.close()
+}
 
 // "Include sections": one checkbox per report section (+ the cover stats strip),
 // from the same list the report uses. Everything is included by default.
@@ -547,6 +660,9 @@ export default function Reports({ inc }) {
   const [sections,               setSections]               = useState(DEFAULT_SECTIONS)
   const toggleSection = (key) => setSections(s => ({ ...s, [key]: !s[key] }))
   const fileRef = useRef(null)
+  // E4: figures over the 7 MiB embed cap — the prepared report waits here for Continue / Cancel.
+  const [capWarning, setCapWarning] = useState(null)   // { action, overCap, count }
+  const pendingRef = useRef(null)
 
   const [history,        setHistory]        = useState([])
   const [historyLoading, setHistoryLoading] = useState(true)
@@ -653,61 +769,116 @@ export default function Reports({ inc }) {
   }
 
   async function generate(action) {
+    const win = action === 'preview' ? openPreviewWindow() : null   // synchronously, in the click
     setLoading(true)
     setError(null)
+    setCapWarning(null)
+    pendingRef.current = null
     try {
       const data = await api.getReportData(inc.id)
-      const rawHtml = generateReport(data, {
-        templateId, mode, logo, footer,
-        classification, audience,
-        includeInternalEvents,
-        includeTimelineAppendix,
-        sections,
-      })
-      // Self-describing SHA-256: the placeholder in the footer is replaced
-      // with the SHA-256 of the document while the placeholder was still in
-      // place. Verifiers reverse the substitution to confirm integrity.
-      const html = await injectReportSha256(rawHtml)
-      if (action === 'preview') {
-        const w = window.open('', '_blank')
-        if (!w) { setError('Pop-up blocked — please allow pop-ups for this site.'); return }
-        w.document.write(html)
-        w.document.close()
-      } else {
-        const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
-        const url  = URL.createObjectURL(blob)
-        const a    = document.createElement('a')
-        const slug = inc.title.slice(0, 30).replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-')
-        a.href     = url
-        a.download = `fenrir-report-${mode}-${slug}.html`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
+      // Figures: fetched, hashed and embedded only when the section is ticked.
+      let figures = []
+      const picked = data.report_files || []
+      if (sections.attachments !== false && picked.length) {
+        const prep = await prepareFigures(inc.id, picked)
+        figures = prep.figures
+        if (prep.overCap) {
+          // Warn before anything is shown or saved; Continue is a fresh click that opens
+          // its own preview tab, so this one is closed (the warning is in this tab).
+          closeWindow(win)
+          pendingRef.current = { data, figures }
+          setCapWarning({ action, overCap: prep.overCap, count: picked.length })
+          return
+        }
       }
-
-      // Persist to history for audit-grade re-download with SHA-256 integrity.
-      // Best-effort — surfacing a save error here would block the analyst's
-      // primary workflow (preview/download), so fall back quietly.
-      try {
-        await api.saveReport(inc.id, {
-          report_type:    mode === 'executive' ? 'exec' : 'full',
-          template_id:    templateId,
-          classification: classification || `TLP:${(inc.tlp || 'AMBER').toUpperCase()}`,
-          audience:       audience || null,
-          footer_text:    footer || null,
-          html,
-        })
-        loadHistory()
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn('Report history save failed:', e?.message)
-      }
+      await renderAndSave(action, data, figures, win)
     } catch (e) {
+      closeWindow(win)
       setError(e.message || 'Failed to generate report')
     } finally {
       setLoading(false)
     }
+  }
+
+  async function continueOverCap() {
+    const pending = pendingRef.current
+    const action = capWarning?.action
+    pendingRef.current = null
+    setCapWarning(null)
+    if (!pending) return
+    const win = action === 'preview' ? openPreviewWindow() : null   // synchronously, in the click
+    setLoading(true)
+    setError(null)
+    try {
+      await renderAndSave(action, pending.data, pending.figures, win)
+    } catch (e) {
+      closeWindow(win)
+      setError(e.message || 'Failed to generate report')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function renderAndSave(action, data, figures, win) {
+    const rawHtml = generateReport(data, {
+      templateId, mode, logo, footer,
+      classification, audience,
+      includeInternalEvents,
+      includeTimelineAppendix,
+      sections,
+      figures,
+    })
+    // Self-describing SHA-256: the placeholder in the footer is replaced
+    // with the SHA-256 of the document while the placeholder was still in
+    // place. Verifiers reverse the substitution to confirm integrity.
+    const html = await injectReportSha256(rawHtml)
+    const problems = []
+    if (action === 'preview') {
+      if (win && !win.closed) {
+        win.document.open()
+        win.document.write(html)
+        win.document.close()
+      } else {
+        problems.push('Pop-up blocked: allow pop-ups for this site to preview the report.')
+      }
+    } else {
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      const slug = inc.title.slice(0, 30).replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-')
+      a.href     = url
+      a.download = `fenrir-report-${mode}-${slug}.html`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    }
+
+    // Persist to history for audit-grade re-download with SHA-256 integrity — also when the
+    // preview pop-up was blocked. The preview/download above has already happened, so a failed
+    // save is reported, not thrown. The whole JSON body must fit the 10 MiB request limit.
+    const payload = {
+      report_type:    mode === 'executive' ? 'exec' : 'full',
+      template_id:    templateId,
+      classification: classification || `TLP:${(inc.tlp || 'AMBER').toUpperCase()}`,
+      audience:       audience || null,
+      footer_text:    footer || null,
+      html,
+    }
+    const bytes = new Blob([JSON.stringify(payload)]).size
+    if (bytes > SAVE_MAX_BYTES) {
+      problems.push(`Not saved to report history: the report is ${fmtBytes(bytes)}, over the ${fmtBytes(SAVE_MAX_BYTES)} `
+        + 'save limit. Untick some figures in Supporting documents (or the Figures section) and generate it again.')
+    } else {
+      try {
+        await api.saveReport(inc.id, payload)
+        loadHistory()
+        if (problems.length) problems.push('The report was saved to Report history below.')
+      } catch (e) {
+        problems.push(`Not saved to report history: ${e?.message || 'the save failed'}.`)
+      }
+    }
+    if (problems.length) setError(problems.join(' '))
   }
 
   return (
@@ -998,8 +1169,27 @@ export default function Reports({ inc }) {
 
       {/* Error */}
       {error && (
-        <div className="alert error" style={{ marginBottom: 'var(--space-3)' }}>
-          <span className="alert-icon">!</span><span>{error}</span>
+        <div className="alert error report-error" role="alert" style={{ marginBottom: 'var(--space-3)' }}>
+          <span className="alert-icon">!</span><span style={{ color: 'var(--text)' }}>{error}</span>
+        </div>
+      )}
+
+      {/* Figures over the embedded-image cap: warn before anything is shown or saved */}
+      {capWarning && (
+        <div className="alert warn report-cap-warning" role="alert" style={{ marginBottom: 'var(--space-3)' }}>
+          <span className="alert-icon">!</span>
+          <div style={{ color: 'var(--text)' }}>
+            <div>
+              {capWarning.overCap} of {capWarning.count} report figure{capWarning.count !== 1 ? 's' : ''} would
+              take the embedded images over the 7 MiB limit (a saved report may be at most 10 MiB).
+              {capWarning.overCap === 1 ? ' It' : ' They'} will be listed with caption and SHA-256, without the image.
+              Untick some figures in Supporting documents to embed them all.
+            </div>
+            <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-2)', flexWrap: 'wrap' }}>
+              <button type="button" className="btn primary" onClick={continueOverCap}>Continue and save</button>
+              <button type="button" className="btn ghost" onClick={() => { pendingRef.current = null; setCapWarning(null) }}>Cancel</button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1034,6 +1224,10 @@ export default function Reports({ inc }) {
         <span style={{ fontSize: 11, color: 'var(--dim)', marginLeft: 'var(--space-1)' }}>
           Self-contained HTML — open in browser and print / save as PDF
         </span>
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 'var(--space-2)' }}>
+        Figures: tick <strong>Include in report</strong> on screenshots in Supporting documents. They are embedded with
+        their SHA-256 (images over 1.5 MB downscaled to 1920 px), up to 7 MiB in total.
       </div>
 
       {/* Tip */}

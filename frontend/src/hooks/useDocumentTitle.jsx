@@ -26,6 +26,8 @@ const ROUTES = [
   ['/on-call',                'On-Call'],
   ['/handoffs',               'Shift handoffs'],
   ['/metrics',                'Metrics'],
+  ['/readiness',              'Readiness'],
+  ['/contacts',               'Contacts'],
   ['/roster',                 'IR Roster'],
   ['/help',                   'Help'],
   ['/settings/*',             'Settings'],

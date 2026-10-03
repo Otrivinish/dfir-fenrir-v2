@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api/client.js'
 import { useAuth } from '../hooks/useAuth.jsx'
+import OobContact from '../components/OobContact.jsx'
+
+// The API returns oob_contact_methods to analysts and admins only (E2); show it when present.
+const hasOob = (e) => !!e && 'oob_contact_methods' in e
 
 function fmtDate(dateStr) {
   // dateStr is YYYY-MM-DD from the backend; display as-is (no TZ shift for calendar dates)
@@ -128,6 +132,7 @@ export default function OnCall() {
   }
 
   const cur = data.current
+  const showOob = data.items.some(hasOob)
 
   return (
     <div className="page-wrap">
@@ -174,6 +179,12 @@ export default function OnCall() {
               On-call now · {fmtDate(cur.start_date)} – {fmtDate(cur.end_date)}
               {cur.notes && <span style={{ marginLeft: 8 }}>{cur.notes}</span>}
             </div>
+            {hasOob(cur) && (
+              <div className="oncall-oob" style={{ fontSize: 12, marginTop: 4 }}>
+                <span style={{ color: 'var(--muted)' }}>Out-of-band: </span>
+                <OobContact methods={cur.oob_contact_methods} />
+              </div>
+            )}
           </div>
           <span className="pill" style={{ marginLeft: 'auto', background: 'var(--ok)', color: '#000', fontSize: 11 }}>
             ACTIVE
@@ -198,6 +209,7 @@ export default function OnCall() {
                 <th>Start</th>
                 <th>End</th>
                 <th>Notes</th>
+                {showOob && <th>Out-of-band contact</th>}
                 <th>Status</th>
                 {isAdmin && <th style={{ width: 80 }} />}
               </tr>
@@ -216,6 +228,7 @@ export default function OnCall() {
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>{fmtDate(e.start_date)}</td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>{fmtDate(e.end_date)}</td>
                     <td style={{ color: 'var(--muted)', fontSize: 13 }}>{e.notes || '—'}</td>
+                    {showOob && <td style={{ fontSize: 12 }}>{hasOob(e) && <OobContact methods={e.oob_contact_methods} />}</td>}
                     <td>
                       {isActive
                         ? <span className="pill" style={{ background: 'var(--ok)', color: '#000', fontSize: 11 }}>Active</span>

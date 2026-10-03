@@ -24,8 +24,10 @@ const NAV_GROUPS = [
     { to: '/threat-actors', label: 'Threat actors',  icon: '◇' },
   ] },
   { label: 'Prepare', items: [
+    { to: '/readiness',    label: 'Readiness',       icon: '⊙', roles: ANALYST },
     { to: '/playbooks',    label: 'Playbooks',       icon: '▤' },
     { to: '/roster',       label: 'IR roster',       icon: '◈' },
+    { to: '/contacts',     label: 'Contacts',        icon: '☎', roles: ANALYST },
     { to: '/settings/stakeholder-matrix', label: 'Stakeholder matrix', icon: '⊞', roles: ADMIN },
     { to: '/settings/validated-tools',    label: 'Validated tools',    icon: '✓', roles: ADMIN },
   ] },

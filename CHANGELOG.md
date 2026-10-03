@@ -336,6 +336,30 @@ Built from the IR-expert workflow audit of 2026-10-01: 21 approved pieces (A1–
   - New LE packages record `signature_kind=hmac-sha256`.
   - Every audit-log page a lead reads is audited.
 
+### Added (E-wave, 2026-10-03)
+
+- **Readiness.** `GET /api/readiness` runs 11 CSF-tagged preparation checks. Prepare → Readiness shows them, the Dashboard shows a banner while a blocker fails, and the New-incident form lists failing blockers without stopping you. MCP gets a readiness view. (E1)
+
+- **Contacts and DPO.** Prepare → Contacts holds supervisory authority, CSIRT, police, insurer, IR retainer and PR contacts, verified and copied into incidents. Fenrir gains a Data Protection Officer role. Responders' out-of-band contacts appear on On-call and the Dashboard. Readiness adds 3 checks. (E2)
+
+- **Report additions.** Screenshots from Supporting documents can go into the final report as numbered figures with their SHA-256, alongside a communications log, an approval and sign-off block, NIST CSF 2.0 IDs on every section and NCISS severity. (E4)
+
+- **E-wave fixes.** (E-fix)
+  - A corrupt figure is marked "integrity failed" instead of breaking the report.
+  - The sign-off reason comes from the close audit record, so it can't be forged.
+  - The timeline refuses server-reserved event sources.
+  - MCP hides out-of-band contacts by default.
+  - Readiness details for sensitive checks are admin-only.
+  - Over-large images are refused.
+  - Figure hashes are stored.
+- ⚠ **E-wave fix API changes.** (E-fix)
+  - `POST /timeline` returns 422 `reserved_system_source` for server-only sources.
+  - Files download/include return 409 `file_integrity_failed` for tampered files.
+  - Including a report figure returns 422 `image_too_large` over 16384 px or 50 MP.
+  - `report_files[]` gains `integrity`.
+  - The new report-data timestamps end in `Z`.
+  - Migration adds `entity_files.report_sha256` and `report_mime`.
+
 ### Upgrade notes
 
 - **Migrations run automatically** through the `migrate` service. They add columns and run guarded one-time backfills.

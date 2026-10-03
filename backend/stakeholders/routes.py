@@ -1,4 +1,9 @@
-"""Per-incident stakeholder contact registry."""
+"""Per-incident stakeholder contact registry.
+
+E2: POST …/stakeholders with `contact_id` copies a Contacts-directory entry (org_contacts) into the
+incident. The copy is independent: editing or deleting the directory entry later never changes it.
+"""
+import copy
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -8,8 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
+from core.errors import ApiError
 from incidents.access import get_accessible_incident
-from models import Incident, IncidentStakeholder, User
+from models import Incident, IncidentStakeholder, OrgContact, User
 from schemas import (
     IncidentStakeholderBulkCreate,
     IncidentStakeholderBulkResult,
@@ -42,6 +48,29 @@ async def _get_stakeholder(
 
 def _to_out(s: IncidentStakeholder) -> IncidentStakeholderOut:
     return IncidentStakeholderOut.model_validate(s)
+
+
+_COPIED = ("name", "title", "organization", "type", "contact_methods", "notes", "available_hours")
+
+
+async def _stakeholder_values(db: AsyncSession, req: IncidentStakeholderCreate) -> dict:
+    """The new row's fields: the request's, or a copy of the directory entry `contact_id` with any
+    non-null field the request also sent taking precedence."""
+    def sent(f):
+        v = getattr(req, f)
+        return [m.model_dump() for m in v] if f == "contact_methods" else v
+    if req.contact_id is None:
+        return {f: sent(f) for f in _COPIED}
+    src = (await db.execute(select(OrgContact).where(OrgContact.id == req.contact_id))).scalar_one_or_none()
+    if src is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "contact_not_found",
+                       "No Contacts-directory entry has that contact_id.")
+    vals = {f: copy.deepcopy(getattr(src, f)) for f in _COPIED}
+    vals["contact_methods"] = vals["contact_methods"] or []
+    for f in req.model_fields_set & set(_COPIED):
+        if getattr(req, f) is not None:
+            vals[f] = sent(f)
+    return vals
 
 
 @router.get("/{incident_id}/stakeholders", response_model=IncidentStakeholderList,
@@ -85,30 +114,34 @@ async def create_stakeholder(
     methods, notes, availability) to the incident. Requires the analyst role.
     Rejected if the incident is closed. The creation is audited and the new
     stakeholder returned.
+
+    With `contact_id` the stakeholder is a copy of that Contacts-directory entry
+    (GET /api/contacts); `name` is then optional and any other non-null field
+    you send overrides the copied value. The incident keeps its own copy: later
+    directory edits or deletes don't change it. Unknown contact_id: 422
+    contact_not_found.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
 
+    vals = await _stakeholder_values(db, req)
     row = IncidentStakeholder(
         id=uuid.uuid4(),
         incident_id=incident_id,
-        name=req.name,
-        title=req.title,
-        organization=req.organization,
-        type=req.type,
-        contact_methods=[m.model_dump() for m in req.contact_methods],
-        notes=req.notes,
-        available_hours=req.available_hours,
         created_by_id=user.id,
+        **vals,
     )
     db.add(row)
     await db.flush()
+    details = {"incident_id": str(incident_id), "type": row.type}
+    if req.contact_id is not None:
+        details["contact_id"] = str(req.contact_id)
     await write_audit(
         db, "stakeholder_create",
         resource_type="stakeholder", resource_id=str(row.id),
-        resource_label=req.name,
-        details={"incident_id": str(incident_id), "type": req.type},
+        resource_label=row.name,
+        details=details,
     )
     await db.commit()
     return _to_out(row)
