@@ -206,10 +206,16 @@ services:
     memswap_limit: 6g
     pids_limit: 256
     # Immutable code: the only writable paths are the data volumes, the scratch
-    # volume at /tmp, and a tiny private tmpfs for the first-run bootstrap token.
+    # volume at /tmp, a tiny private tmpfs for the first-run bootstrap token, and the
+    # parser scratch tmpfs.
     read_only: true
     tmpfs:
       - /app/data:uid=1001,gid=1001,mode=0700,size=1m,noexec,nosuid
+      # Parser scratch (approved 2026-10-03, Wave C fix-up M2): EVTX/SQLite parsers need a file,
+      # and from an exhibit that file is decrypted evidence. RAM-only (never swapped:
+      # memswap_limit == mem_limit), private to uid 1001; deleted after each parse and swept
+      # at startup. 1g counts against mem_limit only while a parse is running.
+      - /run/fenrir-parse:uid=1001,gid=1001,mode=0700,size=1g,noexec,nosuid,nodev
     # Credentials come from /run/secrets (pydantic-settings secrets_dir): the DB URL is
     # built from PG* + postgres_password; Redis authenticates as ACL user `fenrir`.
     secrets:
@@ -241,6 +247,7 @@ services:
       - BRANDING_PATH=/branding
       - REPORTS_PATH=/generated_reports
       - LOGS_PATH=/asset_logs
+      - PARSE_TMP_DIR=/run/fenrir-parse   # the parser tmpfs above (forensic/parser.py)
       - PGHOST=postgres
       - PGUSER=fenrir_app
       - PGDATABASE=fenrir

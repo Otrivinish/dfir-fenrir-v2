@@ -2,7 +2,7 @@
 
 All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
-## [Unreleased] — branch `feature/ux-002` (2026-10-01)
+## [Unreleased] — `feature/ux-002` (merged, #28) and branch `fix/ebm` (2026-10-01)
 
 ### Changed
 
@@ -19,6 +19,24 @@ All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
 - 49 headless-Chrome checks on the component in isolation — Apply/Cancel/Esc/outside click, keyboard, mouse wheel, timezone switch, `utc` fields, Clear, `required`, daylight-saving gap and repeat (Europe/Stockholm), a half-hour zone (Asia/Kolkata), placement at 390–1920 px, all three themes — 0 failures, 0 console errors. `npm run build` clean.
 - Not yet checked in the running app: the 10 pages that use it sit behind login.
+
+### Fixed — post-incident report
+
+- **Timestamps follow the ISO 8601 rule.** They used to follow the reader's browser language (`09/15/2026, 10:30 GMT+2`, or `15.09.2026, 10:30 MESZ` in German), so one report read differently on different machines.
+  - Now: `YYYY-MM-DD HH:MM:SS ±HH:MM`, 24 h, in the operator's Fenrir timezone, using the same formatter as the rest of the app.
+  - The Timeline appendix used the browser's timezone instead of Fenrir's, so events late in the day could land under the wrong date. Fixed too.
+- **Cost Tracking "Phase" column** was always blank: it read `phase`, but the cost data calls it `ir_phase`.
+- **Playbook tasks show their assignee.** The report data now includes `assignee_username` for each task; before, only the user ID was sent, and the report printed nothing.
+- **"Include sections" checkboxes work.** The 13 old checkboxes had no effect and partly named sections that no longer exist (e.g. "Entity graph").
+  - **New list:** one checkbox for each of the 19 report sections, plus "Key metrics strip (cover)". All of them come from one shared list (`REPORT_SECTIONS` in `reportTemplates.js`) that the report, "Show structure" and the Reports page all use.
+  - **Behaviour:** unticked sections are left out and the rest are renumbered. "Show structure" shows them greyed out as "Not included".
+  - **Executive mode** still leaves out its four full-report-only sections; their checkboxes are greyed out there.
+  - **Always printed:** the classification marking, TLP banner and cover are never left out.
+- **Verification:**
+  - **Generator:** report checks on the real generator all pass, in two browser languages (en-US, de-DE) and two browser timezones, with the same Fenrir timezone. All 12 timestamps are identical across runs.
+  - **Checkboxes:** every checkbox removes exactly its own section. "Show structure" matched the report's numbering in 64/64 random checkbox combinations.
+  - **API:** `assignee_username` was checked through the real report-data endpoint (rolled back).
+  - **GUI:** the Reports page was checked in a headless browser.
 
 ### Incidents — immutable incident reference
 
@@ -223,3 +241,118 @@ Every version, including transitive ones, was released **at least 14 days** befo
 - A pre-existing warning is still logged: duplicate OpenAPI operation ID `mint_evidence`.
 - The frontend bundle grew ~11% (Markdown rendering in reports).
 - `backend/requirements.txt` (from #25) describes `pdfplumber` as having "no native PDF renderer in the attack surface", but `pdfplumber` 0.11 depends on `pypdfium2` (native PDFium), which is installed in the image.
+
+---
+
+## IR workflow waves — branch `fix/ebm` (2026-10-03)
+
+Built from the IR-expert workflow audit of 2026-10-01: 21 approved pieces (A1–A5, B1–B5, C1–C5, D1–D5, E3), two owner-approved extras (AX1, AX2) and six review fix passes. Pieces are tagged in brackets.
+
+### Security
+- **Dark Operation now blocks outbound alerts.** Teams, Slack and alert-email messages about a dark incident aren't sent, each blocked message is logged in the audit log, and an incident can be opened dark. (A1)
+- **Dark Operation skips automatic email DNS checks.** The SPF/DKIM/DMARC lookups an email analysis makes on the sender's domain are skipped and audited. The manual domain check still works. (AX1)
+
+### Fixed
+- **Viewers and the Situation board.** (DE-fix)
+  - Viewers land on Incidents instead of a broken Dashboard.
+  - Situation board text is readable in every theme.
+  - Switching incidents shows no stale panels.
+  - Rail counts update right after a change.
+  - LE package screens say HMAC-SHA-256.
+- **LE packages and exports don't freeze the app.** Building an LE package and downloading an export no longer stall the server (from about 20 s to under 0.1 s on a 348 MB package). (DE-fix)
+- **Phase colours and glyphs.** Phase colours are softened to the NIST CSF 2.0 hues and get a symbol each (◇ ◉ ⊘ ↺), so they no longer look like severity. Undefined button classes are fixed, and in-card dropdowns use the standard compact size. (D1)
+- **Metrics leak closed.** Metrics count only incidents you can see; before, they included other teams' incidents. (E3)
+- **Analysts can assign work.** Analysts can assign playbook tasks and response actions, record who decided, and pick colleagues as evidence witnesses. Names replace ID fragments. (A2)
+- **Complete Timeline.** The Timeline and its CSV/HTML exports show every event, not only the first 500. Actions logged straight as Done get a completion time and a Timeline entry. (A3)
+- **Evidence export and imports.** Select all and Unselect all work, and destroyed or verify-failed exhibits are greyed out and refused (409). PCAP IOC import no longer drops earlier rows or crashes. Importing email hops twice no longer duplicates them. (A4)
+- **Edit draft and cost totals.** Saving Tags or Teams no longer discards unsaved Details edits. Costs are totalled per currency in the API (`by_currency`), the panel and reports. (A5)
+- **Concurrent edits are kept.** Saving tags or teams refreshes every Details field you haven't edited, so another responder's change is no longer reverted. (A-fix)
+- **Hop button and Timeline paging.** The email hop button matches what the server can import and offers "Re-import missing hops". Timeline paging can't repeat or skip rows. (A-fix)
+- **Modals scroll.** Long forms scroll inside the modal, and the Save/Create button stays on screen at every window size (56 modals checked). (AX2)
+- **Live notifications work.** The bell, toasts and Dashboard update live in every open tab, and only after the change is saved. (B-fix)
+- **Gate integrity.** Marking an incident false or benign positive outside Detection & Analysis needs a reason. Milestones can't be earlier than Detected, and metrics show how many incidents they exclude. (B-fix)
+- **Wave C security and integrity fixes.** (C-fix-1)
+  - YARA promotes check incident access.
+  - You can't transfer custody to yourself.
+  - Parser column choice is deterministic (parser 2.1.0).
+  - Truncated parses are flagged.
+  - Decrypted evidence is parsed on a RAM-only tmpfs.
+  - Hashing and exports no longer freeze the app.
+- **Wave C UI and MCP fixes.** (C-fix-2)
+  - Containment templates only accept matching target types.
+  - Case-insensitive affected systems.
+  - Timeline host linking is explicit.
+  - Untimestamped import rows can become IOCs.
+  - MCP `add_batch` works again and errors show their code.
+
+### Added
+- **Detection at intake.** New incidents capture Detected (pre-filled with now), How detected and Triage state. SIEM webhooks record the vendor's alert time. (B1)
+- **Declare milestones.** Contained, eradicated and recovered are declared from the incident header, each with a Timeline entry. (B2)
+- **Resolve ≠ Close.** Resolve moves an incident to Post-Incident and keeps it open. Close is a separate sign-off with a reason and records who closed it. Re-open asks for a reason and a phase. After Close, lessons-learned action items stay editable. (B3)
+- **Legal clocks.** Deadlines start from the incident's Detected time, with optional per-regulation anchors. The header shows a countdown per regulation. In-app reminders arrive 12 h and 2 h before, and when overdue. Deadlines can be re-anchored with a reason. (B4)
+- **Phase gates.** `GET /api/incidents/{id}/gates` shows what is still missing before Post-Incident (Gate 1) and before Close (Gate 2). The phase and Close dialogs list the gaps with links, and an override needs a reason, which is audited and posted to the Timeline. (B5)
+- **Containment state on hosts and IOCs.** Response actions link to an entity or IOC. Entities and IOCs show Isolated, Disabled, Blocked or Pending, and the API and MCP can filter actions by target. (C1)
+- **One scope list.** Affected systems are now the incident's compromised entities, so you add a host once. Timeline events pick their host from Entities and carry an IR phase. (C2)
+- **Evidence intake check.** The hash reported by your imaging tool (MD5, SHA-1 or SHA-256) is checked against the uploaded file, and the acquisition time is recorded. Exhibits minted from Email or Browser history appear in the custody log. (C3)
+- **Custody transfer acceptance.** The custodian requests a transfer, and custody changes only when the recipient accepts and records the condition and seals. A pending transfer blocks dispose and seal. (C4)
+- **Timeline Import from an exhibit.** It parses a registered, hash-verified exhibit and logs the examination to custody. A source timezone is required, assumed or inferred times are marked, and untimestamped events are never placed at "now". YARA matches use their scan time. (C5)
+- **Incident-lead rights.** An IC or Deputy analyst can read the incident audit log (the read is audited), build the LE package and set teams on their own incident. `GET /api/incidents/{id}/access` lists your rights. Assignees are notified. (E3)
+- **Incident menu in 800-61 order.** The incident rail has phase-coloured groups, live counts and clearer names (Team, Shift handoffs, Supporting documents). On narrow screens it is one scrolling row. Old URLs still work. (D2)
+- **Situation board.** It is the incident landing tab. Classification shows as one horizontal strip, with milestones, gate status, open actions, team gaps, handoff, next tasks and the newest events on one screen. The timeline API sorts newest-first with `?sort=-event_time`. (D3)
+- **Forensic is now Examine.** Its tabs are in three workflow groups with Collector packages first. Attribution moved under ATT&CK, the Sandbox stub is hidden, and "Register as exhibit" replaces "Mint". Old links redirect. (D4)
+- **Grouped sidebar.** Operate, Investigate, Intel, Prepare, Report and Admin, with Help and Account at the bottom. Metrics moved out of Admin to `/metrics` for analysts. Links follow what each role can open. (D5)
+
+### Changed
+- **Mixed-currency totals.** `GET …/costs/summary` returns `null` top-level totals and currency when an incident mixes currencies; the old totals added EUR and USD together. Use `by_currency`. (A5)
+- **Start phase.** `POST /api/incidents` accepts only `detection_and_analysis` or `containment_eradication_recovery` as the starting phase, and rejects a `detected_at` before `occurred_at` or in the future (422). (B1)
+- **Response metrics fixed.** Entering C/E/R no longer stamps Contained. MTTD, MTTC and MTTR are measured from Detected and drop negative intervals; the old MTTC could come out negative. (B2)
+- ⚠ **Breaking API change: close and re-open need a body.** `POST /api/incidents/{id}/close` requires `{reason}` (≥10 characters), and `…/reopen` requires `{reason, phase}`. Calls without a body return 422. New errors use a flat `{detail, code}` shape. (B3)
+- ⚠ **Legal API is stricter.** Waive needs `completion_notes` (10+ characters); deleting a deadline needs a reason; closed incidents reject initialise, add, delete and re-anchor (409). The NIS2 final report is due one calendar month after the 72h notification; GDPR Art. 34 is labelled an internal target. (B4)
+- ⚠ **Breaking API change: phase gates.** A PATCH into `post_incident` and a POST close return 409 `gate_unmet` until the gate is met, or `override_gate=true` with a reason. `phase=preparation` returns 409, and moving back a phase needs `phase_reason`. False and benign positives close with only a reason. (B5)
+- ⚠ **API changes in the Wave B fixes.**
+  - Notification WebSocket frames are now `{type:"notification", notification:{…}}`.
+  - The legal deadline DELETE takes `{reason}` in the body (`?reason=` is deprecated).
+  - New 422 codes: `triage_reason_required`, `milestone_before_detection`, `milestone_before_occurred`.
+  - Dashboard and metrics add `*_excluded` counts. (B-fix)
+- **`/affected-systems` is deprecated.** DELETE now clears the compromised flag instead of deleting. Entities accept `compromised` and `?compromised=`; timeline events gain `entity_id`. (C2)
+- ⚠ **Evidence upload refuses a mismatching hash.** A target hash that doesn't match the uploaded bytes now returns 422 `hash_mismatch` and nothing is stored. Hashing the data inside a container needs `target_hash_scope=container_media`. (C3)
+- ⚠ **Internal evidence transfers are requests.** `POST …/transfer` no longer moves custody; the recipient must call `…/transfer/accept`. Only the custodian or an admin can start a transfer. (C4)
+- ⚠ **Imported Timeline facts are immutable.** Editing them returns 409, as does disposing an import with promoted events. The LE `timeline.csv` gains four trailing provenance columns. (C5)
+- ⚠ **Wave C fix API changes.** (C-fix-1)
+  - New errors: 422 `recipient_is_requester`, 403 `not_authorised_take_back`, 409 `reparse_required`, 503 `evidence_read_error`.
+  - IOC `entity_id` must belong to the incident.
+  - New flat codes for closed, not-found and parse errors.
+  - Imports add `truncated` and `total_seen`.
+  - The backend has a new tmpfs mount.
+- ⚠ **Containment target types are checked.** A containment template linked to the wrong target type returns 422 `target_type_mismatch`. The deprecated `POST /affected-systems` reuses an existing entity case-insensitively. (C-fix-2)
+- ⚠ **Permission changes.** (E3)
+  - Only the incident lead or an admin can override gates (403 `not_incident_lead`).
+  - Assigning IC/Deputy needs the lead, or the creator or on-call while there is no lead.
+  - An assignee without access gets 422.
+  - `team_ids` is lead-only.
+- ⚠ **Final fix pass changes.** (DE-fix)
+  - A non-admin lead may only add teams they belong to and must keep one (409 `would_lock_out`).
+  - A deactivated IC role grants no lead rights.
+  - New LE packages record `signature_kind=hmac-sha256`.
+  - Every audit-log page a lead reads is audited.
+
+### Upgrade notes
+
+- **Migrations run automatically** through the `migrate` service. They add columns and run guarded one-time backfills.
+  - C2 copies affected systems into compromised entities.
+  - C3 records a hash check for existing evidence.
+  - C5 links old imports to exhibits only on an exact hash match.
+- **Compose change:** the backend has a RAM-only tmpfs at `/run/fenrir-parse` for decrypted parse temp files. Recreate the backend with `docker compose up -d`; `make posture` must stay at 0 failures.
+- **MCP server:** run `fenrir-mcp login` and restart it to pick up the matching tool changes.
+- **API clients:** read the ⚠ entries under Changed. Close/reopen bodies, phase gates, evidence hash checks, custody transfer requests and incident-lead permissions all change request or response contracts.
+
+### Verification
+
+- **Each piece:** rolled-back database tests that call the real routes, plus headless-browser tests of the deployed bundle in all three themes.
+- **Each wave:** an independent review, a full regression run, and negative controls showing the old code fails the new rules.
+- **Final regression:** every suite passes, and nothing persisted.
+- **Live checks passed (2026-10-03).** All pieces were checked against the running stack, through Caddy, with real admin, analyst and viewer accounts. `make smoke` passes 49/0.
+
+### Known issue (pre-existing, not part of this release)
+
+- **Tag filters and threat-actor search return 500.** Any `?tag=` filter (incidents, IOCs, correlations) and threat-actor `?q=` search fail with a 500 error, caused by a cast with no type. This breaks the Dashboard "Top tags" click, and `make smoke` creates a duplicate "[SMOKE] phase gates" incident on each run.

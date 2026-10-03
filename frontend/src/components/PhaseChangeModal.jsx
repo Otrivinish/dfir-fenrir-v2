@@ -1,12 +1,23 @@
 import { useEffect, useState } from 'react'
 import { PHASE } from '../lib/incidentVocab.js'
+import { GateItems, useGate } from './GateItems.jsx'
 
 // Confirmation modal for phase changes from the status-band stepper.
 // `currentPhase` and `targetPhase` are 800-61 R3 values from incidentVocab.
-// `onConfirm` returns a promise; modal shows loading + surfaces errors inline.
-export default function PhaseChangeModal({ currentPhase, targetPhase, onConfirm, onClose }) {
-  const [busy, setBusy]   = useState(false)
-  const [error, setError] = useState(null)
+// Moving into Post-Incident shows Gate 1 from the API; when it is unmet the move needs
+// Override + a justification. Moving back needs a reason. The API enforces both.
+// `onConfirm(targetPhase, { phase_reason?, override_gate? })` returns a promise; the
+// modal shows loading + surfaces errors inline. `canOverride` is the override_gate
+// capability from GET …/access (the incident lead); without it no Override is offered.
+const REASON_MIN = 10
+
+export default function PhaseChangeModal({ incidentId, currentPhase, targetPhase, canOverride = false, onConfirm, onClose }) {
+  const [busy, setBusy]         = useState(false)
+  const [error, setError]       = useState(null)
+  const [reason, setReason]     = useState('')
+  const [override, setOverride] = useState(false)
+  const gated = targetPhase === 'post_incident'
+  const { gate, setGate, loading, error: gateError } = useGate(incidentId, 'post_incident', gated)
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
@@ -24,22 +35,35 @@ export default function PhaseChangeModal({ currentPhase, targetPhase, onConfirm,
   const to   = PHASE[toIdx]
   const verb = goingBack ? 'Revert' : 'Advance'
 
+  const unmet      = gated && !!gate && !gate.met
+  const overriding = unmet && canOverride && override
+  const needReason = goingBack || overriding
+  const n          = reason.trim().length
+  const canSubmit  = !busy && !(gated && loading) && !(unmet && !overriding) && (!needReason || n >= REASON_MIN)
+
   const submit = async () => {
     setError(null); setBusy(true)
+    const extra = {}
+    if (needReason) extra.phase_reason = reason.trim()
+    if (overriding) extra.override_gate = true
     try {
-      await onConfirm(targetPhase)
+      await onConfirm(targetPhase, extra)
     } catch (e) {
-      setError(e.message || 'Could not change phase.')
+      if (e.code === 'gate_unmet' && Array.isArray(e.data?.unmet)) {
+        // The gate changed since it was loaded: show the server's list.
+        setGate(g => ({ gate: 'post_incident', label: g?.label || 'Gate 1', carried_forward: g?.carried_forward || [],
+                        met: false, exempt: false, unmet: e.data.unmet }))
+        setError('The gate is not met: see the list above.')
+      } else {
+        setError(e.message || 'Could not change phase.')
+      }
       setBusy(false)
     }
     // success path: parent unmounts the modal
   }
 
   return (
-    <div
-      className="modal-backdrop"
-     
-    >
+    <div className="modal-backdrop">
       <div className="modal" role="dialog" aria-labelledby="phase-modal-title">
         <div className="modal-head">
           <h2 id="phase-modal-title">{verb} to {to?.label}?</h2>
@@ -52,27 +76,71 @@ export default function PhaseChangeModal({ currentPhase, targetPhase, onConfirm,
           >×</button>
         </div>
         <div className="modal-body">
-          <p style={{ margin: '0 0 var(--space-3) 0', color: 'var(--text)', fontSize: 14, lineHeight: 1.6 }}>
-            Phase will move from <b>{from?.label || currentPhase}</b> to <b>{to?.label}</b>.
-            {' '}This change is recorded in the audit log.
-          </p>
-          {goingBack && (
-            <div className="alert warn" role="status" style={{ marginBottom: 'var(--space-2)' }}>
-              <span className="alert-icon">!</span>
-              <span>You're reverting to an earlier phase. Confirm this matches your runbook.</span>
-            </div>
-          )}
-          {error && (
-            <div className="alert error" role="alert">
-              <span className="alert-icon">!</span>
-              <span>{error}</span>
-            </div>
-          )}
+          <div className="form">
+            <p style={{ margin: 0, color: 'var(--text)', fontSize: 14, lineHeight: 1.6 }}>
+              Phase will move from <b>{from?.label || currentPhase}</b> to <b>{to?.label}</b>.
+              {' '}This change is recorded in the audit log.
+            </p>
+            {goingBack && (
+              <div className="alert warn" role="status">
+                <span className="alert-icon">!</span>
+                <span>You're moving back to an earlier phase. Give the reason; it goes into the audit log.</span>
+              </div>
+            )}
+            {gated && loading && (
+              <span className="field-hint" role="status">Checking Gate 1…</span>
+            )}
+            {gated && gateError && (
+              <div className="alert error" role="alert">
+                <span className="alert-icon">!</span>
+                <span>{gateError} The server still checks the gate when you confirm.</span>
+              </div>
+            )}
+            {gated && <GateItems incidentId={incidentId} gate={gate} onNavigate={onClose} />}
+            {unmet && !canOverride && (
+              <span className="field-hint" data-override-unavailable>
+                Only this incident's lead (Incident Commander or Deputy) or an admin can override the gate.
+              </span>
+            )}
+            {unmet && canOverride && (
+              <div className="field">
+                <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', cursor: 'pointer', fontSize: 13 }}>
+                  <input id="phase-override" type="checkbox" checked={override} disabled={busy}
+                         aria-describedby="phase-override-hint"
+                         onChange={e => setOverride(e.target.checked)} />
+                  Override: move to {to?.label} anyway
+                </label>
+                <span id="phase-override-hint" className="field-hint">
+                  The override, the missing items and your justification go into the audit log and onto the Timeline.
+                </span>
+              </div>
+            )}
+            {needReason && (
+              <div className="field">
+                <label className="field-label" htmlFor="phase-reason">
+                  {goingBack ? 'Reason for moving back' : 'Override justification'}
+                </label>
+                <textarea id="phase-reason" className="input" rows={3} maxLength={2000} required
+                          placeholder={goingBack ? 'What changed: new evidence, recurrence, a missed step…'
+                                                 : 'Why the incident can move on although items are missing…'}
+                          value={reason} onChange={e => setReason(e.target.value)} disabled={busy} />
+                <span className="field-hint">
+                  Goes into the audit log.{n < REASON_MIN ? ` At least ${REASON_MIN} characters (${n} so far).` : ''}
+                </span>
+              </div>
+            )}
+            {error && (
+              <div className="alert error" role="alert">
+                <span className="alert-icon">!</span>
+                <span>{error}</span>
+              </div>
+            )}
+          </div>
         </div>
         <div className="modal-foot">
           <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="button" className="btn primary" onClick={submit} disabled={busy}>
-            {busy ? 'Saving…' : `${verb} phase`}
+          <button type="button" className="btn primary" onClick={submit} disabled={!canSubmit}>
+            {busy ? 'Saving…' : overriding ? 'Override and advance' : `${verb} phase`}
           </button>
         </div>
       </div>

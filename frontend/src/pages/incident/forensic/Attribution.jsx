@@ -148,14 +148,13 @@ function AttributionCard({ attr, actor, onEdit, onDelete, isClosed }) {
         {!isClosed && (
           <div style={{ display: 'flex', gap: 'var(--space-1)', flexShrink: 0 }}>
             <button
-              className="btn btn-ghost btn-sm"
+              className="btn ghost"
               onClick={() => onEdit(attr)}
-              style={{ fontSize: 11 }}
             >Edit</button>
             <button
-              className="btn btn-ghost btn-sm"
+              className="btn ghost"
               onClick={() => onDelete(attr)}
-              style={{ fontSize: 11, color: 'var(--crit)' }}
+              style={{ color: 'var(--crit)' }}
             >Remove</button>
           </div>
         )}
@@ -303,9 +302,9 @@ function SuggestionCard({ suggestion, onAttribute }) {
           </span>
         )}
         <button
-          className="btn btn-sm btn-ghost"
+          className="btn ghost"
           onClick={() => onAttribute(suggestion)}
-          style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--accent)' }}
+          style={{ marginLeft: 'auto', color: 'var(--accent)' }}
         >+ Attribute</button>
       </div>
 
@@ -395,7 +394,7 @@ function AttributionModal({ incidentId, existing, prefillActor, prefillSuggestio
           <h3 style={{ margin: 0, fontSize: 15 }}>
             {existing ? 'Edit Attribution' : 'Attribute Incident'}
           </h3>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>✕</button>
+          <button className="btn ghost" onClick={onClose}>✕</button>
         </div>
         <div className="modal-body" style={{ padding: 'var(--space-4)' }}>
           {error && (
@@ -411,14 +410,12 @@ function AttributionModal({ incidentId, existing, prefillActor, prefillSuggestio
               </label>
               <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
                 <button
-                  className={`btn btn-sm ${!useCustom ? 'btn-primary' : 'btn-ghost'}`}
+                  className={`btn ${!useCustom ? 'primary' : 'ghost'}`}
                   onClick={() => setUseCustom(false)}
-                  style={{ fontSize: 12 }}
                 >Known actor</button>
                 <button
-                  className={`btn btn-sm ${useCustom ? 'btn-primary' : 'btn-ghost'}`}
+                  className={`btn ${useCustom ? 'primary' : 'ghost'}`}
                   onClick={() => setUseCustom(true)}
-                  style={{ fontSize: 12 }}
                 >Unnamed cluster</button>
               </div>
             </div>
@@ -533,9 +530,9 @@ function AttributionModal({ incidentId, existing, prefillActor, prefillSuggestio
           </div>
         </div>
         <div className="modal-footer" style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
-          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn ghost" onClick={onClose}>Cancel</button>
           <button
-            className="btn btn-primary"
+            className="btn primary"
             onClick={handleSave}
             disabled={saving || (!useCustom && !actorId && !existing) || (useCustom && !actorLabel.trim())}
           >{saving ? 'Saving…' : existing ? 'Save changes' : 'Attribute'}</button>
@@ -656,14 +653,14 @@ export default function Attribution() {
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
           <button
-            className="btn btn-ghost btn-sm"
+            className="btn ghost"
             onClick={handleSuggest}
           >
             {showSuggest ? '▾ Hide suggestions' : '◈ Suggest actors'}
           </button>
           {!isClosed && (
             <button
-              className="btn btn-primary btn-sm"
+              className="btn primary"
               onClick={() => setModal({ mode: 'create' })}
             >+ Attribute</button>
           )}

@@ -4,6 +4,13 @@
 
 const SEV_WEIGHT = { mandatory: 2, advisory: 1 }
 
+// C3 — an imaging tool reports MD5, SHA-1 or SHA-256; the algorithm follows from the
+// hex length (same rule as backend/evidence/hashing.py). null = not a valid hash.
+const HASH_ALGORITHM = { 32: 'MD5', 40: 'SHA-1', 64: 'SHA-256' }
+export function hashAlgorithm(value) {
+  return value && /^[0-9a-fA-F]+$/.test(value) ? (HASH_ALGORITHM[value.length] || null) : null
+}
+
 function check(code, label, status, severity, note) {
   return { code, label, status, severity, note: note || null }
 }
@@ -51,7 +58,15 @@ export function scoreEvidence(ev) {
       'Acquisition tool + version documented',
       toolOk ? 'pass' : 'fail',
       ev.coc_sealed ? 'mandatory' : 'advisory'))
-    if (ev.acquisition_hash_source || ev.acquisition_hash_target) {
+    const srcAlgo = hashAlgorithm(ev.acquisition_hash_source)
+    const tgtAlgo = hashAlgorithm(ev.acquisition_hash_target)
+    if (srcAlgo && tgtAlgo && srcAlgo !== tgtAlgo) {
+      // Different algorithms can't be compared here: advisory, never a mandatory fail.
+      checks.push(check('iso_27037_9_2_5_hash_match',
+        'Acquisition source/target hash match',
+        'manual', 'advisory',
+        `Source (${srcAlgo}) and target (${tgtAlgo}) use different algorithms — confirm the match in the imaging tool's report`))
+    } else if (ev.acquisition_hash_source || ev.acquisition_hash_target) {
       const m = (ev.acquisition_hash_source || '').toLowerCase()
              === (ev.acquisition_hash_target || '').toLowerCase()
       checks.push(check('iso_27037_9_2_5_hash_match',
@@ -80,6 +95,20 @@ export function scoreEvidence(ev) {
     checks.push(check('custody_internal_holder',
       'Currently held by an internal accountable user',
       'pass', 'advisory'))
+  }
+
+  // C4 — internal custody transfers accepted by the recipient. Legacy transfers (recorded
+  // before acceptance existed) are advisory ("manual"), never a fail; none → no check.
+  const legacyTransfers = ev.internal_transfers_legacy || 0
+  if (legacyTransfers) {
+    checks.push(check('custody_transfers_acknowledged',
+      'Custody transfers acknowledged by the recipient',
+      'manual', 'advisory',
+      `${legacyTransfers} transfer(s) recorded before recipient acceptance existed — confirm receipt and condition from the paper record`))
+  } else if (ev.internal_transfers_acknowledged) {
+    checks.push(check('custody_transfers_acknowledged',
+      'Custody transfers acknowledged by the recipient',
+      'pass', 'mandatory'))
   }
 
   checks.push(check('wizard_a_sealed', 'Acquisition wizard sealed',

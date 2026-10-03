@@ -16,6 +16,16 @@ Supported formats:
 
 Returns a list of normalized dicts; nothing is written to the database.
 
+Honest timestamps (C5): every event carries `time_basis`, how its UTC time was worked out —
+  explicit       the record states UTC or an offset (ISO offset / 'Z', epoch, EVTX SystemTime,
+                 a column whose header declares UTC such as Entra's "Date (UTC)")
+  assumed_tz     a wall-clock time without a zone, read in the operator-chosen `source_tz`
+  inferred_year  a BSD-syslog time ("Mar  1 10:00:00"): the year comes from the reference time
+                 (the exhibit's acquisition time, else the import time), read in `source_tz`
+  missing        no parseable time; such an event is never placed on the timeline
+`source_tz` (an IANA name) and the year reference are set per call by `parse_artifact` /
+`parse_velociraptor_collection` in context variables, so the parse can run in a worker thread.
+
 python-evtx is imported lazily; the rest of the module works without it.
 EVTX uploads fail with a clear error message if the package is absent.
 """
@@ -28,9 +38,13 @@ import sqlite3
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
-from datetime import datetime, timezone
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone, tzinfo
+from functools import lru_cache
 from typing import Optional, Union
 from urllib.parse import unquote
+from zoneinfo import ZoneInfo, available_timezones
 
 try:
     import Evtx.Evtx as evtx_lib
@@ -40,6 +54,114 @@ except ImportError:  # pragma: no cover
 
 MAX_EVENTS    = 2_000
 MAX_RAW_CHARS = 2_000
+
+# Bump whenever how events or their times are derived changes; stored on every import (C5).
+# Imports parsed before versioning have parser_version NULL and events without time_basis.
+#   2.0.0  C5: source_tz, time_basis, BSD-syslog year from the exhibit.
+#   2.1.0  The CSV/JSON/Velociraptor column heuristics (_TS_COL, _DESC_COL, …) walk ordered tuples
+#          in a documented priority. Before, they walked sets, so with several candidate columns
+#          the chosen time / description / host changed with each process's hash seed.
+PARSER_VERSION = "2.1.0"
+
+# EVTX and SQLite need a file on disk for their libraries. When the parse is of an exhibit that
+# file is decrypted evidence, so it goes only to this RAM-only tmpfs (compose: backend tmpfs, never
+# swapped since memswap_limit == mem_limit), is deleted in `finally`, and stale files are swept at
+# startup (sweep_parse_tmp). No fallback: if the directory is missing the parse fails closed.
+PARSE_TMP_DIR    = os.environ.get("PARSE_TMP_DIR", "/run/fenrir-parse")
+_PARSE_TMP_PREFIX = "fenrir-parse-"
+
+# Per-parse settings (see the module docstring). Context variables, not module globals: each
+# asyncio.to_thread call runs in its own copied context, so concurrent parses can't see each other's.
+_SOURCE_TZ: ContextVar[tzinfo] = ContextVar("fenrir_parser_source_tz", default=timezone.utc)
+_YEAR_REF:  ContextVar[Optional[datetime]] = ContextVar("fenrir_parser_year_ref", default=None)
+# Truncation record of the current parse: {"truncated": bool, "total_seen": int | None}. A parser
+# that stops at an event cap keeps counting the source records it did not convert, so the import
+# can say "N of M". total_seen = source records read (rows / records / matched lines), before
+# any filtering; None = the parser kept every record it read (total_seen is then the event count).
+_CAP: ContextVar[Optional[dict]] = ContextVar("fenrir_parser_cap", default=None)
+
+
+def _record_cap(total_seen: int, truncated: bool) -> None:
+    st = _CAP.get()
+    if st is not None:
+        st["total_seen"] = total_seen
+        st["truncated"] = truncated
+
+
+@contextmanager
+def _parse_tmp_file(content: bytes, suffix: str):
+    """Write `content` to a private file on the parser tmpfs; yield its path; always delete it."""
+    if not os.path.isdir(PARSE_TMP_DIR):
+        raise ValueError(f"Parser scratch space {PARSE_TMP_DIR} is unavailable; refusing to write "
+                         "the file anywhere else")
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=PARSE_TMP_DIR, prefix=_PARSE_TMP_PREFIX, suffix=suffix,
+                                         delete=False) as f:
+            tmp_path = f.name
+            f.write(content)
+        yield tmp_path
+    finally:
+        if tmp_path:
+            for path in (tmp_path, tmp_path + "-journal", tmp_path + "-wal", tmp_path + "-shm"):
+                try:
+                    os.unlink(path)               # + any SQLite side files, same prefix
+                except OSError:
+                    pass
+
+
+def sweep_parse_tmp() -> int:
+    """Startup: delete files a crashed parse may have left on the parser tmpfs. Returns the count.
+    Called before the app serves requests, so no parse can be in flight."""
+    removed = 0
+    try:
+        entries = list(os.scandir(PARSE_TMP_DIR))
+    except OSError:
+        return 0
+    for entry in entries:
+        if entry.name.startswith(_PARSE_TMP_PREFIX) and not entry.is_dir(follow_symlinks=False):
+            try:
+                os.unlink(entry.path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+@lru_cache(maxsize=1)
+def _known_zones() -> frozenset:
+    return frozenset(available_timezones())
+
+
+def resolve_tz(name: str) -> tzinfo:
+    """IANA timezone name (e.g. "Europe/Oslo", "UTC") -> tzinfo. ValueError when unknown."""
+    if not isinstance(name, str) or name not in _known_zones():
+        raise ValueError(f"Unknown timezone {name!r}: use an IANA name such as 'UTC' or 'Europe/Oslo'")
+    return ZoneInfo(name)
+
+
+@contextmanager
+def _time_context(source_tz: str, year_ref: Optional[datetime]):
+    """Per-parse settings; yields the parse's truncation record (see _CAP)."""
+    t_tz = _SOURCE_TZ.set(resolve_tz(source_tz))
+    t_yr = _YEAR_REF.set(year_ref)
+    cap = {"truncated": False, "total_seen": None}
+    t_cap = _CAP.set(cap)
+    try:
+        yield cap
+    finally:
+        _SOURCE_TZ.reset(t_tz)
+        _YEAR_REF.reset(t_yr)
+        _CAP.reset(t_cap)
+
+
+def _localise(dt: datetime) -> tuple[datetime, str]:
+    """An aware time -> (UTC, 'explicit'). A naive one is wall-clock time in the operator-chosen
+    source timezone -> (UTC, 'assumed_tz'). A time repeated by a DST fall-back resolves to the
+    first occurrence; one skipped by a spring-forward uses the offset before the change."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc), "explicit"
+    return dt.replace(tzinfo=_SOURCE_TZ.get()).astimezone(timezone.utc), "assumed_tz"
 
 EVTX_MAGIC   = b"ElfFile\x00"
 SQLITE_MAGIC  = b"SQLite format 3\x00"
@@ -164,26 +286,63 @@ _SYSLOG_RULES: list[tuple] = [
      "Kernel Error", None, None, None, None, False),
 ]
 
-# CSV/JSON heuristic column names (lowercased).
-_TS_COL   = {"timestamp", "time", "datetime", "date", "event_time", "@timestamp",
-             "date_time", "eventtime", "created", "created_at",
-             "timegenerated", "time_generated"}  # Defender / Azure / KQL exports
-_DESC_COL = {"message", "description", "event", "log", "details", "summary",
-             "command", "cmdline", "commandline", "msg", "processcommandline"}
-_HOST_COL = {"hostname", "host", "computer", "device", "source_host", "computername",
-             "machine", "workstation", "devicename"}
-_TYPE_COL = {"type", "event_type", "category", "action", "eventtype", "event_category",
-             "filename"}
-_SRC_COL  = {"source", "log_source", "channel", "provider", "logsource", "source_name"}
+# CSV/JSON/Velociraptor heuristic column names (lowercased), in PRIORITY ORDER: when a row has
+# several candidate columns, _first() takes the first one in this order that has a value. Ordered
+# tuples (H3, parser 2.1.0) so the choice is the same in every process; sets made it depend on
+# the hash seed.
+_TS_COL = (
+    "@timestamp",                        # ECS / Elastic: the event time, normally ISO 8601 with Z
+    "event_time", "eventtime",           # named as the time of the event
+    "timegenerated", "time_generated",   # Azure Monitor / Defender / KQL: event generation time (UTC)
+    "timestamp",
+    "datetime", "date_time",
+    "time",                              # before "date": a time-only value fails to parse (honest
+    "date",                              #   'missing'); a date-only value would read as midnight
+    "created_at", "created",             # record creation: may be ingestion, not the event
+)
+_DESC_COL = (
+    "message", "msg",                    # the record's own message
+    "description", "summary", "details",
+    "event", "log",
+    "commandline", "processcommandline", "cmdline", "command",   # detail of the action, last
+)
+_HOST_COL = (
+    "hostname", "computername", "computer", "devicename", "device",   # the host that logged it
+    "host", "machine", "workstation",
+    "source_host",                       # may name a remote peer, last
+)
+_TYPE_COL = (
+    "event_type", "eventtype", "event_category",   # named as the event's type
+    "category", "action",
+    "type",                              # generic: may be a record / object type
+    "filename",
+)
+_SRC_COL = (
+    "log_source", "logsource", "source_name",      # named as the log source
+    "channel", "provider",               # Windows event channel, then provider
+    "source",                            # generic: in network logs often a source IP, last
+)
+_TS_COL_SET = frozenset(_TS_COL)         # membership tests only (order irrelevant there)
 
 # ─── Public entry point ────────────────────────────────────────────────────────
 
-def parse_artifact(filename: str, content: bytes) -> tuple[str, list[dict]]:
+def parse_artifact(filename: str, content: bytes, *, source_tz: str = "UTC",
+                   year_ref: Optional[datetime] = None) -> tuple[str, list[dict], bool, int]:
     """
     Detect format and parse *content* into a list of normalized event dicts.
-    Returns (detected_format, events).
-    Raises ValueError with a human-readable message on failure.
+    Returns (detected_format, events, truncated, total_seen): `truncated` is True when a parser
+    cap stopped the conversion, `total_seen` the number of source records read (see _CAP).
+    Naive times are read in `source_tz` (IANA name); `year_ref` dates year-less BSD-syslog lines
+    (default: now). See the module docstring.
+    Raises ValueError with a human-readable message on failure (also for an unknown source_tz).
     """
+    with _time_context(source_tz, year_ref) as cap:
+        fmt, events = _dispatch_artifact(filename, content)
+    total = cap["total_seen"] if cap["total_seen"] is not None else len(events)
+    return fmt, events, cap["truncated"], total
+
+
+def _dispatch_artifact(filename: str, content: bytes) -> tuple[str, list[dict]]:
     ext = os.path.splitext(filename.lower())[1]
 
     # Magic-byte detection takes priority over extension.
@@ -193,7 +352,7 @@ def parse_artifact(filename: str, content: bytes) -> tuple[str, list[dict]]:
         return "sqlite", _parse_sqlite(content, filename)
     # ZIP — a Velociraptor offline-collector output bundle (U1.3).
     if content[:4] == b"PK\x03\x04":
-        return "velociraptor", parse_velociraptor_collection(io.BytesIO(content))
+        return "velociraptor", _parse_velociraptor_collection(io.BytesIO(content))
 
     if ext in (".evtx",):
         return "evtx", _parse_evtx(content)
@@ -279,29 +438,23 @@ def _parse_evtx(content: bytes) -> list[dict]:
             "Rebuild the backend image to include it."
         )
     results: list[dict] = []
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".evtx", delete=False) as f:
-            f.write(content)
-            tmp_path = f.name
-        with evtx_lib.Evtx(tmp_path) as log:
-            for record in log.records():
-                if len(results) >= MAX_EVENTS:
-                    break
-                try:
-                    xml_str = record.xml()
-                    root = ET.fromstring(xml_str)
-                    ev = _extract_win_xml(root)
-                    if ev:
-                        results.append(ev)
-                except Exception:
-                    continue
-    finally:
-        if tmp_path:
+    seen = 0
+    truncated = False
+    with _parse_tmp_file(content, ".evtx") as tmp_path, evtx_lib.Evtx(tmp_path) as log:
+        for record in log.records():
+            seen += 1
+            if len(results) >= MAX_EVENTS:
+                truncated = True          # keep counting the records left unconverted (M1)
+                continue
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+                xml_str = record.xml()
+                root = ET.fromstring(xml_str)
+                ev = _extract_win_xml(root)
+                if ev:
+                    results.append(ev)
+            except Exception:
+                continue
+    _record_cap(seen, truncated)
     return results
 
 
@@ -337,8 +490,10 @@ def _parse_xml(content: bytes) -> list[dict]:
         events_el = list(root.iter(_ns("Event"))) or list(root.iter("Event"))
 
     results: list[dict] = []
+    truncated = False
     for el in events_el:
         if len(results) >= MAX_EVENTS:
+            truncated = True
             break
         try:
             ev = _extract_win_xml(el)
@@ -346,6 +501,7 @@ def _parse_xml(content: bytes) -> list[dict]:
                 results.append(ev)
         except Exception:
             continue
+    _record_cap(len(events_el), truncated)
     return results
 
 
@@ -365,7 +521,7 @@ def _extract_win_xml(root: ET.Element) -> Optional[dict]:
 
     ts_el      = _find(sys_el, "TimeCreated")
     ts_str     = ts_el.get("SystemTime") if ts_el is not None else None
-    event_time = _parse_win_ts(ts_str)
+    event_time = _parse_win_ts(ts_str)   # SystemTime is UTC by definition -> explicit
 
     channel_el  = _find(sys_el, "Channel")
     computer_el = _find(sys_el, "Computer")
@@ -400,6 +556,7 @@ def _extract_win_xml(root: ET.Element) -> Optional[dict]:
 
     return _make_event(
         event_time=event_time,
+        time_basis="explicit",
         hostname=hostname or None,
         source=source,
         event_type=event_type,
@@ -496,13 +653,7 @@ _WEBKIT_EPOCH_OFFSET = 11_644_473_600_000_000  # microseconds
 
 
 def _parse_sqlite(content: bytes, filename: str) -> list[dict]:
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            f.write(content)
-            tmp_path = f.name
-
-        conn = sqlite3.connect(tmp_path)
+    with _parse_tmp_file(content, ".db") as tmp_path, closing(sqlite3.connect(tmp_path)) as conn:
         conn.row_factory = sqlite3.Row
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
 
@@ -510,6 +661,7 @@ def _parse_sqlite(content: bytes, filename: str) -> list[dict]:
 
         if "visits" in tables and "urls" in tables:
             # Chrome history
+            total = conn.execute("SELECT count(*) FROM visits v JOIN urls u ON v.url = u.id").fetchone()[0]
             rows = conn.execute(
                 "SELECT v.visit_time, u.url, u.title "
                 "FROM visits v JOIN urls u ON v.url = u.id "
@@ -522,6 +674,7 @@ def _parse_sqlite(content: bytes, filename: str) -> list[dict]:
                 title = r["title"] or url
                 results.append(_make_event(
                     event_time=ts,
+                    time_basis="explicit",   # WebKit epoch
                     hostname=None,
                     source="Chrome History",
                     event_type="Browser Visit",
@@ -533,6 +686,8 @@ def _parse_sqlite(content: bytes, filename: str) -> list[dict]:
 
         elif "moz_historyvisits" in tables and "moz_places" in tables:
             # Firefox history
+            total = conn.execute(
+                "SELECT count(*) FROM moz_historyvisits v JOIN moz_places p ON v.place_id = p.id").fetchone()[0]
             rows = conn.execute(
                 "SELECT v.visit_date, p.url, p.title "
                 "FROM moz_historyvisits v JOIN moz_places p ON v.place_id = p.id "
@@ -545,6 +700,7 @@ def _parse_sqlite(content: bytes, filename: str) -> list[dict]:
                 title = r["title"] or url
                 results.append(_make_event(
                     event_time=ts,
+                    time_basis="explicit",   # Unix epoch (µs)
                     hostname=None,
                     source="Firefox History",
                     event_type="Browser Visit",
@@ -554,17 +710,11 @@ def _parse_sqlite(content: bytes, filename: str) -> list[dict]:
                     suspicious_reasons=[],
                 ))
         else:
-            conn.close()
             raise ValueError("SQLite database does not appear to be Chrome or Firefox history")
 
-        conn.close()
-        return results
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+    # The newest MAX_EVENTS visits are kept (ORDER BY … DESC LIMIT).
+    _record_cap(total, total > len(results))
+    return results
 
 
 def _webkit_ts(microseconds: Optional[int]) -> Optional[datetime]:
@@ -596,13 +746,18 @@ def _parse_syslog(content: bytes) -> list[dict]:
         raise ValueError(f"Could not decode syslog: {e}")
 
     results: list[dict] = []
-    now = datetime.now(tz=timezone.utc)
+    # Year-less BSD lines are dated against the exhibit's acquisition time (C5), else "now".
+    ref = _YEAR_REF.get() or datetime.now(tz=timezone.utc)
 
+    seen = 0
+    truncated = False
     for m in _SYSLOG_LINE_RE.finditer(text):
+        seen += 1
         if len(results) >= MAX_EVENTS:
-            break
+            truncated = True              # keep counting the matched lines left unconverted (M1)
+            continue
         ts_str     = m.group("iso_ts") or m.group("bsd_ts")
-        event_time = _parse_syslog_ts(ts_str, now)
+        event_time, basis = _parse_syslog_ts(ts_str, ref)
         host       = m.group("host") or None
         proc       = (m.group("proc") or "").strip()
         pid        = m.group("pid") or ""
@@ -632,6 +787,7 @@ def _parse_syslog(content: bytes) -> list[dict]:
 
         results.append(_make_event(
             event_time=event_time,
+            time_basis=basis,
             hostname=host,
             source=f"syslog/{proc}" if proc else "syslog",
             event_type=mitre.get("event_type") or "Syslog Event",
@@ -647,33 +803,37 @@ def _parse_syslog(content: bytes) -> list[dict]:
 
     if not results:
         raise ValueError("No syslog lines found in file")
+    _record_cap(seen, truncated)
     return results
 
 
-def _parse_syslog_ts(ts_str: Optional[str], ref: datetime) -> Optional[datetime]:
+def _parse_syslog_ts(ts_str: Optional[str], ref: datetime) -> tuple[Optional[datetime], str]:
     if not ts_str:
-        return None
+        return None, "missing"
     ts_str = ts_str.strip()
-    # BSD / RFC 3164: "Jan  1 12:00:00" — year is inferred from ref (current time).
+    # BSD / RFC 3164: "Jan  1 12:00:00" — no year, no zone. The wall-clock time is read in the
+    # source timezone; the year is ref's (in that zone), or the year before when the month/day
+    # would be after ref (a line can't postdate the acquisition) -> 'inferred_year'.
     bsd_m = re.match(r'([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})', ts_str)
     if bsd_m:
+        tz = _SOURCE_TZ.get()
+        ref_local = ref.astimezone(tz)
         mon = _BSD_MONTHS.get(bsd_m.group(1), 1)
         day = int(bsd_m.group(2))
         h, mi, s = int(bsd_m.group(3)), int(bsd_m.group(4)), int(bsd_m.group(5))
-        year = ref.year
-        # If the month/day appears to be in the future, assume previous year.
-        if mon > ref.month or (mon == ref.month and day > ref.day):
+        year = ref_local.year
+        if (mon, day) > (ref_local.month, ref_local.day):
             year -= 1
         try:
-            return datetime(year, mon, day, h, mi, s, tzinfo=timezone.utc)
+            local = datetime(year, mon, day, h, mi, s, tzinfo=tz)
         except ValueError:
-            return None
+            return None, "missing"
+        return local.astimezone(timezone.utc), "inferred_year"
     # ISO 8601 / RFC 5424 — normalize then fromisoformat.
     try:
         ts = ts_str.replace('T', ' ', 1).replace('Z', '+00:00', 1)
         ts = re.sub(r'([+-])(\d{2})(\d{2})$', r'\1\2:\3', ts)  # ±HHMM → ±HH:MM
-        dt = datetime.fromisoformat(ts)
-        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return _localise(datetime.fromisoformat(ts))
     except Exception:
         return _try_parse_ts(ts_str)
 
@@ -711,8 +871,10 @@ def _parse_journald(content: bytes) -> list[dict]:
                 continue
 
     results: list[dict] = []
+    truncated = False
     for obj in rows:
         if len(results) >= MAX_EVENTS:
+            truncated = True
             break
         if "__REALTIME_TIMESTAMP" not in obj:
             continue
@@ -757,6 +919,7 @@ def _parse_journald(content: bytes) -> list[dict]:
 
         results.append(_make_event(
             event_time=event_time,
+            time_basis="explicit",   # __REALTIME_TIMESTAMP = Unix epoch (µs)
             hostname=host,
             source=f"journald/{proc}" if proc else "journald",
             event_type=mitre.get("event_type") or "Journal Event",
@@ -770,6 +933,7 @@ def _parse_journald(content: bytes) -> list[dict]:
             mitre_technique_name=mitre.get("mitre_technique_name"),
         ))
 
+    _record_cap(len(rows), truncated)
     return results
 
 
@@ -791,8 +955,10 @@ def _parse_macos_unified_log(content: bytes) -> list[dict]:
             data = [data]
 
     results: list[dict] = []
+    truncated = False
     for obj in data:
         if len(results) >= MAX_EVENTS:
+            truncated = True
             break
         if not isinstance(obj, dict):
             continue
@@ -800,7 +966,7 @@ def _parse_macos_unified_log(content: bytes) -> list[dict]:
         if not msg:
             continue
 
-        event_time = _parse_macos_unified_ts(str(obj.get("timestamp", "") or ""))
+        event_time, basis = _parse_macos_unified_ts(str(obj.get("timestamp", "") or ""))
         proc_path  = str(obj.get("processImagePath", "") or obj.get("senderImagePath", "") or "")
         proc       = proc_path.rsplit("/", 1)[-1] if proc_path else ""
         pid        = str(obj.get("processID", "") or "")
@@ -831,6 +997,7 @@ def _parse_macos_unified_log(content: bytes) -> list[dict]:
 
         results.append(_make_event(
             event_time=event_time,
+            time_basis=basis,
             hostname=None,
             source=f"macOS/{proc}" if proc else "macOS Unified Log",
             event_type=mitre.get("event_type") or "Unified Log",
@@ -844,20 +1011,21 @@ def _parse_macos_unified_log(content: bytes) -> list[dict]:
             mitre_technique_name=mitre.get("mitre_technique_name"),
         ))
 
+    _record_cap(len(data), truncated)
     return results
 
 
-def _parse_macos_unified_ts(ts_str: str) -> Optional[datetime]:
-    """Parse macOS Unified Log timestamp: '2024-01-15 09:23:45.123456-0800'"""
+def _parse_macos_unified_ts(ts_str: str) -> tuple[Optional[datetime], str]:
+    """Parse macOS Unified Log timestamp: '2024-01-15 09:23:45.123456-0800'. Without an offset
+    the time is read in the source timezone (it used to be read in the server's local time)."""
     if not ts_str:
-        return None
+        return None, "missing"
     try:
         ts = ts_str.strip().replace(' ', 'T', 1).replace('Z', '+00:00', 1)
         ts = re.sub(r'([+-])(\d{2})(\d{2})$', r'\1\2:\3', ts)
-        dt = datetime.fromisoformat(ts)
-        return dt.astimezone(timezone.utc)
+        return _localise(datetime.fromisoformat(ts))
     except Exception:
-        return None
+        return None, "missing"
 
 
 # ─── JSON format dispatcher ───────────────────────────────────────────────────
@@ -915,20 +1083,34 @@ _DEFENDER_EVIDENCE_HEADER = {"first seen", "entity", "entity type", "verdict", "
 _DEFENDER_SUSPICIOUS_VERDICTS = {"suspicious", "malicious"}
 
 
-def _parse_defender_evidence_csv(content: bytes) -> list[dict]:
-    try:
-        text = content.decode("utf-8-sig", errors="replace")
-    except Exception as e:
-        raise ValueError(f"Could not decode CSV: {e}")
+def _csv_stream(content: bytes) -> io.TextIOWrapper:
+    """The CSV as a text stream decoded in small chunks (C5). Decoding a whole 200 MB export
+    and copying it into a StringIO are single C calls that hold the GIL for most of a second,
+    which stalls the event loop even though the parse runs in a worker thread; a streamed
+    decode yields the GIL between chunks, and a capped parse stops reading early."""
+    return io.TextIOWrapper(io.BytesIO(content), encoding="utf-8-sig", errors="replace", newline="")
 
-    reader = csv.DictReader(io.StringIO(text))
+
+def _count_rest(reader: csv.DictReader) -> int:
+    """Rows left in a capped CSV, counted on the underlying csv.reader (no dicts built). M1."""
+    return sum(1 for r in reader.reader if r)
+
+
+def _parse_defender_evidence_csv(content: bytes) -> list[dict]:
+    reader = csv.DictReader(_csv_stream(content))
     results: list[dict] = []
+    seen = 0
+    truncated = False
     for row in reader:
+        seen += 1
         if len(results) >= MAX_EVENTS:
+            truncated = True
+            seen += _count_rest(reader)
             break
         ev = _defender_row_to_event(row)
         if ev:
             results.append(ev)
+    _record_cap(seen, truncated)
     return results
 
 
@@ -939,7 +1121,7 @@ def _defender_row_to_event(row: dict) -> Optional[dict]:
     # heuristics never match them -- map the fixed columns directly instead.
     lower = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
 
-    event_time  = _try_parse_ts(lower.get("first seen"))
+    event_time, basis = _try_parse_ts(lower.get("first seen"))   # portal time, zone not stated
     entity      = lower.get("entity") or ""
     entity_type = lower.get("entity type") or "Entity"
     verdict     = lower.get("verdict") or ""
@@ -968,6 +1150,7 @@ def _defender_row_to_event(row: dict) -> Optional[dict]:
 
     return _make_event(
         event_time=event_time,
+        time_basis=basis,
         hostname=impacted[:512] or None,
         source="Microsoft Defender — Evidence and Response",
         event_type=entity_type,
@@ -1015,19 +1198,25 @@ _ENTRA_MAX_SUSPICIOUS_EVENTS = 50_000
 def _entra_cap_events(rows, row_to_event) -> list[dict]:
     results: list[dict] = []
     kept_normal = kept_suspicious = 0
+    seen = 0
+    truncated = False
     for row in rows:
+        seen += 1
         ev = row_to_event(row)
         if not ev:
             continue
         if ev["suspicious"]:
             if kept_suspicious >= _ENTRA_MAX_SUSPICIOUS_EVENTS:
+                truncated = True
                 continue
             kept_suspicious += 1
         else:
             if kept_normal >= _ENTRA_MAX_NORMAL_EVENTS:
+                truncated = True
                 continue
             kept_normal += 1
         results.append(ev)
+    _record_cap(seen, truncated)
     return results
 
 
@@ -1086,29 +1275,17 @@ def _looks_like_entra_svc_signin_csv(content: bytes) -> bool:
 
 
 def _parse_entra_signin_csv(content: bytes, *, interactive: bool = True) -> list[dict]:
-    try:
-        text = content.decode("utf-8-sig", errors="replace")
-    except Exception as e:
-        raise ValueError(f"Could not decode CSV: {e}")
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.DictReader(_csv_stream(content))
     return _entra_cap_events(reader, lambda row: _entra_signin_row_to_event(row, interactive=interactive))
 
 
 def _parse_entra_authdetails_csv(content: bytes, *, interactive: bool = True) -> list[dict]:
-    try:
-        text = content.decode("utf-8-sig", errors="replace")
-    except Exception as e:
-        raise ValueError(f"Could not decode CSV: {e}")
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.DictReader(_csv_stream(content))
     return _entra_cap_events(reader, lambda row: _entra_authdetails_row_to_event(row, interactive=interactive))
 
 
 def _parse_entra_svc_signin_csv(content: bytes, *, kind: str) -> list[dict]:
-    try:
-        text = content.decode("utf-8-sig", errors="replace")
-    except Exception as e:
-        raise ValueError(f"Could not decode CSV: {e}")
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.DictReader(_csv_stream(content))
     return _entra_cap_events(reader, lambda row: _entra_svc_signin_row_to_event(row, kind=kind))
 
 
@@ -1117,7 +1294,7 @@ def _entra_authdetails_row_to_event(row: dict, *, interactive: bool = True) -> O
         return None
     lower = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
 
-    event_time = _try_parse_ts(lower.get("date"))
+    event_time, basis = _try_parse_ts(lower.get("date"))   # header doesn't declare UTC
     method     = lower.get("authentication method") or "authentication step"
     detail     = lower.get("authentication method detail") or ""
     succeeded  = (lower.get("succeeded") or "").lower() == "true"
@@ -1134,6 +1311,7 @@ def _entra_authdetails_row_to_event(row: dict, *, interactive: bool = True) -> O
 
     return _make_event(
         event_time=event_time,
+        time_basis=basis,
         # No user/device identifier lives in this export -- only a Request ID
         # GUID linking back to the parent sign-in row in a *different* file,
         # which this row-by-row importer has no way to cross-reference.
@@ -1152,7 +1330,7 @@ def _entra_signin_row_to_event(row: dict, *, interactive: bool = True) -> Option
         return None
     lower = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
 
-    event_time  = _try_parse_ts(lower.get("date (utc)"))
+    event_time, basis = _try_parse_ts(lower.get("date (utc)"), declared_utc=True)
     user        = lower.get("user") or ""
     username    = lower.get("username") or ""
     application = lower.get("application") or ""
@@ -1201,6 +1379,7 @@ def _entra_signin_row_to_event(row: dict, *, interactive: bool = True) -> Option
 
     return _make_event(
         event_time=event_time,
+        time_basis=basis,
         hostname=username or user or None,
         source=f"Microsoft Entra ID — {kind} Sign-in",
         event_type=f"{type_prefix}_{status.lower()}" if status else type_prefix,
@@ -1216,7 +1395,7 @@ def _entra_svc_signin_row_to_event(row: dict, *, kind: str) -> Optional[dict]:
         return None
     lower = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
 
-    event_time  = _try_parse_ts(lower.get("date (utc)"))
+    event_time, basis = _try_parse_ts(lower.get("date (utc)"), declared_utc=True)
     principal   = lower.get("service principal name") or lower.get("service principal id") or ""
     application = lower.get("application") or ""
     resource    = lower.get("resource") or ""
@@ -1245,6 +1424,7 @@ def _entra_svc_signin_row_to_event(row: dict, *, kind: str) -> Optional[dict]:
 
     return _make_event(
         event_time=event_time,
+        time_basis=basis,
         hostname=principal or None,
         source=f"Microsoft Entra ID — {kind} Sign-in",
         event_type=f"{kind.lower().replace(' ', '_')}_signin_{status.lower()}" if status else "svc_signin",
@@ -1287,32 +1467,35 @@ def _looks_like_entra_audit_csv(content: bytes) -> bool:
 
 
 def _parse_entra_audit_csv(content: bytes) -> list[dict]:
-    try:
-        text = content.decode("utf-8-sig", errors="replace")
-    except Exception as e:
-        raise ValueError(f"Could not decode CSV: {e}")
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.DictReader(_csv_stream(content))
 
     results: list[dict] = []
     kept_noisy = kept_normal = kept_suspicious = 0
+    seen = 0
+    truncated = False
     for row in reader:
+        seen += 1
         ev = _entra_audit_row_to_event(row)
         if not ev:
             continue
         category = (row.get("Category") or "").strip().lower()
         if ev["suspicious"]:
             if kept_suspicious >= _ENTRA_AUDIT_MAX_SUSPICIOUS_EVENTS:
+                truncated = True
                 continue
             kept_suspicious += 1
         elif category == _ENTRA_AUDIT_NOISY_CATEGORY:
             if kept_noisy >= _ENTRA_AUDIT_MAX_NOISY_EVENTS:
+                truncated = True
                 continue
             kept_noisy += 1
         else:
             if kept_normal >= _ENTRA_AUDIT_MAX_NORMAL_EVENTS:
+                truncated = True
                 continue
             kept_normal += 1
         results.append(ev)
+    _record_cap(seen, truncated)
     return results
 
 
@@ -1321,7 +1504,7 @@ def _entra_audit_row_to_event(row: dict) -> Optional[dict]:
         return None
     lower = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
 
-    event_time = _try_parse_ts(lower.get("date (utc)"))
+    event_time, basis = _try_parse_ts(lower.get("date (utc)"), declared_utc=True)
     actor = (lower.get("actordisplayname") or lower.get("actoruserprincipalname")
              or lower.get("actorserviceprincipalname") or lower.get("actortype") or "Unknown actor")
     activity = lower.get("activity") or "Unknown activity"
@@ -1358,6 +1541,7 @@ def _entra_audit_row_to_event(row: dict) -> Optional[dict]:
 
     return _make_event(
         event_time=event_time,
+        time_basis=basis,
         hostname=actor or None,
         source="Microsoft Entra ID — Audit Log",
         event_type=f"audit_{category.lower()}" if category else "audit",
@@ -1369,29 +1553,30 @@ def _entra_audit_row_to_event(row: dict) -> Optional[dict]:
 
 
 def _parse_csv(content: bytes, dialect: str = "auto") -> list[dict]:
-    try:
-        text = content.decode("utf-8-sig", errors="replace")
-    except Exception as e:
-        raise ValueError(f"Could not decode CSV: {e}")
-
     if dialect == "tsv":
-        reader = csv.DictReader(io.StringIO(text), delimiter="\t")
+        reader = csv.DictReader(_csv_stream(content), delimiter="\t")
     elif dialect == "auto":
-        sample = text[:4096]
+        sample = content[:4096].decode("utf-8-sig", errors="replace")
         tab_count   = sample.count("\t")
         comma_count = sample.count(",")
         delim = "\t" if tab_count > comma_count else ","
-        reader = csv.DictReader(io.StringIO(text), delimiter=delim)
+        reader = csv.DictReader(_csv_stream(content), delimiter=delim)
     else:
-        reader = csv.DictReader(io.StringIO(text))
+        reader = csv.DictReader(_csv_stream(content))
 
     results: list[dict] = []
+    seen = 0
+    truncated = False
     for row in reader:
+        seen += 1
         if len(results) >= MAX_EVENTS:
+            truncated = True
+            seen += _count_rest(reader)
             break
         ev = _row_to_event(dict(row))
         if ev:
             results.append(ev)
+    _record_cap(seen, truncated)
     return results
 
 
@@ -1433,14 +1618,17 @@ def _parse_json(content: bytes) -> list[dict]:
         rows = parsed if isinstance(parsed, list) else [parsed]
 
     results: list[dict] = []
+    truncated = False
     for row in rows:
         if len(results) >= MAX_EVENTS:
+            truncated = True
             break
         if not isinstance(row, dict):
             continue
         ev = _row_to_event(row)
         if ev:
             results.append(ev)
+    _record_cap(len(rows), truncated)
     return results
 
 
@@ -1453,8 +1641,8 @@ def _row_to_event(row: dict) -> Optional[dict]:
     # Heuristic field detection (lowercased keys).
     lower = {k.lower(): v for k, v in row.items() if v is not None}
 
-    ts_str = _first(lower, _TS_COL)
-    event_time = _try_parse_ts(ts_str)
+    ts_str, declared_utc = _ts_field(lower)
+    event_time, basis = _try_parse_ts(ts_str, declared_utc=declared_utc)
 
     description = str(_first(lower, _DESC_COL) or "")
     if not description:
@@ -1472,6 +1660,7 @@ def _row_to_event(row: dict) -> Optional[dict]:
 
     return _make_event(
         event_time=event_time,
+        time_basis=basis,
         hostname=hostname,
         source=source or "CSV/JSON Import",
         event_type=event_type,
@@ -1482,11 +1671,28 @@ def _row_to_event(row: dict) -> Optional[dict]:
     )
 
 
-def _first(d: dict, keys: set) -> Optional[str]:
+def _first(d: dict, keys: tuple) -> Optional[str]:
+    """The value of the first column in `keys` (priority order) that the row has with a value."""
     for k in keys:
         if k in d and d[k]:
             return str(d[k])
     return None
+
+
+# A "UTC" token in a column name: "Date (UTC)", "timestamp_utc", "UTC Time", "time utc".
+_UTC_MARK = re.compile(r"(?:^|[\s_\-(]+)utc(?:[\s_\-)]+|$)")
+
+
+def _ts_field(lower: dict) -> tuple[Optional[str], bool]:
+    """The row's timestamp value and whether its column name declares UTC (C5). A known
+    timestamp column wins; otherwise a column that is a known one plus a UTC token."""
+    v = _first(lower, _TS_COL)
+    if v:
+        return v, False
+    for k, val in lower.items():
+        if val and isinstance(k, str) and _UTC_MARK.search(k) and _UTC_MARK.sub("", k).strip() in _TS_COL_SET:
+            return str(val), True
+    return None, False
 
 
 # ─── Velociraptor offline-collector bundle (U1.3) ────────────────────────────
@@ -1508,25 +1714,24 @@ _VELO_TS_PATHS = [
 ]
 
 
-def _velo_parse_any_time(v) -> Optional[datetime]:
+def _velo_parse_any_time(v) -> tuple[Optional[datetime], str]:
     if isinstance(v, dict):
         for k in ("SystemTime", "Time", "value", "Value"):
             if k in v:
                 return _velo_parse_any_time(v[k])
-        return None
+        return None, "missing"
     s = str(v).strip()
     if not s:
-        return None
+        return None, "missing"
     # RFC3339 with offset / 'Z' (Python 3.11+ fromisoformat handles both).
     try:
         s2 = s[:-1] + "+00:00" if s.endswith("Z") else s
-        dt = datetime.fromisoformat(s2)
-        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return _localise(datetime.fromisoformat(s2))
     except Exception:
         return _try_parse_ts(s)
 
 
-def _velo_time(row: dict) -> Optional[datetime]:
+def _velo_time(row: dict) -> tuple[Optional[datetime], str]:
     for path in _VELO_TS_PATHS:
         v: object = row
         for k in path:
@@ -1536,9 +1741,9 @@ def _velo_time(row: dict) -> Optional[datetime]:
                 v = None
                 break
         if v not in (None, ""):
-            dt = _velo_parse_any_time(v)
+            dt, basis = _velo_parse_any_time(v)
             if dt:
-                return dt
+                return dt, basis
     lower = {k.lower(): val for k, val in row.items() if isinstance(val, (str, int, float))}
     return _try_parse_ts(_first(lower, _TS_COL))
 
@@ -1569,7 +1774,7 @@ def _velo_description(artifact: str, row: dict) -> str:
         if isinstance(v, (str, int, float)) and str(v).strip():
             return f"{k}: {v}"[:512]
     bits = [f"{k}={v}" for k, v in row.items()
-            if isinstance(v, (str, int, float)) and str(v).strip() and k.lower() not in _TS_COL]
+            if isinstance(v, (str, int, float)) and str(v).strip() and k.lower() not in _TS_COL_SET]
     return " | ".join(bits[:4])[:512]
 
 
@@ -1582,8 +1787,10 @@ def _velo_row_to_event(artifact: str, row: dict, default_host: Optional[str]) ->
     lower = {k.lower(): v for k, v in row.items() if isinstance(v, (str, int, float)) and v != ""}
     host = _first(lower, _HOST_COL) or default_host
     short = artifact.split(".")[-1]
+    event_time, basis = _velo_time(row)
     return _make_event(
-        event_time=_velo_time(row),
+        event_time=event_time,
+        time_basis=basis,
         hostname=host or None,
         source=f"velociraptor/{artifact}",
         event_type=short,
@@ -1608,13 +1815,22 @@ def _velo_default_host(zf: zipfile.ZipFile) -> Optional[str]:
     return None
 
 
-def parse_velociraptor_collection(zip_source: Union[str, io.BytesIO]) -> list[dict]:
+def parse_velociraptor_collection(zip_source: Union[str, io.BytesIO], *, source_tz: str = "UTC",
+                                  year_ref: Optional[datetime] = None) -> tuple[list[dict], bool, int]:
     """Parse a Velociraptor offline-collector ZIP into normalized events.
 
     `zip_source` is a path (preferred for large collections — members are read
-    lazily) or a BytesIO. Raises ValueError if it's not a Velociraptor bundle
-    or has no parseable result rows.
+    lazily) or a BytesIO. Naive times are read in `source_tz` (C5). Returns
+    (events, truncated, total_seen) as parse_artifact does. Raises
+    ValueError if it's not a Velociraptor bundle or has no parseable result rows.
     """
+    with _time_context(source_tz, year_ref) as cap:
+        events = _parse_velociraptor_collection(zip_source)
+    total = cap["total_seen"] if cap["total_seen"] is not None else len(events)
+    return events, cap["truncated"], total
+
+
+def _parse_velociraptor_collection(zip_source: Union[str, io.BytesIO]) -> list[dict]:
     try:
         zf = zipfile.ZipFile(zip_source)
     except zipfile.BadZipFile as e:
@@ -1627,19 +1843,21 @@ def parse_velociraptor_collection(zip_source: Union[str, io.BytesIO]) -> list[di
 
         default_host = _velo_default_host(zf)
         events: list[dict] = []
+        seen = 0
+        truncated = False
         for name in result_files:
-            if len(events) >= VELO_MAX_EVENTS:
-                break
             # Velociraptor URL-encodes the artifact/source path: e.g.
             # results/Windows.EventLogs.Evtx%2FAllEvents.json → Artifact "Windows.EventLogs.Evtx".
             artifact = unquote(name[len("results/"):-len(".json")]).split("/")[0]
             try:
                 with zf.open(name) as fh:
                     for raw_line in fh:
-                        if len(events) >= VELO_MAX_EVENTS:
-                            break
                         line = raw_line.strip()
                         if not line:
+                            continue
+                        seen += 1
+                        if len(events) >= VELO_MAX_EVENTS:
+                            truncated = True      # count the rows left unconverted (M1)
                             continue
                         try:
                             row = json.loads(line)
@@ -1655,6 +1873,7 @@ def parse_velociraptor_collection(zip_source: Union[str, io.BytesIO]) -> list[di
 
         if not events:
             raise ValueError("Velociraptor collection contained no parseable result rows")
+        _record_cap(seen, truncated)
         return events
 
 
@@ -1691,36 +1910,45 @@ def _parse_win_ts(ts: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _try_parse_ts(s: Optional[str]) -> Optional[datetime]:
-    """Try common datetime formats; return None if all fail."""
+def _try_parse_ts(s: Optional[str], *, declared_utc: bool = False) -> tuple[Optional[datetime], str]:
+    """Try common datetime formats -> (UTC datetime, time_basis); (None, 'missing') if all fail.
+    A naive time is read in the source timezone ('assumed_tz'), unless the column declares UTC
+    (`declared_utc`, e.g. Entra's "Date (UTC)") -> UTC, 'explicit'."""
     if not s:
-        return None
+        return None, "missing"
     s = str(s).strip()
-    # Unix timestamp (numeric).
+    # Unix timestamp (numeric) — UTC by definition.
     try:
         epoch = float(s)
         if 1_000_000_000 < epoch < 9_999_999_999:
-            return datetime.fromtimestamp(epoch, tz=timezone.utc)
+            return datetime.fromtimestamp(epoch, tz=timezone.utc), "explicit"
         if epoch > 1_000_000_000_000:
-            return datetime.fromtimestamp(epoch / 1000, tz=timezone.utc)
+            return datetime.fromtimestamp(epoch / 1000, tz=timezone.utc), "explicit"
     except ValueError:
         pass
+
+    def _naive(dt: datetime) -> tuple[datetime, str]:
+        if declared_utc and dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc), "explicit"
+        return _localise(dt)
+
     # ISO 8601 via fromisoformat — handles offsets and (after normalizing) the
     # 7-digit fractional seconds Defender/Azure emit, which strptime's %f rejects.
     iso = s[:-1] + "+00:00" if s.endswith("Z") else s
     iso = re.sub(r"(\.\d{6})\d+", r"\1", iso)   # truncate >6 fractional digits
     try:
-        dt = datetime.fromisoformat(iso)
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return _naive(datetime.fromisoformat(iso))
     except ValueError:
         pass
     for fmt in _TS_FORMATS:
         try:
             dt = datetime.strptime(s, fmt)
-            return dt.replace(tzinfo=timezone.utc)
         except ValueError:
             continue
-    return None
+        if fmt.endswith("Z"):
+            return dt.replace(tzinfo=timezone.utc), "explicit"
+        return _naive(dt)
+    return None, "missing"
 
 
 # ─── Normalized event builder ────────────────────────────────────────────────
@@ -1728,6 +1956,7 @@ def _try_parse_ts(s: Optional[str]) -> Optional[datetime]:
 def _make_event(
     *,
     event_time: Optional[datetime],
+    time_basis: str,
     hostname: Optional[str],
     source: Optional[str],
     event_type: Optional[str],
@@ -1742,6 +1971,7 @@ def _make_event(
 ) -> dict:
     return {
         "event_time":           event_time.isoformat() if event_time else None,
+        "time_basis":           time_basis if event_time else "missing",
         "hostname":             hostname or None,
         "source":               source or None,
         "event_type":           event_type or None,

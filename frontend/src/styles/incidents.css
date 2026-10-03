@@ -171,6 +171,16 @@
   padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--border);
 }
+/* A <form> between .modal and .modal-body/.modal-foot must continue the flex column, or it
+   grows past the 90vh modal and pushes the footer off-screen. Then .modal-body scrolls and
+   the footer stays visible. A form with its fields placed directly in it (no .modal-body)
+   scrolls itself. form.modal-body already scrolls, so the rule skips it. */
+.modal > form:not(.modal-body) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
 
 /* select element — match input style */
 .select {
@@ -214,6 +224,119 @@ textarea.input { min-height: 90px; resize: vertical; font-family: var(--font-bod
   text-transform: uppercase;
 }
 .kv dd { margin: 0; color: var(--text); }
+/* Details › Snapshot: the read-only times (Occurred … Recovered). */
+.kv dd.kv-time { font-family: var(--font-mono); font-size: 12px; min-width: 0; overflow: hidden; }
+.kv dd.kv-time.none { color: var(--muted); }
+
+/* Classification strip (ClassificationStrip.jsx): one read-only line, wraps when narrow. */
+.cls-strip { min-width: 0; }
+.cls-strip-items {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--space-2) var(--space-4);
+  margin: 0; min-width: 0;
+}
+.cls-strip-items > div { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.cls-strip-items dt {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted); white-space: nowrap;
+}
+.cls-strip-items dd {
+  margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  min-width: 0; font-size: 13px; color: var(--text); overflow-wrap: anywhere;
+}
+.cls-strip .cls-none { color: var(--muted); }
+
+/* Team chip (TeamChip in ClassificationStrip.jsx): --team is the team's colour, set inline only
+   when it is a valid CSS colour; otherwise the --muted token. */
+.team-chip {
+  --team: var(--muted);
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  padding: 2px var(--space-2); border-radius: var(--radius-sm);
+  font-size: 12px; font-weight: 500;
+  color: var(--team);
+  background: color-mix(in srgb, var(--team) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--team) 33%, transparent);
+}
+.team-chip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--team); flex-shrink: 0; }
+/* Details › Teams picker: the API's refusal (would_lock_out, would_unrestrict…), text in --text. */
+.team-picker-error {
+  display: flex; align-items: baseline; gap: var(--space-1);
+  padding-left: var(--space-2); border-left: 2px solid var(--crit);
+  font-size: 12px; color: var(--text); overflow-wrap: anywhere;
+}
+.team-picker-error-mark { font-family: var(--font-mono); font-weight: 700; color: var(--crit); }
+
+/* Situation board (pages/incident/Situation.jsx). Two equal columns that always fit;
+   one column when the board itself is narrow (container query). Never scrolls sideways. */
+.sit-board { container-type: inline-size; display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.sit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); align-items: start; }
+.sit-col { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+@container (max-width: 760px) { .sit-grid { grid-template-columns: minmax(0, 1fr); } }
+.sit-panel { min-width: 0; padding: var(--space-3) var(--space-4); }
+.sit-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-2); }
+.sit-head .panel-h { margin: 0; }
+.sit-meta { font-family: var(--font-body); font-weight: 400; color: var(--muted); }
+.sit-more { font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+.sit-muted { color: var(--muted); font-size: 13px; }
+.sit-sub   { color: var(--muted); font-size: 12px; }
+.sit-error { color: var(--crit); font-size: 13px; }
+.sit-crit  { color: var(--crit); font-weight: 600; }
+.sit-warn  { color: var(--text); font-weight: 600; font-size: 13px; }
+.sit-warn::before { content: "! "; color: var(--high); }
+/* State colour goes on a glyph, border or tint; text stays in --text / --muted (>= 4.5:1 in every theme). */
+.sit-ok    { color: var(--text); font-weight: 600; font-size: 13px; }
+.sit-ok-mark { color: var(--ok); }
+.sit-mono  { font-family: var(--font-mono); font-size: 12px; }
+.sit-title { color: var(--text); font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+.sit-list { list-style: none; margin: var(--space-1) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.sit-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); min-width: 0; font-size: 13px; }
+.sit-target { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
+.sit-counts { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); font-size: 13px; color: var(--muted); margin-bottom: var(--space-2); }
+.sit-counts b { font-family: var(--font-mono); color: var(--text); }
+
+.sit-clocks { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-5); margin: 0; }
+.sit-clock { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sit-clock dt {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+}
+.sit-clock dd { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.sit-clock.missing dd { color: var(--crit); font-weight: 700; letter-spacing: 0.04em; }
+.sit-legal {
+  --chip: var(--muted);
+  display: inline-block; max-width: 100%;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--chip); border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--chip) 14%, transparent);
+  color: var(--text); font-weight: 600; text-decoration: none;
+}
+.sit-legal:hover { text-decoration: underline; }
+.sit-legal.crit { --chip: var(--crit); }
+.sit-legal.high { --chip: var(--high); }
+.sit-legal.ok   { --chip: var(--ok); }
+
+.sit-slots { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.sit-slot {
+  display: inline-flex; flex-direction: column; gap: 1px; min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface);
+}
+.sit-slot-role { font-size: 11px; color: var(--muted); }
+.sit-slot-who  { font-size: 13px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.sit-slot.vacant { border-style: dashed; border-color: var(--high); }
+.sit-slot.vacant .sit-slot-who { font-weight: 400; color: var(--muted); }
+.sit-slot.vacant .sit-slot-who::before { content: "\25CB  "; color: var(--high); }
+
+.sit-handoff { display: flex; flex-direction: column; gap: var(--space-2); font-size: 13px; }
+.sit-hypothesis { margin: 0; padding-left: var(--space-3); border-left: 2px solid var(--border-strong); color: var(--text); overflow-wrap: anywhere; }
+.sit-events li { flex-wrap: nowrap; }
+.sit-time { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+.sit-event-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@container (max-width: 560px) {
+  .sit-events li { flex-wrap: wrap; }
+  .sit-event-text { white-space: normal; overflow-wrap: anywhere; }
+}
+.sit-desc { font-size: 13px; }
 
 /* ── Status band (under header, persistent across sub-sections) ──────── */
 .status-band {
@@ -234,6 +357,38 @@ textarea.input { min-height: 90px; resize: vertical; font-family: var(--font-bod
   margin-left: auto;
   flex-shrink: 0;
 }
+
+/* Legal clock chips (ClockChips.jsx): one per regulation, coloured by urgency. */
+.clock-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.clock-chip {
+  --chip: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--chip);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--chip) 14%, transparent);
+  color: var(--chip);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.clock-chip:hover { background: color-mix(in srgb, var(--chip) 26%, transparent); }
+.clock-chip.crit { --chip: var(--crit); }
+.clock-chip.high { --chip: var(--high); }
+.clock-chip.ok   { --chip: var(--ok); }
+.clock-chip.done { --chip: var(--dim); font-weight: 400; }
+.clock-chip-reg { letter-spacing: 0.06em; }
+.clock-chip-left { font-weight: 400; color: var(--text); }
+.clock-chip.done .clock-chip-left { color: var(--dim); }
 
 /* Phase stepper inside the status band */
 .phase-steps {
@@ -268,8 +423,8 @@ button.phase-step.clickable {
   cursor: pointer;
   transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
 }
-/* Per-phase colour (NIST CSF 2.0 function hue, see tokens.css --phase-*).
-   upcoming = dimmed outline · done = ✓ + tint · current = stronger fill + bold */
+/* Per-phase colour (NIST CSF 2.0 function hue, see tokens.css --phase-*) + glyph.
+   upcoming = dimmed outline · done = trailing ✓ + tint · current = stronger fill + bold */
 .phase-step[data-phase="preparation"]                      { --ph: var(--phase-prep); }
 .phase-step[data-phase="detection_and_analysis"]           { --ph: var(--phase-detect); }
 .phase-step[data-phase="containment_eradication_recovery"] { --ph: var(--phase-respond); }
@@ -295,7 +450,15 @@ button.phase-step.clickable:focus-visible {
   background: color-mix(in srgb, var(--ph, var(--ok)) 12%, transparent);
   opacity: 1;
 }
-.phase-step.done::before { content: "✓ "; }
+.phase-step.done::after { content: " ✓"; }
+/* Phase glyph (incidentVocab PHASE[].glyph) — stepper, Incidents list, Dashboard,
+   Help. In the stepper it takes the chip's colour; elsewhere the caller colours it. */
+.phase-glyph {
+  display: inline-block;
+  margin-right: 0.4em;
+  font-weight: 400;
+  letter-spacing: 0;
+}
 .phase-step.current {
   color: var(--ph, var(--accent));
   border-color: var(--ph, var(--accent));
@@ -346,6 +509,38 @@ button.phase-step.clickable:focus-visible {
 .tab-h.active {
   color: var(--accent);
   border-bottom-color: var(--accent);
+}
+
+/* Grouped inner tabs (Examine): each group is a captioned unit that wraps whole
+   onto the next row; a group wider than the row wraps its own tabs. Never
+   scrolls sideways. Caption styled like the rail's .sub-group-label. */
+.tabs-h.tabs-grouped {
+  flex-wrap: wrap;
+  align-items: flex-end;
+  column-gap: var(--space-4);
+  row-gap: var(--space-2);
+  overflow-x: visible;
+}
+.tab-group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+}
+.tab-group-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0 14px 2px;
+  white-space: nowrap;
+}
+.tab-group-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
 }
 
 /* Panel heading reused in detail page */

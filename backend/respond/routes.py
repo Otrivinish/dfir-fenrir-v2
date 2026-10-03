@@ -22,8 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
+from core.errors import ApiError
 from incidents.access import get_accessible_incident
-from models import Decision, Incident, RespondAction, TimelineEvent, User
+from models import IOC, Decision, Entity, Incident, RespondAction, TimelineEvent, User
+from respond.containment import check_target_type
 from schemas import (
     DecisionCreate,
     DecisionList,
@@ -59,6 +61,59 @@ async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) ->
     return await get_accessible_incident(db, incident_id, user)
 
 
+async def _linked(db: AsyncSession, incident_id: uuid.UUID, model, obj_id: uuid.UUID, kind: str):
+    """Load the entity / IOC an action links to: 404 if unknown, 422 if on another incident."""
+    obj = await db.get(model, obj_id)
+    label = "Entity" if kind == "entity" else "IOC"
+    if obj is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{kind}_not_found", f"{label} not found")
+    if obj.incident_id != incident_id:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{kind}_other_incident",
+                       f"{label} belongs to another incident; link one from this incident")
+    return obj
+
+
+async def _fill_target(db: AsyncSession, action: RespondAction,
+                       entity: Optional[Entity] = None, ioc: Optional[IOC] = None) -> None:
+    """An empty target text takes the linked entity's (else IOC's) value."""
+    if str((action.details or {}).get("target") or "").strip():
+        return
+    src = entity or ioc
+    if src is None and action.entity_id:
+        src = await db.get(Entity, action.entity_id)
+    if src is None and action.ioc_id:
+        src = await db.get(IOC, action.ioc_id)
+    if src is not None:
+        action.details = {**(action.details or {}), "target": src.value}
+
+
+def _add_done_timeline_event(db: AsyncSession, action: RespondAction,
+                             incident_id: uuid.UUID, user: User) -> None:
+    """Stage the system timeline event for an action that has just become `done`.
+
+    Placed at the time the action occurred, else its completion time. The caller commits.
+    """
+    event_time = action.occurred_at or action.completed_at
+    desc_parts = [f"[{action.category.capitalize()}] {action.title}"]
+    if action.details.get("target"):
+        desc_parts.append(f"Target: {action.details['target']}")
+    if action.notes:
+        desc_parts.append(action.notes)
+    db.add(TimelineEvent(
+        id=uuid.uuid4(),
+        incident_id=incident_id,
+        event_time=event_time,
+        source="Respond",
+        event_type=action.category.capitalize(),
+        description=" — ".join(desc_parts),
+        origin="system",
+        is_system=True,
+        external_safe=False,
+        system_source="respond_action",
+        created_by_id=user.id,
+    ))
+
+
 # ─── Actions — list ──────────────────────────────────────────────────────────
 
 @router.get("/{incident_id}/respond/actions", response_model=RespondActionList,
@@ -68,15 +123,17 @@ async def list_respond_actions(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
     category: Optional[RespondActionCategory] = Query(default=None),
+    entity_id: Optional[uuid.UUID]            = Query(default=None, description="Only actions linked to this entity"),
+    ioc_id:    Optional[uuid.UUID]            = Query(default=None, description="Only actions linked to this IOC"),
     limit:    int                              = Query(default=100, ge=1, le=200),
     cursor:   Optional[str]                   = Query(default=None),
 ) -> RespondActionList:
     """List response actions (containment/eradication/recovery) for an incident.
 
     Any authenticated user with access to the incident may read. Optionally
-    filter by `category`; paginated via `limit` and opaque `cursor`. Returns
-    `{items, next_cursor}` ordered by category, then order index, then created
-    time.
+    filter by `category`, by linked `entity_id` or by linked `ioc_id`;
+    paginated via `limit` and opaque `cursor`. Returns `{items, next_cursor}`
+    ordered by category, then order index, then created time.
     """
     await _get_incident(db, incident_id, user)
     offset = _decode_cursor(cursor)
@@ -88,6 +145,10 @@ async def list_respond_actions(
     )
     if category:
         stmt = stmt.where(RespondAction.category == category)
+    if entity_id:
+        stmt = stmt.where(RespondAction.entity_id == entity_id)
+    if ioc_id:
+        stmt = stmt.where(RespondAction.ioc_id == ioc_id)
 
     stmt = stmt.offset(offset).limit(limit + 1)
     rows = (await db.execute(stmt)).scalars().all()
@@ -115,11 +176,24 @@ async def create_respond_action(
 
     Requires the analyst role. The incident must not be closed (409 otherwise).
     The action is categorised (containment/eradication/recovery), audited, and
-    the created action is returned.
+    the created action is returned. Creating it as `done` stamps completion and
+    emits a system timeline event, as marking it done later does.
+
+    `entity_id` / `ioc_id` link the action to its target on this incident
+    (404 `entity_not_found` / `ioc_not_found`; 422 `entity_other_incident` /
+    `ioc_other_incident`); an empty `details.target` is then filled from the
+    entity's or IOC's value. A containment `template_id` (e.g. `isolate_host`,
+    `block_ip`) sets the linked entity's / IOC's containment state, and only
+    links of a matching type are accepted (422 `target_type_mismatch`, e.g.
+    `isolate_host` on a hash IOC); a free-text target is not checked.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+
+    entity = await _linked(db, incident_id, Entity, req.entity_id, "entity") if req.entity_id else None
+    ioc    = await _linked(db, incident_id, IOC, req.ioc_id, "ioc") if req.ioc_id else None
+    check_target_type(req.template_id, entity, ioc)
 
     action = RespondAction(
         id=uuid.uuid4(),
@@ -134,17 +208,28 @@ async def create_respond_action(
         order_index=req.order_index,
         created_by_id=user.id,
         occurred_at=req.occurred_at,
+        completed_at=datetime.now(timezone.utc) if req.status == "done" else None,
+        entity_id=req.entity_id,
+        ioc_id=req.ioc_id,
+        template_id=req.template_id,
     )
+    await _fill_target(db, action, entity, ioc)
     db.add(action)
     await db.flush()
 
+    audit_details = {"incident_id": str(incident_id), "category": action.category, "title": action.title}
+    for key in ("entity_id", "ioc_id", "template_id"):
+        if getattr(action, key):
+            audit_details[key] = str(getattr(action, key))
     await write_audit(
         db, "respond_action_create",
         user_id=user.id, username=user.username,
         resource_type="respond_action", resource_id=str(action.id),
-        details={"incident_id": str(incident_id), "category": action.category, "title": action.title},
+        details=audit_details,
         ip_address=request.client.host if request.client else None,
     )
+    if action.status == "done":
+        _add_done_timeline_event(db, action, incident_id, user)
     await db.commit()
     return RespondActionOut.model_validate(action)
 
@@ -167,6 +252,12 @@ async def update_respond_action(
     Only provided fields are changed and audited. Marking the action `done`
     stamps completion and emits a system timeline event. Returns the updated
     action.
+
+    `entity_id`, `ioc_id` and `template_id` change only when sent; an explicit
+    null unlinks / clears. Links are checked as on create (404 / 422), and an
+    empty `details.target` is filled from the linked entity or IOC. When the
+    template or a link changes, the resulting template / target-type pair is
+    checked as on create (422 `target_type_mismatch`).
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -181,6 +272,20 @@ async def update_respond_action(
     if not action:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Action not found")
 
+    sent = req.model_fields_set
+    entity = await _linked(db, incident_id, Entity, req.entity_id, "entity") \
+        if "entity_id" in sent and req.entity_id else None
+    ioc    = await _linked(db, incident_id, IOC, req.ioc_id, "ioc") \
+        if "ioc_id" in sent and req.ioc_id else None
+    # The template / target pair the action ends up with, checked only when it changes.
+    final = {k: getattr(req, k) if k in sent else getattr(action, k) for k in ("template_id", "entity_id", "ioc_id")}
+    if any(final[k] != getattr(action, k) for k in final):
+        check_target_type(
+            final["template_id"],
+            entity if "entity_id" in sent else (await db.get(Entity, final["entity_id"]) if final["entity_id"] else None),
+            ioc if "ioc_id" in sent else (await db.get(IOC, final["ioc_id"]) if final["ioc_id"] else None),
+        )
+
     changed: dict[str, object] = {}
     if req.title       is not None and req.title.strip() != action.title:
         action.title = req.title.strip(); changed["title"] = action.title
@@ -194,6 +299,13 @@ async def update_respond_action(
         action.order_index = req.order_index;  changed["order_index"] = req.order_index
     if req.assignee_id is not None and req.assignee_id != action.assignee_id:
         action.assignee_id = req.assignee_id;  changed["assignee_id"] = str(req.assignee_id)
+    for key in ("entity_id", "ioc_id", "template_id"):
+        new = getattr(req, key)
+        if key in sent and new != getattr(action, key):
+            setattr(action, key, new)
+            changed[key] = str(new) if new else None
+    if changed.keys() & {"details", "entity_id", "ioc_id"}:
+        await _fill_target(db, action, entity, ioc)
 
     status_became_done = False
     if req.status is not None and req.status != action.status:
@@ -220,25 +332,7 @@ async def update_respond_action(
         )
 
     if status_became_done:
-        event_time = action.occurred_at or action.completed_at
-        desc_parts = [f"[{action.category.capitalize()}] {action.title}"]
-        if action.details.get("target"):
-            desc_parts.append(f"Target: {action.details['target']}")
-        if action.notes:
-            desc_parts.append(action.notes)
-        db.add(TimelineEvent(
-            id=uuid.uuid4(),
-            incident_id=incident_id,
-            event_time=event_time,
-            source="Respond",
-            event_type=action.category.capitalize(),
-            description=" — ".join(desc_parts),
-            origin="system",
-            is_system=True,
-            external_safe=False,
-            system_source="respond_action",
-            created_by_id=user.id,
-        ))
+        _add_done_timeline_event(db, action, incident_id, user)
 
     await db.commit()
     return RespondActionOut.model_validate(action)

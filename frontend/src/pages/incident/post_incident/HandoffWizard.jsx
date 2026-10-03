@@ -13,7 +13,7 @@ import { api } from '../../../api/client.js'
 //   2. Legal basis               — incl. EIO (Dir. 2014/41/EU) + MLA (Budapest Art. 31)
 //   3. Build options             — legal_hold_only + include_artifacts
 //   4. Recipient                 — name, role, ID, org, address, delivery channel
-//   5. Sender declaration        — operator certification text (signed Ed25519)
+//   5. Sender declaration        — operator certification text (in the HMAC-SHA-256-protected manifest)
 //   6. Acknowledgment            — enable single-use receipt URL
 //   7. Issue                     — final review + Generate
 
@@ -407,7 +407,7 @@ export default function HandoffWizard({ inc, onClose, onIssued }) {
         {step === 5 && (
           <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
             <StepHeader n={5} total={total} title="Sender declaration"
-                        subtitle="Signed Ed25519. eIDAS-QES hook reserved." />
+                        subtitle="Covered by the manifest HMAC-SHA-256. eIDAS-QES hook reserved." />
             <div>
               <label style={FIELD}>Declaration text *</label>
               <textarea value={form.sender_declaration}
@@ -420,9 +420,9 @@ export default function HandoffWizard({ inc, onClose, onIssued }) {
               border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
               fontSize: 11, color: 'var(--muted)',
             }}>
-              The declaration is included in the bundle manifest. The bundle itself is signed with
-              the platform's Ed25519 key. An eIDAS Qualified Electronic Signature (QES) integration
-              can replace the Ed25519 path without schema change.
+              The declaration is included in the bundle manifest, which is protected by an
+              HMAC-SHA-256 (a keyed integrity check, not a public-key signature). An eIDAS Qualified
+              Electronic Signature (QES) integration can add a signature without a schema change.
             </div>
           </div>
         )}

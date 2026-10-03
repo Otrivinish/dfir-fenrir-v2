@@ -14,6 +14,10 @@
   background: var(--surface);
   border-right: 1px solid var(--border);
   transition: width 120ms ease;
+  /* Pinned to the viewport, so the Help/Account footer stays in reach on long pages. */
+  position: sticky;
+  top: 0;
+  height: 100vh;
 }
 .sb.collapsed { width: 56px; }
 
@@ -59,19 +63,10 @@
 .sb-toggle:hover { color: var(--accent); border-color: var(--accent); }
 .sb.collapsed .sb-name,
 .sb.collapsed .nav-label,
-.sb.collapsed .sb-section,
+.sb.collapsed .sb-group-label,
 .sb.collapsed .sb-foot .who { display: none; }
 .sb.collapsed .sb-brand { flex-direction: column; align-items: center; gap: var(--space-1); padding: 12px 0; }
 .sb.collapsed .sb-toggle { margin-left: 0; }
-
-.sb-section {
-  padding: var(--space-3) var(--space-3) var(--space-1);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  color: var(--dim);
-  text-transform: uppercase;
-}
 
 .sb-nav {
   display: flex;
@@ -79,12 +74,33 @@
   gap: 1px;
   padding: var(--space-1) var(--space-2);
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
+/* Groups (D5): a caption per group; collapsed, a divider between groups instead. */
+.sb-group { display: flex; flex-direction: column; gap: 1px; }
+.sb-group-label {
+  padding: var(--space-2) 10px var(--space-1);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.sb-group:first-child .sb-group-label { padding-top: var(--space-1); }
+.sb.collapsed .sb-group + .sb-group {
+  border-top: 1px solid var(--border);
+  margin-top: var(--space-1);
+  padding-top: var(--space-1);
+}
+.sb-nav-foot { flex: none; border-top: 1px solid var(--border); }
 .nav-item {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: 8px 10px;
+  padding: 6px 10px;   /* 8px before the D5 group captions; keeps all groups on a 900 px screen */
   color: var(--muted);
   border-radius: var(--radius-sm);
   border-left: 2px solid transparent;
@@ -129,6 +145,25 @@
 .who { display: flex; flex-direction: column; min-width: 0; }
 .who-name { color: var(--text); font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .who-role { font-family: var(--font-mono); font-size: 10px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
+
+/* Below 700 px the sidebar is always collapsed (D5, CSS only): the .sb.collapsed rules
+   above, applied whatever the toggle says; the toggle is hidden because it can't expand. */
+@media (max-width: 699px) {
+  .sb { width: 56px; }
+  .sb .sb-name,
+  .sb .nav-label,
+  .sb .sb-group-label,
+  .sb .sb-foot .who,
+  .sb .sb-toggle { display: none; }
+  .sb .sb-brand { flex-direction: column; align-items: center; gap: var(--space-1); padding: 12px 0; }
+  .sb .nav-item { justify-content: center; padding: 10px 6px; border-left: none; border-right: 2px solid transparent; }
+  .sb .nav-item.active { border-right-color: var(--accent); }
+  .sb .sb-group + .sb-group {
+    border-top: 1px solid var(--border);
+    margin-top: var(--space-1);
+    padding-top: var(--space-1);
+  }
+}
 
 /* ── Main column ─────────────────────────────────────────────────────── */
 .app-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }

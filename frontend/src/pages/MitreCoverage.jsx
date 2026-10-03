@@ -255,8 +255,7 @@ export default function MitreCoverage() {
 
         {/* Show all / observed-only toggle */}
         <button
-          className="btn btn-ghost"
-          style={{ fontSize: 11, padding: '2px 8px' }}
+          className="btn ghost"
           onClick={() => setShowAll(v => !v)}
         >
           {showAll ? 'Observed only' : 'Show all techniques'}

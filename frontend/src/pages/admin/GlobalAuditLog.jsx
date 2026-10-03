@@ -175,8 +175,8 @@ function FilterBar({ onApply }) {
         <LocalDateTimePicker value={dateTo} onChange={setDateTo}
                              placeholder="To — YYYY-MM-DD HH:mm:ss" hint={false} clearable />
       </div>
-      <button type="submit"  className="btn btn-primary" style={{ fontSize: '0.8rem' }}>Apply</button>
-      <button type="button"  className="btn btn-ghost"   style={{ fontSize: '0.8rem' }} onClick={handleReset}>Reset</button>
+      <button type="submit"  className="btn primary">Apply</button>
+      <button type="button"  className="btn ghost" onClick={handleReset}>Reset</button>
     </form>
   )
 }
@@ -252,7 +252,7 @@ export default function GlobalAuditLog() {
           {nextCursor && (
             <div style={{ marginTop: 'var(--space-3)', textAlign: 'center' }}>
               <button
-                className="btn btn-ghost"
+                className="btn ghost"
                 onClick={handleLoadMore}
                 disabled={loadingMore}
               >

@@ -158,8 +158,14 @@ export default function OOB() {
           </span>
         </label>
         <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 'var(--space-2)', maxWidth: 560 }}>
-          Activating dark operation mode displays a prominent warning banner on the incident and
-          restricts all external communications. Verify all callers using the passphrase below.
+          Shows a warning banner on the incident and blocks every Teams, Slack and alert-mailbox
+          message about it (new incident, phase change, severity change, closed). It also skips
+          the automatic DNS checks (SPF, DKIM, DMARC) of an analyzed email's sender domain. Each
+          blocked message or check is listed in the incident audit log and is not sent or run
+          later. Still on: in-app notifications to people who can see this incident, syslog audit
+          forwarding (actions and IDs only), OSINT lookups you start, the email Domain auth check
+          (only when you click it), and admin test messages. Verify all callers using the
+          passphrase below.
         </p>
       </section>
 

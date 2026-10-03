@@ -213,6 +213,8 @@ class TeamRef(BaseModel):
 Severity        = Literal["low", "medium", "high", "critical"]
 Phase           = Literal["preparation", "detection_and_analysis",                     # 800-61 R3
                           "containment_eradication_recovery", "post_incident"]
+# Phases an incident can be created in: it exists because something was detected.
+StartPhase      = Literal["detection_and_analysis", "containment_eradication_recovery"]
 Tlp             = Literal["red", "amber_strict", "amber", "green", "clear"]            # TLP 2.0
 IncidentState   = Literal["open", "closed"]
 # Analyst's investigation-confidence assessment. Distinct from severity (impact)
@@ -237,15 +239,19 @@ class IncidentCreate(BaseModel):
     title:            str = Field(min_length=3, max_length=200)
     description:      Optional[str] = None
     severity:         Severity = "medium"
-    phase:            Phase    = "detection_and_analysis"
+    phase:            StartPhase = Field(default="detection_and_analysis",
+                                         description="Starting phase: detection_and_analysis or containment_eradication_recovery only.")
     tlp:              Tlp      = "amber"
     triage_state:     TriageState = "suspected"
     incident_type:    Optional[IncidentType]    = None
     detection_method: Optional[DetectionMethod] = None
     reporter:         Optional[str] = Field(default=None, max_length=128)
     occurred_at:      Optional[datetime] = None
+    detected_at:      Optional[datetime] = Field(default=None,
+                                                 description="When the incident was detected (UTC). Not before occurred_at, not in the future; never set by the server.")
     team_ids:         list[UUID] = []
     tags:             list[str]  = Field(default_factory=list)
+    dark_operation:   bool       = False  # open dark: no Teams/Slack/email alert from the start
 
 
 class IncidentUpdate(BaseModel):
@@ -260,9 +266,40 @@ class IncidentUpdate(BaseModel):
     reporter:         Optional[str]              = Field(default=None, max_length=128)
     occurred_at:      Optional[datetime]         = None
     detected_at:      Optional[datetime]         = None
-    contained_at:     Optional[datetime]         = None
-    team_ids:         Optional[list[UUID]]       = None  # None = no change; [] = remove all teams
+    contained_at:     Optional[datetime]         = Field(default=None,
+                                                         description="When the incident was contained (UTC). Declared, never set by the server. Not in the future.")
+    eradicated_at:    Optional[datetime]         = Field(default=None,
+                                                         description="When eradication was complete (UTC). Not in the future, not before contained_at.")
+    recovered_at:     Optional[datetime]         = Field(default=None,
+                                                         description="When normal operations were restored (UTC). Not in the future, not before contained_at or eradicated_at.")
+    team_ids:         Optional[list[UUID]]       = Field(default=None,
+                                                         description="Replace the incident's teams (omit = no change; [] = no teams, "
+                                                                     "visible to everyone). Incident lead only: an admin, or an analyst "
+                                                                     "assigned as Incident Commander or Deputy (403 not_incident_lead). "
+                                                                     "Only an admin can clear the list of a restricted incident (409 "
+                                                                     "would_unrestrict). An unknown team is 422 team_not_found.")
     tags:             Optional[list[str]]        = None  # None = no change; [] = clear
+    # Phase-change controls (B5 phase gates); they apply only when `phase` changes.
+    phase_reason:     Optional[str]              = Field(default=None, max_length=2000,
+                                                         description="Why the phase changes, at least 10 characters after trimming. "
+                                                                     "Required to move backwards (to an earlier phase) and with "
+                                                                     "override_gate; missing or shorter is 422 code phase_reason_required. "
+                                                                     "Audited with the change.")
+    override_gate:    bool                       = Field(default=False,
+                                                         description="Proceed into post_incident although Gate 1 is unmet "
+                                                                     "(409 gate_unmet otherwise). Needs phase_reason; writes an "
+                                                                     "incident_gate_override audit row and a system timeline event. "
+                                                                     "A reason without this flag never overrides. Incident lead only "
+                                                                     "(admin, or an analyst assigned as Incident Commander or Deputy): "
+                                                                     "with a phase change, true from anyone else is 403 not_incident_lead.")
+    triage_reason:    Optional[str]              = Field(default=None, max_length=2000,
+                                                         description="Why triage_state changes, at least 10 characters after trimming. "
+                                                                     "Required when triage_state becomes false_positive or benign_positive "
+                                                                     "and the incident is (or, with phase in the same request, ends up) "
+                                                                     "outside detection_and_analysis, because such an incident can then be "
+                                                                     "closed without Gate 2; missing or shorter is 422 code "
+                                                                     "triage_reason_required. When given with a triage change it is audited "
+                                                                     "and posted as a system timeline event (\"Triage changed\").")
 
 
 class IncidentOut(BaseModel):
@@ -284,9 +321,12 @@ class IncidentOut(BaseModel):
     created_at:       datetime
     updated_at:       datetime
     closed_at:        Optional[datetime] = None
+    closed_by_id:     Optional[UUID] = None
     occurred_at:      Optional[datetime] = None
     detected_at:      Optional[datetime] = None
     contained_at:     Optional[datetime] = None
+    eradicated_at:    Optional[datetime] = None
+    recovered_at:     Optional[datetime] = None
     teams:            list[TeamRef] = []
     tags:             list[str]      = Field(default_factory=list)
 
@@ -299,8 +339,102 @@ class IncidentList(BaseModel):
     next_cursor: Optional[str] = None
 
 
+# Phases a closed incident can be re-opened into (never Preparation).
+ReopenPhase = Literal["detection_and_analysis", "containment_eradication_recovery", "post_incident"]
+_REASON_DOC = "at least 10 characters after trimming; missing or shorter is 422 code reason_required."
+
+
+class IncidentClose(BaseModel):
+    # reason is checked in the route, not here, so a missing one gets the flat
+    # {detail, code} body; the schema still marks it required.
+    reason: Optional[str] = Field(default=None, max_length=2000,
+                                  description="Closing sign-off statement, " + _REASON_DOC)
+    override_gate: bool = Field(default=False,
+                                description="Close although Gate 2 is unmet (409 gate_unmet otherwise); the "
+                                            "reason doubles as the override justification. Writes an "
+                                            "incident_gate_override audit row and a system timeline event. "
+                                            "Incident lead only (admin, or an analyst assigned as Incident "
+                                            "Commander or Deputy): true from anyone else is 403 not_incident_lead.")
+
+    class Config:
+        json_schema_extra = {"required": ["reason"]}
+
+
+class IncidentReopen(BaseModel):
+    reason: Optional[str]         = Field(default=None, max_length=2000,
+                                          description="Why the incident is re-opened, " + _REASON_DOC)
+    phase:  Optional[ReopenPhase] = Field(default=None,
+                                          description="Phase to re-open into: detection_and_analysis, "
+                                                      "containment_eradication_recovery or post_incident; "
+                                                      "missing is 422 code phase_required.")
+
+    class Config:
+        json_schema_extra = {"required": ["reason", "phase"]}
+
+
+# ─── Phase gates (incidents/gates.py) ────────────────────────────────────────
+# Gate 1 "post_incident": entering Post-Incident (NIST SP 800-61 R3 RS.MI / RC.RP).
+# Gate 2 "close":         closing the incident (800-61 R3 ID.IM).
+GateName = Literal["post_incident", "close"]
+
+
+class GateItem(BaseModel):
+    """One gate condition: unmet (blocking) or carried forward (open, not blocking)."""
+    key:      str = Field(description="Stable machine-readable condition key, e.g. recovered_at_missing.")
+    label:    str = Field(description="What is missing, in plain words.")
+    detail:   Optional[str] = Field(default=None, description="Specifics, e.g. the open actions' titles.")
+    fix_hint: Optional[str] = Field(default=None, description="Where and how to fix it.")
+    route:    Optional[str] = Field(default=None,
+                                    description="Incident sub-page where it is fixed, relative to "
+                                                "/incidents/{id}/ (e.g. respond, legal, post-incident).")
+    due_at:   Optional[datetime] = Field(default=None, description="Deadline (UTC), for legal items.")
+
+
+class GateResult(BaseModel):
+    gate:            GateName
+    label:           str
+    met:             bool = Field(description="True when nothing blocks (or the gate is exempt).")
+    exempt:          bool = Field(default=False,
+                                  description="The gate does not apply: close for a false or benign positive.")
+    unmet:           list[GateItem] = Field(default_factory=list)
+    carried_forward: list[GateItem] = Field(default_factory=list,
+                                            description="Open obligations that do not block this gate.")
+
+
+class IncidentGates(BaseModel):
+    """Both gates' status, evaluated now by the same code that enforces them."""
+    incident_id: UUID
+    items:       list[GateResult]
+
+
+IncidentCapability = Literal["read_audit_log", "manage_le_package", "set_teams", "override_gate",
+                             "remove_any_assignment", "assign_lead_roles", "remove_own_assignment"]
+
+
+class IncidentAccess(BaseModel):
+    """What the caller may do on one incident beyond their platform role (E3), evaluated now."""
+    is_lead: bool = Field(description="True for an admin, or an analyst (effective role: an API token's "
+                                      "role cap applies) assigned as Incident Commander or Deputy "
+                                      "Incident Commander on this incident.")
+    capabilities: list[IncidentCapability] = Field(
+        description="read_audit_log, manage_le_package (build/list/acknowledge LE packages), set_teams, "
+                    "override_gate, remove_any_assignment: the incident lead. assign_lead_roles (create or "
+                    "remove IC / Deputy assignments): the lead, or, while no active analyst or admin holds "
+                    "IC / Deputy, the incident's creator or today's on-call analyst. "
+                    "remove_own_assignment: analysts and admins.")
+
+
+class GateUnmetBody(BaseModel):
+    """409 body when a gate blocks a phase change or close (flat, like every API error)."""
+    detail: str
+    code:   Literal["gate_unmet"]
+    gate:   GateName
+    unmet:  list[GateItem]
+
+
 class IncidentSnapshot(BaseModel):
-    """At-a-glance per-incident counts for the Details landing tab.
+    """At-a-glance per-incident counts for the Details landing tab and the
+    incident rail's live counts.
 
     All values are non-negative integers. Aggregations only — no row data — so
     this endpoint is access-checked but not RBAC-sensitive beyond accessibility.
@@ -309,11 +443,38 @@ class IncidentSnapshot(BaseModel):
     entities:         int
     evidence:         int
     timeline:         int
-    affected_systems: int
+    affected_systems: int   # compromised entities (C2)
     assignments:      int
     playbook_total:   int   # excludes skipped tasks (matches sidebar widget convention)
     playbook_done:    int
     playbook_skipped: int
+    files:            int = Field(description="Supporting documents (the incident's Files store, "
+                                              "including files linked to an entity).")
+    respond_open:     int = Field(description="Respond actions (containment / eradication / recovery) "
+                                              "with status open or in_progress.")
+    respond_total:    int = Field(description="All Respond actions, any status (done, deferred and "
+                                              "reverted included).")
+    handoffs_pending: int = Field(description="Shift handoffs not yet acknowledged (status pending).")
+
+
+# ─── Containment state (C1) ─────────────────────────────────────────────────
+# Derived from the Respond board (respond/containment.py) and returned on the
+# entity and IOC lists.
+
+ContainmentEffect = Literal["isolated", "disabled", "blocked"]
+
+
+class ContainmentOut(BaseModel):
+    """Containment state of an entity or IOC, from its latest non-reverted
+    containment action that has a containment template.
+
+    `state` is the effect once that action is done, or `pending` while it is
+    open or in progress; `effect` always names what the action does.
+    """
+    state:      Literal["isolated", "disabled", "blocked", "pending"]
+    effect:     ContainmentEffect
+    action_id:  UUID
+    updated_at: datetime
 
 
 # ─── IOCs ───────────────────────────────────────────────────────────────────
@@ -338,6 +499,7 @@ class IOCOut(BaseModel):
     confidence:  int            = 50
     tags:        list[str]     = Field(default_factory=list)
     entity_id:   Optional[UUID] = None
+    evidence_id: Optional[UUID] = None   # C5 — the exhibit the indicator was found in
     added_by_id: Optional[UUID] = None
     added_by_username: Optional[str] = None
     added_at:    datetime
@@ -347,6 +509,8 @@ class IOCOut(BaseModel):
     ti_match_source: Optional[str] = None
     lolbin_hit:      bool          = False
     lolbin_name:     Optional[str] = None
+    # Set on the list endpoint only; null when no containment action applies.
+    containment:     Optional[ContainmentOut] = None
 
     class Config:
         from_attributes = True
@@ -362,6 +526,9 @@ class IOCCreate(BaseModel):
     confidence: int            = Field(default=50, ge=0, le=100)
     tags:       list[str]     = Field(default_factory=list, max_length=32)
     entity_id:  Optional[UUID] = None
+    # C5 — an exhibit (evidence item) of THIS incident the indicator was found in
+    # (404 evidence_not_found / 422 evidence_other_incident).
+    evidence_id: Optional[UUID] = None
 
 
 class IOCUpdate(BaseModel):
@@ -430,6 +597,8 @@ class EntityOut(BaseModel):
     added_at:    datetime
     updated_at:  datetime
     file_count:  int = 0
+    # Set on the list endpoint only; null when no containment action applies.
+    containment: Optional[ContainmentOut] = None
 
     class Config:
         from_attributes = True
@@ -441,6 +610,8 @@ class EntityCreate(BaseModel):
     name:        Optional[str] = Field(default=None, max_length=256)
     description: Optional[str] = Field(default=None, max_length=4096)
     criticality: Criticality = "medium"
+    # True = in scope as compromised (it then appears under Affected systems / ?compromised=true).
+    compromised: bool = False
     attributes:  dict = Field(default_factory=dict)
 
 
@@ -549,6 +720,8 @@ CustodyAction   = Literal["collect", "transfer", "examine", "verify", "verify_fa
                           "export", "return", "destroy", "archive"]
 DispositionKind = Literal["destroy", "return", "archive"]
 CollectorRole = Literal["defr", "des"]   # GS-12 — ISO/IEC 27037 §3.7 (DEFR) / §3.8 (DES)
+# C3 — typed target hash vs the server's hash of the uploaded bytes (see models.Evidence).
+UploadHashCheck = Literal["match", "mismatch", "not_checked", "container_media"]
 
 
 class PhotoRef(BaseModel):
@@ -591,6 +764,11 @@ class EvidenceOut(BaseModel):
     current_custodian_external_name:    Optional[str] = None
     current_custodian_external_org:     Optional[str] = None
     current_custodian_external_contact: Optional[str] = None
+    # C4 — an internal transfer awaiting the recipient's acceptance (all null when none).
+    # Custody (current_custodian_id) changes only when the recipient accepts.
+    pending_custodian_id:          Optional[UUID] = None
+    pending_transfer_by_id:        Optional[UUID] = None
+    pending_transfer_requested_at: Optional[datetime] = None
     collected_by_id:      Optional[UUID] = None
     collected_as_role:    Optional[CollectorRole] = None   # GS-12 (DEFR/DES)
     collected_at:         datetime
@@ -609,6 +787,8 @@ class EvidenceOut(BaseModel):
     acquisition_params:        Optional[str] = None
     acquisition_hash_source:   Optional[str] = None
     acquisition_hash_target:   Optional[str] = None
+    acquired_at:               Optional[datetime] = None          # C3 — when the image was taken / item seized
+    upload_hash_check:         Optional[UploadHashCheck] = None   # C3 — null on legacy rows without a target hash
     write_blocker_used:        Optional[bool] = None
     write_blocker_serial:      Optional[str]  = None
     system_state:              Optional[str]  = None
@@ -637,6 +817,10 @@ class EvidenceOut(BaseModel):
     has_examination:                  bool = False
     has_examination_findings:         bool = False
     has_examination_scope:            bool = False
+    # C4 — internal custody changes in the audit chain (set by the list endpoint, 0 elsewhere):
+    # accepted by the recipient / recorded before recipient acceptance existed (legacy).
+    internal_transfers_acknowledged:  int = 0
+    internal_transfers_legacy:        int = 0
     coc_sealed:                bool = False
     coc_sealed_at:             Optional[datetime] = None
     coc_sealed_by_id:          Optional[UUID] = None
@@ -739,6 +923,9 @@ class PhysicalEvidenceCreate(BaseModel):
     photos:             list[PhotoRef] = Field(default_factory=list)
     collected_location: Optional[str] = Field(default=None, max_length=256)
     collected_as_role:  Optional[CollectorRole] = None   # GS-12 (DEFR/DES)
+    # C3 — when the item was seized (UTC; at most a couple of minutes ahead of the server
+    # clock, else 422 acquired_in_future). collected_at stays "registered in FENRIR".
+    acquired_at:        Optional[datetime] = None
 
     # Wizard A — acquisition metadata. Same fields as the digital flow; the
     # write-blocker / acquisition-hash fields don't apply but we accept them
@@ -791,7 +978,12 @@ class ExternalCustodian(BaseModel):
 
 
 class TransferRequest(BaseModel):
-    """Exactly one of `to_user_id` or `to_external` must be set."""
+    """Exactly one of `to_user_id` or `to_external` must be set.
+
+    C4: `to_user_id` (internal) is a REQUEST — custody changes only when that user accepts
+    via `…/transfer/accept`. The one exception is taking an item back from external custody:
+    the receiving user (`to_user_id` = yourself) records it in one step and must give
+    `condition_on_receipt` + `seals_intact`."""
     to_user_id:  Optional[UUID] = None
     to_external: Optional[ExternalCustodian] = None
     reason:      str = Field(min_length=1, max_length=2048)
@@ -799,12 +991,27 @@ class TransferRequest(BaseModel):
     transport_method: Optional[str] = Field(default=None, max_length=128)   # courier, hand-carry, encrypted_channel…
     seal_id:          Optional[str] = Field(default=None, max_length=128)   # tamper-evident seal number
     courier_ref:      Optional[str] = Field(default=None, max_length=128)   # tracking / waybill ref
+    # C4 — only for a return from external custody (ignored otherwise).
+    condition_on_receipt: Optional[str] = Field(default=None, max_length=4096)
+    seals_intact:         Optional[bool] = None
 
     @model_validator(mode="after")
     def _exactly_one_recipient(self):
         if (self.to_user_id is None) == (self.to_external is None):
             raise ValueError("exactly one of to_user_id or to_external must be provided")
         return self
+
+
+class TransferAcceptRequest(BaseModel):
+    """C4 — the recipient confirms receipt after inspecting the item (ISO/IEC 27037 §9.3;
+    SWGDE §6.2/§6.3)."""
+    condition_on_receipt: str = Field(min_length=1, max_length=4096)   # what the recipient found
+    seals_intact:         bool                                         # tamper-evident seals / packaging intact
+
+
+class TransferDeclineRequest(BaseModel):
+    """C4 — decline (recipient) or cancel (requester / admin) a pending transfer."""
+    reason: str = Field(min_length=1, max_length=2048)
 
 
 class ExamineRequest(BaseModel):
@@ -898,6 +1105,11 @@ class ValidatedToolList(BaseModel):
 
 # ─── Email analyzer (U8.1) ────────────────────────────────────────────────────
 
+class HopImportStatus(BaseModel):
+    importable:       int = Field(description="Hops the Timeline import takes (timestamp parses)")
+    already_imported: int = Field(description="Importable hops whose Timeline event still exists")
+
+
 class EmailAnalysisOut(BaseModel):
     id:                 UUID
     incident_id:        UUID
@@ -923,6 +1135,7 @@ class EmailAnalysisOut(BaseModel):
     attachments:  list = []
     created_by:   Optional[str] = None
     created_at:   datetime
+    hop_import:   Optional[HopImportStatus] = None   # null in the history list
 
     class Config:
         from_attributes = True
@@ -1458,6 +1671,11 @@ class RespondActionOut(BaseModel):
     reverted_at:    Optional[datetime] = None
     reverted_by_id: Optional[UUID] = None
     revert_reason:  Optional[str] = None
+    # The entity / IOC the action targets (null = unlinked free-text target) and
+    # the template it was made from.
+    entity_id:      Optional[UUID] = None
+    ioc_id:         Optional[UUID] = None
+    template_id:    Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -1465,6 +1683,15 @@ class RespondActionOut(BaseModel):
 
 class RespondActionRevert(BaseModel):
     revert_reason: str = Field(min_length=1, max_length=4096)
+
+
+_ENTITY_LINK_DOC = ("Entity this action targets; it must belong to this incident (422 otherwise, "
+                    "404 if unknown). An empty details.target is filled from its value.")
+_IOC_LINK_DOC = ("IOC this action targets; it must belong to this incident (422 otherwise, "
+                 "404 if unknown). An empty details.target is filled from its value.")
+_TEMPLATE_DOC = ("Action template id, e.g. isolate_host, block_ip, disable_account. Containment "
+                 "templates set the linked entity's / IOC's containment state and accept only a "
+                 "matching target type (422 target_type_mismatch, e.g. isolate_host on a hash IOC).")
 
 
 class RespondActionCreate(BaseModel):
@@ -1477,6 +1704,10 @@ class RespondActionCreate(BaseModel):
     details:     dict = Field(default_factory=dict)
     order_index: int = 0
     occurred_at: Optional[datetime] = None
+    entity_id:   Optional[UUID] = Field(default=None, description=_ENTITY_LINK_DOC)
+    ioc_id:      Optional[UUID] = Field(default=None, description=_IOC_LINK_DOC)
+    template_id: Optional[str] = Field(default=None, max_length=64, pattern=r"^[a-z][a-z0-9_]*$",
+                                       description=_TEMPLATE_DOC)
 
 
 class RespondActionUpdate(BaseModel):
@@ -1488,6 +1719,11 @@ class RespondActionUpdate(BaseModel):
     details:     Optional[dict] = None
     order_index: Optional[int] = None
     occurred_at: Optional[datetime] = None
+    # For these three, an explicit null clears the value; omit a field to keep it.
+    entity_id:   Optional[UUID] = Field(default=None, description=_ENTITY_LINK_DOC + " Null unlinks.")
+    ioc_id:      Optional[UUID] = Field(default=None, description=_IOC_LINK_DOC + " Null unlinks.")
+    template_id: Optional[str] = Field(default=None, max_length=64, pattern=r"^[a-z][a-z0-9_]*$",
+                                       description=_TEMPLATE_DOC + " Null clears it.")
 
 
 class RespondActionList(BaseModel):
@@ -1538,6 +1774,10 @@ class DecisionList(BaseModel):
 # ─── Timeline events ─────────────────────────────────────────────────────────
 
 TimelineOrigin = Literal["manual", "forensic_import", "system"]
+# C5 — how an imported event's UTC time was worked out (forensic/parser.py): explicit (the record
+# states UTC/an offset), assumed_tz (naive, read in the import's source_tz), inferred_year (BSD
+# syslog, year from the exhibit's acquisition time). 'missing' = no time: never promoted.
+TimeBasis = Literal["explicit", "assumed_tz", "inferred_year", "missing"]
 
 
 class TimelineEventOut(BaseModel):
@@ -1545,6 +1785,7 @@ class TimelineEventOut(BaseModel):
     incident_id:          UUID
     event_time:           datetime
     hostname:             Optional[str] = None
+    entity_id:            Optional[UUID] = None
     source:               Optional[str] = None
     event_type:           Optional[str] = None
     description:          str
@@ -1558,6 +1799,16 @@ class TimelineEventOut(BaseModel):
     is_system:            bool            = False
     system_source:        Optional[str]   = None
     external_safe:        bool            = True
+    # C5 provenance. forensic_import_id set = promoted from a Timeline Import run: its facts
+    # (event_time, hostname, source, event_type, description, raw_log) are immutable (409
+    # imported_fact_immutable); ir_phase, ATT&CK and entity_id stay editable. time_basis NULL =
+    # legacy or analyst-entered. evidence_identifier / parser_version are resolved on read.
+    evidence_id:          Optional[UUID] = None
+    evidence_identifier:  Optional[str]  = None
+    forensic_import_id:   Optional[UUID] = None
+    import_event_index:   Optional[int]  = None
+    parser_version:       Optional[str]  = None
+    time_basis:           Optional[TimeBasis] = None
     created_by_id:        Optional[UUID] = None
     created_by_username:  Optional[str]  = None
     created_at:           datetime
@@ -1570,6 +1821,9 @@ class TimelineEventOut(BaseModel):
 class TimelineEventCreate(BaseModel):
     event_time:           datetime
     hostname:             Optional[str]   = Field(default=None, max_length=256)
+    # An entity of THIS incident (404 unknown / 422 another incident's). An empty hostname
+    # defaults to the entity's value.
+    entity_id:            Optional[UUID]  = None
     source:               Optional[str]   = Field(default=None, max_length=128)
     event_type:           Optional[str]   = Field(default=None, max_length=128)
     description:          str             = Field(min_length=1, max_length=4096)
@@ -1584,8 +1838,10 @@ class TimelineEventCreate(BaseModel):
 
 
 class TimelineEventUpdate(BaseModel):
+    # None = unchanged, except entity_id and ir_phase: sent as null they unlink / clear.
     event_time:           Optional[datetime] = None
     hostname:             Optional[str]   = Field(default=None, max_length=256)
+    entity_id:            Optional[UUID]  = None
     source:               Optional[str]   = Field(default=None, max_length=128)
     event_type:           Optional[str]   = Field(default=None, max_length=128)
     description:          Optional[str]   = Field(default=None, min_length=1, max_length=4096)
@@ -1814,6 +2070,8 @@ class ParsedEventOut(BaseModel):
     mitre_technique_name: Optional[str] = None
     suspicious:           bool = False
     suspicious_reasons:   list[str] = Field(default_factory=list)
+    # C5 — how event_time was worked out; None on imports parsed before parser versioning.
+    time_basis:           Optional[TimeBasis] = None
 
 
 class ForensicParseResponse(BaseModel):
@@ -1821,6 +2079,9 @@ class ForensicParseResponse(BaseModel):
     detected_format: str   # evtx | xml | sqlite | csv | json
     count:          int    # total events returned (capped at MAX_EVENTS)
     suspicious_count: int
+    # True when a parser cap cut the output; total_seen = source records the parser read.
+    truncated:      bool = False
+    total_seen:     Optional[int] = None
     events:         list[ParsedEventOut]
 
 
@@ -1838,6 +2099,17 @@ class ForensicImportSummary(BaseModel):
     suspicious_count: int
     uploaded_by:     Optional[str] = None
     uploaded_at:     datetime
+    # C5 — the exhibit the parsed bytes are (from-evidence, or an upload whose SHA-256 equals
+    # exactly one exhibit of the incident), the parser version and the source timezone used.
+    # All NULL on imports made before C5.
+    evidence_id:         Optional[UUID] = None
+    evidence_identifier: Optional[str]  = None
+    parser_version:      Optional[str]  = None
+    source_tz:           Optional[str]  = None
+    # True when a parser cap cut the output: event_count of total_seen source records (rows /
+    # records / matched lines) were converted. Both NULL on imports made before this was recorded.
+    truncated:           Optional[bool] = None
+    total_seen:          Optional[int]  = None
     class Config: from_attributes = True
 
 
@@ -1847,6 +2119,36 @@ class ForensicImportList(BaseModel):
 
 class ForensicImportDetail(ForensicImportSummary):
     events: list[ParsedEventOut]
+
+
+TimelineImportParser = Literal["auto", "evtx", "xml", "sqlite", "csv", "tsv", "syslog", "json"]
+
+
+class ForensicImportFromEvidence(BaseModel):
+    """C5 — parse a registered exhibit (no re-upload)."""
+    source_tz: str = Field(min_length=1, max_length=64,
+                           description="IANA timezone the exhibit's zone-less times are in, e.g. "
+                                       "'Europe/Oslo' or 'UTC'. Times that state UTC or an offset "
+                                       "are not affected.")
+    parser:    TimelineImportParser = Field(
+        default="auto",
+        description="Format override for a file whose name/extension doesn't say what it is. "
+                    "'auto' detects from the content and the exhibit's original filename.")
+
+
+class ForensicImportPromote(BaseModel):
+    """C5 — promote events of a stored import to the timeline by their index (`idx`)."""
+    indices:  list[int] = Field(min_length=1, max_length=10_000)
+    ir_phase: Optional[Phase] = None
+
+
+class ForensicImportPromoteResult(BaseModel):
+    created:               int
+    created_indices:       list[int] = Field(default_factory=list)
+    # Never placed on the timeline: no parseable time (time_basis 'missing').
+    skipped_untimestamped: list[int] = Field(default_factory=list)
+    # Already on the timeline from this import (re-promoting is a no-op).
+    already_promoted:      list[int] = Field(default_factory=list)
 
 
 # ─── OSINT enrichment ────────────────────────────────────────────────────────
@@ -2367,6 +2669,11 @@ class IncidentHandoffList(BaseModel):
 # ─── Affected systems ─────────────────────────────────────────────────────────
 
 class AffectedSystemOut(BaseModel):
+    """DEPRECATED shape (C2): one compromised entity of the incident, in the old
+    affected-system layout. `id` and `entity_id` are both the entity's id; `name` is the
+    entity's display name, else its value; `notes` its description; `system_type` the
+    original system type kept in `attributes.system_type` (null when the entity never had
+    one); `entity_type` the entity's type."""
     id:                  UUID
     incident_id:         UUID
     name:                str
@@ -2374,9 +2681,8 @@ class AffectedSystemOut(BaseModel):
     notes:               Optional[str] = None
     created_at:          datetime
     created_by_username: Optional[str] = None
-
-    class Config:
-        from_attributes = True
+    entity_id:           UUID
+    entity_type:         EntityType
 
 
 class AffectedSystemCreate(BaseModel):
@@ -2559,7 +2865,11 @@ class LePackageOut(BaseModel):
     delivery_channel:        Optional[str] = None
     delivery_notes:          Optional[str] = None
     sender_declaration:      Optional[str] = None
-    signature_kind:          Optional[str] = None
+    signature_kind:          Optional[str] = Field(
+        default=None,
+        description="How MANIFEST.json is protected: hmac-sha256 (INTEGRITY.sig, keyed with "
+                    "SHA-256 of the bundle password). Packages built before 2026-10-03 say ed25519, "
+                    "a wrong label: they are HMAC-SHA-256 too.")
     acknowledged_at:         Optional[datetime] = None
     acknowledged_by_name:    Optional[str] = None
 

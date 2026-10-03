@@ -20,6 +20,7 @@ from auth.deps import current_user, require_analyst
 from core.worker_client import WORKER_URL, worker_client, worker_headers
 from core.config import settings
 from core.database import get_db
+from core.errors import ApiError, ApiErrorBody
 from incidents.access import get_accessible_incident
 from models import Artifact, Incident, TimelineEvent, IOC, User, YaraMatch, YaraRule
 from schemas import (
@@ -70,6 +71,18 @@ def _parse_meta(content: str) -> dict:
 
 async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) -> Incident:
     return await get_accessible_incident(db, incident_id, user)
+
+
+async def _get_open_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) -> Incident:
+    """Access-checked (404 when the caller can't see it) and open (409 incident_closed)."""
+    inc = await get_accessible_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
+    return inc
+
+
+_PROMOTE_ERRORS = {404: {"description": "Incident (no access) or match not found"},
+                   409: {"model": ApiErrorBody, "description": "incident_closed"}}
 
 
 # ─── Global YARA rule library ─────────────────────────────────────────────────
@@ -378,7 +391,7 @@ async def clear_matches(
 
 
 @incident_router.post("/{incident_id}/yara/matches/{match_id}/to-timeline",
-                      status_code=status.HTTP_201_CREATED,
+                      status_code=status.HTTP_201_CREATED, responses=_PROMOTE_ERRORS,
                       summary="Add a YARA match to the timeline")
 async def match_to_timeline(
     incident_id: uuid.UUID,
@@ -388,8 +401,12 @@ async def match_to_timeline(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Create a timeline event from a YARA match, summarising the rule, matched
-    artifact, and matched strings. Requires the analyst role. Returns the new
-    event id, or 404 if the match does not exist for this incident."""
+    artifact, and matched strings. The event is placed at the scan time (when the
+    match was recorded), never at the time of this request (C5; time_basis
+    explicit). Requires the analyst role and access to the incident (404 otherwise); 409
+    incident_closed on a closed incident. Returns the new event id, or 404 if the
+    match does not exist for this incident."""
+    await _get_open_incident(db, incident_id, user)
     match = (await db.execute(
         select(YaraMatch).where(
             YaraMatch.id == match_id,
@@ -416,7 +433,8 @@ async def match_to_timeline(
     ev = TimelineEvent(
         id=uuid.uuid4(),
         incident_id=incident_id,
-        event_time=datetime.now(timezone.utc),
+        event_time=match.created_at,          # the scan that recorded the match
+        time_basis="explicit",
         event_type="yara_detection",
         source="YARA",
         description=desc,
@@ -429,7 +447,7 @@ async def match_to_timeline(
         db, "yara_match_to_timeline",
         user_id=user.id, username=user.username,
         resource_type="timeline_event", resource_id=str(ev.id),
-        details={"match_id": str(match_id), "rule": match.rule_name},
+        details={"incident_id": str(incident_id), "match_id": str(match_id), "rule": match.rule_name},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -437,7 +455,7 @@ async def match_to_timeline(
 
 
 @incident_router.post("/{incident_id}/yara/matches/{match_id}/to-ioc",
-                      status_code=status.HTTP_201_CREATED,
+                      status_code=status.HTTP_201_CREATED, responses=_PROMOTE_ERRORS,
                       summary="Promote a YARA match to an IOC")
 async def match_to_ioc(
     incident_id: uuid.UUID,
@@ -447,9 +465,11 @@ async def match_to_ioc(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Add the matched artifact's SHA-256 hash as a sha256 IOC on the incident.
-    Deduplicates against existing IOCs. Requires the analyst role. Returns the
+    Deduplicates against existing IOCs. Requires the analyst role and access to the
+    incident (404 otherwise); 409 incident_closed on a closed incident. Returns the
     IOC id and whether it was newly created; 404 if the match is missing, 422
     if the artifact has no SHA-256."""
+    await _get_open_incident(db, incident_id, user)
     match = (await db.execute(
         select(YaraMatch).where(
             YaraMatch.id == match_id,
@@ -498,7 +518,8 @@ async def match_to_ioc(
         db, "yara_match_to_ioc",
         user_id=user.id, username=user.username,
         resource_type="ioc", resource_id=str(ioc.id),
-        details={"match_id": str(match_id), "rule": match.rule_name, "sha256": sha256},
+        details={"incident_id": str(incident_id), "match_id": str(match_id), "rule": match.rule_name,
+                 "sha256": sha256},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()

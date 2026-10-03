@@ -116,6 +116,9 @@ async def notifications_ws(
     websocket: WebSocket,
     db: AsyncSession = Depends(get_db),
 ):
+    """Server push only (session cookie; 4001 without one). Each frame is
+    {"type": "notification", "notification": <item as in GET /api/notifications>}, sent to
+    every open socket of the user once the transaction that created it has committed."""
     user = await _ws_auth(websocket, db)
     if not user:
         await websocket.close(code=4001)
@@ -127,4 +130,4 @@ async def notifications_ws(
         while True:
             await websocket.receive_text()   # keep-alive; server pushes only
     except WebSocketDisconnect:
-        notification_manager.disconnect(uid)
+        notification_manager.disconnect(uid, websocket)

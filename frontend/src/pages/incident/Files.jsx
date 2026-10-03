@@ -22,7 +22,7 @@ function fileType(f) {
 }
 
 export default function Files() {
-  const { inc } = useOutletContext()
+  const { inc, bumpRail } = useOutletContext()
   const isClosed = inc?.status === 'closed'
 
   const [files, setFiles]       = useState([])
@@ -46,6 +46,8 @@ export default function Files() {
   }, [inc.id])
 
   useEffect(() => { load() }, [load])
+  // After a write: re-read the list and the rail's counts.
+  const reload = useCallback(() => { bumpRail?.(); return load() }, [bumpRail, load])
   useEffect(() => {
     api.listEntities(inc.id, { limit: 200 }).then(r => setEntities(r.items || [])).catch(() => {})
   }, [inc.id])
@@ -59,7 +61,7 @@ export default function Files() {
       for (const f of picked) {
         await api.uploadIncidentFile(inc.id, f)
       }
-      await load()
+      await reload()
     } catch (err) {
       setError(err.message || 'Upload failed')
     } finally {
@@ -75,7 +77,7 @@ export default function Files() {
     setBusy(true); setError(null)
     try {
       await api.updateIncidentFile(inc.id, f.id, { original_name: name })
-      await load()
+      await reload()
     } catch (err) {
       setError(err.message || 'Could not rename')
     } finally {
@@ -88,7 +90,7 @@ export default function Files() {
     setBusy(true); setError(null)
     try {
       await api.deleteIncidentFile(inc.id, f.id)
-      await load()
+      await reload()
     } catch (err) {
       setError(err.message || 'Could not delete file')
     } finally {
@@ -101,7 +103,7 @@ export default function Files() {
     try {
       await api.updateIncidentFile(inc.id, f.id, { entity_id: entityId || null })
       setLinkTarget(null)
-      await load()
+      await reload()
     } catch (err) {
       setError(err.message || 'Could not update link')
     } finally {
@@ -112,7 +114,7 @@ export default function Files() {
   return (
     <section className="panel">
       <div className="panel-toolbar">
-        <h2 className="panel-h">Files</h2>
+        <h2 className="panel-h">Supporting documents</h2>
         <input
           ref={fileInputRef}
           type="file"

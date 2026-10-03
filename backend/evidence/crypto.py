@@ -25,6 +25,11 @@ class EvidenceCryptoError(RuntimeError):
     """Raised on KEK misconfig / decrypt failure / tag mismatch."""
 
 
+class EvidenceIntegrityError(EvidenceCryptoError):
+    """The stored ciphertext failed AES-GCM authentication: these are not the bytes that were
+    encrypted (tampering or corruption), as opposed to a file that could not be read at all."""
+
+
 def _load_key() -> bytes:
     kek = settings.evidence_kek
     if not kek:
@@ -68,7 +73,7 @@ def decrypt_file_bytes(ciphertext: bytes, nonce_hex: str) -> bytes:
     try:
         return aes.decrypt(nonce, ciphertext, None)
     except Exception as e:
-        raise EvidenceCryptoError("AES-GCM tag verification failed.") from e
+        raise EvidenceIntegrityError("AES-GCM tag verification failed.") from e
 
 
 def _safe_target(relative_path: str) -> Path:

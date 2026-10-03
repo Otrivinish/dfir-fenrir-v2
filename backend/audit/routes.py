@@ -1,16 +1,19 @@
-"""Audit log endpoints — per-incident (admin-only) + global (admin-only)."""
+"""Audit log endpoints — per-incident (incident lead: admin or IC/Deputy) + global (admin-only)."""
 import base64
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audit.service import write_audit
 from auth.deps import require_admin
 from core.database import get_db
-from models import AuditLog, Incident, User
+from core.errors import ApiErrorBody
+from incidents.access import LeadAccess, require_incident_lead
+from models import AuditLog, User
 from schemas import AuditLogEntryOut, AuditLogList
 
 router        = APIRouter()   # per-incident, mounted at /api/incidents
@@ -36,23 +39,24 @@ def _decode_cursor(cursor: str | None) -> int:
     "/{incident_id}/audit-log",
     response_model=AuditLogList,
     summary="Get the incident audit log",
+    responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}},
 )
 async def get_incident_audit_log(
     incident_id: uuid.UUID,
     limit:  int = Query(100, ge=1, le=500),
     cursor: str | None = Query(None),
-    _user:  User = Depends(require_admin),
+    lead:   LeadAccess = Depends(require_incident_lead),
     db:     AsyncSession = Depends(get_db),
 ) -> AuditLogList:
     """Get the audit-log entries scoped to one incident (by request path or
     incident resource id), newest first, cursor-paginated via `limit`/`cursor`.
-    Admin only. Returns the hash-chained audit entries for the incident."""
-    inc = (await db.execute(
-        select(Incident).where(Incident.id == incident_id)
-    )).scalar_one_or_none()
-    if not inc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Incident not found")
-
+    Incident lead only: an admin, or an analyst (effective role) assigned as
+    Incident Commander or Deputy Incident Commander on this incident (403 code
+    not_incident_lead; not visible: 404). Every page a non-admin reads is itself
+    audited (incident_audit_view, details offset and limit; the same page re-read
+    within 60 seconds is recorded once). Returns the hash-chained audit entries
+    for the incident."""
+    inc = lead.incident
     offset = _decode_cursor(cursor)
     prefix = f"/api/incidents/{incident_id}"
 
@@ -75,11 +79,32 @@ async def get_incident_audit_log(
     has_more = len(rows) > limit
     items = rows[:limit]
     next_cursor = _encode_cursor(offset + limit) if has_more else None
-
-    return AuditLogList(
+    out = AuditLogList(
         items=[AuditLogEntryOut.model_validate(r) for r in items],
         next_cursor=next_cursor,
     )
+
+    # A lead who isn't an admin reads with delegated rights: record every page they
+    # read (a cursor must not skip the record); the same page re-read within 60 s once.
+    if lead.user.role != "admin":
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=60)  # audit timestamps: naive UTC
+        recent = (await db.execute(
+            select(AuditLog.details).where(
+                AuditLog.action == "incident_audit_view",
+                AuditLog.user_id == lead.user.id,
+                AuditLog.resource_id == str(inc.id),
+                AuditLog.timestamp >= since,
+            )
+        )).scalars().all()
+        if not any((d or {}).get("offset") == offset and (d or {}).get("limit") == limit for d in recent):
+            await write_audit(
+                db, "incident_audit_view",
+                outcome="success",
+                resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
+                details={"ref": inc.ref, "offset": offset, "limit": limit},
+            )
+            await db.commit()
+    return out
 
 
 # ─── Global audit log ────────────────────────────────────────────────────────

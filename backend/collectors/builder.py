@@ -200,7 +200,7 @@ HOW TO RUN (on the target host, as Administrator)
 3. Run the collector executable as Administrator. It writes a
    Collection_<host>_<timestamp>.zip beside itself.
 4. Carry that Collection ZIP back and upload it in FENRIR under
-   Incident → Forensic → Collections → Ingest results.
+   Incident → Examine → Collector packages → Ingest results.
 
 The signed MANIFEST proves this package was issued by your FENRIR instance for
 this incident. Do not modify the files in this package.
@@ -241,7 +241,7 @@ HOW TO RUN (on the target Mac, as root)
    It writes a Collection-<host>-<timestamp>.zip beside itself
    (X.509-encrypted to your FENRIR instance).
 4. Carry that Collection ZIP back and upload it in FENRIR under
-   Incident → Forensic → Collections → Ingest results.
+   Incident → Examine → Collector packages → Ingest results.
 
 The signed MANIFEST proves this package was issued by your FENRIR instance for
 this incident. Do not modify the files in this package.

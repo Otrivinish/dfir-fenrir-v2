@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../../api/client.js'
-import { useAuth } from '../../../hooks/useAuth.jsx'
+import { useOutletContext } from 'react-router-dom'
 import { formatLocalShort } from '../../../lib/datetime.js'
 import HandoffWizard from './HandoffWizard.jsx'
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
@@ -407,7 +407,9 @@ function GenerateModal({ inc, onClose, onIssued }) {
 // ─── Main section ─────────────────────────────────────────────────────────────
 
 export default function LePackage({ inc }) {
-  const { user } = useAuth()
+  // manage_le_package from GET …/access: admins and the incident's IC / Deputy (the API decides).
+  const { access } = useOutletContext() ?? {}
+  const canManage = !!access?.capabilities?.includes('manage_le_package')
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -415,7 +417,7 @@ export default function LePackage({ inc }) {
   const [issued, setIssued] = useState(null)
 
   const load = useCallback(async () => {
-    if (user?.role !== 'admin') { setLoading(false); return }
+    if (!canManage) { setLoading(false); return }
     setLoading(true)
     setError(null)
     try {
@@ -426,11 +428,11 @@ export default function LePackage({ inc }) {
     } finally {
       setLoading(false)
     }
-  }, [inc.id, user?.role])
+  }, [inc.id, canManage])
 
   useEffect(() => { load() }, [load])
 
-  if (user?.role !== 'admin') {
+  if (!canManage) {
     return (
       <div style={{
         marginTop: 'var(--space-4)',
@@ -440,7 +442,7 @@ export default function LePackage({ inc }) {
         borderRadius: 'var(--radius)',
         fontSize: 12, color: 'var(--muted)',
       }}>
-        LE package generation is admin-only. Ask an administrator to issue a hand-off bundle.
+        LE packages are for this incident's lead: an admin, or the analyst assigned as Incident Commander or Deputy. Ask them to issue a hand-off bundle.
       </div>
     )
   }

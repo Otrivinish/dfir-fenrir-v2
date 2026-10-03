@@ -4,6 +4,7 @@ import { api } from '../../../api/client.js'
 import { formatLocalShort, formatLocal } from '../../../lib/datetime.js'
 import { tacticColor } from '../../../lib/mitre.js'
 import { detectNode, detectForest, severityColor } from '../../../lib/processTreeDetect.js'
+import { TIMEZONE_GROUPS } from '../../../lib/timezone.js'
 
 const IOC_TYPES = [
   { value: 'ip',           label: 'IP address' },
@@ -20,6 +21,37 @@ const IOC_TYPES = [
 
 const ACCEPTED = '.evtx,.xml,.db,.sqlite,.csv,.tsv,.json,.jsonl,.log'
 const MAX_MB = 500
+const PROMOTE_CHUNK = 10000   // server max indices per promote call
+
+// Source timezone choices (C5): the curated groups, then every other IANA zone the browser knows.
+const CURATED_TZ = new Set(TIMEZONE_GROUPS.flatMap(g => g.zones.map(z => z.id)))
+const OTHER_TZ = (() => {
+  try { return Intl.supportedValuesOf('timeZone').filter(z => !CURATED_TZ.has(z)) } catch { return [] }
+})()
+
+// Format override for an exhibit whose filename doesn't say what it is (server `parser`).
+const PARSERS = [
+  { value: 'auto',   label: 'Auto-detect' },
+  { value: 'evtx',   label: 'EVTX' },
+  { value: 'xml',    label: 'Windows XML' },
+  { value: 'sqlite', label: 'SQLite (browser history)' },
+  { value: 'csv',    label: 'CSV' },
+  { value: 'tsv',    label: 'TSV' },
+  { value: 'syslog', label: 'syslog / auth.log' },
+  { value: 'json',   label: 'JSON / JSONL' },
+]
+
+// An event can go on the timeline only with a time (C5: never "now"). Any row can be selected:
+// untimestamped ones can still become IOCs (IOCs need no event time); promote skips them.
+const isPromotable = (e) => !!e.event_time && e.time_basis !== 'missing'
+
+// Why an exhibit can't be parsed right now (mirrors the server's 409s), or null.
+function exhibitBlock(ev) {
+  if (ev.status !== 'active') return `status ${ev.status}`
+  if (!ev.current_custodian_id) return 'not in internal custody'
+  if (ev.pending_custodian_id) return 'custody transfer pending'
+  return null
+}
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
@@ -43,6 +75,13 @@ export default function TimelineImport() {
   const [iocBulkOpen, setIocBulkOpen]   = useState(false)  // bulk add-to-IOCs modal
   const [viewMode, setViewMode]         = useState('table') // 'table' | 'tree'
 
+  // C5 — where the bytes come from, and the zone of times the source doesn't state.
+  const [mode, setMode]                 = useState('upload')   // 'upload' | 'exhibit'
+  const [sourceTz, setSourceTz]         = useState('')
+  const [exhibits, setExhibits]         = useState(null)       // digital evidence items (exhibit mode)
+  const [exhibitId, setExhibitId]       = useState('')
+  const [parserHint, setParserHint]     = useState('auto')
+
   // Persisted imports — listed on mount; refreshes after each upload/dispose.
   const [imports, setImports]           = useState([])
   const [importsLoading, setImportsLoading] = useState(true)
@@ -62,6 +101,25 @@ export default function TimelineImport() {
   }, [inc.id])
 
   useEffect(() => { loadImports() }, [loadImports])
+
+  // Exhibit mode: every digital evidence item of the incident (all pages).
+  useEffect(() => {
+    if (mode !== 'exhibit' || exhibits !== null) return
+    let live = true
+    ;(async () => {
+      const all = []
+      let cursor = null
+      do {
+        const res = await api.listEvidence(inc.id, { kind: 'digital_file', limit: 200, ...(cursor ? { cursor } : {}) })
+        all.push(...res.items)
+        cursor = res.next_cursor
+      } while (cursor)
+      if (live) setExhibits(all)
+    })().catch(e => { if (live) { setExhibits([]); setParseError(e.message || 'Could not list exhibits.') } })
+    return () => { live = false }
+  }, [mode, exhibits, inc.id])
+
+  const exhibit = (exhibits || []).find(x => x.id === exhibitId) || null
 
   // Deep-link target: /forensic/timeline-import?artifact=<id> (from Collections).
   // Consume the param once so a refresh doesn't re-import.
@@ -95,6 +153,12 @@ export default function TimelineImport() {
       suspicious_count: detail.suspicious_count,
       events:           detail.events,
       import_id:        detail.id,
+      evidence_id:      detail.evidence_id || null,
+      evidence_identifier: detail.evidence_identifier || null,
+      parser_version:   detail.parser_version || null,
+      source_tz:        detail.source_tz || null,
+      truncated:        !!detail.truncated,
+      total_seen:       detail.total_seen ?? null,
     })
     setFilterSuspicious((detail.events?.length || 0) > 1000)
   }
@@ -116,7 +180,13 @@ export default function TimelineImport() {
   }), [events, filterSuspicious, filterSource, filterText])
 
   const selectedVisible = visible.filter(e => selected.has(e.idx))
+  const selectedPromotable = selectedVisible.filter(isPromotable)
   const allVisibleSelected = visible.length > 0 && visible.every(e => selected.has(e.idx))
+  const basisCounts = useMemo(() => {
+    const c = { assumed_tz: 0, inferred_year: 0, missing: 0 }
+    for (const e of events) if (e.time_basis in c) c[e.time_basis] += 1
+    return c
+  }, [events])
 
   // ── File pick ──────────────────────────────────────────────────────────────
 
@@ -144,7 +214,7 @@ export default function TimelineImport() {
   // Upload + parse + persist in one call. Refresh dies → reload past imports.
 
   async function onParse() {
-    if (!file) return
+    if (!file || !sourceTz) return
     setParsing(true)
     setParseError(null)
     setResult(null)
@@ -152,7 +222,7 @@ export default function TimelineImport() {
     setPromoteMsg(null)
     setActiveImportId(null)
     try {
-      const detail = await api.createForensicImport(inc.id, file)
+      const detail = await api.createForensicImport(inc.id, file, sourceTz)
       // detail shape: ForensicImportDetail — same as ParseResponse + id + metadata.
       applyResult(detail)
       setActiveImportId(detail.id)
@@ -161,6 +231,28 @@ export default function TimelineImport() {
       setFile(null)
     } catch (e) {
       setParseError(e.message || 'Upload failed.')
+    } finally {
+      setParsing(false)
+    }
+  }
+
+  // ── Parse a registered exhibit (C5): no re-upload, hash re-verified server-side ──
+  async function onParseExhibit() {
+    if (!exhibit || !sourceTz) return
+    setParsing(true)
+    setParseError(null)
+    setResult(null)
+    setSelected(new Set())
+    setPromoteMsg(null)
+    setActiveImportId(null)
+    try {
+      const detail = await api.importForensicFromEvidence(inc.id, exhibit.id, { source_tz: sourceTz, parser: parserHint })
+      applyResult(detail)
+      setActiveImportId(detail.id)
+      await loadImports()
+    } catch (e) {
+      setParseError(e.message || 'Could not parse the exhibit.')
+      if (e.status === 409) setExhibits(null)   // e.g. frozen after a hash mismatch: refresh the list
     } finally {
       setParsing(false)
     }
@@ -208,7 +300,7 @@ export default function TimelineImport() {
     if (!confirm(
       `Dispose "${imp.filename}"?\n\n` +
       `${imp.event_count} parsed event(s) will be removed from this incident.\n` +
-      `Events already promoted to the timeline are not affected. Audit-logged.`
+      `An import whose events are on the timeline can't be disposed (it is their provenance record). Audit-logged.`
     )) return
     try {
       await api.deleteForensicImport(inc.id, imp.id)
@@ -251,41 +343,40 @@ export default function TimelineImport() {
 
   // ── Promote to timeline ────────────────────────────────────────────────────
 
+  // The server copies the events from the stored import (C5): only their indices are sent, so
+  // no time is ever supplied by the browser and an untimestamped event is never placed at "now".
   async function onPromote() {
-    if (!selectedVisible.length || promoting || isClosed) return
-    const NOW = new Date().toISOString()
-    const noTs = selectedVisible.filter(e => !e.event_time)
+    const picks = selectedPromotable
+    if (!picks.length || promoting || isClosed || !result?.import_id) return
 
     const confirmed = window.confirm(
-      `Add ${selectedVisible.length} event${selectedVisible.length !== 1 ? 's' : ''} to the incident timeline?` +
-      (noTs.length ? `\n\n${noTs.length} event${noTs.length !== 1 ? 's' : ''} have no timestamp and will use the current time.` : '')
+      `Add ${picks.length} event${picks.length !== 1 ? 's' : ''} to the incident timeline?\n\n` +
+      'Times, hosts, sources and descriptions are copied from the stored import and stay as imported; ' +
+      'you can still set the IR phase, ATT&CK and entity link.'
     )
     if (!confirmed) return
 
     setPromoting(true)
     setPromoteMsg(null)
     try {
-      const res = await api.batchCreateTimelineEvents(inc.id, {
-        events: selectedVisible.map(e => ({
-          event_time:          e.event_time || NOW,
-          hostname:            e.hostname   || null,
-          source:              e.source     || null,
-          event_type:          e.event_type || null,
-          description:         e.description,
-          raw_log:             e.raw_log    || null,
-          ir_phase:            null,
-          mitre_tactic_id:     e.mitre_tactic_id     || null,
-          mitre_tactic_name:   e.mitre_tactic_name   || null,
-          mitre_technique_id:  e.mitre_technique_id  || null,
-          mitre_technique_name:e.mitre_technique_name || null,
-        })),
-      })
-      const msg = `Added ${res.created} event${res.created !== 1 ? 's' : ''} to the timeline.` +
-        (res.errors.length ? ` ${res.errors.length} failed.` : '')
+      let created = 0
+      const untimed = []
+      const already = []
+      for (let i = 0; i < picks.length; i += PROMOTE_CHUNK) {
+        const res = await api.promoteForensicImport(inc.id, result.import_id, {
+          indices: picks.slice(i, i + PROMOTE_CHUNK).map(e => e.idx),
+        })
+        created += res.created
+        untimed.push(...res.skipped_untimestamped)
+        already.push(...res.already_promoted)
+      }
+      const msg = `Added ${created} event${created !== 1 ? 's' : ''} to the timeline.` +
+        (already.length ? ` ${already.length} already on the timeline (skipped).` : '') +
+        (untimed.length ? ` ${untimed.length} without a timestamp skipped.` : '')
       setPromoteMsg({ kind: 'ok', text: msg })
-      setSelected(prev => {
+      setSelected(prev => {   // untimestamped rows stay selected (e.g. for Add to IOCs)
         const next = new Set(prev)
-        selectedVisible.forEach(e => next.delete(e.idx))
+        picks.forEach(e => next.delete(e.idx))
         return next
       })
     } catch (e) {
@@ -348,9 +439,18 @@ export default function TimelineImport() {
                     color: isActive ? 'var(--accent)' : 'var(--text)',
                     flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }} title={imp.filename}>{imp.filename}</span>
+                  {imp.evidence_identifier && (
+                    <span className="pill" style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }}
+                          title="Parsed from this registered exhibit">⛁ {imp.evidence_identifier}</span>
+                  )}
                   <span style={{ color: 'var(--dim)', fontFamily: 'var(--font-mono)' }}>
                     {imp.detected_format || '—'}
                   </span>
+                  {imp.source_tz && (
+                    <span style={{ color: 'var(--dim)', fontSize: 11 }} title="Source timezone used for times without a zone">
+                      {imp.source_tz}
+                    </span>
+                  )}
                   <span style={{ color: 'var(--muted)' }}>
                     {imp.event_count} ev
                   </span>
@@ -386,7 +486,93 @@ export default function TimelineImport() {
         </div>
       )}
 
+      {/* Source (C5): upload a file, or parse a registered exhibit without re-uploading it */}
+      <div className="form" style={{ marginBottom: 'var(--space-3)' }}>
+        <div role="radiogroup" aria-label="Import source" style={{ display: 'flex', gap: 'var(--space-4)', flexWrap: 'wrap', fontSize: 13 }}>
+          {[['upload', 'Upload a file'], ['exhibit', 'From a registered exhibit']].map(([v, label]) => (
+            <label key={v} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', cursor: 'pointer' }}>
+              <input type="radio" name="tlimp-mode" value={v} checked={mode === v}
+                     onChange={() => { setMode(v); setParseError(null) }} />
+              {label}
+            </label>
+          ))}
+        </div>
+        <div className="form-row">
+          <div className="field">
+            <label className="field-label" htmlFor="tlimp-tz">Source timezone *</label>
+            <select id="tlimp-tz" className="select" value={sourceTz} required
+                    onChange={(e) => setSourceTz(e.target.value)}>
+              <option value="">— choose the zone the log was written in —</option>
+              {TIMEZONE_GROUPS.map(g => (
+                <optgroup key={g.group} label={g.group}>
+                  {g.zones.map(z => <option key={z.id} value={z.id}>{z.label}</option>)}
+                </optgroup>
+              ))}
+              {OTHER_TZ.length > 0 && (
+                <optgroup label="Other IANA zones">
+                  {OTHER_TZ.map(z => <option key={z} value={z}>{z}</option>)}
+                </optgroup>
+              )}
+            </select>
+            <div className="field-hint">
+              Used only for times the source doesn&rsquo;t state a zone for; times with UTC or an offset are kept as they are.
+            </div>
+          </div>
+          {mode === 'exhibit' && (
+            <div className="field">
+              <label className="field-label" htmlFor="tlimp-exhibit">Exhibit *</label>
+              <select id="tlimp-exhibit" className="select" value={exhibitId}
+                      onChange={(e) => setExhibitId(e.target.value)} disabled={exhibits === null}>
+                <option value="">{exhibits === null ? 'Loading exhibits…' : exhibits.length ? '— choose an exhibit —' : 'No digital exhibits registered'}</option>
+                {(exhibits || []).map(x => {
+                  const block = exhibitBlock(x)
+                  return (
+                    <option key={x.id} value={x.id} disabled={!!block}>
+                      {x.identifier} · {x.name}{x.original_filename ? ` (${x.original_filename})` : ''}{block ? ` — ${block}` : ''}
+                    </option>
+                  )
+                })}
+              </select>
+            </div>
+          )}
+        </div>
+        {mode === 'exhibit' && exhibit && (
+          <div className="field-hint" role="status" data-testid="tlimp-exhibit-hint">
+            Recorded device clock (at collection): {exhibit.system_time_offset
+              ? <strong>{exhibit.system_time_offset}</strong>
+              : <span style={{ color: 'var(--dim)' }}>not recorded</span>}
+            {' · '}Year-less syslog lines are dated against {exhibit.acquired_at
+              ? <>the acquisition time {formatLocal(exhibit.acquired_at)}</>
+              : <>its registration time {formatLocal(exhibit.collected_at)} (no acquisition time recorded)</>}.
+          </div>
+        )}
+        {mode === 'exhibit' && (
+          <div className="form-row">
+            <div className="field">
+              <label className="field-label" htmlFor="tlimp-parser">Format</label>
+              <select id="tlimp-parser" className="select" value={parserHint} onChange={(e) => setParserHint(e.target.value)}>
+                {PARSERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+              </select>
+            </div>
+            <div className="field" style={{ justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={onParseExhibit}
+                disabled={isClosed || parsing || !exhibit || !!exhibitBlock(exhibit) || !sourceTz}
+                title={isClosed ? 'Closed incidents are read-only — re-open the incident to import'
+                  : !sourceTz ? 'Choose the source timezone first'
+                  : 'Verify the exhibit\u2019s hash, parse it and save the events to this incident (recorded in its custody log)'}
+              >
+                Parse exhibit
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Drop zone */}
+      {mode === 'upload' && (
       <div
         role="button"
         tabIndex={0}
@@ -437,16 +623,19 @@ export default function TimelineImport() {
           </>
         )}
       </div>
+      )}
 
       {/* Parse button */}
-      {file && !parsing && (
+      {mode === 'upload' && file && !parsing && (
         <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
           <button
             type="button"
             className="btn primary"
             onClick={onParse}
-            disabled={isClosed}
-            title={isClosed ? 'Closed incidents are read-only — re-open the incident to import' : 'Parse the file and save events to this incident'}
+            disabled={isClosed || !sourceTz}
+            title={isClosed ? 'Closed incidents are read-only — re-open the incident to import'
+              : !sourceTz ? 'Choose the source timezone first'
+              : 'Parse the file and save events to this incident'}
           >
             Parse &amp; save
           </button>
@@ -500,6 +689,41 @@ export default function TimelineImport() {
             </span>
           )}
           <span style={{ color: 'var(--dim)', fontSize: 12 }}>{result.source_file}</span>
+          {result.evidence_identifier && (
+            <span className="pill" style={{ fontSize: 11, fontFamily: 'var(--font-mono)' }} title="Parsed from this registered exhibit">
+              ⛁ {result.evidence_identifier}
+            </span>
+          )}
+          {result.source_tz && (
+            <span><span style={{ color: 'var(--muted)' }}>Source TZ: </span>{result.source_tz}</span>
+          )}
+          {result.parser_version && (
+            <span style={{ color: 'var(--dim)', fontSize: 12 }}>parser {result.parser_version}</span>
+          )}
+          {basisCounts.assumed_tz > 0 && (
+            <span title={`Times without a zone, read as ${result.source_tz || 'the source timezone'}`}>
+              <TimeBasisMark basis="assumed_tz" sourceTz={result.source_tz} /> {basisCounts.assumed_tz}
+            </span>
+          )}
+          {basisCounts.inferred_year > 0 && (
+            <span><TimeBasisMark basis="inferred_year" /> {basisCounts.inferred_year}</span>
+          )}
+          {basisCounts.missing > 0 && (
+            <span style={{ color: 'var(--muted)' }} title="Events without a timestamp can't be placed on the timeline">
+              No timestamp: <strong>{basisCounts.missing}</strong>
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Parser cap: the import holds only part of the source (M1) */}
+      {result && result.truncated && (
+        <div className="alert warn" role="status" data-testid="tlimp-truncated" style={{ marginBottom: 'var(--space-3)' }}>
+          <span className="alert-icon">!</span>
+          <span>
+            Showing {result.count} events from {result.total_seen ?? 'more'} source records — output truncated
+            at the parser limit. Split the file to see the rest.
+          </span>
         </div>
       )}
 
@@ -619,9 +843,12 @@ export default function TimelineImport() {
                 type="button"
                 className="btn primary"
                 onClick={onPromote}
-                disabled={promoting || isClosed}
+                disabled={promoting || isClosed || selectedPromotable.length === 0}
+                title={selectedPromotable.length < selectedVisible.length
+                  ? `${selectedVisible.length - selectedPromotable.length} selected without a timestamp stay off the timeline`
+                  : undefined}
               >
-                {promoting ? 'Adding…' : `Add ${selectedVisible.length} to Timeline`}
+                {promoting ? 'Adding…' : `Add ${selectedPromotable.length} to Timeline`}
               </button>
               <button
                 type="button"
@@ -654,7 +881,7 @@ export default function TimelineImport() {
                         checked={allVisibleSelected}
                         onChange={toggleAllVisible}
                         aria-label="Select all visible"
-                        title="Select all visible"
+                        title="Select all visible events"
                       />
                     </th>
                     <th style={{ width: 24 }} aria-label="Suspicious" title="Suspicious">⚠</th>
@@ -672,6 +899,7 @@ export default function TimelineImport() {
                     <TriageRow
                       key={e.idx}
                       event={e}
+                      sourceTz={result.source_tz}
                       checked={selected.has(e.idx)}
                       onToggle={() => toggleRow(e.idx)}
                       onIoc={() => setIocTarget(e)}
@@ -690,7 +918,7 @@ export default function TimelineImport() {
               onSelectSubtree={(idxs) => {
                 setSelected(prev => {
                   const next = new Set(prev)
-                  for (const i of idxs) next.add(i)
+                  for (const i of idxs) if (events[i]) next.add(i)
                   return next
                 })
               }}
@@ -715,6 +943,7 @@ export default function TimelineImport() {
       {iocTarget && (
         <IocQuickModal
           incidentId={inc.id}
+          evidenceId={result?.evidence_id || null}
           event={iocTarget}
           onClose={() => setIocTarget(null)}
           onCreated={() => setIocTarget(null)}
@@ -724,6 +953,7 @@ export default function TimelineImport() {
       {iocBulkOpen && (
         <BulkIocModal
           incidentId={inc.id}
+          evidenceId={result?.evidence_id || null}
           events={selectedVisible}
           onClose={() => setIocBulkOpen(false)}
           onDone={(msg) => {
@@ -739,10 +969,30 @@ export default function TimelineImport() {
 
 // ─── Triage row ───────────────────────────────────────────────────────────────
 
-function TriageRow({ event: e, checked, onToggle, onIoc, isClosed }) {
+// How an imported time was worked out (C5). Explicit / legacy times get no mark.
+function TimeBasisMark({ basis, sourceTz }) {
+  if (basis === 'assumed_tz') {
+    return (
+      <span className="pill" data-basis="assumed_tz"
+            style={{ fontSize: 9, padding: '0 4px', color: 'var(--med)', borderColor: 'var(--med)' }}
+            title={`No zone in the source: read as ${sourceTz || 'the chosen source timezone'}`}>TZ assumed</span>
+    )
+  }
+  if (basis === 'inferred_year') {
+    return (
+      <span className="pill" data-basis="inferred_year"
+            style={{ fontSize: 9, padding: '0 4px', color: 'var(--med)', borderColor: 'var(--med)' }}
+            title="No year in the source: inferred from the exhibit's acquisition time (else the import time)">year inferred</span>
+    )
+  }
+  return null
+}
+
+function TriageRow({ event: e, sourceTz, checked, onToggle, onIoc, isClosed }) {
   const [expanded, setExpanded] = useState(false)
   const tacticId = e.mitre_tactic_id
   const color = tacticId ? tacticColor(tacticId) : 'var(--muted)'
+  const promotable = isPromotable(e)
 
   return (
     <>
@@ -751,7 +1001,13 @@ function TriageRow({ event: e, checked, onToggle, onIoc, isClosed }) {
         onClick={() => setExpanded(x => !x)}
       >
         <td onClick={(ev) => ev.stopPropagation()}>
-          <input type="checkbox" checked={checked} onChange={onToggle} />
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={onToggle}
+            aria-label={promotable ? 'Select event' : 'Select event (no timestamp: IOCs only, can\u2019t be placed on the timeline)'}
+            title={promotable ? undefined : 'No timestamp — can be added as an IOC, but can\u2019t be placed on the timeline'}
+          />
         </td>
         <td>
           {e.suspicious && (
@@ -768,7 +1024,8 @@ function TriageRow({ event: e, checked, onToggle, onIoc, isClosed }) {
           title={e.event_time ? formatLocal(e.event_time) : 'No timestamp'}
           style={{ fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'nowrap' }}
         >
-          {e.event_time ? formatLocalShort(e.event_time) : <span style={{ color: 'var(--dim)' }}>—</span>}
+          {e.event_time ? formatLocalShort(e.event_time) : <span style={{ color: 'var(--dim)' }}>no timestamp</span>}
+          {e.event_time && <> <TimeBasisMark basis={e.time_basis} sourceTz={sourceTz} /></>}
         </td>
         <td style={{ fontSize: 12, color: 'var(--muted)' }}>{e.source || '—'}</td>
         <td
@@ -862,7 +1119,7 @@ function TriageRow({ event: e, checked, onToggle, onIoc, isClosed }) {
 
 // ─── IOC quick-add modal ──────────────────────────────────────────────────────
 
-function IocQuickModal({ incidentId, event, onClose, onCreated }) {
+function IocQuickModal({ incidentId, evidenceId, event, onClose, onCreated }) {
   const [type,  setType]  = useState('other')
   const [value, setValue] = useState(event.description.slice(0, 512))
   const [notes, setNotes] = useState(
@@ -883,6 +1140,7 @@ function IocQuickModal({ incidentId, event, onClose, onCreated }) {
         value:  v,
         notes:  notes.trim() || null,
         source: event.source || null,
+        ...(evidenceId ? { evidence_id: evidenceId } : {}),
       })
       onCreated()
     } catch (err) {
@@ -963,7 +1221,7 @@ const VALUE_FIELDS = [
   { key: 'source',      label: 'Source' },
 ]
 
-function BulkIocModal({ incidentId, events, onClose, onDone }) {
+function BulkIocModal({ incidentId, evidenceId, events, onClose, onDone }) {
   const [type, setType]           = useState('other')
   const [valueField, setValueField] = useState('description')
   const [busy, setBusy]           = useState(false)
@@ -979,7 +1237,7 @@ function BulkIocModal({ incidentId, events, onClose, onDone }) {
   const items = events
     .map(e => (e[valueField] || '').trim())
     .filter(Boolean)
-    .map(v => ({ type, value: v.slice(0, 2048) }))
+    .map(v => ({ type, value: v.slice(0, 2048), ...(evidenceId ? { evidence_id: evidenceId } : {}) }))
   const eligible = items.length
   const skippedNoValue = events.length - eligible
 

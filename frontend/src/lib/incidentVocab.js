@@ -14,11 +14,14 @@ export const SEVERITY = [
   { value: 'critical', label: 'Critical', pill: 'pill-crit' },
 ]
 
+// glyph: a shape per phase so phase is never shown by colour alone — render it
+//        aria-hidden next to the label. color: the theme's --phase-* token
+//        (CSF 2.0 hue family, see tokens.css and CLAUDE.md "Phase palette").
 export const PHASE = [
-  { value: 'preparation',                      label: 'Preparation',                          short: 'Prep'   },
-  { value: 'detection_and_analysis',           label: 'Detection & Analysis',                 short: 'Detect' },
-  { value: 'containment_eradication_recovery', label: 'Containment, Eradication & Recovery', short: 'C/E/R'  },
-  { value: 'post_incident',                    label: 'Post-Incident',                        short: 'Post'   },
+  { value: 'preparation',                      label: 'Preparation',                          short: 'Prep',   glyph: '◇', color: 'var(--phase-prep)'    },
+  { value: 'detection_and_analysis',           label: 'Detection & Analysis',                 short: 'Detect', glyph: '◉', color: 'var(--phase-detect)'  },
+  { value: 'containment_eradication_recovery', label: 'Containment, Eradication & Recovery', short: 'C/E/R',  glyph: '⊘', color: 'var(--phase-respond)' },
+  { value: 'post_incident',                    label: 'Post-Incident',                        short: 'Post',   glyph: '↺', color: 'var(--phase-post)'    },
 ]
 
 export const TLP = [
@@ -81,6 +84,19 @@ export const SYSTEM_TYPE = [
   { value: 'other',          label: 'Other' },
 ]
 
+// Entity types (backend EntityType). Affected systems are compromised entities (C2).
+export const ENTITY_TYPE = [
+  { value: 'host',          label: 'Host' },
+  { value: 'user',          label: 'User' },
+  { value: 'ip',            label: 'IP' },
+  { value: 'domain',        label: 'Domain' },
+  { value: 'email',         label: 'Email' },
+  { value: 'service',       label: 'Service' },
+  { value: 'network_range', label: 'Network range' },
+  { value: 'group',         label: 'Group' },
+  { value: 'other',         label: 'Other' },
+]
+
 function makeLookup(rows) {
   const out = {}
   for (const r of rows) out[r.value] = r
@@ -95,6 +111,7 @@ export const byValue = {
   incident_type:    makeLookup(INCIDENT_TYPE),
   detection_method: makeLookup(DETECTION_METHOD),
   system_type:      makeLookup(SYSTEM_TYPE),
+  entity_type:      makeLookup(ENTITY_TYPE),
 }
 
 export function labelOf(group, value) { return byValue[group]?.[value]?.label ?? value }

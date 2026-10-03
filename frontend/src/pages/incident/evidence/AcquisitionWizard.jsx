@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../../api/client.js'
 import { TLP } from '../../../lib/incidentVocab.js'
+import { formatLocal } from '../../../lib/datetime.js'
+import { hashAlgorithm } from '../../../lib/evidenceProvenance.js'
+import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 
 // Collection wizard — ISO/IEC 27037 §7 (branch-aware).
 //
@@ -10,7 +13,8 @@ import { TLP } from '../../../lib/incidentVocab.js'
 //   identify — lawful basis, source description, in-situ photo (physical only)
 //   decide   — system state, collect/acquire, §7.1.1.3 decision factors
 //   branch   — per-type extras (computer/storage/mobile/network/cctv)
-//   acquire  — file + tool/version/SHA-256/params, source/target hashes, scope (digital)
+//   acquire  — file + acquisition time + tool/version/params, source/target hashes
+//              (MD5 / SHA-1 / SHA-256) and what the target hash covers (digital)
 //   witness  — second user co-signs (optional)
 //   confirm  — seal-readiness preview + Collect & seal
 //
@@ -102,22 +106,39 @@ function StepHeader({ n, total, title, subtitle }) {
   )
 }
 
-function HashInput({ value, onChange, placeholder, disabled }) {
-  const ok = value && /^[0-9a-fA-F]{64}$/.test(value)
-  const bad = value && !ok
+// C3 — an imaging tool reports MD5, SHA-1 or SHA-256: accept 32 / 40 / 64 hex and show
+// which algorithm the length means. `sha256Only` keeps the tool-fingerprint field strict.
+function HashInput({ id, value, onChange, placeholder, disabled, sha256Only = false }) {
+  const algo = hashAlgorithm(value)
+  const ok = !!value && (sha256Only ? algo === 'SHA-256' : !!algo)
+  const bad = !!value && !ok
+  const hintId = id ? `${id}-algo` : undefined
   return (
-    <input
-      className="input"
-      value={value || ''}
-      onChange={(e) => onChange(e.target.value.trim())}
-      placeholder={placeholder}
-      maxLength={64}
-      disabled={disabled}
-      style={{
-        fontFamily: 'var(--font-mono)', fontSize: 11,
-        borderColor: bad ? 'var(--crit)' : (ok ? 'var(--ok)' : undefined),
-      }}
-    />
+    <>
+      <input
+        id={id}
+        className="input"
+        value={value || ''}
+        onChange={(e) => onChange(e.target.value.trim())}
+        placeholder={placeholder}
+        maxLength={64}
+        disabled={disabled}
+        aria-invalid={bad || undefined}
+        aria-describedby={sha256Only ? undefined : hintId}
+        style={{
+          fontFamily: 'var(--font-mono)', fontSize: 11,
+          borderColor: bad ? 'var(--crit)' : (ok ? 'var(--ok)' : undefined),
+        }}
+      />
+      {!sha256Only && (
+        <div id={hintId} className="field-hint" data-hash-algo={algo || ''}
+             style={bad ? { color: 'var(--crit)' } : undefined}>
+          {!value ? 'MD5, SHA-1 or SHA-256 (32 / 40 / 64 hex)'
+            : algo ? `${algo} · ${value.length} hex`
+            : 'Not a hash — use 32 (MD5), 40 (SHA-1) or 64 (SHA-256) hex characters'}
+        </div>
+      )}
+    </>
   )
 }
 
@@ -185,6 +206,10 @@ export default function AcquisitionWizard({
   const [acquisitionParams, setAcquisitionParams]           = useState('')
   const [acquisitionHashSource, setAcquisitionHashSource]   = useState('')
   const [acquisitionHashTarget, setAcquisitionHashTarget]   = useState('')
+  // C3 — what the target hash covers: the uploaded file (compared, mismatch refused) or
+  // an E01/AFF4 container's media (recorded as advisory, not compared).
+  const [targetHashScope, setTargetHashScope]     = useState('uploaded_file')
+  const [acquiredAt, setAcquiredAt]               = useState('')   // UTC ISO …Z or ''
   const [acquisitionScope, setAcquisitionScope]   = useState('')   // '' | full_image | logical
   const [logicalRationale, setLogicalRationale]   = useState('')
   const [systemTimeOffset, setSystemTimeOffset]   = useState('')
@@ -210,6 +235,13 @@ export default function AcquisitionWizard({
 
   const isLive = systemState === 'live' || systemState === 'live_critical'
   const has = (t) => deviceTypes.includes(t)
+
+  // C3 — source and target are compared only when both use the same algorithm.
+  const srcAlgo = hashAlgorithm(acquisitionHashSource)
+  const tgtAlgo = hashAlgorithm(acquisitionHashTarget)
+  const hashesComparable = !!srcAlgo && srcAlgo === tgtAlgo
+  const hashesMatch = hashesComparable &&
+    acquisitionHashSource.toLowerCase() === acquisitionHashTarget.toLowerCase()
 
   // Step list per kind + tags. `branch` only when a type is tagged; `acquire`
   // only for digital files.
@@ -281,8 +313,10 @@ export default function AcquisitionWizard({
       if (acquisitionScope === 'logical' && !logicalRationale.trim()) {
         setError('Logical acquisition requires a rationale of what was taken and why (§7.1.3.1.1).'); return false
       }
-      if (acquisitionHashSource && acquisitionHashTarget &&
-          acquisitionHashSource.toLowerCase() !== acquisitionHashTarget.toLowerCase()) {
+      if ((acquisitionHashSource && !srcAlgo) || (acquisitionHashTarget && !tgtAlgo)) {
+        setError('Hashes must be 32 (MD5), 40 (SHA-1) or 64 (SHA-256) hex characters.'); return false
+      }
+      if (hashesComparable && !hashesMatch) {
         setError('Source and target hashes do not match — acquisition integrity broken. Re-acquire before continuing.'); return false
       }
     }
@@ -347,6 +381,7 @@ export default function AcquisitionWizard({
         acquisition_tool_validated: toolValidated === '' ? null : toolValidated === 'true',
         acquisition_tool_validation_ref: toolValidationRef.trim() || null,
         acquisition_tool_validation_date: toolValidationDate || null,
+        acquired_at: acquiredAt || null,   // C3 — when the image was taken / item seized
       }
 
       let created
@@ -363,6 +398,7 @@ export default function AcquisitionWizard({
             ...wizardCommon,
             acquisition_hash_source: acquisitionHashSource.trim() || null,
             acquisition_hash_target: acquisitionHashTarget.trim() || null,
+            target_hash_scope: acquisitionHashTarget.trim() ? targetHashScope : null,
             write_blocker_used: writeBlockerUsed === '' ? null : writeBlockerUsed === 'true',
             write_blocker_serial: writeBlockerSerial.trim() || null,
             system_state: systemState || null,
@@ -396,11 +432,29 @@ export default function AcquisitionWizard({
       }
       setStep('confirm')
     } catch (e) {
-      setError(e.message || 'Could not collect evidence.')
+      // C3 — a refused hash stores nothing; the fix is on the Acquisition step.
+      const code = e.data?.code
+      setError((code === 'hash_mismatch' || code === 'invalid_hash_format')
+        ? `${e.message} Go Back to the Acquisition step to correct it.`
+        : code === 'acquired_in_future'
+          ? (kind === 'digital_file'
+            ? 'The acquisition time is in the future. Go Back to the Acquisition step and correct it, or clear it if unknown.'
+            : 'The seizure time is in the future. Go Back to the Identification step and correct it, or clear it if unknown.')
+          : (e.message || 'Could not collect evidence.'))
     } finally {
       setBusy(false)
     }
   }
+
+  const acquiredAtField = (
+    <div className="field">
+      <label className="field-label" htmlFor="aw-acquired">
+        {kind === 'digital_file' ? 'Acquisition time (when the image was taken)' : 'Seizure time (when the item was taken)'}
+      </label>
+      <LocalDateTimePicker id="aw-acquired" value={acquiredAt} onChange={setAcquiredAt} clearable />
+      <div className="field-hint">From the imaging tool's log or your notes — not when you upload it here. Leave blank if unknown.</div>
+    </div>
+  )
 
   return (
     <div className="modal-backdrop">
@@ -538,6 +592,8 @@ export default function AcquisitionWizard({
                   <div className="field-hint">Caption alone documents that a photo was taken — file attachment UI in a later slice.</div>
                 </div>
               )}
+
+              {kind === 'physical_item' && acquiredAtField}
             </div>
           )}
 
@@ -717,6 +773,8 @@ export default function AcquisitionWizard({
                 <div className="field-hint">Hashed (SHA-256 + SHA-1 + MD5) and AES-256-GCM encrypted at rest on upload.</div>
               </div>
 
+              {acquiredAtField}
+
               <div className="field">
                 <label className="field-label" htmlFor="aw-scope">Acquisition scope</label>
                 <select id="aw-scope" className="select" value={acquisitionScope} onChange={e => setAcquisitionScope(e.target.value)}>
@@ -766,8 +824,8 @@ export default function AcquisitionWizard({
 
               <div className="field">
                 <label className="field-label" htmlFor="aw-tsha">Tool SHA-256 (optional)</label>
-                <HashInput value={acquisitionToolSha256} onChange={setAcquisitionToolSha256}
-                           placeholder="64-hex tool binary fingerprint" />
+                <HashInput id="aw-tsha" value={acquisitionToolSha256} onChange={setAcquisitionToolSha256}
+                           placeholder="64-hex tool binary fingerprint" sha256Only />
               </div>
 
               {/* ISO/IEC 27041 — method/tool validation (soft-scored) */}
@@ -806,27 +864,54 @@ export default function AcquisitionWizard({
               <div className="form-row">
                 <div className="field">
                   <label className="field-label" htmlFor="aw-hs">Source hash (pre-image)</label>
-                  <HashInput value={acquisitionHashSource} onChange={setAcquisitionHashSource} placeholder="SHA-256 of source media" />
+                  <HashInput id="aw-hs" value={acquisitionHashSource} onChange={setAcquisitionHashSource} placeholder="Hash of the source media" />
                 </div>
                 <div className="field">
                   <label className="field-label" htmlFor="aw-ht">Target hash (post-image)</label>
-                  <HashInput value={acquisitionHashTarget} onChange={setAcquisitionHashTarget} placeholder="SHA-256 of acquired image" />
+                  <HashInput id="aw-ht" value={acquisitionHashTarget} onChange={setAcquisitionHashTarget} placeholder="Hash of the acquired image" />
                 </div>
               </div>
-              {acquisitionHashSource && acquisitionHashTarget && (
-                <div style={{
+              {srcAlgo && tgtAlgo && (
+                <div data-hash-compare={hashesComparable ? (hashesMatch ? 'match' : 'differ') : 'different_algorithms'} style={{
                   padding: '6px 10px', fontSize: 11,
-                  background: acquisitionHashSource.toLowerCase() === acquisitionHashTarget.toLowerCase()
-                    ? 'color-mix(in srgb, var(--ok) 12%, transparent)'
-                    : 'color-mix(in srgb, var(--crit) 12%, transparent)',
-                  color: acquisitionHashSource.toLowerCase() === acquisitionHashTarget.toLowerCase() ? 'var(--ok)' : 'var(--crit)',
+                  background: !hashesComparable
+                    ? 'color-mix(in srgb, var(--med) 12%, transparent)'
+                    : hashesMatch
+                      ? 'color-mix(in srgb, var(--ok) 12%, transparent)'
+                      : 'color-mix(in srgb, var(--crit) 12%, transparent)',
+                  color: !hashesComparable ? 'var(--med)' : hashesMatch ? 'var(--ok)' : 'var(--crit)',
                   borderRadius: 'var(--radius-sm)',
                 }}>
-                  {acquisitionHashSource.toLowerCase() === acquisitionHashTarget.toLowerCase()
-                    ? '✓ Source and target hashes match — acquisition integrity proven'
-                    : '✗ Hashes differ — re-acquire before sealing'}
+                  {!hashesComparable
+                    ? `Different algorithms (${srcAlgo} source, ${tgtAlgo} target) — they can't be compared here. Confirm the match in the imaging tool's report.`
+                    : hashesMatch
+                      ? '✓ Source and target hashes match — acquisition integrity proven'
+                      : '✗ Hashes differ — re-acquire before sealing'}
                 </div>
               )}
+
+              <fieldset className="field" style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+                        disabled={!acquisitionHashTarget}>
+                <legend className="field-label">Target hash covers</legend>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
+                  {[
+                    { value: 'uploaded_file',   label: 'The file you upload here',
+                      desc: 'FENRIR hashes the upload with the same algorithm and refuses a mismatch.' },
+                    { value: 'container_media', label: "The container's media (E01 / AFF4 content hash)",
+                      desc: 'The hash covers the imaged disk inside the container, not the container file. Recorded as advisory, not compared.' },
+                  ].map(o => (
+                    <label key={o.value} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 13 }}>
+                      <input type="radio" name="aw-target-scope" value={o.value}
+                             checked={targetHashScope === o.value}
+                             onChange={() => setTargetHashScope(o.value)} />
+                      <span>
+                        {o.label}
+                        <span style={{ display: 'block', fontSize: 11, color: 'var(--muted)' }}>{o.desc}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
 
               {(systemState === 'live' || systemState === 'live_critical') && (
                 <div className="field">
@@ -883,8 +968,8 @@ export default function AcquisitionWizard({
                 <label className="field-label" htmlFor="aw-wu">Witness (platform user)</label>
                 <select id="aw-wu" className="select" value={witnessUserId} onChange={e => setWitnessUserId(e.target.value)}>
                   <option value="">— no witness —</option>
-                  {users.filter(u => u.is_active).map(u => (
-                    <option key={u.id} value={u.id}>{u.username} ({u.role})</option>
+                  {users.map(u => (
+                    <option key={u.id} value={u.id}>{u.username}{u.full_name ? ` (${u.full_name})` : ''}</option>
                   ))}
                 </select>
               </div>
@@ -932,6 +1017,10 @@ export default function AcquisitionWizard({
                       <li><strong>State / handling:</strong> {SYSTEM_STATE.find(s => s.value === systemState)?.label || '—'} · {HANDLING_MODE.find(h => h.value === handlingMode)?.label}</li>
                       <li><strong>Lawful basis:</strong> {LAWFUL_BASIS.find(l => l.value === lawfulBasis)?.label || '—'}</li>
                       {kind === 'digital_file' && <li><strong>Tool:</strong> {acquisitionTool} v{acquisitionToolVersion} ({acquisitionScope || 'scope n/s'})</li>}
+                      <li><strong>{kind === 'digital_file' ? 'Acquired' : 'Seized'}:</strong> {acquiredAt ? formatLocal(acquiredAt) : 'not recorded'}</li>
+                      {kind === 'digital_file' && tgtAlgo && (
+                        <li><strong>Target hash:</strong> {tgtAlgo} · {targetHashScope === 'container_media' ? "container's media (advisory)" : 'compared with the upload'}</li>
+                      )}
                       {(witnessUserId || witnessName) && (
                         <li><strong>Witness:</strong> {witnessName || users.find(u => u.id === witnessUserId)?.username}</li>
                       )}

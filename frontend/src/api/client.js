@@ -142,8 +142,12 @@ export const api = {
   getIncidentSnapshot: (id)       => request('GET',   `/api/incidents/${id}/snapshot`),
   createIncident:      (payload)  => request('POST',  '/api/incidents', payload),
   updateIncident:      (id, body) => request('PATCH', `/api/incidents/${id}`, body),
-  closeIncident:       (id)       => request('POST',  `/api/incidents/${id}/close`),
-  reopenIncident:      (id)       => request('POST',  `/api/incidents/${id}/reopen`),
+  getIncidentGates:    (id)       => request('GET',   `/api/incidents/${id}/gates`),
+  // My rights on this incident (E3): {is_lead, capabilities[]}; the API decides.
+  getIncidentAccess:   (id)       => request('GET',   `/api/incidents/${id}/access`),
+  closeIncident:       (id, reason, overrideGate = false) => request('POST', `/api/incidents/${id}/close`,
+                         overrideGate ? { reason, override_gate: true } : { reason }),
+  reopenIncident:      (id, reason, phase) => request('POST',  `/api/incidents/${id}/reopen`, { reason, phase }),
 
   // IOC export — triggers a browser file download
   exportIocs: async (incidentId, fmt, params = {}) => {
@@ -250,6 +254,17 @@ export const api = {
     }
     const s = qs.toString()
     return request('GET', `/api/incidents/${incidentId}/entities${s ? '?' + s : ''}`)
+  },
+  // Every page (limit 200 each) — for pickers that must offer all of an incident's entities.
+  listAllEntities: async (incidentId, params = {}) => {
+    const byId = new Map()
+    let cursor = null
+    do {
+      const res = await api.listEntities(incidentId, { ...params, limit: 200, ...(cursor ? { cursor } : {}) })
+      for (const e of res.items) byId.set(e.id, e)
+      cursor = res.next_cursor
+    } while (cursor)
+    return [...byId.values()]
   },
   createEntity: (incidentId, payload)             => request('POST',   `/api/incidents/${incidentId}/entities`, payload),
   updateEntity: (incidentId, entityId, payload)   => request('PATCH',  `/api/incidents/${incidentId}/entities/${entityId}`, payload),
@@ -375,6 +390,7 @@ export const api = {
         (res.status === 413 ? 'File exceeds upload limit.' : `Upload failed (${res.status})`)
       )
       err.status = res.status
+      err.code = data && typeof data === 'object' ? data.code : undefined
       err.data = data
       throw err
     }
@@ -386,6 +402,11 @@ export const api = {
 
   transferEvidence: (incidentId, evidenceId, payload) =>
     request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/transfer`, payload),
+  // C4 — the recipient accepts {condition_on_receipt, seals_intact}; decline/cancel {reason}.
+  acceptEvidenceTransfer:  (incidentId, evidenceId, payload) =>
+    request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/transfer/accept`, payload),
+  declineEvidenceTransfer: (incidentId, evidenceId, payload) =>
+    request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/transfer/decline`, payload),
 
   examineEvidence:  (incidentId, evidenceId, payload) =>
     request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/examine`, payload),
@@ -658,11 +679,13 @@ export const api = {
   },
 
   // Forensic timeline imports — persisted on the server with a "dispose" option.
-  // POST takes a file (multipart), GETs return the parsed events for re-load,
-  // DELETE removes the record (audit-logged).
-  createForensicImport: async (incidentId, file) => {
+  // POST takes a file (multipart) + the source timezone (IANA) for zone-less times,
+  // GETs return the parsed events for re-load, DELETE removes the record (audit-logged;
+  // 409 while events promoted from it are on the timeline).
+  createForensicImport: async (incidentId, file, sourceTz) => {
     const form = new FormData()
     form.append('file', file)
+    if (sourceTz) form.append('source_tz', sourceTz)
     const res = await fetch(`/api/incidents/${incidentId}/forensic/timeline-import/imports`, {
       method: 'POST',
       credentials: 'same-origin',
@@ -687,6 +710,12 @@ export const api = {
     request('GET',    `/api/incidents/${incidentId}/forensic/timeline-import/imports/${importId}`),
   deleteForensicImport: (incidentId, importId) =>
     request('DELETE', `/api/incidents/${incidentId}/forensic/timeline-import/imports/${importId}`),
+  // C5 — parse a registered exhibit (hash re-verified server-side): { source_tz, parser? }
+  importForensicFromEvidence: (incidentId, evidenceId, payload) =>
+    request('POST', `/api/incidents/${incidentId}/forensic/timeline-import/from-evidence/${evidenceId}`, payload),
+  // C5 — the server copies the chosen events (by idx) from the stored parse: { indices, ir_phase? }
+  promoteForensicImport: (incidentId, importId, payload) =>
+    request('POST', `/api/incidents/${incidentId}/forensic/timeline-import/imports/${importId}/promote`, payload),
 
   // MITRE ATT&CK coverage (per-incident)
   getMitreCoverage: (incidentId) => request('GET', `/api/incidents/${incidentId}/mitre/coverage`),
@@ -1021,7 +1050,8 @@ export const api = {
   initializeDeadlines: (incidentId, payload)           => request('POST',   `/api/incidents/${incidentId}/legal/deadlines/initialize`, payload),
   createDeadline:      (incidentId, payload)           => request('POST',   `/api/incidents/${incidentId}/legal/deadlines`, payload),
   updateDeadline:      (incidentId, deadlineId, payload) => request('PATCH', `/api/incidents/${incidentId}/legal/deadlines/${deadlineId}`, payload),
-  deleteDeadline:      (incidentId, deadlineId)        => request('DELETE', `/api/incidents/${incidentId}/legal/deadlines/${deadlineId}`),
+  // The reason goes in the JSON body, not the query string (which lands in access logs).
+  deleteDeadline:      (incidentId, deadlineId, reason) => request('DELETE', `/api/incidents/${incidentId}/legal/deadlines/${deadlineId}`, { reason }),
 
   // Costs + Business Impact Assessment
   getBusinessImpact:    (incidentId)              => request('GET',   `/api/incidents/${incidentId}/business-impact`),
@@ -1066,14 +1096,6 @@ export const api = {
   acknowledgeHandoff:  (incidentId, handoffId, payload)    =>
     request('PATCH', `/api/incidents/${incidentId}/handoffs/${handoffId}/acknowledge`, payload),
   listPendingHandoffs: () => request('GET', '/api/handoffs/pending'),
-
-  // Affected systems
-  listAffectedSystems:   (incidentId)           => request('GET',    `/api/incidents/${incidentId}/affected-systems`),
-  createAffectedSystem:  (incidentId, payload)  => request('POST',   `/api/incidents/${incidentId}/affected-systems`, payload),
-  updateAffectedSystem:  (incidentId, sysId, payload) => request('PATCH', `/api/incidents/${incidentId}/affected-systems/${sysId}`, payload),
-  deleteAffectedSystem:  (incidentId, sysId)    => request('DELETE', `/api/incidents/${incidentId}/affected-systems/${sysId}`),
-  promoteAffectedSystemsToEntities: (incidentId, payload = {}) =>
-    request('POST', `/api/incidents/${incidentId}/affected-systems/promote-to-entities`, payload),
 
   // Integrations (admin)
   getSmtpConfig:      ()        => request('GET',    '/api/integrations/smtp'),

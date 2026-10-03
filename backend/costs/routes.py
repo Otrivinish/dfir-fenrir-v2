@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -140,31 +140,38 @@ async def list_costs(
     return [_cost_to_out(r) for r in rows]
 
 
-@router.get("/{incident_id}/costs/summary", summary="Summarize incident costs")
-async def cost_summary(
-    incident_id: uuid.UUID,
-    user: User = Depends(current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Aggregate an incident's cost line items into estimated/realised totals.
+class CostSplit(BaseModel):
+    estimated: float
+    realised:  float
 
-    Returns grand totals plus breakdowns by cost category and by IR phase. Requires read access to
-    the incident.
-    """
-    await _get_incident(db, incident_id, user)
-    rows = (await db.execute(
-        select(IncidentCost).where(IncidentCost.incident_id == incident_id)
-    )).scalars().all()
 
+class CurrencyCostTotals(BaseModel):
+    total_estimated: float
+    total_realised:  float
+    total:           float
+    by_category:     dict[str, CostSplit]
+    by_phase:        dict[str, CostSplit]
+
+
+class CostSummaryOut(BaseModel):
+    total_estimated: Optional[float] = Field(description="null when the incident has costs in more than one currency")
+    total_realised:  Optional[float] = Field(description="null when the incident has costs in more than one currency")
+    total:           Optional[float] = Field(description="null when the incident has costs in more than one currency")
+    currency:        Optional[str]   = Field(description="ISO 4217 code of the totals; USD when there are no costs; "
+                                                         "null when the incident has costs in more than one currency")
+    by_category:     dict[str, CostSplit] = Field(description="empty when the incident has costs in more than one currency")
+    by_phase:        dict[str, CostSplit] = Field(description="empty when the incident has costs in more than one currency")
+    by_currency:     dict[str, CurrencyCostTotals] = Field(
+        description="Totals and breakdowns per ISO 4217 currency code; empty when there are no costs")
+
+
+def _summarise(rows) -> dict:
     by_category: dict = {}
     by_phase:    dict = {}
     total_estimated = 0.0
     total_realised  = 0.0
-    currency = "USD"
 
     for c in rows:
-        if c.currency:
-            currency = c.currency
         amt = float(c.amount)
         cat = c.category
         if cat not in by_category:
@@ -189,10 +196,40 @@ async def cost_summary(
         "total_estimated": round(total_estimated, 2),
         "total_realised":  round(total_realised, 2),
         "total":           round(total_estimated + total_realised, 2),
-        "currency":        currency,
         "by_category":     {k: {kk: round(vv, 2) for kk, vv in v.items()} for k, v in by_category.items()},
         "by_phase":        {k: {kk: round(vv, 2) for kk, vv in v.items()} for k, v in by_phase.items()},
     }
+
+
+@router.get("/{incident_id}/costs/summary", response_model=CostSummaryOut, summary="Summarize incident costs")
+async def cost_summary(
+    incident_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate an incident's cost line items into estimated/realised totals.
+
+    Returns grand totals plus breakdowns by cost category and by IR phase, and the same figures per
+    currency in `by_currency`. Amounts in different currencies are never added together: when the
+    incident has costs in more than one currency, the top-level `total_estimated`, `total_realised`,
+    `total` and `currency` are null and `by_category` / `by_phase` are empty — read `by_currency`.
+    Requires read access to the incident.
+    """
+    await _get_incident(db, incident_id, user)
+    rows = (await db.execute(
+        select(IncidentCost).where(IncidentCost.incident_id == incident_id)
+    )).scalars().all()
+
+    per_currency: dict = {}
+    for c in rows:
+        per_currency.setdefault(c.currency, []).append(c)
+    by_currency = {cur: _summarise(per_currency[cur]) for cur in sorted(per_currency)}
+
+    if len(by_currency) > 1:
+        return {"total_estimated": None, "total_realised": None, "total": None, "currency": None,
+                "by_category": {}, "by_phase": {}, "by_currency": by_currency}
+    currency = next(iter(by_currency), "USD")
+    return {**_summarise(rows), "currency": currency, "by_currency": by_currency}
 
 
 class CostCreate(BaseModel):

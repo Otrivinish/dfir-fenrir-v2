@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useOutletContext, Link } from 'react-router-dom'
-import { useAuth } from '../../hooks/useAuth.jsx'
 import { api } from '../../api/client.js'
 import { PHASE, labelOf } from '../../lib/incidentVocab.js'
 import { formatLocal } from '../../lib/datetime.js'
@@ -19,10 +18,8 @@ const STATUS_PILL = {
 }
 
 export default function Playbook() {
-  const { inc } = useOutletContext()
-  const { user } = useAuth()
+  const { inc, bumpRail } = useOutletContext()
   const isClosed = inc?.status === 'closed'
-  const isAdmin  = user?.role === 'admin'
 
   const [tasks, setTasks]         = useState([])
   const [templates, setTemplates] = useState([])
@@ -50,16 +47,15 @@ export default function Playbook() {
 
   useEffect(() => { load() }, [load])
 
-  // Lazy-load users for the assignee picker. Endpoint is admin-only;
-  // non-admins simply won't have it populated.
+  // Lazy-load users for the assignee picker. /users/assignable is open to
+  // every authenticated user and returns active users only.
   useEffect(() => {
-    if (!isAdmin) return
     let cancelled = false
-    api.listUsers()
-      .then(u => { if (!cancelled) setUsers(u) })
+    api.listAssignableUsers()
+      .then(u => { if (!cancelled) setUsers(u || []) })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [isAdmin])
+  }, [])
 
   const usernameOf = (uid) => {
     if (!uid) return null
@@ -94,6 +90,7 @@ export default function Playbook() {
     try {
       const updated = await api.updatePlaybookTask(inc.id, task.id, { status: next })
       setTasks(prev => prev.map(t => t.id === updated.id ? updated : t))
+      bumpRail?.()
     } catch (e) {
       setError(e.message || 'Could not update status')
     } finally {
@@ -106,6 +103,7 @@ export default function Playbook() {
     try {
       const updated = await api.updatePlaybookTask(inc.id, task.id, { assignee_id: next || null })
       setTasks(prev => prev.map(t => t.id === updated.id ? updated : t))
+      bumpRail?.()
     } catch (e) {
       setError(e.message || 'Could not change assignee')
     } finally {
@@ -119,6 +117,7 @@ export default function Playbook() {
     try {
       await api.deletePlaybookTask(inc.id, task.id)
       setTasks(prev => prev.filter(t => t.id !== task.id))
+      bumpRail?.()
     } catch (e) {
       setError(e.message || 'Could not delete task')
     } finally {
@@ -193,7 +192,6 @@ export default function Playbook() {
             onAssigneeChange={onAssigneeChange}
             onDelete={onDelete}
             isClosed={isClosed}
-            isAdmin={isAdmin}
             busy={busy}
           />
         ))
@@ -203,7 +201,7 @@ export default function Playbook() {
         <AddTaskModal
           incidentId={inc.id}
           onClose={() => setModal(null)}
-          onSaved={(t) => { setTasks(prev => [...prev, t]); setModal(null) }}
+          onSaved={(t) => { setTasks(prev => [...prev, t]); setModal(null); bumpRail?.() }}
         />
       )}
       {modal === 'apply' && (
@@ -212,7 +210,7 @@ export default function Playbook() {
           templates={templates}
           existingCount={totalTasks}
           onClose={() => setModal(null)}
-          onApplied={(allTasks) => { setTasks(allTasks); setModal(null) }}
+          onApplied={(allTasks) => { setTasks(allTasks); setModal(null); bumpRail?.() }}
         />
       )}
     </section>
@@ -221,7 +219,7 @@ export default function Playbook() {
 
 // ── Phase group ───────────────────────────────────────────────────────────
 
-function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange, onDelete, isClosed, isAdmin, busy }) {
+function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange, onDelete, isClosed, busy }) {
   return (
     <div style={{ marginBottom: 'var(--space-4)' }}>
       <h3 style={{
@@ -251,11 +249,10 @@ function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange
           }}>
             <div>
               <select
-                className="select"
+                className="select compact"
                 value={t.status}
                 onChange={(e) => onStatusChange(t, e.target.value)}
                 disabled={isClosed || busy}
-                style={{ padding: '2px 6px', fontSize: 11 }}
                 aria-label="Status"
               >
                 {Object.entries(STATUS_LABEL).map(([v, l]) => (
@@ -284,19 +281,18 @@ function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange
             </div>
             <div>
               <select
-                className="select"
+                className="select compact"
                 value={t.assignee_id || ''}
                 onChange={(e) => onAssigneeChange(t, e.target.value)}
-                disabled={isClosed || busy || (!isAdmin && users.length === 0)}
-                style={{ padding: '2px 6px', fontSize: 11 }}
+                disabled={isClosed || busy}
                 aria-label="Assignee"
               >
                 <option value="">Unassigned</option>
                 {users.map(u => (
                   <option key={u.id} value={u.id}>{u.username}</option>
                 ))}
-                {/* If a task is assigned to someone not in our user list (e.g. non-admin
-                    viewing) keep the value showing rather than dropping it silently. */}
+                {/* If a task is assigned to someone not in our user list (e.g. a
+                    deactivated user) keep the value showing rather than dropping it silently. */}
                 {t.assignee_id && !users.some(u => u.id === t.assignee_id) && (
                   <option value={t.assignee_id}>{usernameOf(t.assignee_id)}</option>
                 )}

@@ -12,7 +12,11 @@ from __future__ import annotations
 
 from typing import Optional
 
+from evidence.hashing import hash_algorithm
 from models import Evidence
+
+
+_ALGO_LABEL = {"md5": "MD5", "sha1": "SHA-1", "sha256": "SHA-256"}
 
 
 def _passes(b: Optional[bool]) -> str:
@@ -109,8 +113,20 @@ def score_evidence(ev: Evidence) -> dict:
             note=None if tool_ok else "Required for reproducibility (ISO §9.2.4, NIST 800-86 §3.2.4)",
         ))
 
-        # ISO §9.2.5 — source vs target hash match (acquisition integrity)
-        if ev.acquisition_hash_source or ev.acquisition_hash_target:
+        # ISO §9.2.5 — source vs target hash match (acquisition integrity). C3: two hashes
+        # of different algorithms (e.g. MD5 source, SHA-256 target) can't be compared here,
+        # so that case is advisory ("manual"), never a mandatory fail.
+        src_algo = hash_algorithm(ev.acquisition_hash_source)
+        tgt_algo = hash_algorithm(ev.acquisition_hash_target)
+        if src_algo and tgt_algo and src_algo != tgt_algo:
+            checks.append(_check(
+                code="iso_27037_9_2_5_hash_match",
+                label="Acquisition source/target hash match",
+                status="manual", severity="advisory",
+                note=(f"Source ({_ALGO_LABEL[src_algo]}) and target ({_ALGO_LABEL[tgt_algo]}) use "
+                      "different algorithms — confirm the match in the imaging tool's report"),
+            ))
+        elif ev.acquisition_hash_source or ev.acquisition_hash_target:
             match = (ev.acquisition_hash_source or "").lower() == (ev.acquisition_hash_target or "").lower()
             checks.append(_check(
                 code="iso_27037_9_2_5_hash_match",
@@ -156,6 +172,26 @@ def score_evidence(ev: Evidence) -> dict:
             label="Currently held by an internal accountable user",
             status="pass",
             severity="advisory",
+        ))
+
+    # ── C4 — internal custody transfers accepted by the recipient (ISO/IEC 27037 §9.3;
+    # SWGDE §6.2/§6.3). Transfers recorded before recipient acceptance existed are advisory
+    # ("manual"), never a fail. No internal transfer → not applicable (no check).
+    acked  = getattr(ev, "internal_transfers_acknowledged", 0)
+    legacy = getattr(ev, "internal_transfers_legacy", 0)
+    if legacy:
+        checks.append(_check(
+            code="custody_transfers_acknowledged",
+            label="Custody transfers acknowledged by the recipient",
+            status="manual", severity="advisory",
+            note=(f"{legacy} transfer(s) recorded before recipient acceptance existed — "
+                  "confirm receipt and condition from the paper record"),
+        ))
+    elif acked:
+        checks.append(_check(
+            code="custody_transfers_acknowledged",
+            label="Custody transfers acknowledged by the recipient",
+            status="pass", severity="mandatory",
         ))
 
     # ── Wizard A seal ──

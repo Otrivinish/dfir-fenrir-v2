@@ -243,23 +243,27 @@ async def import_pcap_iocs(
             skipped += 1
             continue
 
-        ioc = IOC(
-            id=uuid.uuid4(),
-            incident_id=incident_id,
-            type=ioc_type,
-            value=value,
-            notes=notes,
-            source=audit_source,
-            tags=auto_tags,
-            added_by_id=user.id,
-        )
-        db.add(ioc)
+        # Per-row savepoint (same pattern as iocs/routes.py batch create): a
+        # row that loses a race to a concurrent import is skipped without
+        # discarding the rows already imported in this request.
+        sp = await db.begin_nested()
         try:
+            db.add(IOC(
+                id=uuid.uuid4(),
+                incident_id=incident_id,
+                type=ioc_type,
+                value=value,
+                notes=notes,
+                source=audit_source,
+                tags=auto_tags,
+                added_by_id=user.id,
+            ))
             await db.flush()
+            await sp.commit()
             existing.add(value)
             imported += 1
         except IntegrityError:
-            await db.rollback()
+            await sp.rollback()
             skipped += 1
 
     await write_audit(

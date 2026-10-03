@@ -5,8 +5,13 @@ import { formatLocal } from '../../../lib/datetime.js'
 
 const ACTION_COLOR = {
   evidence_collect:                  'var(--ok)',
+  evidence_collect_rejected:         'var(--crit)',
+  email_mint_evidence:               'var(--ok)',
+  webhistory_mint_evidence:          'var(--ok)',
   evidence_update:                   'var(--muted)',
+  evidence_transfer_request:         'var(--med)',
   evidence_transfer:                 'var(--accent)',
+  evidence_transfer_declined:        'var(--high)',
   evidence_examine:                  'var(--med)',
   evidence_verify:                   'var(--ok)',
   evidence_verify_failed:            'var(--crit)',
@@ -21,8 +26,13 @@ const ACTION_COLOR = {
 
 const ACTION_LABEL = {
   evidence_collect:                'Collected',
+  evidence_collect_rejected:       'Collection REFUSED',
+  email_mint_evidence:             'Collected (from Email)',
+  webhistory_mint_evidence:        'Collected (from Browser history)',
   evidence_update:                 'Updated',
+  evidence_transfer_request:       'Transfer requested',
   evidence_transfer:               'Transferred',
+  evidence_transfer_declined:      'Transfer declined',
   evidence_examine:                'Examined',
   evidence_verify:                 'Verified',
   evidence_verify_failed:          'Verify FAILED',

@@ -4,6 +4,10 @@ import { api } from '../../api/client.js'
 import { useAuth } from '../../hooks/useAuth.jsx'
 import { formatLocal } from '../../lib/datetime.js'
 
+// The Incident Commander / Deputy role keys (backend incidents/access.py LEAD_ROLE_KEYS).
+// Who may assign or remove them is the API's `assign_lead_roles` capability, not a rule here.
+const LEAD_ROLE_KEYS = ['incident_commander', 'deputy_commander']
+
 // ─── Role Coverage section ────────────────────────────────────────────────────
 
 function RoleCoverage({ incidentId, refreshKey }) {
@@ -24,14 +28,14 @@ function RoleCoverage({ incidentId, refreshKey }) {
   return (
     <div style={{ marginTop: 'var(--space-6)' }}>
       <div style={{ marginBottom: 'var(--space-3)' }}>
-        <h3 style={{ margin: 0, fontSize: '0.9rem', fontWeight: 700 }}>Role Coverage</h3>
-        <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: 'var(--muted)' }}>
+        <h3 className="panel-h" style={{ margin: 0 }}>Role Coverage</h3>
+        <div className="page-sub">
           CISA operational roles — filled vs. vacant on this incident.
-        </p>
+        </div>
       </div>
 
       {slots === null && (
-        <div style={{ fontSize: '0.8rem', color: 'var(--dim)' }}>Loading…</div>
+        <div style={{ fontSize: 12, color: 'var(--dim)' }}>Loading…</div>
       )}
 
       {slots !== null && (
@@ -81,7 +85,7 @@ function RoleCoverage({ incidentId, refreshKey }) {
 
 // ─── Assign modal ─────────────────────────────────────────────────────────────
 
-function AssignModal({ incidentId, onClose, onCreated }) {
+function AssignModal({ incidentId, canAssignLead, onClose, onCreated }) {
   const [users, setUsers]   = useState([])
   const [roles, setRoles]   = useState([])
   const [userId, setUserId] = useState('')
@@ -96,11 +100,12 @@ function AssignModal({ incidentId, onClose, onCreated }) {
       api.listOperationalRoles(),
     ]).then(([u, r]) => {
       setUsers(u)
-      const active = (r.items ?? r).filter(x => x.is_active)
+      // IC / Deputy are offered only with the assign_lead_roles capability (GET …/access).
+      const active = (r.items ?? r).filter(x => x.is_active && (canAssignLead || !LEAD_ROLE_KEYS.includes(x.key)))
       setRoles(active)
-      if (active.length) setRoleId(active[0].id)
+      setRoleId(active.length ? active[0].id : '')
     }).catch(() => {})
-  }, [])
+  }, [canAssignLead])
 
   const handleSubmit = useCallback(async e => {
     e.preventDefault()
@@ -200,7 +205,7 @@ function Avatar({ username }) {
       color: 'var(--accent)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       fontFamily: 'var(--font-mono)',
-      fontSize: '0.75rem', fontWeight: 700,
+      fontSize: 12, fontWeight: 700,
       flexShrink: 0,
     }}>
       {initials || '?'}
@@ -210,12 +215,17 @@ function Avatar({ username }) {
 
 // ─── Assignment card ──────────────────────────────────────────────────────────
 
-function AssignmentCard({ assignment, currentUser, isClosed, onRemoved }) {
+function AssignmentCard({ assignment, isLeadRole, currentUser, capabilities, isClosed, onRemoved }) {
   const [removing, setRemoving] = useState(false)
 
-  const canRemove = !isClosed && (
-    currentUser?.role === 'admin' || assignment.user_id === currentUser?.id
-  )
+  // Rights come from GET …/access: an IC / Deputy assignment needs assign_lead_roles (the
+  // lead, or the creator / today's on-call while the incident has no lead, so a dead slot
+  // can be cleared); any other, the lead (admins included) removes anyone's and analysts
+  // their own. The API enforces the full rule.
+  const canRemove = !isClosed && (isLeadRole
+    ? capabilities.includes('assign_lead_roles')
+    : capabilities.includes('remove_any_assignment') ||
+      (capabilities.includes('remove_own_assignment') && assignment.user_id === currentUser?.id))
 
   const handleRemove = useCallback(async () => {
     if (!window.confirm(`Remove ${assignment.username} (${assignment.role_label})?`)) return
@@ -230,7 +240,9 @@ function AssignmentCard({ assignment, currentUser, isClosed, onRemoved }) {
   }, [assignment, onRemoved])
 
   return (
-    <div className="surface-2" style={{
+    <div style={{
+      background: 'var(--surface-2)',
+      border: '1px solid var(--border)',
       borderRadius: 'var(--radius)',
       padding: 'var(--space-3)',
       display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-start',
@@ -246,26 +258,26 @@ function AssignmentCard({ assignment, currentUser, isClosed, onRemoved }) {
           color: 'var(--accent)',
           borderRadius: 'var(--radius-sm)',
           padding: '1px 8px',
-          fontSize: '0.75rem',
+          fontSize: 12,
           fontWeight: 600,
           marginBottom: 4,
         }}>
           {assignment.role_label}
         </div>
         {assignment.notes && (
-          <div style={{ fontSize: '0.8rem', color: 'var(--muted)', marginTop: 2 }}>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
             {assignment.notes}
           </div>
         )}
-        <div style={{ fontSize: '0.75rem', color: 'var(--dim)', marginTop: 4 }}>
+        <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4 }}>
           Assigned {formatLocal(assignment.assigned_at)}
           {assignment.assigned_by_username && ` by ${assignment.assigned_by_username}`}
         </div>
       </div>
       {canRemove && (
         <button
-          className="btn btn-ghost"
-          style={{ fontSize: '0.75rem', padding: '2px 8px', flexShrink: 0 }}
+          className="btn ghost"
+          style={{ flexShrink: 0 }}
           onClick={handleRemove}
           disabled={removing}
         >
@@ -279,13 +291,24 @@ function AssignmentCard({ assignment, currentUser, isClosed, onRemoved }) {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Assignments() {
-  const { inc: incident } = useOutletContext()
+  const { inc: incident, access, refreshAccess, bumpRail } = useOutletContext()
   const { user } = useAuth()
+  const capabilities = access?.capabilities ?? []
   const [assignments, setAssignments]   = useState([])
   const [loading, setLoading]           = useState(true)
   const [showModal, setShowModal]       = useState(false)
   const [coverageKey, setCoverageKey]   = useState(0)
+  const [leadRoleIds, setLeadRoleIds]   = useState(() => new Set())
   const isClosed = incident?.status === 'closed'
+
+  // Which role ids are IC / Deputy (inactive roles too: an old assignment may hold one).
+  useEffect(() => {
+    let cancelled = false
+    api.listOperationalRoles({ includeInactive: true })
+      .then(r => { if (!cancelled) setLeadRoleIds(new Set((r.items ?? r).filter(x => LEAD_ROLE_KEYS.includes(x.key)).map(x => x.id))) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
   const load = useCallback(async () => {
     if (!incident?.id) return
@@ -298,32 +321,33 @@ export default function Assignments() {
 
   useEffect(() => { load() }, [load])
 
+  // An IC / Deputy assignment added or removed can change my rights: re-read them.
   const handleCreated = useCallback(created => {
     setAssignments(prev => [...prev, created])
     setShowModal(false)
     setCoverageKey(k => k + 1)
-  }, [])
+    refreshAccess?.()
+    bumpRail?.()
+  }, [refreshAccess, bumpRail])
 
   const handleRemoved = useCallback(id => {
     setAssignments(prev => prev.filter(a => a.id !== id))
     setCoverageKey(k => k + 1)
-  }, [])
+    refreshAccess?.()
+    bumpRail?.()
+  }, [refreshAccess, bumpRail])
 
   return (
-    <div style={{ padding: 'var(--space-4)' }}>
-      <div style={{
-        display: 'flex', alignItems: 'center',
-        justifyContent: 'space-between',
-        marginBottom: 'var(--space-4)',
-      }}>
+    <section className="panel">
+      <div className="panel-toolbar">
         <div>
-          <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Assignments</h2>
-          <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: 'var(--muted)' }}>
+          <h2 className="panel-h">Assignments</h2>
+          <div className="page-sub">
             IR team members and their operational roles on this incident.
-          </p>
+          </div>
         </div>
         {!isClosed && user?.role !== 'viewer' && (
-          <button className="btn btn-primary" style={{ fontSize: '0.8rem' }}
+          <button className="btn primary"
             onClick={() => setShowModal(true)}>
             + Assign
           </button>
@@ -333,10 +357,7 @@ export default function Assignments() {
       {loading && <p className="muted">Loading…</p>}
 
       {!loading && assignments.length === 0 && (
-        <div style={{
-          textAlign: 'center', padding: 'var(--space-6)',
-          color: 'var(--muted)', fontSize: '0.85rem',
-        }}>
+        <div className="panel-empty">
           No assignments yet.{!isClosed && ' Use "+ Assign" to add team members.'}
         </div>
       )}
@@ -347,7 +368,9 @@ export default function Assignments() {
             <AssignmentCard
               key={a.id}
               assignment={a}
+              isLeadRole={leadRoleIds.has(a.role_id)}
               currentUser={user}
+              capabilities={capabilities}
               isClosed={isClosed}
               onRemoved={handleRemoved}
             />
@@ -360,10 +383,11 @@ export default function Assignments() {
       {showModal && (
         <AssignModal
           incidentId={incident.id}
+          canAssignLead={capabilities.includes('assign_lead_roles')}
           onClose={() => setShowModal(false)}
           onCreated={handleCreated}
         />
       )}
-    </div>
+    </section>
   )
 }

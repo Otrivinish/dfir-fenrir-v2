@@ -47,6 +47,8 @@ const BROWSERS = [
   { value: 'firefox', label: 'Firefox' },
 ]
 const BROWSER_LABEL = Object.fromEntries(BROWSERS.map(b => [b.value, b.label]))
+// "Exhibit" is not used on the Evidence tab yet, so the button says what it means.
+const EXHIBIT_HINT = 'Exhibit = an evidence item. Adds this upload to Evidence, re-hashed, with a custody log.'
 
 export default function WebBrowserHistory() {
   const { inc } = useOutletContext()
@@ -242,7 +244,7 @@ export default function WebBrowserHistory() {
       await api.mintWebHistoryEvidence(incidentId, u.id)
       loadUploads()
     } catch (e) {
-      setUploadsErr(e.message || 'Mint failed.')
+      setUploadsErr(e.message || 'Could not register as exhibit.')
     }
   }
 
@@ -323,10 +325,10 @@ export default function WebBrowserHistory() {
               <span style={{ color: 'var(--dim)' }} title={formatLocal(u.uploaded_at)}>{relative(u.uploaded_at)} · {u.uploaded_by}</span>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 'var(--space-2)' }} onClick={e => e.stopPropagation()}>
                 {u.evidence_id ? (
-                  <span style={{ color: 'var(--ok)' }}>Evidence ✓</span>
+                  <span style={{ color: 'var(--ok)' }} title={EXHIBIT_HINT}>Registered as exhibit ✓</span>
                 ) : (
-                  <button type="button" className="btn ghost" style={{ fontSize: 12, padding: '2px 8px' }}
-                          onClick={() => onMintEvidence(u)} disabled={isClosed}>Mint as Evidence</button>
+                  <button type="button" className="btn ghost" style={{ fontSize: 12, padding: '2px 8px' }} title={EXHIBIT_HINT}
+                          onClick={() => onMintEvidence(u)} disabled={isClosed}>Register as exhibit</button>
                 )}
                 <button type="button" className="btn-link danger" onClick={() => onDeleteUpload(u)} disabled={isClosed}>Delete</button>
               </div>

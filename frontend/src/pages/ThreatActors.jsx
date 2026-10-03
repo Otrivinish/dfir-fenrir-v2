@@ -518,7 +518,7 @@ function ActorDetailDrawer({ actor, isAdmin, onClose, onEdit, onDeleted }) {
               return (
                 <Link
                   key={l.attribution_id}
-                  to={`/incidents/${l.incident_id}/forensic/attribution`}
+                  to={`/incidents/${l.incident_id}/mitre/attribution`}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 8,
                     padding: '6px 8px', textDecoration: 'none',

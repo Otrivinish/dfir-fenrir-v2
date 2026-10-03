@@ -6,6 +6,7 @@ import BulkImportModal from './iocs/BulkImportModal.jsx'
 import TagChip from '../../components/TagChip.jsx'
 import TagInput, { normalizeTags } from '../../components/TagInput.jsx'
 import { SEV_PALETTE } from '../../components/SevBadge.jsx'
+import ContainmentBadge from '../../components/ContainmentBadge.jsx'
 
 // Reuse the canonical severity palette so the IOC status badges read with the
 // same bright red/green as the "critical" badge in the incident header.
@@ -54,7 +55,7 @@ const PLATFORMS = [
 ]
 
 export default function IOCs() {
-  const { inc } = useOutletContext()
+  const { inc, bumpRail } = useOutletContext()
   const isClosed = inc?.status === 'closed'
 
   const [allIocs, setAllIocs]               = useState([])
@@ -116,6 +117,8 @@ export default function IOCs() {
   }, [inc.id, typeFilter])
 
   useEffect(() => { load() }, [load])
+  // After a write: re-read the list and the rail's counts.
+  const reload = useCallback(() => { bumpRail?.(); return load() }, [bumpRail, load])
 
   // Fetch enrichment sources once; preselect all currently-available sources.
   useEffect(() => {
@@ -153,7 +156,7 @@ export default function IOCs() {
     setBusy(true)
     try {
       await api.deleteIoc(inc.id, i.id)
-      await load()
+      await reload()
     } catch (e) {
       setError(e.message || 'Could not delete IOC')
     } finally {
@@ -169,7 +172,7 @@ export default function IOCs() {
     setBusy(true)
     try {
       await api.updateIoc(inc.id, i.id, { notes: next || null })
-      await load()
+      await reload()
     } catch (e) {
       setError(e.message || 'Could not update notes')
     } finally {
@@ -185,7 +188,7 @@ export default function IOCs() {
     setBusy(true)
     try {
       await api.updateIoc(inc.id, i.id, { malicious: status })
-      await load()
+      await reload()
     } catch (e) {
       setError(e.message || 'Could not update status')
     } finally {
@@ -502,6 +505,7 @@ export default function IOCs() {
                     {i.malicious === true  && <span className="pill" style={{ fontSize: 10, marginLeft: 4, ...MAL_STYLE }}>MALICIOUS</span>}
                     {i.malicious === false && <span className="pill" style={{ fontSize: 10, marginLeft: 4, ...CLEAN_STYLE }}>CLEAN</span>}
                     {i.malicious == null   && <span className="pill pill-gray" style={{ fontSize: 10, marginLeft: 4 }}>UNKNOWN</span>}
+                    {i.containment && <span style={{ marginLeft: 4 }}><ContainmentBadge containment={i.containment} /></span>}
                   </td>
                   <td style={{ fontSize: 12, maxWidth: 280 }}>
                     <span
@@ -760,7 +764,7 @@ export default function IOCs() {
         <IocModal
           incidentId={inc.id}
           onClose={() => setModalOpen(false)}
-          onCreated={() => { setModalOpen(false); load() }}
+          onCreated={() => { setModalOpen(false); reload() }}
         />
       )}
 
@@ -776,7 +780,7 @@ export default function IOCs() {
         <BulkImportModal
           incidentId={inc.id}
           onClose={() => setBulkOpen(false)}
-          onImported={() => { setBulkOpen(false); load() }}
+          onImported={() => { setBulkOpen(false); reload() }}
         />
       )}
 
@@ -793,7 +797,7 @@ export default function IOCs() {
           incidentId={inc.id}
           ioc={editTarget}
           onClose={() => setEditTarget(null)}
-          onSaved={() => { setEditTarget(null); load() }}
+          onSaved={() => { setEditTarget(null); reload() }}
         />
       )}
     </section>

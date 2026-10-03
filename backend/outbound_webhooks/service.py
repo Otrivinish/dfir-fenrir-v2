@@ -12,8 +12,9 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audit.service import write_audit
 from core.security import decrypt_secret
-from models import PlatformSetting
+from models import Incident, PlatformSetting
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,34 @@ _EVENT_EMOJI = {
     "severity_changed":  "⚠",
     "incident_resolved": "✅",
 }
+
+
+async def suppressed_by_dark_operation(db: AsyncSession, event: str, inc: Incident) -> bool:
+    """Fail-closed Dark Operation guard for outbound incident sends (Teams/Slack
+    webhooks and the admin alert email).
+
+    Returns False (send allowed) only when `inc.dark_operation` is exactly
+    False. Otherwise the send is blocked: an `outbound_notification_suppressed`
+    audit row records `{event, reason}` — never the title or description — and
+    True is returned. Never raises; any error still blocks the send.
+    """
+    try:
+        if inc.dark_operation is False:
+            return False
+        # Savepoint: a failed audit write must not poison the caller's session.
+        async with db.begin_nested():
+            await write_audit(
+                db, "outbound_notification_suppressed",
+                outcome="success",
+                resource_type="incident", resource_id=str(inc.id), resource_label=inc.ref,
+                details={"event": event, "reason": "dark_operation"},
+            )
+        await db.commit()
+        log.info("Dark Operation: outbound %s suppressed for incident %s", event, inc.id)
+    except Exception as exc:  # noqa: BLE001 — fail closed: block, never raise
+        log.warning("Dark Operation: outbound %s blocked for incident %s; audit row not written (%s)",
+                    event, inc.id, type(exc).__name__)
+    return True
 
 
 async def _get_url(db: AsyncSession, key: str) -> Optional[str]:

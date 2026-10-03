@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { formatLocal, formatLocalShort } from '../../lib/datetime.js'
 import { MITRE_TACTICS, MITRE_TECHNIQUES, tacticColor } from '../../lib/mitre.js'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
+import { labelOf } from '../../lib/incidentVocab.js'
+import { matchEntity } from '../../lib/entityMatch.js'
 
 // Maps 800-61 R3 phase keys to display labels.
 const IR_PHASE_LABELS = {
@@ -236,7 +238,7 @@ body{background:#07080b;color:#d9dde5;font-family:-apple-system,'Segoe UI',Robot
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function Timeline() {
-  const { inc } = useOutletContext()
+  const { inc, bumpRail } = useOutletContext()
   const isClosed = inc?.status === 'closed'
 
   const [events, setEvents]       = useState([])
@@ -266,16 +268,32 @@ export default function Timeline() {
     return next
   })
 
+  // Each load gets a sequence number; only the newest one may set state, so an
+  // older multi-page load that finishes late can't overwrite a newer view.
+  const loadSeq = useRef(0)
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     setError(null)
     try {
-      const res = await api.listTimelineEvents(inc.id, { limit: 500, include_system: showSystem })
-      setEvents(res.items)
+      // Follow next_cursor so the view and the CSV/HTML exports hold every event.
+      // Keyed by id: a row shifted onto the next page by a concurrent insert is kept once.
+      const byId = new Map()
+      let cursor = null
+      let res
+      do {
+        res = await api.listTimelineEvents(inc.id, { limit: 500, include_system: showSystem, ...(cursor ? { cursor } : {}) })
+        for (const ev of res.items) byId.set(ev.id, ev)
+        cursor = res.next_cursor
+      } while (cursor)
+      if (seq !== loadSeq.current) return
+      setEvents([...byId.values()])
       setSystemCount(res.system_event_count ?? 0)
     } catch (e) {
+      if (seq !== loadSeq.current) return
       setError(e.message || 'Could not load timeline')
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
     // LOLBin scan fires after events load — non-blocking, no loading state.
     api.lolbinsTimelineScan(inc.id)
@@ -294,6 +312,8 @@ export default function Timeline() {
   }, [lolbinHits])
 
   useEffect(() => { load() }, [load])
+  // After a write: re-read the list and the rail's counts.
+  const reload = useCallback(() => { bumpRail?.(); return load() }, [bumpRail, load])
 
   const toggle = (id) => setExpandedId(prev => prev === id ? null : id)
 
@@ -303,7 +323,7 @@ export default function Timeline() {
     try {
       await api.deleteTimelineEvent(inc.id, ev.id)
       setExpandedId(null)
-      await load()
+      await reload()
     } catch (e) {
       setError(e.message || 'Could not delete event')
     } finally {
@@ -423,7 +443,7 @@ export default function Timeline() {
         <EventModal
           incidentId={inc.id}
           onClose={() => setModalOpen(false)}
-          onCreated={() => { setModalOpen(false); load() }}
+          onCreated={(warning) => { setModalOpen(false); reload().then(() => { if (warning) setError(warning) }) }}
         />
       )}
 
@@ -432,7 +452,7 @@ export default function Timeline() {
           incidentId={inc.id}
           event={editEvent}
           onClose={() => setEditEvent(null)}
-          onCreated={() => { setEditEvent(null); load() }}
+          onCreated={(warning) => { setEditEvent(null); reload().then(() => { if (warning) setError(warning) }) }}
         />
       )}
 
@@ -440,7 +460,7 @@ export default function Timeline() {
         <SystemEventModal
           incidentId={inc.id}
           onClose={() => setSysModalOpen(false)}
-          onCreated={() => { setSysModalOpen(false); load() }}
+          onCreated={() => { setSysModalOpen(false); reload() }}
         />
       )}
 
@@ -449,7 +469,7 @@ export default function Timeline() {
           incidentId={inc.id}
           event={editEvent}
           onClose={() => setEditEvent(null)}
-          onCreated={() => { setEditEvent(null); load() }}
+          onCreated={() => { setEditEvent(null); reload() }}
         />
       )}
     </section>
@@ -614,6 +634,20 @@ function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClose
                   {ev.origin === 'forensic_import' && (
                     <span className="pill" style={{ fontSize: 10, color: 'var(--muted)' }}>import</span>
                   )}
+                  {ev.evidence_id && (
+                    <span className="pill" data-testid="tl-exhibit-pill"
+                          style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}
+                          title={`From exhibit ${ev.evidence_identifier || ''}${ev.parser_version ? ` · parser ${ev.parser_version}` : ''}`}>
+                      ⛁ {ev.evidence_identifier || 'exhibit'}
+                    </span>
+                  )}
+                  {TIME_BASIS_LABEL[ev.time_basis] && (
+                    <span className="pill" data-basis={ev.time_basis}
+                          style={{ fontSize: 10, color: 'var(--med)' }}
+                          title={TIME_BASIS_HINT[ev.time_basis]}>
+                      {TIME_BASIS_LABEL[ev.time_basis]}
+                    </span>
+                  )}
                   {isSystem && (
                     <span className="pill" style={{ fontSize: 10, color: 'var(--dim)' }}>
                       ⚙ system{ev.system_source && ev.system_source !== 'manual' ? ` · ${ev.system_source}` : ''}
@@ -711,6 +745,15 @@ function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClose
                     </div>
                   )}
 
+                  {ev.forensic_import_id && (
+                    <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
+                      Imported{ev.evidence_id ? <> from exhibit <span style={{ fontFamily: 'var(--font-mono)' }}>{ev.evidence_identifier}</span></> : ' from a Timeline Import'}
+                      {ev.import_event_index != null ? ` · event #${ev.import_event_index}` : ''}
+                      {ev.parser_version ? ` · parser ${ev.parser_version}` : ''}
+                      {ev.time_basis ? ` · time ${TIME_BASIS_LABEL[ev.time_basis] || 'stated by the source'}` : ''}
+                    </div>
+                  )}
+
                   <div style={{ fontSize: 11, color: 'var(--dim)', marginBottom: 12 }}>
                     Added {formatLocal(ev.created_at)}
                     {ev.created_by_username ? ` by ${ev.created_by_username}` : ''}
@@ -744,12 +787,31 @@ function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClose
   )
 }
 
+// C5 — how an imported event's time was worked out; explicit / legacy times get no badge.
+const TIME_BASIS_LABEL = { assumed_tz: 'TZ assumed', inferred_year: 'year inferred' }
+const TIME_BASIS_HINT  = {
+  assumed_tz:    'The source gave no zone; the time was read in the source timezone chosen at import',
+  inferred_year: 'The source gave no year; it was inferred from the exhibit\u2019s acquisition time',
+}
+
 // ─── Add event modal ──────────────────────────────────────────────────────────
 
 function EventModal({ incidentId, event, onClose, onCreated }) {
   const isEdit = !!event
+  // C5 — promoted from a Timeline Import: the facts copied from the source are locked (409 on
+  // the server); IR phase, ATT&CK and the entity link stay editable.
+  const locked = isEdit && !!event.forensic_import_id
+  const [entityPick, setEntityPick]   = useState(event?.entity_id || '')
   const [eventTime, setEventTime]     = useState(() => event?.event_time || new Date().toISOString())
+  // Host field = combobox over the incident's entities (C2). The event is linked to an entity only
+  // when the user links it (pinnedId: its current link, or Link on a matching entity); a typed
+  // name never links by itself. Unlink keeps the hostname; editing the host text drops the link.
   const [hostname, setHostname]       = useState(event?.hostname || '')
+  const [pinnedId, setPinnedId]       = useState(event?.entity_id || null)
+  const [entities, setEntities]       = useState([])
+  const [entitiesError, setEntitiesError] = useState(null)
+  const [addAsEntity, setAddAsEntity] = useState(false)
+  const [irPhase, setIrPhase]         = useState(event?.ir_phase || '')
   const [source, setSource]           = useState(event?.source || '')
   const [eventType, setEventType]     = useState(event?.event_type || '')
   const [description, setDescription] = useState(event?.description || '')
@@ -767,6 +829,19 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [busy, onClose])
+
+  useEffect(() => {
+    let live = true
+    api.listAllEntities(incidentId)
+      .then(list => { if (live) setEntities(list) })
+      .catch(err => { if (live) setEntitiesError(err.message || 'request failed') })
+    return () => { live = false }
+  }, [incidentId])
+
+  const hostText   = hostname.trim().slice(0, 256)
+  const linked     = pinnedId ? entities.find(e => e.id === pinnedId) || null : null
+  // An entity the typed host matches (case-insensitive) — offered to link, never linked silently.
+  const suggestion = pinnedId ? null : matchEntity(entities, hostText)
 
   const onTacticChange = (e) => {
     const id   = e.target.value
@@ -788,17 +863,38 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
     e.preventDefault()
     setError(null)
     const desc = description.trim()
-    if (!desc) { setError('Description is required.'); return }
-    if (!eventTime) { setError('Event time is required.'); return }
+    // An imported event's facts are locked as imported, so they aren't re-validated (an empty
+    // imported description must not block saving the annotations).
+    if (!locked && !desc) { setError('Description is required.'); return }
+    if (!locked && !eventTime) { setError('Event time is required.'); return }
 
     setBusy(true)
     try {
+      if (locked) {
+        await api.updateTimelineEvent(incidentId, event.id, {
+          entity_id:            entityPick || null,
+          ir_phase:             irPhase || null,
+          mitre_tactic_id:      tacticId,
+          mitre_tactic_name:    tacticName,
+          mitre_technique_id:   techniqueId,
+          mitre_technique_name: techniqueName,
+        })
+        onCreated()
+        return
+      }
+      const entityId = pinnedId || null
+      // A new host goes to Entities only after the event is saved, so a failed save leaves no
+      // orphan entity; it is then linked to the saved event.
+      const addHost = !entityId && addAsEntity && !suggestion && hostText
+      let saved
       if (isEdit) {
         // Empty strings (not null) so cleared fields actually clear — the PATCH
-        // endpoint treats null as "leave unchanged".
-        await api.updateTimelineEvent(incidentId, event.id, {
+        // endpoint treats null as "leave unchanged" (entity_id / ir_phase: null clears).
+        saved = await api.updateTimelineEvent(incidentId, event.id, {
           event_time:           eventTime,
-          hostname:             hostname.trim(),
+          hostname:             hostText,
+          entity_id:            entityId,
+          ir_phase:             irPhase || null,
           source:               source.trim(),
           event_type:           eventType.trim(),
           description:          desc,
@@ -809,9 +905,11 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
           mitre_technique_name: techniqueName,
         })
       } else {
-        await api.createTimelineEvent(incidentId, {
+        saved = await api.createTimelineEvent(incidentId, {
           event_time:           eventTime,
-          hostname:             hostname.trim()  || null,
+          hostname:             hostText        || null,
+          entity_id:            entityId,
+          ir_phase:             irPhase         || null,
           source:               source.trim()   || null,
           event_type:           eventType.trim() || null,
           description:          desc,
@@ -822,7 +920,16 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
           mitre_technique_name: techniqueName   || null,
         })
       }
-      onCreated()
+      let warning = null
+      if (addHost) {
+        try {
+          const ent = await api.createEntity(incidentId, { type: 'host', value: hostText })
+          await api.updateTimelineEvent(incidentId, saved?.id ?? event.id, { entity_id: ent.id })
+        } catch (err2) {
+          warning = `The event was saved, but “${hostText}” could not be added to Entities and linked: ${err2.message || 'request failed'}`
+        }
+      }
+      onCreated(warning)
     } catch (err) {
       setError(err.message || (isEdit ? 'Could not save changes.' : 'Could not add event.'))
     } finally {
@@ -839,7 +946,7 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
     >
       <div className="modal" role="dialog" aria-labelledby="tl-modal-title" style={{ maxWidth: 560 }}>
         <div className="modal-head">
-          <h2 id="tl-modal-title">{isEdit ? 'Edit timeline event' : 'Add timeline event'}</h2>
+          <h2 id="tl-modal-title">{locked ? 'Annotate imported event' : isEdit ? 'Edit timeline event' : 'Add timeline event'}</h2>
           <button
             type="button"
             className="modal-close"
@@ -853,6 +960,17 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
           <div className="modal-body">
             <div className="form">
 
+              {locked && (
+                <div className="alert info" role="note" data-testid="tl-locked-note">
+                  <span className="alert-icon">ⓘ</span>
+                  <span>
+                    Imported{event.evidence_id ? <> from exhibit <strong style={{ fontFamily: 'var(--font-mono)' }}>{event.evidence_identifier}</strong></> : ' from a Timeline Import'}:
+                    {' '}the time, host, source, type, description and raw log are locked as imported.
+                    You can set the IR phase, ATT&amp;CK and the entity link.
+                  </span>
+                </div>
+              )}
+
               {/* Event time + event type */}
               <div className="form-row">
                 <div className="field">
@@ -863,7 +981,8 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                     id="tl-event-time"
                     value={eventTime}
                     onChange={setEventTime}
-                    required
+                    required={!locked}
+                    disabled={locked}
                   />
                 </div>
                 <div className="field">
@@ -874,6 +993,7 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                     value={eventType}
                     onChange={(e) => setEventType(e.target.value)}
                     maxLength={128}
+                    disabled={locked}
                     placeholder="e.g. Process Execution"
                   />
                 </div>
@@ -890,25 +1010,101 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                   rows={2}
                   maxLength={4096}
                   required
-                  autoFocus
+                  autoFocus={!locked}
+                  disabled={locked}
                   placeholder="What happened? Be concise — one observable event per entry."
                 />
               </div>
 
-              {/* Hostname + Source */}
-              <div className="form-row">
-                <div className="field">
-                  <label className="field-label" htmlFor="tl-hostname">Hostname</label>
-                  <input
-                    id="tl-hostname"
-                    className="input"
-                    value={hostname}
-                    onChange={(e) => setHostname(e.target.value)}
-                    maxLength={256}
-                    placeholder="e.g. WORKSTATION-07"
-                    style={{ fontFamily: 'var(--font-mono)' }}
-                  />
+              {/* Imported event: the host is a fact; the entity link is a separate, editable choice */}
+              {locked && (
+                <div className="form-row">
+                  <div className="field">
+                    <label className="field-label" htmlFor="tl-hostname-locked">Host (as imported)</label>
+                    <input id="tl-hostname-locked" className="input" value={hostname || '—'} disabled
+                           style={{ fontFamily: 'var(--font-mono)' }} />
+                  </div>
+                  <div className="field">
+                    <label className="field-label" htmlFor="tl-entity-link">Entity link</label>
+                    <select id="tl-entity-link" className="select" value={entityPick}
+                            onChange={(e) => setEntityPick(e.target.value)}>
+                      <option value="">— none —</option>
+                      {entities.map(en => (
+                        <option key={en.id} value={en.id}>
+                          {labelOf('entity_type', en.type)} · {en.value}{en.compromised ? ' · compromised' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
+              )}
+
+              {/* Host: an entity of this incident, or a new host added to Entities */}
+              {!locked && (
+              <div className="field">
+                <label className="field-label" htmlFor="tl-hostname">Host / entity</label>
+                <input
+                  id="tl-hostname"
+                  className="input"
+                  list="tl-entity-options"
+                  value={hostname}
+                  onChange={(e) => { setHostname(e.target.value); setPinnedId(null) }}
+                  maxLength={256}
+                  placeholder="Pick from Entities or type a hostname"
+                  style={{ fontFamily: 'var(--font-mono)' }}
+                />
+                <datalist id="tl-entity-options">
+                  {entities.map(en => (
+                    <option key={en.id} value={en.value}>
+                      {labelOf('entity_type', en.type)}{en.name && en.name !== en.value ? ` · ${en.name}` : ''}
+                      {en.compromised ? ' · compromised' : ''}
+                    </option>
+                  ))}
+                </datalist>
+                {pinnedId ? (
+                  <div className="field-hint" role="status">
+                    Linked to entity:{' '}
+                    {linked ? (
+                      <>
+                        {labelOf('entity_type', linked.type)}{' '}
+                        <span style={{ fontFamily: 'var(--font-mono)' }}>{linked.value}</span>
+                        {linked.compromised && <span style={{ color: 'var(--crit)' }}> · ⚠ compromised</span>}
+                      </>
+                    ) : 'an entity of this incident'}
+                    {' · '}
+                    <button type="button" className="btn ghost" data-testid="tl-unlink"
+                            onClick={() => setPinnedId(null)}
+                            title="Remove the link; the hostname text stays"
+                            style={{ padding: '0 6px', fontSize: 11 }}>Unlink</button>
+                  </div>
+                ) : suggestion ? (
+                  <div className="field-hint" role="status">
+                    Matches entity: {labelOf('entity_type', suggestion.type)}{' '}
+                    <span style={{ fontFamily: 'var(--font-mono)' }}>{suggestion.value}</span>
+                    {suggestion.compromised && <span style={{ color: 'var(--crit)' }}> · ⚠ compromised</span>}
+                    {' · '}
+                    <button type="button" className="btn ghost" data-testid="tl-link"
+                            onClick={() => setPinnedId(suggestion.id)}
+                            title="Link this event to the entity"
+                            style={{ padding: '0 6px', fontSize: 11 }}>Link</button>
+                  </div>
+                ) : hostText ? (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: 'var(--muted)' }}>
+                    <input type="checkbox" checked={addAsEntity} onChange={(e) => setAddAsEntity(e.target.checked)} />
+                    Add “{hostText}” to Entities as a host
+                  </label>
+                ) : null}
+              </div>
+              )}
+
+              {entitiesError && (
+                <div className="field-hint" role="alert" data-testid="tl-entities-error" style={{ color: 'var(--crit)' }}>
+                  Could not load this incident&rsquo;s entities ({entitiesError}), so none can be linked now.
+                </div>
+              )}
+
+              {/* Source + IR phase */}
+              <div className="form-row">
                 <div className="field">
                   <label className="field-label" htmlFor="tl-source">Log source</label>
                   <input
@@ -917,8 +1113,23 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                     value={source}
                     onChange={(e) => setSource(e.target.value)}
                     maxLength={128}
+                    disabled={locked}
                     placeholder="e.g. Sysmon, Windows Security"
                   />
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="tl-ir-phase">IR phase (optional)</label>
+                  <select
+                    id="tl-ir-phase"
+                    className="select"
+                    value={irPhase}
+                    onChange={(e) => setIrPhase(e.target.value)}
+                  >
+                    <option value="">— none —</option>
+                    {Object.entries(IR_PHASE_LABELS).map(([k, label]) => (
+                      <option key={k} value={k}>{label}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
@@ -974,6 +1185,7 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                     onChange={(e) => setRawLog(e.target.value)}
                     rows={5}
                     maxLength={4000}
+                    disabled={locked}
                     placeholder="Paste the relevant raw log entry here…"
                     style={{ fontFamily: 'var(--font-mono)', fontSize: 11, marginTop: 6 }}
                   />

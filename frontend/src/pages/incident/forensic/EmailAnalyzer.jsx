@@ -7,14 +7,16 @@ import { formatLocal } from '../../../lib/datetime.js'
 // single .eml/.msg, pick several, or a single .zip of them (multi/zip silently routes to
 // the batch endpoint) → verdict + findings, a message summary (subject/sender/recipient/
 // source IP), a sanitized+sandboxed email preview, full raw headers, hop chain,
-// Safelink-unwrapped URLs (→ IOC), attachments (→ quarantine Artifact), and "mint as
-// Evidence". Parsing itself never hits the network; SPF/DMARC/DKIM are additionally
+// Safelink-unwrapped URLs (→ IOC), attachments (→ quarantine Artifact), and "Register as
+// exhibit" (→ Evidence). Parsing itself never hits the network; SPF/DMARC/DKIM are additionally
 // cross-checked against a live DNS lookup so the header's own claim isn't trusted blindly
 // (queries go to the claimed sender domain, same as any receiving mail server would do —
 // never to a URL/host found inside the message).
 
 const VERDICT_COLOR = { red: 'var(--crit)', amber: 'var(--med)', green: 'var(--ok)' }
 const SEV_COLOR     = { high: 'var(--crit)', medium: 'var(--med)', low: 'var(--muted)' }
+// "Exhibit" is not used on the Evidence tab yet, so the button says what it means.
+const EXHIBIT_HINT  = 'Exhibit = an evidence item. Adds this message to Evidence, re-hashed, with a custody log.'
 
 export default function EmailAnalyzer() {
   const { inc } = useOutletContext()
@@ -93,6 +95,11 @@ export default function EmailAnalyzer() {
   const a = analysis
   const auth = a?.headers?.auth || {}
   const hops = a?.headers?.hops || []
+  // The backend's own counts: hops the import takes, and those still on the Timeline.
+  const hopImport = a?.hop_import || { importable: 0, already_imported: 0 }
+  const hopsOnTimeline = hopImport.importable > 0 && hopImport.already_imported >= hopImport.importable
+  // Imported before, but an event was deleted since: the import adds back only the missing ones.
+  const hopsMarked = hops.some(h => h.timeline_event_id)
   const av = a?.auth_verified || null
 
   return (
@@ -103,7 +110,7 @@ export default function EmailAnalyzer() {
           Paste raw headers/source, or choose one or more <code>.eml</code>/<code>.msg</code> files — or a single{' '}
           <code>.zip</code> of them to analyze as a batch. Parsing, header inspection, and Safelink decoding all
           happen locally — no URL from the message is ever fetched and no attachment is executed. SPF/DMARC/DKIM
-          are additionally checked live against the claimed sender domain's own DNS.
+          are additionally checked live against the claimed sender domain's own DNS (skipped under Dark Operation).
         </p>
         <textarea className="input" rows={6} value={raw} onChange={e => setRaw(e.target.value)}
                   placeholder="Paste raw email headers or full source here…"
@@ -152,11 +159,12 @@ export default function EmailAnalyzer() {
               </div>
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-              <button className="btn ghost" disabled={busy || !hops.length}
-                      onClick={() => act(() => api.importEmailHops(incidentId, a.id), 'Hops imported to Timeline.')}>Import hops → Timeline</button>
-              <button className="btn ghost" disabled={busy || !!a.evidence_id}
-                      onClick={() => act(() => api.mintEmailEvidence(incidentId, a.id), 'Minted as Evidence.')}>
-                {a.evidence_id ? 'Evidence minted ✓' : 'Mint as Evidence'}</button>
+              <button className="btn ghost" disabled={busy || !hopImport.importable || hopsOnTimeline}
+                      onClick={() => act(() => api.importEmailHops(incidentId, a.id), 'Hops imported to Timeline.')}>
+                {hopsOnTimeline ? 'Hops on Timeline ✓' : hopsMarked ? 'Re-import missing hops' : 'Import hops → Timeline'}</button>
+              <button className="btn ghost" disabled={busy || !!a.evidence_id} title={EXHIBIT_HINT}
+                      onClick={() => act(() => api.mintEmailEvidence(incidentId, a.id), 'Registered as exhibit.')}>
+                {a.evidence_id ? 'Registered as exhibit ✓' : 'Register as exhibit'}</button>
             </div>
           </div>
 
@@ -264,7 +272,7 @@ export default function EmailAnalyzer() {
               </tr>
             </tbody>
           </table>
-          {av?.error && <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4 }}>Live validation unavailable: {av.error}</div>}
+          {av?.error && <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4 }}>{av.skipped ? av.error : `Live validation unavailable: ${av.error}`}</div>}
 
           {/* Hop chain */}
           <h4 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>Received chain ({hops.length})</h4>

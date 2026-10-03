@@ -19,10 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
+from core.errors import ApiError, ApiErrorBody
 from incidents.access import get_accessible_incident
 import lolbins.service as lol_svc
-from models import IOC, Incident, IocTimelineLink, ThreatIntelIOC, TimelineEvent, User
+from models import IOC, Entity, Evidence, Incident, IocTimelineLink, RespondAction, ThreatIntelIOC, TimelineEvent, User
 from osint.service import SOURCES, enrich_one, source_available
+from respond.containment import containment_map
 from schemas import (
     EnrichResultItem,
     IocEnrichAllRequest, IocEnrichAllResponse,
@@ -53,6 +55,26 @@ def _decode_cursor(cursor: Optional[str]) -> int:
 
 async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) -> Incident:
     return await get_accessible_incident(db, incident_id, user)
+
+
+async def _check_evidence(db: AsyncSession, incident_id: uuid.UUID, evidence_id: uuid.UUID) -> None:
+    """C5 — the exhibit an IOC was found in: 404 if unknown, 422 if it is another incident's."""
+    ev_incident = (await db.execute(select(Evidence.incident_id).where(Evidence.id == evidence_id))).scalar_one_or_none()
+    if ev_incident is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "evidence_not_found", "Evidence not found")
+    if ev_incident != incident_id:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "evidence_other_incident",
+                       "Evidence belongs to another incident; pick an exhibit of this incident")
+
+
+async def _check_entity(db: AsyncSession, incident_id: uuid.UUID, entity_id: uuid.UUID) -> None:
+    """The entity an IOC is linked to: 404 if unknown, 422 if it is another incident's (L6)."""
+    ent_incident = (await db.execute(select(Entity.incident_id).where(Entity.id == entity_id))).scalar_one_or_none()
+    if ent_incident is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "entity_not_found", "Entity not found")
+    if ent_incident != incident_id:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "entity_other_incident",
+                       "Entity belongs to another incident; link one from this incident")
 
 
 async def _username_map(db: AsyncSession, user_ids) -> dict[uuid.UUID, str]:
@@ -107,9 +129,10 @@ async def list_iocs(
 
     Supports optional filtering by `type` and `tag` (canonical lowercase-dashed),
     and cursor-based pagination via `limit` and `cursor`. Each item is enriched
-    with threat-intel match info and a LOLBins flag for file_path IOCs. Requires
-    an authenticated user with access to the incident. Returns a paginated
-    `IOCList` with `items` and `next_cursor`.
+    with threat-intel match info, a LOLBins flag for file_path IOCs and its
+    `containment` state from the Respond board (blocked / pending, or null).
+    Requires an authenticated user with access to the incident. Returns a
+    paginated `IOCList` with `items` and `next_cursor`.
     """
     await _get_incident(db, incident_id, user)
     offset = _decode_cursor(cursor)
@@ -155,8 +178,10 @@ async def list_iocs(
 
     # Resolve adder usernames for display (batched)
     umap = await _username_map(db, [i.added_by_id for i in items])
+    containment = await containment_map(db, RespondAction.ioc_id, [i.id for i in items])
     for ioc in items:
         ioc.added_by_username = umap.get(ioc.added_by_id)
+        ioc.containment = containment.get(ioc.id)
 
     next_cursor = _encode_cursor(offset + limit) if has_more else None
     return IOCList(items=items, next_cursor=next_cursor)
@@ -167,6 +192,9 @@ async def list_iocs(
 @router.post("/{incident_id}/iocs",
              response_model=IOCOut,
              status_code=status.HTTP_201_CREATED,
+             responses={404: {"model": ApiErrorBody, "description": "evidence_not_found or entity_not_found"},
+                        422: {"model": ApiErrorBody, "description": "evidence_other_incident or "
+                              "entity_other_incident (or a validation error)"}},
              summary="Create an IOC")
 async def create_ioc(
     incident_id: uuid.UUID,
@@ -178,13 +206,20 @@ async def create_ioc(
     """Create a new indicator of compromise on an incident.
 
     Rejects the request if the incident is closed (409) or if an identical IOC
-    already exists on it (409). On creation the IOC is auto-checked against the
-    threat-intel database and the result is reflected in the response. Requires
-    the analyst role and access to the incident. Returns the created `IOCOut`.
+    already exists on it (409). `evidence_id` records the exhibit of this incident the
+    indicator was found in (404 evidence_not_found / 422 evidence_other_incident); `entity_id`
+    must be an entity of this incident (404 entity_not_found / 422 entity_other_incident). On
+    creation the IOC is auto-checked against the threat-intel database and the result is
+    reflected in the response. Requires the analyst role and access to the incident.
+    Returns the created `IOCOut`.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    if req.evidence_id:
+        await _check_evidence(db, incident_id, req.evidence_id)
+    if req.entity_id:
+        await _check_entity(db, incident_id, req.entity_id)
 
     ioc = IOC(
         id=uuid.uuid4(),
@@ -197,6 +232,7 @@ async def create_ioc(
         confidence=req.confidence,
         tags=_norm_tags(req.tags),
         entity_id=req.entity_id,
+        evidence_id=req.evidence_id,
         added_by_id=user.id,
     )
     db.add(ioc)
@@ -220,6 +256,7 @@ async def create_ioc(
         resource_type="ioc", resource_id=str(ioc.id),
         details={
             "incident_id": str(incident_id), "type": ioc.type, "value": ioc.value,
+            **({"evidence_id": str(ioc.evidence_id)} if ioc.evidence_id else {}),
             **({"ti_match": ti_hit.feed_name} if ti_hit else {}),
         },
         ip_address=request.client.host if request.client else None,
@@ -252,7 +289,9 @@ async def batch_create_iocs(
     """Bulk-create many IOCs in one request (e.g. promoted from a forensic import).
 
     Each IOC is inserted in its own savepoint: duplicates (same incident+type+value)
-    are skipped rather than aborting the batch, other failures are collected.
+    are skipped rather than aborting the batch, other failures are collected. An item whose
+    `evidence_id` is not an exhibit of this incident, or whose `entity_id` is not an entity of
+    this incident, is skipped with an error.
     Rejects on a closed incident with 409. Requires the analyst role; audit-logged
     once. Returns an IOCBatchResult with created/skipped counts and any errors.
     """
@@ -260,11 +299,26 @@ async def batch_create_iocs(
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
 
+    wanted_ev = {item.evidence_id for item in req.items if item.evidence_id}
+    own_ev = set((await db.execute(
+        select(Evidence.id).where(Evidence.id.in_(wanted_ev), Evidence.incident_id == incident_id)
+    )).scalars().all()) if wanted_ev else set()
+    wanted_ent = {item.entity_id for item in req.items if item.entity_id}
+    own_ent = set((await db.execute(
+        select(Entity.id).where(Entity.id.in_(wanted_ent), Entity.incident_id == incident_id)
+    )).scalars().all()) if wanted_ent else set()
+
     created = 0
     skipped = 0
     errors: list[str] = []
 
     for i, item in enumerate(req.items):
+        if item.evidence_id and item.evidence_id not in own_ev:
+            errors.append(f"[{i}] evidence_id {item.evidence_id} is not an exhibit of this incident")
+            continue
+        if item.entity_id and item.entity_id not in own_ent:
+            errors.append(f"[{i}] entity_id {item.entity_id} is not an entity of this incident")
+            continue
         sp = await db.begin_nested()
         try:
             db.add(IOC(
@@ -278,6 +332,7 @@ async def batch_create_iocs(
                 confidence=item.confidence,
                 tags=_norm_tags(item.tags),
                 entity_id=item.entity_id,
+                evidence_id=item.evidence_id,
                 added_by_id=user.id,
             ))
             await db.flush()
@@ -467,6 +522,8 @@ async def enrich_single_ioc(
 # ─── Update (notes only in MVP) ──────────────────────────────────────────────
 
 @router.patch("/{incident_id}/iocs/{ioc_id}", response_model=IOCOut,
+              responses={404: {"model": ApiErrorBody, "description": "IOC not found, or entity_not_found"},
+                         422: {"model": ApiErrorBody, "description": "entity_other_incident (or a validation error)"}},
               summary="Update an IOC")
 async def update_ioc(
     incident_id: uuid.UUID,
@@ -478,7 +535,8 @@ async def update_ioc(
 ) -> IOCOut:
     """Partially update an IOC's notes, malicious flag, confidence, tags, or
     linked entity. The malicious and entity_id fields are tri-state, so an
-    explicit null clears them. Returns 409 if the incident is closed and 404 if
+    explicit null clears them; a linked entity must be of this incident (404
+    entity_not_found / 422 entity_other_incident). Returns 409 if the incident is closed and 404 if
     the IOC is not found. Requires the analyst role and access to the incident.
     Returns the updated `IOCOut`.
     """
@@ -491,6 +549,8 @@ async def update_ioc(
     )).scalar_one_or_none()
     if not ioc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "IOC not found")
+    if "entity_id" in req.model_fields_set and req.entity_id is not None and req.entity_id != ioc.entity_id:
+        await _check_entity(db, incident_id, req.entity_id)
 
     changed: dict[str, object] = {}
     # type/value are editable; re-check the (incident, type, value) uniqueness

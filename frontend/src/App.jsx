@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useOutletContext, useParams } from 'react-router-dom'
 import { ThemeProvider } from './hooks/useTheme.jsx'
 import { AuthProvider, useAuth } from './hooks/useAuth.jsx'
 import { TitleManager } from './hooks/useDocumentTitle.jsx'
@@ -33,6 +33,7 @@ import AuditExports from './pages/admin/AuditExports.jsx'
 import AdminStorage from './pages/admin/Storage.jsx'
 import AdminSessions from './pages/admin/Sessions.jsx'
 import AdminAPIDocs from './pages/admin/APIDocs.jsx'
+import Situation from './pages/incident/Situation.jsx'
 import Details from './pages/incident/Details.jsx'
 import Playbook from './pages/incident/Playbook.jsx'
 import Timeline from './pages/incident/Timeline.jsx'
@@ -64,6 +65,7 @@ import Respond from './pages/incident/Respond.jsx'
 import Comms from './pages/incident/Comms.jsx'
 import Legal from './pages/incident/Legal.jsx'
 import Mitre from './pages/incident/Mitre.jsx'
+import AttackLayout from './pages/incident/AttackLayout.jsx'
 import CommsComments from './pages/incident/comms/Comments.jsx'
 import CommsOOB from './pages/incident/comms/OOB.jsx'
 import CommsStakeholders from './pages/incident/comms/Stakeholders.jsx'
@@ -108,6 +110,39 @@ function RequireAdmin({ children }) {
   return children
 }
 
+// Matches the backend's require_analyst (admin + analyst); viewers are sent away.
+function RequireAnalyst({ children }) {
+  const { user } = useAuth()
+  if (user?.role !== 'admin' && user?.role !== 'analyst') return <Navigate to="/settings/account" replace />
+  return children
+}
+
+// "/" — Dashboard for admins and analysts. Viewers can't read the Dashboard API (require_analyst),
+// so they land on the incident list instead; this also covers login's default next='/'.
+function HomeRoute() {
+  const { user } = useAuth()
+  if (user?.role === 'viewer') return <Navigate to="/incidents" replace />
+  return <Dashboard />
+}
+
+// Incident sub-page guard: follows the capabilities of GET /api/incidents/{id}/access
+// (loaded by IncidentDetail), so the server decides. The API enforces it as well.
+function RequireIncidentCapability({ cap, children }) {
+  const { access } = useOutletContext()
+  if (!access) return <div className="panel"><div className="panel-empty">Loading…</div></div>
+  if (!access.capabilities.includes(cap)) return <Navigate to="../details" replace />
+  return children
+}
+
+// Redirect to another page of the same incident, keeping ?query and #hash. The target
+// is built as an absolute path from :id, so RR v7's relative-path rules for nested and
+// index routes cannot resolve it somewhere else. Used for moved tabs (old bookmarks).
+function RedirectTo({ to }) {
+  const { id } = useParams()
+  const { search, hash } = useLocation()
+  return <Navigate to={`/incidents/${encodeURIComponent(id)}/${to}${search}${hash}`} replace />
+}
+
 export default function App() {
   return (
     <ThemeProvider>
@@ -126,15 +161,16 @@ export default function App() {
 
             {/* Authenticated routes — wrapped in the app shell */}
             <Route element={<RequireAuth><AppShell /></RequireAuth>}>
-              <Route path="/"                  element={<Dashboard />} />
+              <Route path="/"                  element={<HomeRoute />} />
               <Route path="/incidents"         element={<Incidents />} />
               <Route path="/playbooks"         element={<Playbooks />} />
               <Route path="/correlations"      element={<Correlations />} />
-              <Route path="/threat-intel"     element={<ThreatIntelHub />} />
+              <Route path="/threat-intel"     element={<RequireAnalyst><ThreatIntelHub /></RequireAnalyst>} />
               <Route path="/threat-actors"    element={<ThreatActors />} />
               <Route path="/mitre"            element={<MitreCoverage />} />
               <Route path="/incidents/:id" element={<IncidentDetail />}>
-                <Route index                  element={<Navigate to="details" replace />} />
+                <Route index                  element={<Navigate to="situation" replace />} />
+                <Route path="situation"       element={<Situation />} />
                 <Route path="details"         element={<Details />} />
                 <Route path="playbook"        element={<Playbook />} />
                 <Route path="timeline"        element={<Timeline />} />
@@ -151,9 +187,9 @@ export default function App() {
                   <Route path="sop"          element={<EvidenceSOP />} />
                 </Route>
                 <Route path="forensic" element={<Forensic />}>
-                  <Route index               element={<Navigate to="detections" replace />} />
+                  <Route index               element={<Navigate to="collections" replace />} />
                   <Route path="detections"   element={<Detections />} />
-                  <Route path="attribution"  element={<Attribution />} />
+                  <Route path="attribution"  element={<RedirectTo to="mitre/attribution" />} />
                   <Route path="lolbins"      element={<LOLBins />} />
                   <Route path="pcap"         element={<PCAP />} />
                   <Route path="email"        element={<EmailAnalyzer />} />
@@ -174,11 +210,14 @@ export default function App() {
                   <Route path="stakeholders"     element={<CommsStakeholders />} />
                 </Route>
                 <Route path="legal"           element={<Legal />} />
-                <Route path="mitre"           element={<Mitre />} />
+                <Route path="mitre" element={<AttackLayout />}>
+                  <Route index               element={<Mitre />} />
+                  <Route path="attribution"  element={<Attribution />} />
+                </Route>
                 <Route path="post-incident"   element={<PostIncident />} />
                 <Route path="assignments"     element={<Assignments />} />
                 <Route path="handoffs"        element={<IncidentHandoffs />} />
-                <Route path="audit-log"       element={<RequireAdmin><AuditLog /></RequireAdmin>} />
+                <Route path="audit-log"       element={<RequireIncidentCapability cap="read_audit_log"><AuditLog /></RequireIncidentCapability>} />
               </Route>
               <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>}>
                 <Route index             element={<Navigate to="audit-log" replace />} />
@@ -186,10 +225,12 @@ export default function App() {
                 <Route path="audit-exports" element={<AuditExports />} />
                 <Route path="sessions"      element={<AdminSessions />} />
                 <Route path="storage"    element={<AdminStorage />} />
-                <Route path="metrics"    element={<Metrics />} />
                 <Route path="backup"     element={<Backup />} />
                 <Route path="api-docs"   element={<AdminAPIDocs />} />
               </Route>
+              {/* Metrics left Admin (D5); old bookmarks redirect. Outside RequireAdmin so analysts get through. */}
+              <Route path="/admin/metrics"     element={<Navigate to="/metrics" replace />} />
+              <Route path="/metrics"           element={<RequireAnalyst><Metrics /></RequireAnalyst>} />
               <Route path="/on-call"           element={<OnCall />} />
               <Route path="/handoffs"          element={<Handoffs />} />
               <Route path="/roster"            element={<Roster />} />

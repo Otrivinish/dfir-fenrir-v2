@@ -82,6 +82,21 @@ _PRIVILEGE_MIGRATIONS: list[str] = [
 # ── Idempotent in-place migrations ────────────────────────────────────────
 # When a real migration tool (Alembic) lands, this disappears.
 
+def _add_check_if_missing(table: str, name: str, expr: str) -> str:
+    """CHECK constraint added only when pg_constraint doesn't have it yet, so a re-run takes no
+    ACCESS EXCLUSIVE lock and doesn't re-scan the table (Wave C fix-up L7). A changed rule needs
+    a NEW constraint name; this never alters an existing one. Constants only (no user input)."""
+    return f"""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                       WHERE conrelid = '{table}'::regclass AND conname = '{name}') THEN
+            ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({expr});
+        END IF;
+    END $$
+    """
+
+
 _INPLACE_MIGRATIONS: list[str] = [
     # Incidents: drop csf_function (moved to report-level only); remap legacy
     # NCISS severity values onto the internal Low/Med/High/Critical scale.
@@ -103,11 +118,36 @@ _INPLACE_MIGRATIONS: list[str] = [
     "CREATE INDEX IF NOT EXISTS ix_audit_logs_request_id ON audit_logs(request_id)",
 
     # Dashboard metrics: occurred_at (analyst-supplied event time) and
-    # contained_at (auto-set on CER phase transition, editable after).
+    # contained_at (analyst-declared; no longer auto-set on entering C/E/R).
     "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS occurred_at  TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS contained_at TIMESTAMP WITH TIME ZONE",
     # detected_at (analyst-supplied: when the incident was detected).
     "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS detected_at  TIMESTAMP WITH TIME ZONE",
+    # Eradication / recovery milestones (analyst-declared). Nullable, no backfill.
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS eradicated_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS recovered_at  TIMESTAMP WITH TIME ZONE",
+    # Who closed the incident (set by POST …/close, cleared on re-open). Nullable, no
+    # backfill: incidents closed before this column have no closer on record. Partial
+    # index so ON DELETE SET NULL from users doesn't scan incidents.
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS closed_by_id UUID REFERENCES users(id) ON DELETE SET NULL",
+    "CREATE INDEX IF NOT EXISTS ix_incidents_closed_by_id ON incidents(closed_by_id) WHERE closed_by_id IS NOT NULL",
+    # Legal reminders (legal/reminders.py): last reminder stage sent per deadline. Only when
+    # the column is first created, deadlines already overdue start at stage 3 (overdue sent),
+    # so deploying doesn't fire a burst of reminders for old deadlines; later runs are no-ops.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'regulatory_deadlines' AND column_name = 'reminder_stage'
+        ) THEN
+            ALTER TABLE regulatory_deadlines ADD COLUMN reminder_stage SMALLINT NOT NULL DEFAULT 0;
+            UPDATE regulatory_deadlines SET reminder_stage = 3
+            WHERE deadline_at <= now() AND status NOT IN ('completed', 'waived');
+        END IF;
+    END $$
+    """,
 
     # Incident type classification (CISA/SOC category).
     "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS incident_type VARCHAR(32)",
@@ -171,6 +211,84 @@ _INPLACE_MIGRATIONS: list[str] = [
 
     # Respond actions: analyst-supplied time when the action was actually performed.
     "ALTER TABLE respond_actions ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMP WITH TIME ZONE",
+    # C1: the entity / IOC an action targets + the template it came from. Nullable and NOT
+    # backfilled: older actions keep only their free-text target (no name-matching guesses).
+    # Partial indexes so ON DELETE SET NULL from entities/iocs, the containment lookup and
+    # the ?entity_id= / ?ioc_id= filters don't scan respond_actions.
+    "ALTER TABLE respond_actions ADD COLUMN IF NOT EXISTS entity_id UUID REFERENCES entities(id) ON DELETE SET NULL",
+    "ALTER TABLE respond_actions ADD COLUMN IF NOT EXISTS ioc_id UUID REFERENCES iocs(id) ON DELETE SET NULL",
+    "ALTER TABLE respond_actions ADD COLUMN IF NOT EXISTS template_id VARCHAR(64)",
+    "CREATE INDEX IF NOT EXISTS ix_respond_actions_entity_id ON respond_actions(entity_id) WHERE entity_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_respond_actions_ioc_id ON respond_actions(ioc_id) WHERE ioc_id IS NOT NULL",
+
+    # C2: Entities is the single scope list; affected_systems becomes a frozen legacy table
+    # behind the /affected-systems compatibility layer. Each row is copied ONCE into entities
+    # as compromised and stamped with the entity it became (migrated_entity_id). The copy runs
+    # only in the migrate run that first adds the stamp column, so later runs never re-flag an
+    # entity an analyst cleared, nor re-create one an analyst deleted (its ON DELETE SET NULL
+    # clears the stamp). An existing entity for (incident, type, value) is only flagged (and
+    # gets attributes.system_type when it has none). Type map = affected_systems/routes.py
+    # SYSTEM_TYPE_TO_ENTITY_TYPE; the original system_type is kept in attributes.
+    # DISTINCT ON: two rows mapping to one entity (e.g. a workstation and a server with the
+    # same name) can't hit the same conflict row twice.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'affected_systems' AND column_name = 'migrated_entity_id'
+        ) THEN
+            ALTER TABLE affected_systems
+                ADD COLUMN migrated_entity_id UUID REFERENCES entities(id) ON DELETE SET NULL;
+            WITH src AS (
+                SELECT a.id, a.incident_id, btrim(a.name) AS value, a.name, a.notes, a.system_type,
+                       a.created_at, u.id AS user_id,
+                       CASE a.system_type
+                           WHEN 'workstation'    THEN 'host'
+                           WHEN 'server'         THEN 'host'
+                           WHEN 'mobile'         THEN 'host'
+                           WHEN 'network_device' THEN 'network_range'
+                           WHEN 'cloud_resource' THEN 'service'
+                           WHEN 'application'    THEN 'service'
+                           WHEN 'database'       THEN 'service'
+                           ELSE 'other'
+                       END AS etype
+                FROM affected_systems a
+                LEFT JOIN users u ON u.username = a.created_by_username
+                WHERE a.migrated_entity_id IS NULL AND btrim(a.name) <> ''
+            ), up AS (
+                INSERT INTO entities (id, incident_id, type, value, name, description, criticality,
+                                      attributes, compromised, added_by_id, added_at, updated_at)
+                SELECT DISTINCT ON (incident_id, etype, value)
+                       gen_random_uuid(), incident_id, etype, value, name, notes, 'high',
+                       CASE WHEN system_type IS NULL THEN '{}'::json
+                            ELSE json_build_object('system_type', system_type) END,
+                       TRUE, user_id, created_at, now()
+                FROM src
+                ORDER BY incident_id, etype, value, created_at, id
+                ON CONFLICT (incident_id, type, value) DO UPDATE SET
+                    compromised = TRUE,
+                    attributes  = CASE WHEN (entities.attributes::jsonb ->> 'system_type') IS NOT NULL
+                                         OR (EXCLUDED.attributes::jsonb ->> 'system_type') IS NULL
+                                       THEN entities.attributes
+                                       ELSE (entities.attributes::jsonb || EXCLUDED.attributes::jsonb)::json END
+                RETURNING id, incident_id, type, value
+            )
+            UPDATE affected_systems a SET migrated_entity_id = up.id
+              FROM src JOIN up ON up.incident_id = src.incident_id
+                              AND up.type = src.etype AND up.value = src.value
+             WHERE a.id = src.id;
+            ANALYZE entities;
+        END IF;
+    END $$
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_affected_systems_migrated_entity_id ON affected_systems(migrated_entity_id) "
+    "WHERE migrated_entity_id IS NOT NULL",
+    # C2: the entity a timeline event happened on. Nullable, NO backfill from hostname
+    # (no name-matching guesses). Partial index for ON DELETE SET NULL from entities.
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS entity_id UUID REFERENCES entities(id) ON DELETE SET NULL",
+    "CREATE INDEX IF NOT EXISTS ix_timeline_events_entity_id ON timeline_events(entity_id) WHERE entity_id IS NOT NULL",
 
     # Handoff package: structured investigation-state fields aligned with v1.
     "ALTER TABLE incident_handoffs ADD COLUMN IF NOT EXISTS current_hypothesis    TEXT",
@@ -305,6 +423,127 @@ _INPLACE_MIGRATIONS: list[str] = [
 
     # GS-12 DEFR/DES collector-role taxonomy (ISO/IEC 27037 §3.7/§3.8). Nullable.
     "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS collected_as_role VARCHAR(8)",
+
+    # C3 evidence intake integrity. acquired_at = when the image was taken / item seized;
+    # nullable and NOT backfilled (collected_at is the registration time; copying it would
+    # invent an acquisition time). upload_hash_check = the typed target hash vs the stored
+    # hash of the uploaded bytes. Its one-shot backfill runs only in the migrate run that
+    # first adds the column: digital items with a target hash get 'match' when it equals
+    # the stored MD5 / SHA-1 / SHA-256, else 'mismatch' (target hashes of an E01/AFF4
+    # container's media show up here, which is correct). Items without one stay NULL.
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS acquired_at TIMESTAMP WITH TIME ZONE",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'evidence' AND column_name = 'upload_hash_check'
+        ) THEN
+            ALTER TABLE evidence ADD COLUMN upload_hash_check VARCHAR(16);
+            UPDATE evidence
+               SET upload_hash_check = CASE
+                       WHEN lower(btrim(acquisition_hash_target)) IN (lower(md5), lower(sha1), lower(sha256))
+                       THEN 'match' ELSE 'mismatch' END
+             WHERE kind = 'digital_file' AND btrim(coalesce(acquisition_hash_target, '')) <> '';
+        END IF;
+    END $$
+    """,
+    _add_check_if_missing("evidence", "ck_evidence_upload_hash_check",
+                          "upload_hash_check IS NULL "
+                          "OR upload_hash_check IN ('match', 'mismatch', 'not_checked', 'container_media')"),
+
+    # C4 custody transfer with recipient acceptance. An internal transfer is a request until
+    # the recipient accepts; these three hold it and are all NULL when nothing is pending
+    # (CHECK). No backfill: no transfer can be pending before C4. Partial indexes on both new
+    # FKs (the recipient's "awaiting me" look-up and the FK check on a user delete).
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS pending_custodian_id UUID REFERENCES users(id)",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS pending_transfer_by_id UUID REFERENCES users(id)",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS pending_transfer_requested_at TIMESTAMP WITH TIME ZONE",
+    "CREATE INDEX IF NOT EXISTS ix_evidence_pending_custodian_id ON evidence(pending_custodian_id) "
+    "WHERE pending_custodian_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_evidence_pending_transfer_by_id ON evidence(pending_transfer_by_id) "
+    "WHERE pending_transfer_by_id IS NOT NULL",
+    _add_check_if_missing("evidence", "ck_evidence_pending_transfer",
+                          "(pending_custodian_id IS NULL) = (pending_transfer_by_id IS NULL) "
+                          "AND (pending_custodian_id IS NULL) = (pending_transfer_requested_at IS NULL)"),
+
+    # C5 Timeline Import from an exhibit, with honest timestamps. forensic_imports gets the exhibit
+    # it parsed, the parser version and the source timezone. Its evidence_id one-shot backfill runs
+    # only in the migrate run that first adds the column, and links an old import ONLY when its
+    # SHA-256 equals the SHA-256 of exactly one evidence row of the same incident (no other
+    # guessing; an analyst's later change is never undone). parser_version / source_tz stay NULL on
+    # old imports (they were parsed before either existed). timeline_events gets the exhibit, the
+    # import run + event index (partial UNIQUE: re-promoting is a no-op) and time_basis (NULL =
+    # legacy / analyst-entered; 'missing' is never stored: untimestamped events aren't promoted).
+    # iocs gets the exhibit an indicator was found in. FKs SET NULL + partial indexes.
+    "ALTER TABLE forensic_imports ADD COLUMN IF NOT EXISTS parser_version VARCHAR(32)",
+    "ALTER TABLE forensic_imports ADD COLUMN IF NOT EXISTS source_tz VARCHAR(64)",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'forensic_imports' AND column_name = 'evidence_id'
+        ) THEN
+            ALTER TABLE forensic_imports
+                ADD COLUMN evidence_id UUID REFERENCES evidence(id) ON DELETE SET NULL;
+            UPDATE forensic_imports f SET evidence_id = m.evidence_id
+              FROM (SELECT f2.id AS import_id, (array_agg(e.id))[1] AS evidence_id
+                      FROM forensic_imports f2
+                      JOIN evidence e ON e.incident_id = f2.incident_id
+                                     AND lower(btrim(e.sha256)) = lower(btrim(f2.sha256_hash))
+                     WHERE btrim(coalesce(f2.sha256_hash, '')) <> ''
+                     GROUP BY f2.id
+                    HAVING count(*) = 1) m
+             WHERE f.id = m.import_id;
+        END IF;
+    END $$
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_forensic_imports_evidence_id ON forensic_imports(evidence_id) "
+    "WHERE evidence_id IS NOT NULL",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS evidence_id UUID REFERENCES evidence(id) ON DELETE SET NULL",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS forensic_import_id UUID "
+    "REFERENCES forensic_imports(id) ON DELETE SET NULL",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS import_event_index INTEGER",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS time_basis VARCHAR(16)",
+    "CREATE INDEX IF NOT EXISTS ix_timeline_events_evidence_id ON timeline_events(evidence_id) "
+    "WHERE evidence_id IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_import_event "
+    "ON timeline_events(forensic_import_id, import_event_index) WHERE forensic_import_id IS NOT NULL",
+    _add_check_if_missing("timeline_events", "ck_timeline_events_time_basis",
+                          "time_basis IS NULL OR time_basis IN ('explicit', 'assumed_tz', 'inferred_year')"),
+    # Wave C fix-up M3: timeline_events.forensic_import_id was ON DELETE SET NULL, so deleting an
+    # import (e.g. a raw DELETE) unlinked its promoted events and made their facts editable. Now
+    # RESTRICT. Guarded via pg_constraint: dropped and re-added only while the FK isn't RESTRICT
+    # yet (confdeltype 'r'); a fresh database gets RESTRICT from the model. Re-runs are no-ops.
+    """
+    DO $$
+    DECLARE fk RECORD;
+    BEGIN
+        SELECT c.conname, c.confdeltype INTO fk
+          FROM pg_constraint c
+          JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+         WHERE c.conrelid = 'timeline_events'::regclass AND c.contype = 'f'
+           AND c.confrelid = 'forensic_imports'::regclass
+           AND cardinality(c.conkey) = 1 AND a.attname = 'forensic_import_id';
+        IF FOUND AND fk.confdeltype = 'r' THEN
+            RETURN;
+        END IF;
+        IF FOUND THEN
+            EXECUTE format('ALTER TABLE timeline_events DROP CONSTRAINT %I', fk.conname);
+        END IF;
+        ALTER TABLE timeline_events ADD CONSTRAINT timeline_events_forensic_import_id_fkey
+            FOREIGN KEY (forensic_import_id) REFERENCES forensic_imports(id) ON DELETE RESTRICT;
+    END $$
+    """,
+    "ALTER TABLE iocs ADD COLUMN IF NOT EXISTS evidence_id UUID REFERENCES evidence(id) ON DELETE SET NULL",
+    "CREATE INDEX IF NOT EXISTS ix_iocs_evidence_id ON iocs(evidence_id) WHERE evidence_id IS NOT NULL",
+    # Wave C fix-up M1: did a parser cap cut the import's output, and how many source records were
+    # read. Nullable, NO backfill (older imports were parsed without counting; NULL = unknown).
+    "ALTER TABLE forensic_imports ADD COLUMN IF NOT EXISTS truncated BOOLEAN",
+    "ALTER TABLE forensic_imports ADD COLUMN IF NOT EXISTS total_seen INTEGER",
 
     # GS-8 tamper monitoring — make audit_logs append-only at the DB layer so
     # "the application cannot modify the log" is demonstrable, not promised

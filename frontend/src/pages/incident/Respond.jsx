@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
-import { useAuth } from '../../hooks/useAuth.jsx'
 import { api } from '../../api/client.js'
 import { formatLocalShort } from '../../lib/datetime.js'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
-import { ACTION_TEMPLATES } from './respond/actionTemplates.js'
+import { ACTION_TEMPLATES, TEMPLATE_BY_ID } from './respond/actionTemplates.js'
 
 // ── Vocabulary ────────────────────────────────────────────────────────────
 
@@ -37,19 +36,34 @@ const COLUMN_COLOR = {
   decisions:   'var(--accent)',
 }
 
+// Every page of a per-incident list (entities / IOCs) for the Target picker,
+// so an incident with more than one page of them still offers all of them.
+// A failed page doesn't throw: { items: the pages that loaded, error }.
+async function listAll(listFn, incidentId) {
+  const byId = new Map()
+  let cursor = null
+  try {
+    do {
+      const res = await listFn(incidentId, { limit: 200, ...(cursor ? { cursor } : {}) })
+      for (const it of res.items) byId.set(it.id, it)
+      cursor = res.next_cursor
+    } while (cursor)
+  } catch (e) {
+    return { items: [...byId.values()], error: e.message || 'request failed' }
+  }
+  return { items: [...byId.values()], error: null }
+}
+
 
 // ── Main component ────────────────────────────────────────────────────────
 
 export default function Respond() {
-  const { inc }  = useOutletContext()
-  const { user } = useAuth()
+  const { inc, bumpRail } = useOutletContext()
   const isClosed = inc?.status === 'closed'
-  const isAdmin  = user?.role === 'admin'
 
   const [actions,   setActions]   = useState([])
   const [decisions, setDecisions] = useState([])
   const [users,     setUsers]     = useState([])
-  const [entities,  setEntities]  = useState([])
   const [loading,   setLoading]   = useState(true)
   const [error,     setError]     = useState(null)
   const [busy,      setBusy]      = useState(false)
@@ -58,17 +72,17 @@ export default function Respond() {
   //              | { type:'decision' } | { type:'decision-edit', decision }
   const [modal, setModal] = useState(null)
 
+  // The board needs only actions + decisions; the Target picker loads entities / IOCs itself
+  // when the action modal opens (ActionModal), so neither slows nor fails the board.
   const load = useCallback(async () => {
     setError(null)
     try {
-      const [aResult, dResult, eResult] = await Promise.all([
+      const [aResult, dResult] = await Promise.all([
         api.listRespondActions(inc.id),
         api.listDecisions(inc.id),
-        api.listEntities(inc.id),
       ])
       setActions(aResult.items   ?? aResult)
       setDecisions(dResult.items ?? dResult)
-      setEntities(eResult.items  ?? eResult)
     } catch (e) {
       setError(e.message || 'Could not load respond data')
     } finally {
@@ -78,12 +92,12 @@ export default function Respond() {
 
   useEffect(() => { load() }, [load])
 
+  // /users/assignable is open to every authenticated user (active users only).
   useEffect(() => {
-    if (!isAdmin) return
     let cancelled = false
-    api.listUsers().then(u => { if (!cancelled) setUsers(u) }).catch(() => {})
+    api.listAssignableUsers().then(u => { if (!cancelled) setUsers(u || []) }).catch(() => {})
     return () => { cancelled = true }
-  }, [isAdmin])
+  }, [])
 
   const usernameOf = (uid) => {
     if (!uid) return null
@@ -96,6 +110,7 @@ export default function Respond() {
     try {
       const updated = await api.updateRespondAction(inc.id, action.id, { status: next })
       setActions(prev => prev.map(a => a.id === updated.id ? updated : a))
+      bumpRail?.()
     } catch (e) {
       setError(e.message || 'Could not update status')
     } finally {
@@ -109,6 +124,7 @@ export default function Respond() {
     try {
       await api.deleteRespondAction(inc.id, action.id)
       setActions(prev => prev.filter(a => a.id !== action.id))
+      bumpRail?.()
     } catch (e) {
       setError(e.message || 'Could not delete action')
     } finally {
@@ -121,6 +137,7 @@ export default function Respond() {
     try {
       const updated = await api.revertRespondAction(inc.id, action.id, { revert_reason })
       setActions(prev => prev.map(a => a.id === updated.id ? updated : a))
+      bumpRail?.()
     } catch (e) {
       setError(e.message || 'Could not revert action')
       throw e
@@ -135,6 +152,7 @@ export default function Respond() {
     try {
       await api.deleteDecision(inc.id, dec.id)
       setDecisions(prev => prev.filter(d => d.id !== dec.id))
+      bumpRail?.()
     } catch (e) {
       setError(e.message || 'Could not delete decision')
     } finally {
@@ -235,8 +253,6 @@ export default function Respond() {
           category={modal.category ?? modal.action?.category}
           editing={modal.action}
           users={users}
-          entities={entities}
-          isAdmin={isAdmin}
           onClose={() => setModal(null)}
           onSaved={(saved) => {
             if (modal.action) {
@@ -245,6 +261,7 @@ export default function Respond() {
               setActions(prev => [...prev, saved])
             }
             setModal(null)
+            bumpRail?.()
           }}
         />
       )}
@@ -253,7 +270,6 @@ export default function Respond() {
           incidentId={inc.id}
           editing={modal.decision}
           users={users}
-          isAdmin={isAdmin}
           onClose={() => setModal(null)}
           onSaved={(saved) => {
             if (modal.decision) {
@@ -262,6 +278,7 @@ export default function Respond() {
               setDecisions(prev => [saved, ...prev])
             }
             setModal(null)
+            bumpRail?.()
           }}
         />
       )}
@@ -393,11 +410,10 @@ function ActionCard({ action, usernameOf, onStatusChange, onEdit, onDelete, onRe
     }}>
       {/* Status select — full width, no competition. Disabled when reverted. */}
       <select
-        className="select"
+        className="select compact"
         value={action.status}
         onChange={(e) => onStatusChange(e.target.value)}
         disabled={isClosed || busy || isReverted}
-        style={{ padding: '1px 5px', fontSize: 10, width: '100%' }}
         aria-label="Status"
       >
         {(isReverted ? ACTION_STATUS : ACTION_STATUS_SELECTABLE).map(s =>
@@ -416,6 +432,13 @@ function ActionCard({ action, usernameOf, onStatusChange, onEdit, onDelete, onRe
       {target && (
         <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
           → {target}
+          {!action.entity_id && !action.ioc_id && (
+            <span data-unlinked-target
+                  title="Free-text target: not linked to an entity or IOC, so it sets no containment state"
+                  style={{ marginLeft: 6, color: 'var(--dim)', fontFamily: 'var(--font-body)' }}>
+              (unlinked target)
+            </span>
+          )}
         </div>
       )}
 
@@ -570,17 +593,21 @@ function DecisionCard({ decision, usernameOf, onEdit, onDelete, isClosed, busy }
 
 // ── Action modal (2-step: template picker → form) ─────────────────────────
 
-function ActionModal({ incidentId, category, editing, users, entities, isAdmin, onClose, onSaved }) {
+function ActionModal({ incidentId, category, editing, users, onClose, onSaved }) {
   const isEdit = !!editing
 
   // step: 'pick' (template selection) | 'form' (fill details)
   const [step,        setStep]        = useState(isEdit ? 'form' : 'pick')
-  // selTemplate carries { title, targetHint, entityFilter } from the chosen template's group
-  const [selTemplate, setSelTemplate] = useState(null)
+  // selTemplate = TEMPLATE_BY_ID entry { id, title, targetHint, entityFilter, iocFilter };
+  // when editing, the action's own template (for the Target picker filters).
+  const [selTemplate, setSelTemplate] = useState(isEdit ? (TEMPLATE_BY_ID[editing.template_id] ?? null) : null)
 
   // form fields
   const [title,       setTitle]       = useState(editing?.title           ?? '')
   const [target,      setTarget]      = useState(editing?.details?.target ?? '')
+  // The entity / IOC the action is linked to ('' = free-text target, no link).
+  const [entityId,    setEntityId]    = useState(editing?.entity_id       ?? '')
+  const [iocId,       setIocId]       = useState(editing?.ioc_id          ?? '')
   const [description, setDescription] = useState(editing?.description      ?? '')
   const [status,      setStatus]      = useState(editing?.status           ?? 'open')
   const [assigneeId,  setAssigneeId]  = useState(editing?.assignee_id     ?? '')
@@ -588,6 +615,12 @@ function ActionModal({ incidentId, category, editing, users, entities, isAdmin, 
   const [occurredAt,  setOccurredAt]  = useState(editing?.occurred_at || '')
   const [busy,        setBusy]        = useState(false)
   const [error,       setError]       = useState(null)
+  // Target picker data, loaded when the modal opens. A failed list keeps the pages that loaded
+  // and shows its error in the picker; free text still works.
+  const [entities,      setEntities]      = useState([])
+  const [iocs,          setIocs]          = useState([])
+  const [pickerLoading, setPickerLoading] = useState(true)
+  const [pickerErrors,  setPickerErrors]  = useState([])
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
@@ -595,32 +628,49 @@ function ActionModal({ incidentId, category, editing, users, entities, isAdmin, 
     return () => window.removeEventListener('keydown', onKey)
   }, [busy, onClose])
 
-  // pickTemplate receives { id, title, targetHint } + entityFilter from the group
+  useEffect(() => {
+    let live = true
+    Promise.all([listAll(api.listEntities, incidentId), listAll(api.listIocs, incidentId)]).then(([e, i]) => {
+      if (!live) return
+      setEntities(e.items)
+      setIocs(i.items)
+      setPickerErrors([e.error && `entities (${e.error})`, i.error && `IOCs (${i.error})`].filter(Boolean))
+      setPickerLoading(false)
+    })
+    return () => { live = false }
+  }, [incidentId])
+
+  // pickTemplate receives a TEMPLATE_BY_ID entry, or null for a custom action
   const pickTemplate = (tpl) => {
     setSelTemplate(tpl)
-    if (tpl) {
-      setTitle(tpl.title)
-      setTarget('')
-    } else {
-      setTitle('')
-      setTarget('')
-    }
+    setTitle(tpl ? tpl.title : '')
+    setTarget('')
+    setEntityId('')
+    setIocId('')
     setStep('form')
   }
 
-  // Entities filtered by the template's group hint (or all if no filter / custom)
-  const filteredEntities = (() => {
-    if (!entities.length) return []
-    const filter = selTemplate?.entityFilter
-    if (!filter) return entities
-    return entities.filter(e => filter.includes(e.type))
-  })()
+  // Target picker options, filtered by the template group's entity / IOC types
+  // (null = all types). The currently linked item is always offered.
+  const offered = (items, filter, linkedId) =>
+    items.filter(x => x.id === linkedId || !filter || filter.includes(x.type))
+  const filteredEntities = offered(entities, selTemplate?.entityFilter, entityId)
+  const filteredIocs     = offered(iocs,     selTemplate?.iocFilter,    iocId)
+  const pickValue = entityId ? `entity:${entityId}` : iocId ? `ioc:${iocId}` : ''
+  // The current link while the lists load (or when its list failed), so the select still shows it.
+  const linkPending = pickValue && !(entityId ? entities : iocs).some(x => x.id === (entityId || iocId))
+  const showPicker  = pickerLoading || pickerErrors.length > 0 || linkPending
+    || filteredEntities.length > 0 || filteredIocs.length > 0
 
-  const onEntityPick = (e) => {
-    const val = e.target.value
-    if (!val) return
-    const ent = entities.find(x => x.id === val)
-    if (ent) setTarget(ent.name || ent.value)
+  // Picking an entity / IOC links it and copies its value into Target;
+  // "free text" removes the link and keeps the typed text.
+  const onTargetPick = (e) => {
+    const [kind, id] = e.target.value.split(':')
+    const item = kind === 'entity' ? entities.find(x => x.id === id)
+               : kind === 'ioc'    ? iocs.find(x => x.id === id) : null
+    setEntityId(kind === 'entity' ? id : '')
+    setIocId(kind === 'ioc' ? id : '')
+    if (item) setTarget(item.value)
   }
 
   const onSubmit = async (e) => {
@@ -638,7 +688,11 @@ function ActionModal({ incidentId, category, editing, users, entities, isAdmin, 
         notes:       notes.trim() || null,
         details:     { ...(editing?.details ?? {}), target: target.trim() || undefined },
         occurred_at: occurredAt || null,
+        entity_id:   entityId || null,
+        ioc_id:      iocId || null,
       }
+      // The template is fixed once the action exists; editing leaves it unchanged.
+      if (!isEdit && selTemplate) payload.template_id = selTemplate.id
       const saved = isEdit
         ? await api.updateRespondAction(incidentId, editing.id, payload)
         : await api.createRespondAction(incidentId, payload)
@@ -686,7 +740,7 @@ function ActionModal({ incidentId, category, editing, users, entities, isAdmin, 
                       key={tpl.id}
                       type="button"
                       className="btn"
-                      onClick={() => pickTemplate({ ...tpl, entityFilter: group.entityFilter ?? null })}
+                      onClick={() => pickTemplate(TEMPLATE_BY_ID[tpl.id])}
                       style={{ fontSize: 12, padding: '4px 10px' }}
                     >
                       {tpl.title}
@@ -739,25 +793,49 @@ function ActionModal({ incidentId, category, editing, users, entities, isAdmin, 
                          autoFocus required maxLength={512} />
                 </div>
 
-                {/* Entity picker — only when incident has entities */}
-                {filteredEntities.length > 0 && (
+                {/* Target picker: links the action to an entity or IOC of this incident */}
+                {showPicker && (
                   <div className="field">
-                    <label className="field-label" htmlFor="am-entity">
-                      Entity
+                    <label className="field-label" htmlFor="am-target-pick">
+                      Link target
                       <span style={{ color: 'var(--dim)', fontWeight: 400, marginLeft: 4 }}>
-                        (picks target)
+                        (entity or IOC)
                       </span>
                     </label>
-                    <select id="am-entity" className="select" defaultValue=""
-                            onChange={onEntityPick}>
-                      <option value="">— select from entities —</option>
-                      {filteredEntities.map(ent => (
-                        <option key={ent.id} value={ent.id}>
-                          [{ent.type}] {ent.name || ent.value}
-                          {ent.compromised ? ' ⚠' : ''}
-                        </option>
-                      ))}
+                    <select id="am-target-pick" className="select" value={pickValue}
+                            onChange={onTargetPick}>
+                      <option value="">— none: free-text target —</option>
+                      {linkPending && (
+                        <option value={pickValue}>linked: {target || (entityId ? 'entity' : 'IOC')}</option>
+                      )}
+                      {filteredEntities.length > 0 && (
+                        <optgroup label="Entities">
+                          {filteredEntities.map(ent => (
+                            <option key={ent.id} value={`entity:${ent.id}`}>
+                              [{ent.type}] {ent.value}{ent.name ? ` (${ent.name})` : ''}
+                              {ent.compromised ? ' ⚠' : ''}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {filteredIocs.length > 0 && (
+                        <optgroup label="IOCs">
+                          {filteredIocs.map(ioc => (
+                            <option key={ioc.id} value={`ioc:${ioc.id}`}>
+                              [{ioc.type}] {ioc.value}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
+                    {pickerLoading && (
+                      <div className="field-hint" role="status" data-testid="am-picker-loading">Loading entities and IOCs…</div>
+                    )}
+                    {pickerErrors.length > 0 && (
+                      <div className="field-hint" role="alert" data-testid="am-picker-error" style={{ color: 'var(--crit)' }}>
+                        Could not load {pickerErrors.join(' and ')}; only what loaded is listed. You can still type a free-text target.
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -784,19 +862,17 @@ function ActionModal({ incidentId, category, editing, users, entities, isAdmin, 
                       {ACTION_STATUS_SELECTABLE.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
                     </select>
                   </div>
-                  {(isAdmin || users.length > 0) && (
-                    <div className="field">
-                      <label className="field-label" htmlFor="am-assignee">Assignee</label>
-                      <select id="am-assignee" className="select" value={assigneeId}
-                              onChange={(e) => setAssigneeId(e.target.value)}>
-                        <option value="">Unassigned</option>
-                        {users.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
-                        {assigneeId && !users.some(u => u.id === assigneeId) && (
-                          <option value={assigneeId}>{assigneeId.slice(0, 8)}…</option>
-                        )}
-                      </select>
-                    </div>
-                  )}
+                  <div className="field">
+                    <label className="field-label" htmlFor="am-assignee">Assignee</label>
+                    <select id="am-assignee" className="select" value={assigneeId}
+                            onChange={(e) => setAssigneeId(e.target.value)}>
+                      <option value="">Unassigned</option>
+                      {users.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
+                      {assigneeId && !users.some(u => u.id === assigneeId) && (
+                        <option value={assigneeId}>{assigneeId.slice(0, 8)}…</option>
+                      )}
+                    </select>
+                  </div>
                 </div>
 
                 <div className="field">
@@ -845,7 +921,7 @@ function ActionModal({ incidentId, category, editing, users, entities, isAdmin, 
 
 // ── Decision modal ────────────────────────────────────────────────────────
 
-function DecisionModal({ incidentId, editing, users, isAdmin, onClose, onSaved }) {
+function DecisionModal({ incidentId, editing, users, onClose, onSaved }) {
   const isEdit = !!editing
 
   const [summary,     setSummary]     = useState(editing?.summary       ?? '')
@@ -934,19 +1010,17 @@ function DecisionModal({ incidentId, editing, users, isAdmin, onClose, onSaved }
                 </div>
               </div>
 
-              {(isAdmin || users.length > 0) && (
-                <div className="field">
-                  <label className="field-label" htmlFor="dm-by">Decided by</label>
-                  <select id="dm-by" className="select" value={decidedById}
-                          onChange={(e) => setDecidedById(e.target.value)}>
-                    <option value="">— not recorded —</option>
-                    {users.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
-                    {decidedById && !users.some(u => u.id === decidedById) && (
-                      <option value={decidedById}>{decidedById.slice(0, 8)}…</option>
-                    )}
-                  </select>
-                </div>
-              )}
+              <div className="field">
+                <label className="field-label" htmlFor="dm-by">Decided by</label>
+                <select id="dm-by" className="select" value={decidedById}
+                        onChange={(e) => setDecidedById(e.target.value)}>
+                  <option value="">— not recorded —</option>
+                  {users.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
+                  {decidedById && !users.some(u => u.id === decidedById) && (
+                    <option value={decidedById}>{decidedById.slice(0, 8)}…</option>
+                  )}
+                </select>
+              </div>
 
               <div className="field">
                 <label className="field-label" htmlFor="dm-tags">Tags (comma-separated)</label>

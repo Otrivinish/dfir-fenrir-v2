@@ -6,6 +6,7 @@ import EntityDetailDrawer from './entities/EntityDetailDrawer.jsx'
 import EntityGraph from './entities/EntityGraph.jsx'
 import ConnectModal from './entities/ConnectModal.jsx'
 import BulkImportModal from './entities/BulkImportModal.jsx'
+import ContainmentBadge from '../../components/ContainmentBadge.jsx'
 
 const ENTITY_TYPES = [
   { value: 'host',          label: 'Host'          },
@@ -43,7 +44,7 @@ const typeColor   = (v) => `var(${TYPE_COLOR[v] || '--muted'})`
 const critOf      = (v) => CRITICALITY.find(c => c.value === v) || CRITICALITY[1]
 
 export default function Entities() {
-  const { inc } = useOutletContext()
+  const { inc, bumpRail } = useOutletContext()
   const isClosed = inc?.status === 'closed'
 
   const [items, setItems]           = useState([])
@@ -95,6 +96,8 @@ export default function Entities() {
   }, [inc.id, typeFilter, critFilter]) // intentionally excludes selectedEntity to avoid loop
 
   useEffect(() => { load() }, [load])
+  // After a write: re-read the list and the rail's counts.
+  const reload = useCallback(() => { bumpRail?.(); return load() }, [bumpRail, load])
 
   const onDelete = async (ent) => {
     const label = `${labelOfType(ent.type)}: ${ent.value}`
@@ -104,7 +107,7 @@ export default function Entities() {
     try {
       await api.deleteEntity(inc.id, ent.id)
       if (selectedEntity?.id === ent.id) setSelectedEntity(null)
-      await load()
+      await reload()
     } catch (e) {
       setError(e.message || 'Could not delete entity')
     } finally {
@@ -117,7 +120,7 @@ export default function Entities() {
     setBusy(true)
     try {
       await api.updateEntity(inc.id, ent.id, { criticality: value })
-      await load()
+      await reload()
     } catch (e) {
       setError(e.message || 'Could not update criticality')
     } finally {
@@ -129,7 +132,7 @@ export default function Entities() {
     setBusy(true)
     try {
       await api.updateEntity(inc.id, ent.id, { compromised: !ent.compromised })
-      await load()
+      await reload()
     } catch (e) {
       setError(e.message || 'Could not update compromised status')
     } finally {
@@ -145,7 +148,7 @@ export default function Entities() {
     setBusy(true)
     try {
       await api.updateEntity(inc.id, ent.id, { name: next || null })
-      await load()
+      await reload()
     } catch (e) {
       setError(e.message || 'Could not update name')
     } finally {
@@ -156,13 +159,13 @@ export default function Entities() {
 
   // Drawer callbacks
   const onEntityUpdated = useCallback(async () => {
-    await load()
-  }, [load])
+    await reload()
+  }, [reload])
 
   const onEntityDeleted = useCallback(async () => {
     setSelectedEntity(null)
-    await load()
-  }, [load])
+    await reload()
+  }, [reload])
 
   const openConnectModal = useCallback((entity) => {
     setConnectSource(entity)
@@ -353,16 +356,19 @@ export default function Entities() {
                     </select>
                   </td>
                   <td onClick={(e) => e.stopPropagation()}>
-                    <button
-                      type="button"
-                      className={`compromised-toggle ${ent.compromised ? 'is-compromised' : 'not-compromised'}`}
-                      style={{ padding: '2px 8px', fontSize: 10 }}
-                      onClick={() => !isClosed && toggleCompromised(ent)}
-                      disabled={isClosed || busy}
-                      title={ent.compromised ? 'Clear compromised flag' : 'Mark as compromised'}
-                    >
-                      {ent.compromised ? '⚠ Compromised' : '○ Clean'}
-                    </button>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
+                      <button
+                        type="button"
+                        className={`compromised-toggle ${ent.compromised ? 'is-compromised' : 'not-compromised'}`}
+                        style={{ padding: '2px 8px', fontSize: 10 }}
+                        onClick={() => !isClosed && toggleCompromised(ent)}
+                        disabled={isClosed || busy}
+                        title={ent.compromised ? 'Clear compromised flag' : 'Mark as compromised'}
+                      >
+                        {ent.compromised ? '⚠ Compromised' : '○ Clean'}
+                      </button>
+                      <ContainmentBadge containment={ent.containment} />
+                    </div>
                   </td>
                   <td title={formatLocal(ent.added_at)} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
                     {formatLocal(ent.added_at).slice(0, 16)}
@@ -398,7 +404,7 @@ export default function Entities() {
           incidentId={inc.id}
           allEntities={items}
           onClose={() => setModal(null)}
-          onSaved={() => { setModal(null); load() }}
+          onSaved={() => { setModal(null); reload() }}
         />
       )}
 
@@ -424,7 +430,7 @@ export default function Entities() {
           allEntities={items}
           incidentId={inc.id}
           onClose={() => setConnectSource(null)}
-          onSaved={() => { setConnectSource(null); load() }}
+          onSaved={() => { setConnectSource(null); reload() }}
         />
       )}
 
@@ -433,7 +439,7 @@ export default function Entities() {
         <BulkImportModal
           incidentId={inc.id}
           onClose={() => setShowBulkImport(false)}
-          onImported={() => { setShowBulkImport(false); load() }}
+          onImported={() => { setShowBulkImport(false); reload() }}
         />
       )}
     </section>

@@ -8,7 +8,11 @@
 # anchors and WebSocket routing.
 #
 # Idempotent: reuses ONE incident titled "[SMOKE] container hardening" and only
-# appends test records to it. Needs an admin API token:
+# appends test records to it (the wrong-target-hash upload is refused and stores
+# nothing; it adds only an evidence_collect_rejected audit row). The phase-gate step uses its own dark incident,
+# "[SMOKE] phase gates" (tag smoke-phase-gates), kept in C/E/R: it only sends
+# moves the gates refuse, so nothing changes (the move into Post-Incident is sent
+# only while GET …/gates shows Gate 1 unmet). Needs an admin API token:
 #   FENRIR_TOKEN=fnr_v1_...  scripts/smoke-test.sh
 #   FENRIR_TOKEN_FILE=path   scripts/smoke-test.sh
 #   scripts/smoke-test.sh --big   # + 1 GiB evidence and 500 MiB PCAP (memory sizing)
@@ -65,6 +69,36 @@ if [ -z "$INC" ]; then
 else pass "reuse smoke incident $INC"; fi
 [ -n "$INC" ] || { echo "no incident — aborting"; exit 98; }
 I="/api/incidents/$INC"
+
+# ── Phase gates (own dark incident, kept in C/E/R; only refused moves, so nothing changes) ─
+GTAG="smoke-phase-gates"
+api GET "/api/incidents?tag=$GTAG&limit=50" >/dev/null
+GINC="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(next((i["id"] for i in d.get("items",[]) if i.get("title")==sys.argv[2]),""))' "$TMP/body" "[SMOKE] phase gates")"
+if [ -z "$GINC" ]; then
+  c=$(api POST /api/incidents -H 'Content-Type: application/json' -d "{\"title\":\"[SMOKE] phase gates\",\"severity\":\"low\",\"phase\":\"containment_eradication_recovery\",\"dark_operation\":true,\"tags\":[\"$GTAG\"],\"description\":\"Automated smoke-test incident for the phase gates (scripts/smoke-test.sh). Keep it in C/E/R.\"}")
+  check 201 "create gate smoke incident" "$c" && GINC="$(jget id)"
+else pass "reuse gate smoke incident $GINC"; fi
+if [ -n "$GINC" ]; then
+  G="/api/incidents/$GINC"
+  G1_UNMET=0
+  c=$(api GET "$G/gates"); check 200 "GET phase gates" "$c" \
+    && { [ "$(python3 -c 'import json,sys; g={x["gate"]: x for x in json.load(open(sys.argv[1]))["items"]}; print(set(g) == {"post_incident","close"} and g["post_incident"]["met"] is False and "recovered_at_missing" in [u["key"] for u in g["post_incident"]["unmet"]])' "$TMP/body")" = "True" ] \
+         && { G1_UNMET=1; pass "Gate 1 unmet, lists recovered_at_missing"; } || fail "unexpected gate status: $(detail)"; }
+  c=$(api GET "$G"); ph="$(jget phase)"
+  if [ "$ph" = "containment_eradication_recovery" ] && [ "$(jget status)" = "open" ]; then
+    # Only while Gate 1 is unmet is the move refused; otherwise it would really move the incident.
+    if [ "$G1_UNMET" = 1 ]; then
+      c=$(api PATCH "$G" -H 'Content-Type: application/json' -d '{"phase":"post_incident"}')
+      check 409 "move to Post-Incident blocked by Gate 1" "$c" && { [ "$(jget code)" = "gate_unmet" ] && pass "409 code gate_unmet" || fail "code $(jget code): $(detail)"; }
+      c=$(api PATCH "$G" -H 'Content-Type: application/json' -d '{"phase":"post_incident","phase_reason":"smoke test: reason without the override flag"}')
+      check 409 "a reason without override_gate does not override" "$c"
+    else
+      echo "  NOTE skipped the refused-move checks: Gate 1 is not shown unmet on $GINC, so a move to Post-Incident could succeed"
+    fi
+    c=$(api PATCH "$G" -H 'Content-Type: application/json' -d '{"phase":"preparation"}')
+    check 409 "move to Preparation refused" "$c" && { [ "$(jget code)" = "phase_transition_invalid" ] && pass "409 code phase_transition_invalid" || fail "code $(jget code): $(detail)"; }
+  else fail "gate smoke incident $GINC is no longer an open C/E/R incident (phase $ph) — move it back to C/E/R"; fi
+fi
 
 # ── Artifact → analysis worker ─────────────────────────────────────────────
 printf 'MZ\x90\x00smoke %s http://evil.example.com/payload 10.66.66.66 powershell -enc AAAA\n' "$RUN" > "$TMP/smoke.bin"
@@ -135,6 +169,8 @@ evidence_cycle() {  # file label
        -F 'device_types=["computer"]' -F "handling_mode=collect" -F "lawful_basis=consent")
   check 201 "evidence collect $label (KEK encrypt)" "$c" || return
   ev="$(jget id)"
+  [ "$(jget upload_hash_check)" = "match" ] && pass "evidence $label upload_hash_check = match" \
+    || fail "evidence $label upload_hash_check = '$(jget upload_hash_check)', want match"
   c=$(api POST "$I/evidence/$ev/verify"); check 200 "evidence verify $label (KEK decrypt)" "$c" \
     && { [ "$(jget ok)" = "True" ] && pass "evidence $label hash matches" || fail "evidence $label hash mismatch: $(detail)"; }
   c=$(api POST "$I/evidence/$ev/seal" -H 'Content-Type: application/json' -d '{"confirm":true}'); check 200 "evidence seal $label" "$c"
@@ -147,6 +183,13 @@ evidence_cycle() {  # file label
 }
 head -c 65536 /dev/urandom > "$TMP/evidence.bin"
 evidence_cycle "$TMP/evidence.bin" small
+# A target hash that doesn't match the uploaded bytes is refused before anything is encrypted
+# or written (C3): 422 hash_mismatch, nothing stored, one evidence_collect_rejected audit row.
+c=$(api POST "$I/evidence/digital" -F "file=@$TMP/evidence.bin;filename=evidence-wrong-target.bin" \
+     -F "name=smoke wrong target $RUN" -F "identifier=SMOKE-wrong-target-$RUN" \
+     -F "acquisition_hash_target=$(printf '%064d' 0)")
+check 422 "evidence collect with a wrong target hash refused" "$c" \
+  && { [ "$(jget code)" = "hash_mismatch" ] && pass "422 code hash_mismatch" || fail "code $(jget code): $(detail)"; }
 if [ "$BIG" -eq 1 ]; then
   # just under the backend's 1 GiB evidence cap (an exact 1 GiB file is rejected by design)
   head -c $((1023*1024*1024)) /dev/urandom > "$TMP/evidence-1g.bin"; evidence_cycle "$TMP/evidence-1g.bin" 1023MiB; rm -f "$TMP/evidence-1g.bin"

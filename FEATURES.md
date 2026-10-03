@@ -31,7 +31,9 @@
 - Operational dark-mode toggle (`dark_operation`)
 - Tags (incident + IOC scoped, normalised, auto-sourced, 20-cap, usage-ranked typeahead)
 
-## Investigation — forensics
+## Investigation — Examine & findings
+
+Incident **Examine** tab (was Forensic), in three groups: Acquire & ingest (Collector packages, Malware quarantine) · Analyse by artefact (Email, Network capture, Browser history, Logs & triage, Vendor reports, Ransom note) · Enrich & hunt (OSINT, YARA & hunt queries, LOLBins reference). Attribution sits under **ATT&CK & attribution**.
 
 ### Timeline
 - Timeline CRUD with vertical-spine UI, date grouping, expand/collapse
@@ -40,7 +42,7 @@
 - Export to CSV and self-contained HTML
 - Process-tree visualiser (Sysmon / Windows Security / syslog PID hierarchy)
 
-### Forensic timeline import
+### Logs & triage (forensic timeline import)
 - Multi-format upload (EVTX, XML, SQLite, CSV, JSON) with auto-detection
 - Event classification engine (36 Windows/Sysmon EID → MITRE)
 - Suspicious-event flagging; triage table with filters
@@ -76,21 +78,21 @@
 - ISO 27037 collection wizard, 27041 validation, master/working-copy ledger
 - Entity linking + legal-hold flag; RFC 3161 trusted timestamping
 
-### Artifacts (quarantined files)
+### Malware quarantine (quarantined files)
 - Drag-and-drop upload; MD5/SHA256/SHA512 hashing; MIME detection; path-traversal guard
 - Auto-extract hashes as IOCs; AES-256 password ZIP download (`infected`)
 - Air-gapped analysis worker pipeline with 11 static tools: file-type, hashes, entropy, strings, IOC-extract, PE, Office, PDF, EXIF, hexdump, YARA
 
-### Detections (YARA & hunting)
+### YARA & hunt queries
 - Global YARA rule library (upload, enable/disable, match counts)
 - Per-incident artifact scan (air-gapped worker); matches → timeline / IOC
 - SIEM detection-query generation (10 techniques × 5 platforms: KQL/EQL/SPL/XQL/CrowdStrike; ZIP export)
 
-### LOLBins
+### LOLBins reference
 - Global LOLBAS + GTFOBins library
 - Per-incident timeline correlation scan, LOL badge, inline correlation panel
 
-### PCAP analysis
+### Network capture (PCAP analysis)
 - Drag-and-drop upload, tshark analysis (conversations, DNS, HTTP, TLS, top talkers, suspicious patterns)
 - 7-tab result view incl. DNS reconstruction (domain aggregation, DGA heuristics)
 - IOC import / bulk promote from results
@@ -100,14 +102,14 @@
 - 7 sources: GeoIP, GreyNoise, AbuseIPDB, VirusTotal, Shodan, ASN (RIPE), crt.sh
 - Per-source TTL cache, OPSEC warnings, add-to-IOC
 
-### Threat-actor attribution
+### ATT&CK & attribution — Coverage
+- Per-incident coverage matrix (12 tactics, observed vs gaps, technique pills)
+
+### ATT&CK & attribution — Attribution
 - 25 seeded actors (APT28/29/32/41, Lazarus, Turla, …), MITRE-synced (intrusion-set + techniques + software, 7-day TTL)
 - Per-incident attribution model (possible/probable/confirmed) with analyst notes
 - TTP-overlap scoring suggestion engine (top-10 candidates with evidence breakdown)
 - Global `/threat-actors` page (search, motivation filter, detail drawer, linked-incident table)
-
-### MITRE ATT&CK coverage
-- Per-incident coverage matrix (12 tactics, observed vs gaps, technique pills)
 
 ### Email analyzer
 - Phishing triage, single-message or bulk (`.msg`/RFC-822 parsing, `.zip` batch
@@ -129,7 +131,7 @@
 - Lessons learned (root cause, effectiveness ratings, observations, near-misses, timeline metrics, action items, control improvements; HTML export)
 - Response analytics (TTD/TTC/TTR, IOC/entity/timeline/playbook/respond/evidence breakdowns)
 - MITRE post-incident summary
-- **Post-incident report** — 4 layouts (Executive, Tactical, Forensic, Print); Executive / Full modes; auto-numbered sections incl. What happened, Markdown description, Decisions Log, Stakeholders, Legal & Regulatory Deadlines (met / violated), Attack Chain visual, Threat Actor Attribution, remediation plan anchored to close time; Appendix A Affected Systems / B Timeline; classification override; show-structure preview that mirrors the report; audit-grade history + verified re-download
+- **Post-incident report** — 4 layouts (Executive, Tactical, Forensic, Print); Executive / Full modes; auto-numbered sections incl. What happened, Markdown description, Decisions Log, Stakeholders, Legal & Regulatory Deadlines (met / violated), Attack Chain visual, Threat Actor Attribution, remediation plan anchored to close time; Appendix A Affected Systems / B Timeline; classification override; per-section include checkboxes; show-structure preview that mirrors the report; ISO 8601 timestamps in the operator's timezone; audit-grade history + verified re-download
 - Business-impact assessment (6 dimensions)
 - Cost tracking (line items, category/phase summaries)
 - **Legal & regulatory deadlines** — GDPR, NIS2, DORA, HIPAA, CCPA, PCI-DSS with live countdowns, status workflow, custom deadlines
@@ -180,7 +182,7 @@
 - SIEM inbound webhooks — Splunk / Sentinel / Elastic, `X-Fenrir-Key` auth, severity normalisation → incident
 - Syslog forwarding — RFC 5424, UDP / TCP / TCP+TLS 1.3, optional mTLS, audit-only or audit+logging scopes
 
-### Signed offline collectors (U1)
+### Collector packages (signed offline collectors, U1)
 - Incident-scoped signed collection packages (Velociraptor v0.76.6, hash-pinned)
 - Windows Triage/Full + macOS ARM64 profiles; X.509 per-package encryption (key wrapped under `EVIDENCE_KEK`)
 - Ingest responder output → quarantine → first-class Artifact, `output_sha256` anchored in audit chain

@@ -203,6 +203,9 @@ function SeverityTrendChart({ data }) {
 
 function TtxTable({ data }) {
   if (!data?.length) return <div style={{ fontSize: 12, color: 'var(--dim)' }}>No closed incidents in window</div>
+  // Closed incidents left out of each mean (a time missing, or an interval that runs backwards).
+  const excl = ['mttd', 'mttr', 'mttc'].map(k => [k, data.reduce((n, r) => n + (r[`${k}_excluded`] || 0), 0)])
+    .filter(([, n]) => n > 0)
   const TH = { fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: 'var(--muted)', padding: '0 8px 6px', whiteSpace: 'nowrap' }
   const TD = { padding: '5px 8px', borderBottom: '1px solid var(--border)', fontSize: 12, fontFamily: 'var(--font-mono)' }
   return (
@@ -211,9 +214,9 @@ function TtxTable({ data }) {
         <thead>
           <tr>
             <th style={{ ...TH, textAlign: 'left' }}>Week</th>
-            <th style={{ ...TH, textAlign: 'right', color: 'var(--accent)' }}>MTTD</th>
-            <th style={{ ...TH, textAlign: 'right', color: 'var(--high)'   }}>MTTR</th>
-            <th style={{ ...TH, textAlign: 'right', color: 'var(--med)'    }}>MTTC</th>
+            <th style={{ ...TH, textAlign: 'right', color: 'var(--accent)' }} title="Mean time to detect: Occurred → Detected">MTTD</th>
+            <th style={{ ...TH, textAlign: 'right', color: 'var(--high)'   }} title="Mean time to recover: Detected (else created) → Recovered (else closed)">MTTR</th>
+            <th style={{ ...TH, textAlign: 'right', color: 'var(--med)'    }} title="Mean time to contain: Detected (else created) → Contained">MTTC</th>
           </tr>
         </thead>
         <tbody>
@@ -227,11 +230,17 @@ function TtxTable({ data }) {
           ))}
         </tbody>
       </table>
-      <div style={{ display: 'flex', gap: 12, fontSize: 10, color: 'var(--muted)', marginTop: 6 }}>
-        <span style={{ color: 'var(--accent)' }}>MTTD</span> Mean time to detect
-        <span style={{ color: 'var(--high)' }}>MTTR</span> Mean time to respond (close)
-        <span style={{ color: 'var(--med)' }}>MTTC</span> Mean time to contain
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 10, color: 'var(--muted)', marginTop: 6 }}>
+        <span style={{ color: 'var(--accent)' }}>MTTD</span> Mean time to detect (occurred → detected)
+        <span style={{ color: 'var(--high)' }}>MTTR</span> Mean time to recover (detected → recovered, else closed)
+        <span style={{ color: 'var(--med)' }}>MTTC</span> Mean time to contain (detected → contained)
       </div>
+      {excl.length > 0 && (
+        <div className="ttx-excluded" style={{ fontSize: 10, color: 'var(--dim)', marginTop: 4 }}
+             title="Left out of the mean: a time is missing, or the interval runs backwards (e.g. Contained before Detected).">
+          {excl.map(([k, n]) => `${k.toUpperCase()} ${n} excluded`).join(' · ')}
+        </div>
+      )}
     </div>
   )
 }

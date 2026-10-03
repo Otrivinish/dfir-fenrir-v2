@@ -19,6 +19,7 @@ could stream-encrypt per-file.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -28,7 +29,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import BinaryIO, Iterable, Iterator
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import select
@@ -37,7 +38,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from models import AuditLog, CustodyExport, Evidence, Incident, User
 
-from evidence.crypto import aread_decrypted
+from evidence.crypto import read_decrypted
+from evidence.hashing import hash_algorithm
 
 
 README = """\
@@ -95,10 +97,6 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _hash_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-
 def _key_hint(key_hex: str) -> str:
     return f"{key_hex[:8]}…{key_hex[-8:]}"
 
@@ -124,6 +122,9 @@ def _build_coc_doc(inc: Incident, ev: Evidence, events: list[AuditLog]) -> dict:
             "status":     ev.status,
             "description": ev.description,
             "collected_at":       ev.collected_at.isoformat() if ev.collected_at else None,
+            # C3 — when the image was taken / item seized (operator-stated; None when not
+            # recorded). collected_at above is when the item was registered in FENRIR.
+            "acquired_at":        ev.acquired_at.isoformat() if ev.acquired_at else None,
             "collected_by_id":    str(ev.collected_by_id) if ev.collected_by_id else None,
             "collected_location": ev.collected_location,
             "current_custodian_id": (
@@ -133,6 +134,15 @@ def _build_coc_doc(inc: Incident, ev: Evidence, events: list[AuditLog]) -> dict:
                 "sha256": ev.sha256,
                 "sha1":   ev.sha1,
                 "md5":    ev.md5,
+            } if ev.kind == "digital_file" else None,
+            # C3 — the imaging tool's hashes and how the target hash compared with the
+            # uploaded bytes: match | mismatch | not_checked | container_media (None = legacy
+            # item without a target hash).
+            "hash_check": {
+                "acquisition_hash_source":    ev.acquisition_hash_source,
+                "acquisition_hash_target":    ev.acquisition_hash_target,
+                "target_hash_algorithm":      hash_algorithm(ev.acquisition_hash_target),
+                "upload_hash_check":          ev.upload_hash_check,
             } if ev.kind == "digital_file" else None,
             "file": {
                 "original_filename": ev.original_filename,
@@ -185,6 +195,39 @@ def _events_excerpt(events: list[AuditLog]) -> str:
     return "\n".join(out) + ("\n" if out else "")
 
 
+def _write_bundle(parts: list[tuple[str, str | None, tuple[str, str] | None]],
+                  rel_path: str) -> tuple[str, int, str]:
+    """Blocking: decrypt the digital items, build the inner ZIP, encrypt it with a fresh
+    per-export AES-256-GCM key and write it under evidence_path. Call via asyncio.to_thread.
+    Returns (key_hex, bundle size, bundle SHA-256)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, text, encrypted in parts:
+            zf.writestr(name, read_decrypted(*encrypted) if encrypted else text)
+
+    # Encrypt the whole ZIP with a fresh per-export key. A zero-copy view, and the nonce prefix is
+    # written + hashed separately: no whole-bundle bytes copies (each costs RAM and holds the GIL).
+    # Residual: AES-GCM over one big buffer still holds the GIL (~150 ms per 300 MB, measured).
+    key_bytes = secrets.token_bytes(32)         # AES-256
+    key_hex   = key_bytes.hex()
+    nonce     = os.urandom(12)
+    with buf.getbuffer() as plaintext_zip:
+        ct = AESGCM(key_bytes).encrypt(nonce, plaintext_zip, None)
+    buf.close()
+
+    # Persist to disk: [nonce][ciphertext + tag], the self-describing format.
+    target = Path(settings.evidence_path) / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "wb") as f:
+        f.write(nonce)
+        f.write(ct)
+    h = hashlib.sha256(nonce)
+    mv = memoryview(ct)
+    for i in range(0, len(mv), 16 * 1024 * 1024):
+        h.update(mv[i:i + 16 * 1024 * 1024])
+    return key_hex, len(nonce) + len(ct), h.hexdigest()
+
+
 async def build_bundle(
     db: AsyncSession,
     inc: Incident,
@@ -212,88 +255,73 @@ async def build_bundle(
         )
         events_by_item[ev.id] = q.scalars().all()
 
-    # Assemble the inner ZIP in memory.
-    buf = io.BytesIO()
+    # What goes in the inner ZIP, in order: (name, text, (storage_path, nonce_hex) | None). The
+    # DB-derived parts are built here; decrypting, zipping, encrypting and writing the bundle are
+    # blocking CPU + I/O on up to GiBs, so they run in a worker thread (L8: never on the loop).
+    parts: list[tuple[str, str | None, tuple[str, str] | None]] = [("README.txt", README, None)]
     manifest_items = []
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("README.txt", README)
+    for ev in items:
+        coc = _build_coc_doc(inc, ev, events_by_item[ev.id])
+        parts.append((f"coc/{ev.id}.json", json.dumps(coc, indent=2, sort_keys=True), None))
+        parts.append((f"audit/{ev.id}.jsonl", _events_excerpt(events_by_item[ev.id]), None))
 
-        for ev in items:
-            coc = _build_coc_doc(inc, ev, events_by_item[ev.id])
-            zf.writestr(f"coc/{ev.id}.json", json.dumps(coc, indent=2, sort_keys=True))
-            zf.writestr(f"audit/{ev.id}.jsonl", _events_excerpt(events_by_item[ev.id]))
+        file_path_in_zip = None
+        if ev.kind == "digital_file" and ev.storage_path and ev.nonce_hex:
+            # Decrypted from /evidence (in the thread) and embedded as plaintext in the export.
+            file_path_in_zip = f"files/{ev.id}__{ev.original_filename or 'evidence.bin'}"
+            parts.append((file_path_in_zip, None, (ev.storage_path, ev.nonce_hex)))
 
-            file_path_in_zip = None
-            if ev.kind == "digital_file" and ev.storage_path and ev.nonce_hex:
-                # Decrypt from /evidence and embed plaintext in the export.
-                plaintext = await aread_decrypted(ev.storage_path, ev.nonce_hex)
-                file_path_in_zip = f"files/{ev.id}__{ev.original_filename or 'evidence.bin'}"
-                zf.writestr(file_path_in_zip, plaintext)
+        manifest_items.append({
+            "id":         str(ev.id),
+            "identifier": ev.identifier,
+            "name":       ev.name,
+            "kind":       ev.kind,
+            "tlp":        ev.tlp,
+            "status":     ev.status,
+            "sha256":     ev.sha256,
+            "sha1":       ev.sha1,
+            "md5":        ev.md5,
+            "file_path":  file_path_in_zip,
+            "coc_path":   f"coc/{ev.id}.json",
+            "audit_path": f"audit/{ev.id}.jsonl",
+            "final_hash_at_disposition": ev.final_hash_at_disposition,
+        })
 
-            manifest_items.append({
-                "id":         str(ev.id),
-                "identifier": ev.identifier,
-                "name":       ev.name,
-                "kind":       ev.kind,
-                "tlp":        ev.tlp,
-                "status":     ev.status,
-                "sha256":     ev.sha256,
-                "sha1":       ev.sha1,
-                "md5":        ev.md5,
-                "file_path":  file_path_in_zip,
-                "coc_path":   f"coc/{ev.id}.json",
-                "audit_path": f"audit/{ev.id}.jsonl",
-                "final_hash_at_disposition": ev.final_hash_at_disposition,
-            })
+    manifest = {
+        "version": "1.0",
+        "export": {
+            "id":              str(export_id),
+            "created_at":      _now_utc().isoformat(),
+            "created_by":      exporter.username,
+            "created_by_id":   str(exporter.id),
+            "recipient":       recipient,
+            "purpose":         purpose,
+            "acknowledgments": acknowledgments,
+        },
+        "incident": {
+            "id":       str(inc.id),
+            "title":    inc.title,
+            "severity": inc.severity,
+            "tlp":      inc.tlp,
+            "phase":    inc.phase,
+            "status":   inc.status,
+        },
+        "items": manifest_items,
+        "verification": {
+            "spec": (
+                "Outer bundle: AES-256-GCM, 12-byte nonce prefix + "
+                "ciphertext + 16-byte tag. Inner files: plaintext, "
+                "SHA-256 must match this manifest entry."
+            ),
+            "decrypt_recipe": (
+                "AESGCM(bytes.fromhex(key)).decrypt(bundle[:12], bundle[12:], None)"
+            ),
+        },
+    }
+    parts.append(("manifest.json", json.dumps(manifest, indent=2, sort_keys=True), None))
 
-        manifest = {
-            "version": "1.0",
-            "export": {
-                "id":              str(export_id),
-                "created_at":      _now_utc().isoformat(),
-                "created_by":      exporter.username,
-                "created_by_id":   str(exporter.id),
-                "recipient":       recipient,
-                "purpose":         purpose,
-                "acknowledgments": acknowledgments,
-            },
-            "incident": {
-                "id":       str(inc.id),
-                "title":    inc.title,
-                "severity": inc.severity,
-                "tlp":      inc.tlp,
-                "phase":    inc.phase,
-                "status":   inc.status,
-            },
-            "items": manifest_items,
-            "verification": {
-                "spec": (
-                    "Outer bundle: AES-256-GCM, 12-byte nonce prefix + "
-                    "ciphertext + 16-byte tag. Inner files: plaintext, "
-                    "SHA-256 must match this manifest entry."
-                ),
-                "decrypt_recipe": (
-                    "AESGCM(bytes.fromhex(key)).decrypt(bundle[:12], bundle[12:], None)"
-                ),
-            },
-        }
-        zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
-
-    plaintext_zip = buf.getvalue()
-
-    # Encrypt the whole ZIP with a fresh per-export key.
-    key_bytes = secrets.token_bytes(32)         # AES-256
-    key_hex   = key_bytes.hex()
-    nonce     = os.urandom(12)
-    ct        = AESGCM(key_bytes).encrypt(nonce, plaintext_zip, None)
-    bundle    = nonce + ct                       # nonce prefix for self-describing format
-    bundle_sha256 = _hash_bytes(bundle)
-
-    # Persist to disk.
     rel_path = f"exports/{export_id}.enc"
-    target   = Path(settings.evidence_path) / rel_path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(bundle)
+    key_hex, bundle_size, bundle_sha256 = await asyncio.to_thread(_write_bundle, parts, rel_path)
 
     # Generate the one-time token.
     token = secrets.token_urlsafe(32)
@@ -311,7 +339,7 @@ async def build_bundle(
         token=token,
         status="ready",
         file_path=rel_path,
-        file_size=len(bundle),
+        file_size=bundle_size,
         bundle_sha256=bundle_sha256,
         key_hint=_key_hint(key_hex),
         item_ids=[str(ev.id) for ev in items],
@@ -325,21 +353,34 @@ async def build_bundle(
     return export, key_hex, download_url
 
 
-def open_bundle_for_download(export: CustodyExport) -> tuple[bytes, str]:
-    """Read the encrypted bundle from disk. Returns (bytes, suggested_filename).
-    Caller is responsible for status checks (consumed/expired/revoked)."""
+_DOWNLOAD_CHUNK = 1024 * 1024
+
+
+def open_bundle_for_download(export: CustodyExport) -> tuple[BinaryIO, int, str]:
+    """Open the encrypted bundle on disk for streaming. Returns (open file, size in
+    bytes, suggested_filename); stream it with iter_bundle(), which closes it.
+    Blocking: call via asyncio.to_thread. Raises FileNotFoundError when the bundle
+    is gone. Caller is responsible for status checks (consumed/expired/revoked)."""
     if not export.file_path:
         raise FileNotFoundError("Export bundle path missing")
     path = Path(settings.evidence_path) / export.file_path
-    if not path.exists():
-        raise FileNotFoundError(f"Export bundle file missing: {path}")
     # Derive the suggested extension from the actual on-disk path so LE
     # packages (now AES-256 password ZIP, stored as `.zip`) and legacy
     # evidence custody exports (still AES-256-GCM, stored as `.enc`) each
     # serve with the correct extension.
     ext = Path(export.file_path).suffix or ".enc"
     suggested = f"fenrir-export-{export.id}{ext}"
-    return path.read_bytes(), suggested
+    f = open(path, "rb")
+    return f, os.fstat(f.fileno()).st_size, suggested
+
+
+def iter_bundle(f: BinaryIO) -> Iterator[bytes]:
+    """Yield the open bundle in 1 MiB chunks, then close it. A sync generator on
+    purpose: StreamingResponse runs each step in a worker thread, so the event
+    loop never reads the file and the bundle is never held whole in memory."""
+    with f:
+        while chunk := f.read(_DOWNLOAD_CHUNK):
+            yield chunk
 
 
 def is_expired(export: CustodyExport) -> bool:

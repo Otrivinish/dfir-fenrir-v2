@@ -1,8 +1,9 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import ReactMarkdown from 'react-markdown'
-import { DETECTION_METHOD, SYSTEM_TYPE } from './incidentVocab.js'
+import { DETECTION_METHOD, SYSTEM_TYPE, labelOf } from './incidentVocab.js'
 import { MITRE_TACTICS } from './mitre.js'
+import { formatLocal } from './datetime.js'
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -13,14 +14,12 @@ function esc(s) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
+// "YYYY-MM-DD HH:MM:SS ±HH:MM" — ISO 8601, 24 h, in the operator's Fenrir
+// timezone with the offset visible (same formatter as the rest of the app), so a
+// report reads the same whatever the reader's browser locale is.
 function fmtTs(iso) {
   if (!iso) return '—'
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short',
-    })
-  } catch { return iso }
+  return formatLocal(iso)
 }
 
 const SEV_HEX = { critical: '#ef4444', high: '#f97316', medium: '#f59e0b', low: '#22c55e' }
@@ -73,6 +72,38 @@ function markdownToHtml(s) {
   if (!s || !String(s).trim()) return ''
   return renderToStaticMarkup(createElement(ReactMarkdown, null, String(s)))
 }
+
+// ─── Report sections (single source) ─────────────────────────────────────────
+// Order, title and executive-report rule for every numbered section. Used by
+// generateProReport(), the "Show structure" preview and the Reports page's
+// "Include sections" checkboxes — add or rename a section here, nowhere else.
+export const REPORT_SECTIONS = [
+  { key: 'exec_summary',  title: 'Executive Summary' },
+  { key: 'details',       title: 'Incident Details' },
+  { key: 'assignments',   title: 'Assignments' },
+  { key: 'stakeholders',  title: 'Stakeholders' },
+  { key: 'detection',     title: 'Detection & Identification', fullOnly: true },
+  { key: 'cer',           title: 'Containment, Eradication & Recovery', fullOnly: true },
+  { key: 'decisions',     title: 'Decisions Log' },
+  { key: 'impact',        title: 'Impact Assessment' },
+  { key: 'legal',         title: 'Legal & Regulatory Deadlines' },
+  { key: 'root_cause',    title: 'Root Cause Analysis' },
+  { key: 'attack_chain',  title: 'Attack Chain' },
+  { key: 'attribution',   title: 'Threat Actor Attribution' },
+  { key: 'entities',      title: 'Entities & Attack Path' },
+  { key: 'evidence',      title: 'Evidence & Artifacts', fullOnly: true },
+  { key: 'playbook',      title: 'Playbook', fullOnly: true },
+  { key: 'closure',       title: 'Closure Checklist Completion' },
+  { key: 'lessons',       title: 'Lessons Learned & Recommendations' },
+  { key: 'remediation',   title: 'Remediation Plan' },
+  { key: 'costs',         title: 'Cost Tracking' },
+]
+const SECTION_BY_KEY = Object.fromEntries(REPORT_SECTIONS.map(s => [s.key, s]))
+// Checkbox list for the Reports page: the cover stats strip + every section.
+export const REPORT_SECTION_OPTIONS = [
+  { key: 'kpis', title: 'Key metrics strip (cover)' },
+  ...REPORT_SECTIONS,
+]
 
 // Sentinel string that lives in the footer until `injectReportSha256()` is
 // awaited. Verifiers reverse the substitution to recompute and check.
@@ -394,9 +425,9 @@ function _proTimelineAppendix(evs) {
   const rows = []
   let prevDate = null
   evs.forEach((ev, i) => {
-    const d = new Date(ev.event_time)
-    const dateLabel = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
-    const timeLabel = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`
+    const local = formatLocal(ev.event_time)          // Fenrir timezone, not the browser's
+    const dateLabel = local.slice(0, 10)
+    const timeLabel = local.slice(11)                  // HH:MM:SS ±HH:MM
     if (dateLabel !== prevDate) {
       rows.push(`<div class="atl-date"><span>${esc(dateLabel)}</span></div>`)
       prevDate = dateLabel
@@ -432,7 +463,10 @@ function generateProReport(data, opts = {}) {
     classification = '',
     audience = '',
     includeTimelineAppendix = false,
+    sections: sectionToggles = {},
   } = opts
+  // Every section is included unless its "Include sections" checkbox is off.
+  const include = (key) => sectionToggles[key] !== false
 
   const inc = (data && data.incident) || {}
   const theme = PRO_THEMES[templateId] || PRO_THEMES.executive
@@ -585,7 +619,7 @@ function generateProReport(data, opts = {}) {
         <thead><tr><th>System</th><th>Type</th><th>Notes</th><th>Added By</th><th>Added At</th></tr></thead>
         <tbody>${affected.map(s => `<tr>
           <td class="mono" style="font-weight:600">${esc(s.name)}</td>
-          <td>${esc(SYSTEM_TYPE_LABEL[s.system_type] || s.system_type || '—')}</td>
+          <td>${esc(SYSTEM_TYPE_LABEL[s.system_type] || s.system_type || labelOf('entity_type', s.entity_type) || '—')}</td>
           <td class="small">${esc(s.notes || '—')}</td>
           <td class="mono small">${esc(s.created_by_username || '—')}</td>
           <td class="mono small">${s.created_at ? esc(fmtTs(s.created_at)) : '—'}</td>
@@ -605,7 +639,7 @@ function generateProReport(data, opts = {}) {
         `<li class="task-row ${t.status === 'done' ? 'task-done' : 'task-pending'}">`
         + `<span class="task-icon">${STATUS_ICON[t.status] || '○'}</span>`
         + `<span class="task-title">${esc(t.title)}</span>`
-        + (t.assignee ? `<span class="task-time">${esc(t.assignee)}</span>` : '')
+        + (t.assignee_username ? `<span class="task-time">${esc(t.assignee_username)}</span>` : '')
         + `</li>`
       ).join('')
       return `<h3>${esc(phaseLabel(phase))} — ${done}/${ts.length} complete</h3>`
@@ -632,15 +666,18 @@ function generateProReport(data, opts = {}) {
     else                    buckets.long.push(it)
   }
 
-  // Cost summary
-  let costTotal = 0
-  const costByCat = {}
+  // Cost summary — totalled per currency; amounts in different currencies are never added.
+  const costByCur = {}
   for (const c of costs) {
     const amt = Number(c.amount) || 0
-    costTotal += amt
-    costByCat[c.category] = (costByCat[c.category] || 0) + amt
+    if (!costByCur[c.currency]) costByCur[c.currency] = { total: 0, byCat: {} }
+    const cur = costByCur[c.currency]
+    cur.total += amt
+    cur.byCat[c.category] = (cur.byCat[c.category] || 0) + amt
   }
+  const costCurs = Object.keys(costByCur).sort()
   const costCurrency = (n) => n.toLocaleString(undefined, { maximumFractionDigits: 2 })
+  const costMoney = (cur, n) => `${cur} ${costCurrency(n)}`
 
   // TLP message
   const tlpUpper = tlp.toUpperCase()
@@ -660,21 +697,22 @@ function generateProReport(data, opts = {}) {
 
   const descriptionHtml = markdownToHtml(inc.description)
   const notClosed = '<span style="color:#d97706">Not closed</span>'
+  const pending   = '<span style="color:#d97706">Pending</span>'
 
   // ── Sections ─────────────────────────────────────────────────────────────
-  // KEEP IN SYNC: "Show structure" (_skeletonSections / _skeletonAppendices
-  // below) describes this list — order, titles, fullOnly / conditional rules
+  // KEEP IN SYNC: keys/titles/fullOnly come from REPORT_SECTIONS; "Show structure"
+  // (_skeletonSections / _skeletonAppendices below) describes this list — order, titles, fullOnly / conditional rules
   // and the fields each section prints. Change one, change the other.
   // Numbered in order of appearance. `fullOnly` sections are left out of the
   // executive report; a section whose body is '' (attack chain with no
   // MITRE-tagged events) is omitted.
   const sections = [
-    { title: 'Executive Summary', body: `
+    { key: 'exec_summary', body: `
   ${audienceNote}
   ${narrativeToHtml(ll && ll.incident_narrative)
     || '<div class="placeholder-box"><strong>[ PLACEHOLDER — EXECUTIVE SUMMARY ]</strong>On [DATE], [ORGANIZATION] identified a security incident with [SEVERITY] severity. The response team achieved initial containment by [TIME]. This report details the full findings and recommended remediation actions.</div>'}` },
 
-    { title: 'Incident Details', body: `
+    { key: 'details', body: `
   <div class="two-col" style="margin-bottom:24px">
     <div class="info-card"><div class="label">Incident Type</div><div class="value">${esc(inc.incident_type ? inc.incident_type.replace(/_/g, ' ') : '[Not specified]')}</div></div>
     <div class="info-card"><div class="label">Severity</div><div class="value" style="color:${sevColor}">${esc(sev.toUpperCase())}</div></div>
@@ -684,7 +722,9 @@ function generateProReport(data, opts = {}) {
     <div class="info-card"><div class="label">Reporter</div><div class="value">${esc(inc.reporter || '—')}</div></div>
     <div class="info-card"><div class="label">Occurred At</div><div class="value mono">${inc.occurred_at ? esc(fmtTs(inc.occurred_at)) : '—'}</div></div>
     <div class="info-card"><div class="label">Detected At</div><div class="value mono">${inc.detected_at ? esc(fmtTs(inc.detected_at)) : '—'}</div></div>
-    <div class="info-card"><div class="label">Contained At</div><div class="value mono">${inc.contained_at ? esc(fmtTs(inc.contained_at)) : '<span style="color:#d97706">Pending</span>'}</div></div>
+    <div class="info-card"><div class="label">Contained At</div><div class="value mono">${inc.contained_at ? esc(fmtTs(inc.contained_at)) : pending}</div></div>
+    <div class="info-card"><div class="label">Eradicated At</div><div class="value mono">${inc.eradicated_at ? esc(fmtTs(inc.eradicated_at)) : pending}</div></div>
+    <div class="info-card"><div class="label">Recovered At</div><div class="value mono">${inc.recovered_at ? esc(fmtTs(inc.recovered_at)) : pending}</div></div>
     <div class="info-card"><div class="label">Closed At</div><div class="value mono">${inc.closed_at ? esc(fmtTs(inc.closed_at)) : notClosed}</div></div>
   </div>
   <h3>Incident Description</h3>
@@ -695,11 +735,11 @@ function generateProReport(data, opts = {}) {
     ? `<h3>Tags</h3><div>${inc.tags.map(t => `<span class="tag" style="margin-right:6px">${esc(t)}</span>`).join('')}</div>`
     : ''}` },
 
-    { title: 'Assignments', body: assignmentsHtml },
+    { key: 'assignments', body: assignmentsHtml },
 
-    { title: 'Stakeholders', body: stakeholdersHtml },
+    { key: 'stakeholders', body: stakeholdersHtml },
 
-    { title: 'Detection & Identification', fullOnly: true, body: `
+    { key: 'detection', body: `
   <h3>Detection Method</h3>
   ${inc.detection_method
     ? `<div class="prose" style="white-space:pre-wrap">${esc(DETECTION_LABEL[inc.detection_method] || inc.detection_method)}</div>`
@@ -726,14 +766,14 @@ function generateProReport(data, opts = {}) {
        </table></div>`
     : '<div class="placeholder-box"><strong>[ NO IOCs RECORDED ]</strong></div>'}` },
 
-    { title: 'Containment, Eradication & Recovery', fullOnly: true, body: `
+    { key: 'cer', body: `
   ${_proCERSubsection(acts, 'containment', 'Containment Actions')}
   ${_proCERSubsection(acts, 'eradication', 'Eradication Actions')}
   ${_proCERSubsection(acts, 'recovery',    'Recovery Actions')}` },
 
-    { title: 'Decisions Log', body: decisionsHtml },
+    { key: 'decisions', body: decisionsHtml },
 
-    { title: 'Impact Assessment', body: `
+    { key: 'impact', body: `
   <div class="two-col" style="margin-bottom:24px">
     <div class="info-card"><div class="label">Financial Impact</div><div class="value">${bia && bia.financial ? esc(bia.financial) : '[ To be assessed ]'}</div></div>
     <div class="info-card"><div class="label">Operational Downtime</div><div class="value">${bia && bia.operational ? esc(bia.operational) : '[ To be assessed ]'}</div></div>
@@ -746,9 +786,9 @@ function generateProReport(data, opts = {}) {
     ? `<div class="prose" style="white-space:pre-wrap;margin-top:16px;padding:16px;background:var(--bg-card);border-radius:6px;border-left:3px solid #d97706">${esc(bia.notes)}</div>`
     : ''}` },
 
-    { title: 'Legal & Regulatory Deadlines', body: deadlinesHtml },
+    { key: 'legal', body: deadlinesHtml },
 
-    { title: 'Root Cause Analysis', body: `
+    { key: 'root_cause', body: `
   <h3>Initial Attack Vector / Root Cause Category</h3>
   ${ll && ll.root_cause_category
     ? `<div class="prose" style="white-space:pre-wrap"><strong>${esc(ll.root_cause_category.replace(/_/g, ' ').toUpperCase())}</strong>${ll.root_cause_description ? ' — ' + esc(ll.root_cause_description) : ''}</div>`
@@ -765,18 +805,18 @@ function generateProReport(data, opts = {}) {
        </table></div>`
     : '<div class="placeholder-box"><strong>[ NO MITRE TECHNIQUES MAPPED ]</strong></div>'}` },
 
-    { title: 'Attack Chain', body: _proAttackChain(evs) },
+    { key: 'attack_chain', body: _proAttackChain(evs) },
 
-    { title: 'Threat Actor Attribution', body: attributionHtml },
+    { key: 'attribution', body: attributionHtml },
 
-    { title: 'Entities & Attack Path', body: ents.length
+    { key: 'entities', body: ents.length
     ? `<div class="table-wrap"><table>
          <thead><tr><th>Type</th><th>Name / Value</th><th>Criticality</th><th>Status</th><th>Notes</th></tr></thead>
          <tbody>${entityRows}</tbody>
        </table></div>`
     : '<div class="placeholder-box"><strong>[ NO ENTITIES RECORDED ]</strong></div>' },
 
-    { title: 'Evidence & Artifacts', fullOnly: true, body: ev.total
+    { key: 'evidence', body: ev.total
     ? `<div class="two-col" style="margin-bottom:24px">
          <div class="info-card"><div class="label">Total Items</div><div class="value">${ev.total}</div></div>
          <div class="info-card"><div class="label">Active</div><div class="value">${ev.active || 0}</div></div>
@@ -785,13 +825,13 @@ function generateProReport(data, opts = {}) {
        </div>`
     : '<div class="placeholder-box"><strong>[ NO EVIDENCE ITEMS COLLECTED ]</strong></div>' },
 
-    { title: 'Playbook', fullOnly: true,
+    { key: 'playbook',
       body: playbookSections || '<div class="placeholder-box"><strong>[ NO PLAYBOOK TASKS RECORDED ]</strong></div>' },
 
-    { title: 'Closure Checklist Completion',
+    { key: 'closure',
       body: closureItems || '<div class="placeholder-box"><strong>[ NO CLOSURE CHECKLIST ITEMS ]</strong></div>' },
 
-    { title: 'Lessons Learned & Recommendations', body: `
+    { key: 'lessons', body: `
   <h3>What Worked Well</h3>
   ${_proNarrativeAndList(ll && ll.report_what_worked_well,
       ll && ll.what_went_well && ll.what_went_well.length
@@ -808,23 +848,23 @@ function generateProReport(data, opts = {}) {
              <tbody>${ll.control_improvements.map(ci => `<tr><td>${esc(ci.recommendation || '')}</td><td style="text-transform:capitalize">${esc(ci.category || '')}</td><td style="text-transform:capitalize">${esc(ci.priority || '')}</td></tr>`).join('')}</tbody>
            </table></div>` : '')}` },
 
-    { title: 'Remediation Plan', body: `
+    { key: 'remediation', body: `
   <p class="small" style="color:var(--text-muted);margin-bottom:8px">Terms are measured from ${inc.closed_at ? 'the incident close time' : 'the report generation time (incident still open)'}: ${esc(fmtTs(anchorIso))}.</p>
   ${_proRemSection(ll && ll.report_remediation_short,  buckets.short,  'Short-Term (0–30 days)',   '#dc2626')}
   ${_proRemSection(ll && ll.report_remediation_medium, buckets.medium, 'Medium-Term (30–90 days)', '#ea580c')}
   ${_proRemSection(ll && ll.report_remediation_long,   buckets.long,   'Long-Term (90+ days)',     '#2563eb')}
   ${buckets.none.length ? _proRemSection(null, buckets.none, 'Unscheduled (no due date)', '#6b7280') : ''}` },
 
-    { title: 'Cost Tracking', body: `
+    { key: 'costs', body: `
   ${bia && bia.financial
     ? `<h3>Financial Impact Narrative</h3><div class="prose" style="white-space:pre-wrap">${esc(bia.financial)}</div>`
     : ''}
   ${costs.length
-    ? `<h3>Cost Summary — Total: <span class="mono">${esc(costCurrency(costTotal))}</span></h3>
+    ? `<h3>Cost Summary — Total: <span class="mono">${esc(costCurs.map(cur => costMoney(cur, costByCur[cur].total)).join(' · '))}</span></h3>
        <div class="two-col" style="margin-bottom:16px">
-         ${Object.entries(costByCat).sort((a, b) => b[1] - a[1]).map(([cat, sum]) =>
-           `<div class="info-card"><div class="label">${esc(cat.replace(/_/g, ' '))}</div><div class="value mono">${esc(costCurrency(sum))}</div></div>`
-         ).join('')}
+         ${costCurs.flatMap(cur => Object.entries(costByCur[cur].byCat).sort((a, b) => b[1] - a[1]).map(([cat, sum]) =>
+           `<div class="info-card"><div class="label">${esc(cat.replace(/_/g, ' '))}</div><div class="value mono">${esc(costMoney(cur, sum))}</div></div>`
+         )).join('')}
        </div>
        <h3>Itemised Costs</h3>
        <div class="table-wrap"><table>
@@ -832,12 +872,13 @@ function generateProReport(data, opts = {}) {
          <tbody>${costs.map(c => `<tr>
            <td style="text-transform:capitalize">${esc((c.category || '').replace(/_/g, ' '))}</td>
            <td>${esc(c.description || '')}</td>
-           <td class="mono" style="text-align:right">${esc(costCurrency(Number(c.amount) || 0))}</td>
-           <td style="text-transform:capitalize">${esc((c.phase || '').replace(/_/g, ' '))}</td>
+           <td class="mono" style="text-align:right">${esc(costMoney(c.currency, Number(c.amount) || 0))}</td>
+           <td style="text-transform:capitalize">${esc((c.ir_phase || '').replace(/_/g, ' '))}</td>
          </tr>`).join('')}</tbody>
        </table></div>`
     : ((bia && bia.financial) ? '' : '<div class="placeholder-box"><strong>[ NO COSTS RECORDED ]</strong></div>')}` },
-  ].filter(s => !(isExec && s.fullOnly) && s.body)
+  ].map(s => ({ ...SECTION_BY_KEY[s.key], ...s }))
+   .filter(s => !(isExec && s.fullOnly) && include(s.key) && s.body)
 
   const sectionsHtml = sections.map((s, i) => `
 <div class="section${i % 2 ? ' section-alt' : ''}">
@@ -902,14 +943,14 @@ function generateProReport(data, opts = {}) {
   <div class="doc-control-item"><div class="label">Report Type</div><div class="value">${isExec ? 'Exec' : 'Full'}</div></div>
 </div>
 
-<div class="stats-bar">
+${include('kpis') ? `<div class="stats-bar">
   <div class="stat"><div class="stat-value">${evs.length}</div><div class="stat-label">Timeline Events</div></div>
   <div class="stat"><div class="stat-value">${iocs.length}</div><div class="stat-label">IOCs</div></div>
   <div class="stat"><div class="stat-value" style="color:#dc2626">${malicIocs}</div><div class="stat-label">Malicious IOCs</div></div>
   <div class="stat"><div class="stat-value">${ents.length}</div><div class="stat-label">Entities</div></div>
   <div class="stat"><div class="stat-value">${ev.total || 0}</div><div class="stat-label">Evidence Items</div></div>
   <div class="stat"><div class="stat-value" style="color:${taskPct === 100 ? '#16a34a' : '#d97706'}">${taskPct}%</div><div class="stat-label">Playbook Done</div></div>
-</div>
+</div>` : ''}
 
 ${sectionsHtml}
 
@@ -1121,84 +1162,86 @@ function where(s) { return `<span class="where">← ${esc(s)}</span>` }
 // Whenever the main report changes, update these two functions — and vice
 // versa: a change here that the report doesn't make is a bug.
 function _skeletonSections() {
-  return [
-    { title: 'Executive Summary', items: [
+  const list = [
+    { key: 'exec_summary', items: [
       `Audience note (when set): ${ph('Advanced options → Audience', 'user')}`,
       `Narrative: ${ph('lessons_learned.incident_narrative', 'auto')} ${where('Details → Resolution summary → "What happened"')}`,
     ]},
-    { title: 'Incident Details', items: [
+    { key: 'details', items: [
       `Type · Severity · TLP · Triage state · Reporter: ${ph('incident.incident_type / severity / tlp / triage_state / reporter', 'auto')} ${where('Details → Classification')}`,
       `Current phase: ${ph('incident.phase', 'auto')} ${where('phase stepper in the incident header')}`,
-      `Occurred · Detected · Contained at: ${ph('incident.occurred_at / detected_at / contained_at', 'auto')} ${where('Details → Classification')}`,
-      `Closed at: ${ph('incident.closed_at', 'auto')} ${where('set when the incident is resolved')} <span class="static">— "Not closed" while open</span>`,
+      `Occurred · Detected at: ${ph('incident.occurred_at / detected_at', 'auto')} ${where('Details → Classification')}`,
+      `Contained · Eradicated · Recovered at: ${ph('incident.contained_at / eradicated_at / recovered_at', 'auto')} ${where('Declare … in the incident header, or Details → Classification')} <span class="static">— "Pending" until declared</span>`,
+      `Closed at: ${ph('incident.closed_at', 'auto')} ${where('set when the incident is closed')} <span class="static">— "Not closed" while open</span>`,
       `Incident description (rendered as Markdown): ${ph('incident.description', 'auto')} ${where('Details → Description')}`,
       `Tags (when set): ${ph('incident.tags[]', 'auto')} ${where('Details → Snapshot → Tags')}`,
     ]},
-    { title: 'Assignments', items: [
-      `Table: ${ph('assignments[*] (role, analyst, assigned by, assigned at, notes)', 'auto')} ${where('Assignments tab')}`,
+    { key: 'assignments', items: [
+      `Table: ${ph('assignments[*] (role, analyst, assigned by, assigned at, notes)', 'auto')} ${where('Team')}`,
     ]},
-    { title: 'Stakeholders', items: [
-      `Table: ${ph('stakeholders[*] (name, title, organization, type)', 'auto')} ${where('Comms → Stakeholders')}`,
+    { key: 'stakeholders', items: [
+      `Table: ${ph('stakeholders[*] (name, title, organization, type)', 'auto')} ${where('Comms & stakeholders → Stakeholders')}`,
       `<span class="static">Contact methods and notes are never printed.</span>`,
     ]},
-    { title: 'Detection & Identification', fullOnly: true, items: [
+    { key: 'detection', items: [
       `Detection method (friendly label): ${ph('incident.detection_method', 'auto')} ${where('Details → Classification')}`,
       `Timeline of key events: ${ph('timeline_events[*] (time, hostname, event type, description, MITRE technique)', 'auto')} ${where('Timeline tab')}`,
-      `IOCs summary: ${ph('iocs[*] (type, value, malicious, confidence, TI match / source, tags)', 'auto')} ${where('Forensic → IOCs')}`,
+      `IOCs summary: ${ph('iocs[*] (type, value, malicious, confidence, TI match / source, tags)', 'auto')} ${where('IOCs')}`,
     ]},
-    { title: 'Containment, Eradication & Recovery', fullOnly: true, items: [
+    { key: 'cer', items: [
       `Containment / Eradication / Recovery tables (aligned columns): ${ph('respond_actions[*] (title, description, status, occurred at, notes, assignee = "By")', 'auto')} ${where('Respond → actions')}`,
     ]},
-    { title: 'Decisions Log', items: [
+    { key: 'decisions', items: [
       `Table: ${ph('decisions[*] (summary, outcome, rationale, decided by, decided at)', 'auto')} ${where('Respond → Decisions')}`,
     ]},
-    { title: 'Impact Assessment', items: [
+    { key: 'impact', items: [
       `Financial · Operational · Data exposure · Reputational · Regulatory · Notes: ${ph('business_impact.*', 'auto')} ${where('Post-Incident → Reports → Business Impact Assessment')}`,
-      `Legal obligations: ${ph('regulatory_deadlines[*] regulation + article', 'auto')} + ${ph('business_impact.legal', 'auto')} <span class="static">— empty ("—") unless legal deadlines have been initialized</span> ${where('Legal → Initialize deadlines')}`,
+      `Legal obligations: ${ph('regulatory_deadlines[*] regulation + article', 'auto')} + ${ph('business_impact.legal', 'auto')} <span class="static">— empty ("—") unless legal deadlines have been initialized</span> ${where('Legal & regulatory → Initialize deadlines')}`,
     ]},
-    { title: 'Legal & Regulatory Deadlines', items: [
-      `Table: ${ph('regulatory_deadlines[*] (regulation, article, obligation, recipient, deadline, status, completed)', 'auto')} ${where('Legal tab')}`,
+    { key: 'legal', items: [
+      `Table: ${ph('regulatory_deadlines[*] (regulation, article, obligation, recipient, deadline, status, completed)', 'auto')} ${where('Legal & regulatory')}`,
       `Compliance: ${ph('met / violated (late or overdue) / pending / waived', 'auto')} <span class="static">— computed by the server</span>`,
     ]},
-    { title: 'Root Cause Analysis', items: [
+    { key: 'root_cause', items: [
       `Root cause category + description · Contributing factors: ${ph('lessons_learned.root_cause_*, contributing_factors[]', 'auto')} ${where('Post-Incident → Lessons Learned → Root Cause Analysis')}`,
       `MITRE ATT&CK table: ${ph('timeline_events[*] with a MITRE technique', 'auto')} ${where('Timeline tab')}`,
     ]},
-    { title: 'Attack Chain', conditional: 'Only when at least one timeline event carries a MITRE tactic — otherwise omitted and the sections below move up one number.', items: [
+    { key: 'attack_chain', conditional: 'Only when at least one timeline event carries a MITRE tactic — otherwise omitted and the sections below move up one number.', items: [
       `Swimlane per tactic (ATT&amp;CK kill-chain order), one dot per event by time: ${ph('timeline_events[*] (mitre_tactic_id, technique, event_time)', 'auto')} ${where('Timeline tab → MITRE tactic / technique')}`,
     ]},
-    { title: 'Threat Actor Attribution', items: [
-      `Table: ${ph('attributions[*] (actor, MITRE ID, country, confidence, score, motivation, supporting IOCs/events, notes, attributed by/at)', 'auto')} ${where('Forensic → Attribution')}`,
+    { key: 'attribution', items: [
+      `Table: ${ph('attributions[*] (actor, MITRE ID, country, confidence, score, motivation, supporting IOCs/events, notes, attributed by/at)', 'auto')} ${where('ATT&CK & attribution → Attribution')}`,
     ]},
-    { title: 'Entities & Attack Path', items: [
+    { key: 'entities', items: [
       `Table: ${ph('entities[*] (type, name / value, criticality, compromised, description)', 'auto')} ${where('Entities tab (compromised: entity drawer)')}`,
     ]},
-    { title: 'Evidence & Artifacts', fullOnly: true, items: [
+    { key: 'evidence', items: [
       `Counts: ${ph('evidence_summary (total, active, digital, physical)', 'auto')} ${where('Evidence tab')}`,
     ]},
-    { title: 'Playbook', fullOnly: true, items: [
+    { key: 'playbook', items: [
       `Per-phase tasks + progress: ${ph('playbook_tasks[*] (title, phase, status)', 'auto')} ${where('Playbook tab')}`,
     ]},
-    { title: 'Closure Checklist Completion', items: [
+    { key: 'closure', items: [
       `Progress + items: ${ph('closure_checklist[*] (label, checked, owner)', 'auto')} ${where('Post-Incident → Closure Checklist')}`,
     ]},
-    { title: 'Lessons Learned & Recommendations', items: [
+    { key: 'lessons', items: [
       `Each sub-heading prints the Reports-tab text first, then the structured Lessons Learned entries:`,
       `What worked well: ${ph('report_what_worked_well', 'auto')} + ${ph('what_went_well[]', 'auto')}`,
       `What could be improved: ${ph('report_what_could_improve', 'auto')} + ${ph('friction_points[]', 'auto')}`,
       `Security recommendations: ${ph('report_security_recommendations', 'auto')} + ${ph('control_improvements[]', 'auto')}`,
       `${where('text: Post-Incident → Reports → Lessons Learned & Remediation Plan · lists: Post-Incident → Lessons Learned')}`,
     ]},
-    { title: 'Remediation Plan', items: [
+    { key: 'remediation', items: [
       `Short (0–30 d) · Medium (30–90 d) · Long (90+ d): ${ph('report_remediation_short / medium / long', 'auto')} text, then ${ph('action_items[] by due date', 'auto')}`,
       `<span class="static">Terms are measured from the incident's close time (report time while open), so regenerating never moves items. Undated items go under "Unscheduled".</span>`,
       `${where('text: Post-Incident → Reports · action items: Post-Incident → Lessons Learned → Action Items')}`,
     ]},
-    { title: 'Cost Tracking', items: [
+    { key: 'costs', items: [
       `Financial impact narrative: ${ph('business_impact.financial', 'auto')} ${where('Post-Incident → Reports → Business Impact')}`,
-      `Totals by category + itemised costs: ${ph('costs[*] (category, description, amount)', 'auto')} ${where('Post-Incident → Reports → Cost Tracking')}`,
+      `Totals per currency and by category + itemised costs: ${ph('costs[*] (category, description, amount, currency)', 'auto')} ${where('Post-Incident → Reports → Cost Tracking')}`,
     ]},
   ]
+  return list.map(s => ({ ...SECTION_BY_KEY[s.key], ...s }))
 }
 
 // Mirrors the `appendices` array in generateProReport() — see KEEP IN SYNC above.
@@ -1222,11 +1265,14 @@ export function generateSkeleton(opts = {}) {
     audience = '',
     footer = '',
     includeInternalEvents = false,
+    sections: sectionToggles = {},
   } = opts
   const isExec = mode === 'executive'
+  const include = (key) => sectionToggles[key] !== false
   const all = _skeletonSections()
   const shown = all.filter(s => !(isExec && s.fullOnly))
   const omitted = all.filter(s => isExec && s.fullOnly).map(s => s.title)
+  const unticked = shown.filter(s => !include(s.key)).map(s => s.title)
 
   const summary = `
     <div class="sk-banner">
@@ -1234,6 +1280,7 @@ export function generateSkeleton(opts = {}) {
       ${classification ? ` · ${esc(classification)}` : ''}
       ${audience ? ` · for ${esc(audience)}` : ''}
       ${isExec ? `<div style="margin-top:6px">Left out of the executive report: ${omitted.map(esc).join(' · ')}.</div>` : ''}
+      ${unticked.length ? `<div style="margin-top:6px">Unticked under "Include sections": ${unticked.map(esc).join(' · ')}.</div>` : ''}
       ${isExec && !includeInternalEvents ? '<div style="margin-top:6px">⚠ Timeline-based parts only use events flagged <code>external_safe</code> (tick "Include internal-only events" to override).</div>' : ''}
     </div>
     <div class="legend">
@@ -1250,15 +1297,23 @@ export function generateSkeleton(opts = {}) {
         <li>Logo: ${ph('Branding → Company logo', 'user')}</li>
         <li>Incident ID: ${ph('incident.ref (e.g. INC-2026-00009)', 'auto')} · Opened: ${ph('incident.created_at', 'auto')} · Closed: ${ph('incident.closed_at', 'auto')} <span class="static">("Not closed" while open)</span> · Generated: ${ph('report time', 'auto')}</li>
         <li>Classification: ${ph('Advanced options → Classification marking', 'user')} or fallback ${ph('incident.tlp', 'auto')}</li>
-        <li>Counts: ${ph('timeline events · IOCs (malicious) · entities · evidence items · playbook %', 'auto')}</li>
+        <li>Counts${include('kpis') ? '' : ' <span class="sk-tag">unticked — not printed</span>'}: ${ph('timeline events · IOCs (malicious) · entities · evidence items · playbook %', 'auto')}</li>
       </ul>
     </div>`
 
-  const secs = shown.map((s, i) => `
+  // Unticked sections stay visible (greyed, unnumbered) so the structure stays honest;
+  // numbering counts only the sections the report will actually print.
+  let n = 0
+  const secs = shown.map((s) => include(s.key) ? `
       <div class="sk-section">
-        <h3><span class="sk-num">§ ${String(i + 1).padStart(2, '0')}</span>${esc(s.title)}${s.fullOnly ? '<span class="sk-tag">full report only</span>' : ''}</h3>
+        <h3><span class="sk-num">§ ${String(++n).padStart(2, '0')}</span>${esc(s.title)}${s.fullOnly ? '<span class="sk-tag">full report only</span>' : ''}</h3>
         ${s.conditional ? `<p class="sk-cond">${esc(s.conditional)}</p>` : ''}
         <ul>${s.items.filter(Boolean).map(item => `<li>${item}</li>`).join('')}</ul>
+      </div>` : `
+      <div class="sk-section excluded">
+        <span class="excluded-badge">Not included</span>
+        <h3>${esc(s.title)}</h3>
+        <p class="sk-cond">Unticked under Advanced options → Include sections.</p>
       </div>`).join('')
 
   const apps = _skeletonAppendices(opts).map(a => `

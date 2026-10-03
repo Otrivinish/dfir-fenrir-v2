@@ -28,6 +28,19 @@ async def dashboard_summary(
     user: User = Depends(require_analyst),
     db:   AsyncSession = Depends(get_db),
 ):
+    """Headline counts plus mean response times over the last 30 days, in minutes
+    (null when there is no sample; *_sample = incidents counted).
+
+    - mttd_minutes: occurred_at → detected_at (incidents created in the window).
+    - mttc_minutes: detected_at (else created_at) → contained_at (contained in the window).
+    - mttr_minutes: detected_at (else created_at) → recovered_at (else closed_at),
+      ending in the window.
+
+    Negative intervals are left out, and so are MTTD incidents missing occurred_at or
+    detected_at; *_excluded = incidents of that metric's window left out for either
+    reason. Scoped to incidents the caller can access; mine=true keeps only incidents
+    the caller created.
+    """
     cutoff = utcnow() - timedelta(days=_METRICS_DAYS)
     # Scope every aggregate to incidents the caller can access (admins: all),
     # plus the optional "mine" filter. Without the access filter these counts /
@@ -45,35 +58,36 @@ async def dashboard_summary(
     open_by_sev = {r.severity: r.n for r in open_rows}
     open_total  = sum(open_by_sev.values())
 
-    # MTTD — mean time from occurred_at to created_at (detect delay)
+    # Negative intervals (inconsistent times) and missing times are dropped, not
+    # averaged in; returns (kept minutes, number dropped).
+    def _deltas(pairs):
+        pairs = list(pairs)
+        kept = [m for m in (_minutes(end - start) for start, end in pairs
+                            if start is not None and end is not None) if m >= 0]
+        return kept, len(pairs) - len(kept)
+
+    # MTTD — mean time from occurred_at to detected_at (detect delay)
     mttd_rows = (await db.execute(
-        select(Incident.occurred_at, Incident.created_at)
-        .where(Incident.occurred_at.isnot(None), Incident.created_at >= cutoff, *mine_filter)
+        select(Incident.occurred_at, Incident.detected_at)
+        .where(Incident.created_at >= cutoff, *mine_filter)
     )).all()
-    mttd_deltas = [
-        _minutes(r.created_at - r.occurred_at)
-        for r in mttd_rows
-        if r.occurred_at < r.created_at
-    ]
+    mttd_deltas, mttd_excluded = _deltas((r.occurred_at, r.detected_at) for r in mttd_rows)
 
-    # MTTR — mean time from created_at to closed_at (full response)
+    # MTTR — mean time from detection (detected_at, else created_at) to recovery
+    # (recovered_at, else closed_at)
+    mttr_end = func.coalesce(Incident.recovered_at, Incident.closed_at)
     mttr_rows = (await db.execute(
-        select(Incident.created_at, Incident.closed_at)
-        .where(
-            Incident.status == "closed",
-            Incident.closed_at.isnot(None),
-            Incident.closed_at >= cutoff,
-            *mine_filter,
-        )
+        select(Incident.detected_at, Incident.created_at, mttr_end.label("end"))
+        .where(mttr_end >= cutoff, *mine_filter)
     )).all()
-    mttr_deltas = [_minutes(r.closed_at - r.created_at) for r in mttr_rows]
+    mttr_deltas, mttr_excluded = _deltas((r.detected_at or r.created_at, r.end) for r in mttr_rows)
 
-    # MTTC — mean time from created_at to contained_at
+    # MTTC — mean time from detection (detected_at, else created_at) to contained_at
     mttc_rows = (await db.execute(
-        select(Incident.created_at, Incident.contained_at)
+        select(Incident.detected_at, Incident.created_at, Incident.contained_at)
         .where(Incident.contained_at.isnot(None), Incident.contained_at >= cutoff, *mine_filter)
     )).all()
-    mttc_deltas = [_minutes(r.contained_at - r.created_at) for r in mttc_rows]
+    mttc_deltas, mttc_excluded = _deltas((r.detected_at or r.created_at, r.contained_at) for r in mttc_rows)
 
     # Opened in the 30-day window (count)
     opened_30d = (await db.execute(
@@ -112,6 +126,9 @@ async def dashboard_summary(
         "mttd_sample":         len(mttd_deltas),
         "mttr_sample":         len(mttr_deltas),
         "mttc_sample":         len(mttc_deltas),
+        "mttd_excluded":       mttd_excluded,
+        "mttr_excluded":       mttr_excluded,
+        "mttc_excluded":       mttc_excluded,
         "metrics_window_days": _METRICS_DAYS,
     }
 

@@ -203,6 +203,7 @@ function ExportWizard({ incidentId, onClose, onCreated }) {
       return next
     })
   }
+  const setAll = (ids) => setPicked(new Set(ids))
 
   const create = async () => {
     setError(null); setBusy(true)
@@ -249,7 +250,7 @@ function ExportWizard({ incidentId, onClose, onCreated }) {
                   <div>No evidence in this incident to export.</div>
                 </div>
               ) : (
-                <ItemPicker items={evidenceItems} picked={picked} onToggle={togglePick} />
+                <ItemPicker items={evidenceItems} picked={picked} onToggle={togglePick} onSetAll={setAll} />
               )}
               {error && (
                 <div className="alert error" role="alert" style={{ marginTop: 'var(--space-3)' }}>
@@ -339,8 +340,16 @@ function ExportWizard({ incidentId, onClose, onCreated }) {
   )
 }
 
-function ItemPicker({ items, picked, onToggle }) {
-  const allSelected = picked.size === items.length
+// Mirrors the backend refusal (create_export → 409 evidence_not_exportable).
+const NOT_EXPORTABLE = {
+  destroyed:     'Destroyed: the master copy was deleted, so there is nothing to export.',
+  verify_failed: 'Verification failed: the item no longer matches its recorded hash, so it can\'t be exported.',
+}
+
+function ItemPicker({ items, picked, onToggle, onSetAll }) {
+  const selectable = items.filter(i => !NOT_EXPORTABLE[i.status])
+  const blocked = items.length - selectable.length
+  const allSelected = selectable.length > 0 && selectable.every(i => picked.has(i.id))
   const someSelected = picked.size > 0 && !allSelected
 
   return (
@@ -349,14 +358,12 @@ function ItemPicker({ items, picked, onToggle }) {
         <button
           type="button"
           className="btn ghost"
-          onClick={() => {
-            if (allSelected) picked.clear()
-            else items.forEach(i => picked.add(i.id))
-            onToggle('') // force render via fake toggle (set already mutated)
-          }}
+          disabled={selectable.length === 0}
+          onClick={() => onSetAll(allSelected ? [] : selectable.map(i => i.id))}
         >{allSelected ? 'Unselect all' : 'Select all'}</button>
         <span style={{ color: 'var(--muted)', fontSize: 12 }}>
-          {picked.size} of {items.length} selected
+          {picked.size} of {selectable.length} selected
+          {blocked > 0 && ` · ${blocked} can't be exported`}
         </span>
       </div>
       <table className="settings-table">
@@ -372,12 +379,20 @@ function ItemPicker({ items, picked, onToggle }) {
         <tbody>
           {items.map(i => {
             const isChecked = picked.has(i.id)
+            const reason = NOT_EXPORTABLE[i.status]
             return (
-              <tr key={i.id} style={{ cursor: 'pointer' }} onClick={() => onToggle(i.id)}>
+              <tr
+                key={i.id}
+                style={reason ? { cursor: 'not-allowed', opacity: 0.55 } : { cursor: 'pointer' }}
+                title={reason}
+                aria-disabled={reason ? true : undefined}
+                onClick={reason ? undefined : () => onToggle(i.id)}
+              >
                 <td>
                   <input
                     type="checkbox"
                     checked={isChecked}
+                    disabled={!!reason}
                     onChange={() => onToggle(i.id)}
                     onClick={(e) => e.stopPropagation()}
                   />
@@ -392,7 +407,7 @@ function ItemPicker({ items, picked, onToggle }) {
                 <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
                   {i.sha256 ? `${i.sha256.slice(0, 12)}…` : '—'}
                 </td>
-                <td><span className="pill">{i.status}</span></td>
+                <td><span className="pill">{i.status.replace(/_/g, ' ')}</span></td>
               </tr>
             )
           })}

@@ -56,6 +56,10 @@ def _fmt(n: Notification) -> dict:
     }
 
 
+# Session.info key for WebSocket pushes waiting for their transaction to commit.
+_PENDING_PUSHES = "pending_notification_pushes"
+
+
 async def _create_and_push(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -64,6 +68,10 @@ async def _create_and_push(
     body: str | None,
     incident_id: uuid.UUID | None,
 ) -> Notification:
+    """Add a notification and queue its WebSocket push. The push is sent by
+    commit_and_push() only once the transaction has committed; after a rollback,
+    discard_pushes() drops it. The frame is {"type": "notification", "notification":
+    <item>}, the item shaped exactly like GET /api/notifications items."""
     n = Notification(
         user_id=user_id,
         type=type,
@@ -73,8 +81,23 @@ async def _create_and_push(
     )
     db.add(n)
     await db.flush()   # get id/created_at without full commit
-    await notification_manager.push(str(user_id), {"type": "notification", **_fmt(n)})
+    db.info.setdefault(_PENDING_PUSHES, []).append(
+        (str(user_id), {"type": "notification", "notification": _fmt(n)}))
     return n
+
+
+async def commit_and_push(db: AsyncSession) -> None:
+    """Commit, then push the notifications queued in this transaction to every open
+    socket of their users. A failed commit pushes nothing."""
+    pending = db.info.pop(_PENDING_PUSHES, [])
+    await db.commit()
+    for user_id, frame in pending:
+        await notification_manager.push(user_id, frame)
+
+
+def discard_pushes(db: AsyncSession) -> None:
+    """Drop the queued pushes after a rollback: those notifications were never stored."""
+    db.info.pop(_PENDING_PUSHES, None)
 
 
 async def notify_warroom_message(
@@ -114,7 +137,7 @@ async def notify_warroom_message(
                 body=snippet,
                 incident_id=incident_id,
             )
-    await db.commit()
+    await commit_and_push(db)
 
 
 async def notify_handoff(
@@ -133,7 +156,72 @@ async def notify_handoff(
         body=f"You have a pending handoff on {incident_ref}",
         incident_id=incident_id,
     )
-    await db.commit()
+    await commit_and_push(db)
+
+
+async def notify_custody_transfer(
+    db: AsyncSession,
+    recipient_id: uuid.UUID,
+    incident_id: uuid.UUID,
+    incident_ref: str,
+    requester_username: str,
+):
+    """Notify the recipient that an evidence custody transfer awaits their acceptance (C4).
+    Like notify_handoff: the incident ref only — no incident title or item name. Commits and
+    pushes after the commit."""
+    await _create_and_push(
+        db,
+        recipient_id,
+        type="custody_transfer",
+        title=f"Custody transfer from {requester_username}",
+        body=f"An evidence item on {incident_ref} awaits your acceptance",
+        incident_id=incident_id,
+    )
+    await commit_and_push(db)
+
+
+async def notify_assignment(
+    db: AsyncSession,
+    assignee_id: uuid.UUID,
+    incident_id: uuid.UUID,
+    incident_ref: str,
+    role_label: str,
+    assigner_username: str,
+):
+    """Tell a user they were given an operational role on an incident (E3). The incident
+    ref only, no title (the caller skips self-assignment). Commits, then pushes."""
+    await _create_and_push(
+        db,
+        assignee_id,
+        type="assignment",
+        title=f"Assigned as {role_label}",
+        body=f"{assigner_username} assigned you as {role_label} on {incident_ref}",
+        incident_id=incident_id,
+    )
+    await commit_and_push(db)
+
+
+async def notify_le_package_built(
+    db: AsyncSession,
+    incident_id: uuid.UUID,
+    incident_ref: str,
+    builder_username: str,
+):
+    """Tell every active admin that a non-admin incident lead built a law-enforcement
+    package (E3). The incident ref only. Commits, then pushes."""
+    admins = (await db.execute(
+        select(User).where(User.is_active == True, User.role == "admin")  # noqa: E712
+    )).scalars().all()
+    for admin in admins:
+        await _create_and_push(
+            db,
+            admin.id,
+            type="le_package",
+            title=f"LE package built on {incident_ref}",
+            body=f"{builder_username} built a law-enforcement package as incident lead",
+            incident_id=incident_id,
+        )
+    await commit_and_push(db)
 
 
 async def notify_incident_created(
@@ -155,7 +243,7 @@ async def notify_incident_created(
             body=incident_title,
             incident_id=incident_id,
         )
-    await db.commit()
+    await commit_and_push(db)
 
 
 async def notify_phase_changed(
@@ -180,7 +268,7 @@ async def notify_phase_changed(
             body=incident_title,
             incident_id=incident_id,
         )
-    await db.commit()
+    await commit_and_push(db)
 
 
 async def notify_comment(
@@ -221,4 +309,4 @@ async def notify_comment(
                 body=snippet,
                 incident_id=incident_id,
             )
-    await db.commit()
+    await commit_and_push(db)
