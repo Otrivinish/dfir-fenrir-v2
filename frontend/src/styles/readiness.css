@@ -1,0 +1,96 @@
+/* Readiness (E1): pages/Readiness.jsx, components/ReadinessBanner.jsx and the blockers callout in
+   IncidentCreateModal.jsx. Tokens only. State is a glyph + a word: the glyph and the left border
+   carry the colour, every text stays in --text / --muted (>= 4.5:1 on --surface in all themes;
+   --muted is never placed on a tint). */
+
+.rd-page { max-width: 1100px; container-type: inline-size; }
+.rd-head { align-items: flex-start; flex-wrap: wrap; }
+
+.rd-glyph { font-family: var(--font-mono); font-weight: 700; width: 1.2em; text-align: center; flex-shrink: 0; }
+
+.rd-error {
+  display: flex; align-items: baseline; gap: var(--space-2);
+  margin-bottom: var(--space-3); padding: var(--space-2) var(--space-3);
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--crit);
+  border-radius: var(--radius); color: var(--text); font-size: 13px;
+}
+.rd-error-mark { font-family: var(--font-mono); font-weight: 700; color: var(--crit); }
+
+.rd-summary {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-5);
+  margin-bottom: var(--space-3); padding: var(--space-3) var(--space-4);
+}
+.rd-count { display: inline-flex; align-items: baseline; gap: var(--space-1); font-weight: 600; font-size: 13px; color: var(--text); }
+.rd-count-blocker .rd-glyph { color: var(--crit); }
+.rd-count-warning .rd-glyph { color: var(--high); }
+.rd-count-ok .rd-glyph      { color: var(--ok); }
+.rd-count-unknown .rd-glyph { color: var(--muted); }
+.rd-summary-note { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+.rd-panel { padding: 0; overflow: hidden; }
+.rd-cols, .rd-item {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) 72px 132px 116px;
+  gap: var(--space-2) var(--space-3);
+  align-items: baseline;
+  padding: var(--space-2) var(--space-4);
+}
+.rd-cols {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted); border-bottom: 1px solid var(--border);
+}
+.rd-list { list-style: none; margin: 0; padding: 0; }
+.rd-item { border-left: 3px solid transparent; padding-left: calc(var(--space-4) - 3px); }
+.rd-item + .rd-item { border-top: 1px solid var(--border); }
+.rd-pass                 { border-left-color: var(--ok); }
+.rd-fail.rd-lvl-blocker  { border-left-color: var(--crit); }
+.rd-fail.rd-lvl-warning  { border-left-color: var(--high); }
+.rd-unknown              { border-left-color: var(--muted); }
+.rd-pass .rd-glyph                 { color: var(--ok); }
+.rd-fail.rd-lvl-blocker .rd-glyph  { color: var(--crit); }
+.rd-fail.rd-lvl-warning .rd-glyph  { color: var(--high); }
+.rd-unknown .rd-glyph              { color: var(--muted); }
+
+.rd-status { display: inline-flex; align-items: baseline; gap: var(--space-1); font-weight: 600; font-size: 13px; color: var(--text); }
+.rd-main   { min-width: 0; }
+.rd-title  { font-size: 13px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.rd-detail { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.rd-level  { font-size: 12px; color: var(--text); }
+.rd-csf    { font-family: var(--font-mono); font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.rd-fix    { font-size: 12px; text-align: right; }
+.rd-fix a  { color: var(--text); text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
+.rd-fix-admin { color: var(--muted); }
+
+@container (max-width: 720px) {
+  .rd-cols { display: none; }
+  .rd-item { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .rd-main { grid-column: 1 / -1; grid-row: 2; }
+  .rd-csf  { grid-column: 1 / 3; }
+  .rd-fix  { grid-column: 3; }
+}
+
+.rd-limits { margin-top: var(--space-3); font-size: 12px; color: var(--muted); }
+.rd-limits-h { margin: 0 0 var(--space-2); font-size: 12px; font-weight: 700; color: var(--text); }
+.rd-limits ul { margin: 0 0 var(--space-2); padding-left: var(--space-4); }
+.rd-limits p  { margin: 0; }
+
+/* Dashboard banner + New-incident callout: a faint --crit tint on --surface, text in --text. */
+.rd-banner, .rd-callout {
+  background: color-mix(in srgb, var(--crit) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--crit) 35%, transparent);
+  border-left: 3px solid var(--crit);
+  border-radius: var(--radius);
+  color: var(--text);
+}
+.rd-banner {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-3); margin-bottom: var(--space-3); font-size: 13px;
+}
+.rd-banner-mark { font-family: var(--font-mono); font-weight: 700; color: var(--crit); }
+.rd-banner-text { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.rd-banner-link { color: var(--text); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
+
+.rd-callout { padding: var(--space-2) var(--space-3); font-size: 13px; }
+.rd-callout-head { display: flex; align-items: baseline; gap: var(--space-2); font-weight: 700; }
+.rd-callout-list { margin: var(--space-1) 0; padding-left: var(--space-5); }
+.rd-callout-note { font-size: 12px; }

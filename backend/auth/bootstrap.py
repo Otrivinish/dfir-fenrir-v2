@@ -29,6 +29,10 @@ SEED_ROLES = [
      "Coordinates with legal counsel, regulators, and law enforcement."),
     ("recorder",             "Recorder",
      "Maintains the contemporaneous record of decisions, actions, and timeline."),
+    # E2: added to existing installs by the startup seeding below (missing keys only).
+    ("data_protection_officer", "Data Protection Officer",
+     "Assesses personal-data impact and advises on GDPR breach notification to the "
+     "supervisory authority and data subjects."),
 ]
 
 

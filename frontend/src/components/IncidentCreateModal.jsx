@@ -26,17 +26,30 @@ const START_PHASES = PHASE.filter(p => p.value === 'detection_and_analysis' || p
 export default function IncidentCreateModal({ open, onClose, onCreated }) {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
+  // GET /api/readiness is admin + analyst only; viewers never ask for it.
+  const readsReadiness = isAdmin || user?.role === 'analyst'
   const [form, setForm] = useState(INITIAL)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [allTeams, setAllTeams] = useState([])
   const [selectedTeamIds, setSelectedTeamIds] = useState([])
   const [tags, setTags] = useState([])
+  const [blockers, setBlockers] = useState([])   // failing readiness blockers: shown, never blocking
 
   useEffect(() => {
     // Detected defaults to now (editable); the API never fills it in itself.
     if (open) { setForm({ ...INITIAL, detected_at: new Date().toISOString() }); setError(''); setBusy(false); setSelectedTeamIds([]); setTags([]) }
   }, [open])
+
+  useEffect(() => {
+    setBlockers([])
+    if (!open || !readsReadiness) return
+    let live = true
+    api.getReadiness()
+      .then(d => { if (live) setBlockers(d.checks.filter(c => c.level === 'blocker' && c.status === 'fail')) })
+      .catch(() => {})   // 403 or offline: no callout
+    return () => { live = false }
+  }, [open, readsReadiness])
 
   useEffect(() => {
     if (open && isAdmin && allTeams.length === 0) {
@@ -95,6 +108,17 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
         <form onSubmit={onSubmit}>
           <div className="modal-body">
             <div className="form">
+              {blockers.length > 0 && (
+                <div className="rd-callout" role="note" aria-labelledby="newinc-rd-head">
+                  <div id="newinc-rd-head" className="rd-callout-head">
+                    <span className="rd-banner-mark" aria-hidden="true">!</span>
+                    {blockers.length} readiness blocker{blockers.length === 1 ? '' : 's'} failing
+                  </div>
+                  <ul className="rd-callout-list">{blockers.map(b => <li key={b.id}>{b.title}</li>)}</ul>
+                  <div className="rd-callout-note">You can still create the incident. Details: Prepare → Readiness.</div>
+                </div>
+              )}
+
               <div className="field">
                 <label className="field-label" htmlFor="inc-title">Title</label>
                 <input id="inc-title" className="input" value={form.title} onChange={set('title')}

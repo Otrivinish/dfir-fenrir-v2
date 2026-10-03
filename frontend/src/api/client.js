@@ -1044,6 +1044,21 @@ export const api = {
   // Portfolio metrics
   getMetrics: (window_days = 90) => request('GET', `/api/metrics?window_days=${window_days}`),
 
+  // Organisation readiness (E1) — admins + analysts; viewers get 403
+  getReadiness: () => request('GET', '/api/readiness'),
+
+  // Contacts directory (E2) — read: admins + analysts (viewers 403); write: admins only.
+  // { verified: true } on update stamps the server time + you as verifier.
+  listContacts:  (params = {}) => {
+    const qs = new URLSearchParams()
+    for (const k of ['q', 'type', 'limit', 'cursor']) if (params[k]) qs.set(k, params[k])
+    const s = qs.toString()
+    return request('GET', `/api/contacts${s ? '?' + s : ''}`)
+  },
+  createContact: (payload)     => request('POST',   '/api/contacts', payload),
+  updateContact: (id, payload) => request('PATCH',  `/api/contacts/${id}`, payload),
+  deleteContact: (id)          => request('DELETE', `/api/contacts/${id}`),
+
   // Legal — regulatory deadline tracking
   legalTemplates:      (incidentId)                    => request('GET',    `/api/incidents/${incidentId}/legal/templates`),
   listDeadlines:       (incidentId)                    => request('GET',    `/api/incidents/${incidentId}/legal/deadlines`),

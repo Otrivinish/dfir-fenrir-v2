@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
+import { useAuth } from '../../../hooks/useAuth.jsx'
+import { useDialogFocus } from '../../../hooks/useDialogFocus.js'
 import { formatLocal } from '../../../lib/datetime.js'
 
 // ─── Vocabulary ──────────────────────────────────────────────────────────────
 
-const TYPE_LABELS = {
+export const TYPE_LABELS = {
   internal:        'Internal',
   legal:           'Legal',
   regulatory:      'Regulatory',
@@ -16,10 +18,12 @@ const TYPE_LABELS = {
   customer:        'Customer',
   insurer:         'Insurer',
   board:           'Board',
+  supervisory_authority: 'Supervisory Authority',
+  csirt:           'CSIRT',
   other:           'Other',
 }
 
-const TYPE_COLORS = {
+export const TYPE_COLORS = {
   internal:        'var(--accent)',
   legal:           'var(--med)',
   regulatory:      'var(--high)',
@@ -30,10 +34,13 @@ const TYPE_COLORS = {
   customer:        'var(--ok)',
   insurer:         'var(--med)',
   board:           'var(--high)',
+  // E2 types: tokens with >= 4.5:1 text contrast on --surface in all three themes (--high is 3.6:1 in nordic-calm)
+  supervisory_authority: 'var(--crit)',
+  csirt:           'var(--low)',
   other:           'var(--dim)',
 }
 
-const CHANNEL_LABELS = {
+export const CHANNEL_LABELS = {
   email:       'Email',
   phone:       'Phone',
   mobile:      'Mobile',
@@ -46,7 +53,7 @@ const CHANNEL_LABELS = {
   in_person:   'In Person',
 }
 
-const CHANNEL_OPTS = Object.entries(CHANNEL_LABELS).map(([value, label]) => ({ value, label }))
+export const CHANNEL_OPTS = Object.entries(CHANNEL_LABELS).map(([value, label]) => ({ value, label }))
 const TYPE_OPTS    = Object.entries(TYPE_LABELS).map(([value, label]) => ({ value, label }))
 
 // CSV column → channel mapping for bulk import
@@ -113,11 +120,55 @@ const EMPTY_FORM = {
 
 const EMPTY_METHOD = { channel: 'email', value: '', preferred: false, notes: '' }
 
-// ─── Main component ──────────────────────────────────────────────────────────
+// ─── Incident tab: the board over this incident's stakeholders ──────────────
 
 export default function Stakeholders() {
   const { inc, isClosed } = useOutletContext()
+  const { user } = useAuth()
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [reloadToken, setReloadToken] = useState(0)
 
+  const source = useMemo(() => ({
+    list:   ()            => api.listStakeholders(inc.id).then(d => d.items || []),
+    create: (payload)     => api.createStakeholder(inc.id, payload),
+    update: (id, payload) => api.updateStakeholder(inc.id, id, payload),
+    remove: (id)          => api.deleteStakeholder(inc.id, id),
+    bulk:   (payload)     => api.bulkCreateStakeholders(inc.id, payload),
+  }), [inc.id])
+
+  // The Contacts directory is readable by analysts and admins (GET /api/contacts).
+  const canUseDirectory = !isClosed && (user?.role === 'admin' || user?.role === 'analyst')
+
+  return (
+    <>
+      <StakeholderBoard
+        source={source}
+        readOnly={isClosed}
+        reloadToken={reloadToken}
+        toolbarExtra={canUseDirectory && (
+          <button className="btn" type="button" onClick={() => setPickerOpen(true)}>Add from directory</button>
+        )}
+      />
+      {pickerOpen && (
+        <DirectoryPicker
+          incidentId={inc.id}
+          onAdded={() => setReloadToken(n => n + 1)}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
+    </>
+  )
+}
+
+// ─── The board (incident Stakeholders tab + Prepare → Contacts) ──────────────
+// `source` is the data API: { list() → items, create(p), update(id, p), remove(id), bulk?(p) }.
+// The board holds no rules of its own; the API enforces who may write.
+
+export function StakeholderBoard({
+  source, readOnly, title = 'Stakeholders', toolbarExtra = null, cardExtra = null, reloadToken = 0,
+  emptyText = 'No stakeholders yet.', emptyHint = 'Add individual contacts or bulk-import from CSV.',
+  deleteConfirm = 'Remove this stakeholder?', noun = 'stakeholder',
+}) {
   const [items,        setItems]        = useState([])
   const [loading,      setLoading]      = useState(true)
   const [error,        setError]        = useState('')
@@ -136,16 +187,19 @@ export default function Stakeholders() {
   const load = useCallback(async () => {
     setError('')
     try {
-      const data = await api.listStakeholders(inc.id)
-      setItems(data.items || [])
+      setItems(await source.list())
     } catch (e) {
       setError(e.message || 'Failed to load stakeholders')
     } finally {
       setLoading(false)
     }
-  }, [inc.id])
+  }, [source])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load() }, [load, reloadToken])
+
+  const replaceItem = useCallback((updated) => {
+    setItems(prev => prev.map(s => s.id === updated.id ? updated : s))
+  }, [])
 
   const filtered = useMemo(() => {
     let list = items
@@ -182,10 +236,9 @@ export default function Stakeholders() {
         contact_methods: form.contact_methods.filter(m => m.value.trim()),
       }
       if (form._id) {
-        const updated = await api.updateStakeholder(inc.id, form._id, payload)
-        setItems(prev => prev.map(s => s.id === updated.id ? updated : s))
+        replaceItem(await source.update(form._id, payload))
       } else {
-        const created = await api.createStakeholder(inc.id, payload)
+        const created = await source.create(payload)
         setItems(prev => [...prev, created])
       }
       setEditTarget(null)
@@ -197,9 +250,9 @@ export default function Stakeholders() {
   }
 
   const onDelete = async (id) => {
-    if (!confirm('Remove this stakeholder?')) return
+    if (!confirm(deleteConfirm)) return
     try {
-      await api.deleteStakeholder(inc.id, id)
+      await source.remove(id)
       setItems(prev => prev.filter(s => s.id !== id))
     } catch (e) {
       setError(e.message || 'Delete failed')
@@ -215,7 +268,7 @@ export default function Stakeholders() {
     if (!csvPreview?.length) return
     setImporting(true); setImportResult(null)
     try {
-      const result = await api.bulkCreateStakeholders(inc.id, { rows: csvPreview })
+      const result = await source.bulk({ rows: csvPreview })
       setImportResult(result)
       if (result.created > 0) await load()
     } catch (e) {
@@ -232,7 +285,7 @@ export default function Stakeholders() {
   return (
     <section className="panel">
       <div className="panel-toolbar">
-        <h2 className="panel-h">Stakeholders</h2>
+        <h2 className="panel-h">{title}</h2>
         <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
           <input
             className="input"
@@ -245,9 +298,10 @@ export default function Stakeholders() {
             <option value="">All types</option>
             {TYPE_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          {!isClosed && (
+          {toolbarExtra}
+          {!readOnly && (
             <>
-              <button className="btn" type="button" onClick={() => setImportOpen(true)}>Import CSV</button>
+              {source.bulk && <button className="btn" type="button" onClick={() => setImportOpen(true)}>Import CSV</button>}
               <button className="btn primary" type="button" onClick={openAdd}>+ Add</button>
             </>
           )}
@@ -265,17 +319,17 @@ export default function Stakeholders() {
       ) : filtered.length === 0 ? (
         <div className="panel-empty">
           <div className="panel-empty-mark" aria-hidden="true">◎</div>
-          <div>{items.length === 0 ? 'No stakeholders yet.' : 'No matches.'}</div>
-          {items.length === 0 && !isClosed && (
+          <div>{items.length === 0 ? emptyText : 'No matches.'}</div>
+          {items.length === 0 && !readOnly && emptyHint && (
             <div style={{ color: 'var(--dim)', fontSize: 12 }}>
-              Add individual contacts or bulk-import from CSV.
+              {emptyHint}
             </div>
           )}
         </div>
       ) : (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(min(300px, 100%), 1fr))',   // one column on a narrow screen, never wider than it
           gap: 'var(--space-3)',
           marginTop: 'var(--space-2)',
         }}>
@@ -283,7 +337,8 @@ export default function Stakeholders() {
             <StakeholderCard
               key={s.id}
               stakeholder={s}
-              readOnly={isClosed}
+              readOnly={readOnly}
+              extra={cardExtra && cardExtra(s, replaceItem)}
               onEdit={() => openEdit(s)}
               onDelete={() => onDelete(s.id)}
             />
@@ -294,6 +349,7 @@ export default function Stakeholders() {
       {editTarget && (
         <StakeholderModal
           form={editTarget}
+          noun={noun}
           saving={saving}
           onSave={onSave}
           onClose={() => setEditTarget(null)}
@@ -318,7 +374,7 @@ export default function Stakeholders() {
 
 // ─── Stakeholder card ────────────────────────────────────────────────────────
 
-function StakeholderCard({ stakeholder: s, readOnly, onEdit, onDelete }) {
+function StakeholderCard({ stakeholder: s, readOnly, extra, onEdit, onDelete }) {
   const typeColor = TYPE_COLORS[s.type] || 'var(--dim)'
   const preferred = s.contact_methods.find(m => m.preferred) || s.contact_methods[0]
 
@@ -334,7 +390,7 @@ function StakeholderCard({ stakeholder: s, readOnly, onEdit, onDelete }) {
       gap: 'var(--space-2)',
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
+        <div style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
           <div style={{ fontWeight: 600, fontSize: 14 }}>{s.name}</div>
           {(s.title || s.organization) && (
             <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
@@ -397,6 +453,8 @@ function StakeholderCard({ stakeholder: s, readOnly, onEdit, onDelete }) {
         </div>
       )}
 
+      {extra}
+
       {!readOnly && (
         <div style={{
           display: 'flex', gap: 'var(--space-2)', justifyContent: 'flex-end',
@@ -412,7 +470,7 @@ function StakeholderCard({ stakeholder: s, readOnly, onEdit, onDelete }) {
 
 // ─── Add / edit modal ────────────────────────────────────────────────────────
 
-function StakeholderModal({ form: initialForm, saving, onSave, onClose }) {
+function StakeholderModal({ form: initialForm, noun, saving, onSave, onClose }) {
   const [form, setForm] = useState(initialForm)
 
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }))
@@ -441,10 +499,10 @@ function StakeholderModal({ form: initialForm, saving, onSave, onClose }) {
   }
 
   return (
-    <div className="modal-overlay">
+    <div className="modal-backdrop">
       <div className="modal" style={{ maxWidth: 560, width: '100%' }} onClick={e => e.stopPropagation()}>
         <div className="modal-head">
-          <h3 className="modal-title">{form._id ? 'Edit stakeholder' : 'Add stakeholder'}</h3>
+          <h3 className="modal-title">{form._id ? `Edit ${noun}` : `Add ${noun}`}</h3>
           <button className="modal-close" type="button" onClick={onClose}>✕</button>
         </div>
 
@@ -524,7 +582,7 @@ function StakeholderModal({ form: initialForm, saving, onSave, onClose }) {
           <div style={{ display: 'flex', gap: 'var(--space-2)', justifyContent: 'flex-end' }}>
             <button className="btn" type="button" onClick={onClose} disabled={saving}>Cancel</button>
             <button className="btn primary" type="submit" disabled={saving || !form.name.trim()}>
-              {saving ? 'Saving…' : (form._id ? 'Save changes' : 'Add stakeholder')}
+              {saving ? 'Saving…' : (form._id ? 'Save changes' : `Add ${noun}`)}
             </button>
           </div>
         </form>
@@ -537,7 +595,7 @@ function StakeholderModal({ form: initialForm, saving, onSave, onClose }) {
 
 function ImportModal({ csvText, setCsvText, preview, result, importing, onParse, onImport, onClose }) {
   return (
-    <div className="modal-overlay">
+    <div className="modal-backdrop">
       <div className="modal" style={{ maxWidth: 700, width: '100%' }} onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           <h3 className="modal-title">Import stakeholders from CSV</h3>
@@ -645,6 +703,134 @@ function ImportModal({ csvText, setCsvText, preview, result, importing, onParse,
             </div>
           </>
         )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Contacts directory helpers (E2) ─────────────────────────────────────────
+
+// "Verified <local time with offset> by <user>" from the server's stamp, or "Never verified".
+export function verifiedLabel(c) {
+  if (!c.last_verified_at) return 'Never verified'
+  return `Verified ${formatLocal(c.last_verified_at)}${c.verified_by_username ? ` by ${c.verified_by_username}` : ''}`
+}
+
+// "Add from directory": lists GET /api/contacts and POSTs { contact_id } so the server copies the
+// entry into this incident. The copy is the incident's own: later directory edits don't change it.
+function DirectoryPicker({ incidentId, onAdded, onClose }) {
+  const [q,       setQ]       = useState('')
+  const [type,    setType]    = useState('')
+  const [items,   setItems]   = useState([])
+  const [cursor,  setCursor]  = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState('')
+  const [added,   setAdded]   = useState({})     // contact id → true once copied in this session
+  const [busy,    setBusy]    = useState(null)
+  const seq = useRef(0)
+
+  const fetchPage = useCallback(async (cur) => {
+    const mine = ++seq.current
+    setLoading(true); setError('')
+    try {
+      const d = await api.listContacts({ q: q.trim(), type, limit: 50, cursor: cur })
+      if (mine !== seq.current) return
+      setItems(prev => cur ? [...prev, ...d.items] : d.items)
+      setCursor(d.next_cursor || null)
+    } catch (e) {
+      if (mine === seq.current) setError(e.message || 'Could not load the directory')
+    } finally {
+      if (mine === seq.current) setLoading(false)
+    }
+  }, [q, type])
+
+  useEffect(() => {
+    const t = setTimeout(() => fetchPage(null), 200)
+    return () => clearTimeout(t)
+  }, [fetchPage])
+
+  // Focus moves in (search field), Tab stays inside, Esc closes, focus returns to the opener on close.
+  const dialogRef = useRef(null)
+  useDialogFocus(dialogRef, onClose)
+
+  const add = async (c) => {
+    setBusy(c.id); setError('')
+    try {
+      await api.createStakeholder(incidentId, { contact_id: c.id })
+      setAdded(a => ({ ...a, [c.id]: true }))
+      onAdded()
+    } catch (e) {
+      setError(e.message || 'Could not add the contact')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal dir-picker" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="dir-picker-title"
+           style={{ maxWidth: 640 }} onClick={e => e.stopPropagation()}>
+        <div className="modal-head">
+          <h2 id="dir-picker-title">Add from directory</h2>
+          <button className="modal-close" type="button" aria-label="Close" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <p style={{ margin: 0, fontSize: 12, color: 'var(--muted)' }}>
+            Adds a copy of the contact to this incident. Later changes in the directory don't change the copy.
+          </p>
+          <div className="panel-toolbar" style={{ gap: 'var(--space-2)' }}>
+            <input className="input" placeholder="Search name or organization…" aria-label="Search the directory"
+                   value={q} onChange={e => setQ(e.target.value)} />
+            <select className="select" aria-label="Type" value={type} onChange={e => setType(e.target.value)}>
+              <option value="">All types</option>
+              {TYPE_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          {error && (
+            <div className="alert error" role="alert"><span className="alert-icon">!</span><span>{error}</span></div>
+          )}
+          {!loading && items.length === 0 && !error && (
+            <div className="panel-empty" style={{ padding: 'var(--space-4)' }}>
+              <div>{q || type ? 'No matches.' : 'The Contacts directory is empty.'}</div>
+              <div style={{ color: 'var(--muted)', fontSize: 12 }}>Admins fill it in under Prepare → Contacts.</div>
+            </div>
+          )}
+          {items.length > 0 && (
+            <ul className="dir-picker-list" aria-label="Directory contacts"
+                style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+              {items.map(c => (
+                <li key={c.id} data-contact-id={c.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
+                  border: '1px solid var(--border)', borderLeft: `3px solid ${TYPE_COLORS[c.type] || 'var(--dim)'}`,
+                  borderRadius: 'var(--radius)', padding: 'var(--space-2) var(--space-3)',
+                }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13, overflowWrap: 'anywhere' }}>{c.name}</div>
+                    <div style={{ fontSize: 12, color: 'var(--muted)', overflowWrap: 'anywhere' }}>
+                      {[TYPE_LABELS[c.type] || c.type, c.organization, c.title].filter(Boolean).join(' · ')}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--muted)' }}>{verifiedLabel(c)}</div>
+                  </div>
+                  {added[c.id]
+                    ? <span className="dir-picker-added" style={{ fontSize: 12, color: 'var(--text)', whiteSpace: 'nowrap' }}>
+                        <span aria-hidden="true" style={{ color: 'var(--ok)' }}>✓ </span>Added
+                      </span>
+                    : <button className="btn" type="button" disabled={busy === c.id} onClick={() => add(c)}
+                              aria-label={`Add ${c.name} to this incident`}>
+                        {busy === c.id ? 'Adding…' : 'Add'}
+                      </button>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {loading && <div style={{ fontSize: 12, color: 'var(--muted)' }}>Loading…</div>}
+          {cursor && !loading && (
+            <button className="btn ghost" type="button" onClick={() => fetchPage(cursor)}>Load more</button>
+          )}
+        </div>
+        <div className="modal-foot">
+          <button className="btn primary" type="button" onClick={onClose}>Done</button>
         </div>
       </div>
     </div>

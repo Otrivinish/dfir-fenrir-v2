@@ -210,6 +210,14 @@ class TeamRef(BaseModel):
 # CSF 2.0 function tagging belongs at the report level (which subcategories the
 # response programme covered), not on every incident — see CLAUDE.md.
 
+NCISS_BY_SEVERITY = {"critical": "emergency", "high": "severe", "medium": "medium", "low": "low"}
+
+
+def nciss_severity(severity: Optional[str]) -> Optional[str]:
+    """NCISS value for an internal severity (the fixed mapping above); None for anything else."""
+    return NCISS_BY_SEVERITY.get((severity or "").lower())
+
+
 Severity        = Literal["low", "medium", "high", "critical"]
 Phase           = Literal["preparation", "detection_and_analysis",                     # 800-61 R3
                           "containment_eradication_recovery", "post_incident"]
@@ -641,16 +649,27 @@ class EntityFileOut(BaseModel):
     uploaded_by_username: Optional[str] = None
     entity_name:          Optional[str] = None
     uploaded_at:    datetime
+    # E4: picked as a figure for generated reports, and the caption printed under it.
+    include_in_report: bool          = False
+    report_caption:    Optional[str] = None
 
     class Config:
         from_attributes = True
 
 
 class IncidentFileUpdate(BaseModel):
-    """Rename a stored file and/or (un)link it to an entity. `entity_id` is
-    tri-state — an explicit null unlinks; omitting it leaves the link unchanged."""
-    original_name: Optional[str]  = Field(default=None, min_length=1, max_length=512)
-    entity_id:     Optional[UUID] = None
+    """Rename a stored file, (un)link it to an entity, or pick it as a report figure.
+    `entity_id` is tri-state — an explicit null unlinks; omitting it leaves the link
+    unchanged. `include_in_report=true` is accepted only for a PNG, JPEG, GIF or WebP
+    image, checked by content (422 code unsupported_report_image; SVG is refused, as is
+    an image whose dimensions can't be read from its header), at most 16384 px per side
+    and 50 megapixels (422 code image_too_large), whose stored bytes pass their integrity
+    check (409 code file_integrity_failed).
+    `report_caption` (max 512) is printed under the figure; null or "" clears it."""
+    original_name:     Optional[str]  = Field(default=None, min_length=1, max_length=512)
+    entity_id:         Optional[UUID] = None
+    include_in_report: Optional[bool] = None
+    report_caption:    Optional[str]  = Field(default=None, max_length=512)
 
 
 class EntityFileList(BaseModel):
@@ -1583,7 +1602,8 @@ StakeholderChannel = Literal[
 ]
 StakeholderType = Literal[
     "internal", "legal", "regulatory", "law_enforcement",
-    "media_pr", "vendor", "ir_firm", "customer", "insurer", "board", "other",
+    "media_pr", "vendor", "ir_firm", "customer", "insurer", "board",
+    "supervisory_authority", "csirt", "other",
 ]
 
 
@@ -1612,7 +1632,8 @@ class IncidentStakeholderOut(BaseModel):
         from_attributes = True
 
 
-class IncidentStakeholderCreate(BaseModel):
+class IncidentStakeholderRow(BaseModel):
+    """One stakeholder typed in full (a bulk-import row)."""
     name:            str              = Field(min_length=1, max_length=255)
     title:           Optional[str]    = Field(default=None, max_length=128)
     organization:    Optional[str]    = Field(default=None, max_length=256)
@@ -1620,6 +1641,28 @@ class IncidentStakeholderCreate(BaseModel):
     contact_methods: list[ContactMethod] = Field(default_factory=list)
     notes:           Optional[str]    = Field(default=None, max_length=4096)
     available_hours: Optional[str]    = Field(default=None, max_length=64)
+
+
+class IncidentStakeholderCreate(BaseModel):
+    contact_id:      Optional[UUID]   = Field(
+        default=None,
+        description="Copy this Contacts-directory entry (GET /api/contacts) into the incident. Any other "
+                    "field you also send (non-null) overrides the copied value. The incident keeps its own "
+                    "copy: later directory edits don't change it. Unknown id: 422 contact_not_found.")
+    name:            Optional[str]    = Field(default=None, min_length=1, max_length=255,
+                                              description="Required unless contact_id is given.")
+    title:           Optional[str]    = Field(default=None, max_length=128)
+    organization:    Optional[str]    = Field(default=None, max_length=256)
+    type:            StakeholderType  = "other"
+    contact_methods: list[ContactMethod] = Field(default_factory=list)
+    notes:           Optional[str]    = Field(default=None, max_length=4096)
+    available_hours: Optional[str]    = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _name_or_contact(self):
+        if self.contact_id is None and not self.name:
+            raise ValueError("name is required unless contact_id is given")
+        return self
 
 
 class IncidentStakeholderUpdate(BaseModel):
@@ -1633,7 +1676,7 @@ class IncidentStakeholderUpdate(BaseModel):
 
 
 class IncidentStakeholderBulkCreate(BaseModel):
-    rows: list[IncidentStakeholderCreate] = Field(min_length=1, max_length=500)
+    rows: list[IncidentStakeholderRow] = Field(min_length=1, max_length=500)
 
 
 class IncidentStakeholderBulkResult(BaseModel):
@@ -1643,6 +1686,54 @@ class IncidentStakeholderBulkResult(BaseModel):
 
 class IncidentStakeholderList(BaseModel):
     items: list[IncidentStakeholderOut]
+
+
+# ─── Contacts directory (org-wide, E2) ───────────────────────────────────────
+
+class OrgContactOut(BaseModel):
+    id:                   UUID
+    name:                 str
+    title:                Optional[str] = None
+    organization:         Optional[str] = None
+    type:                 str
+    contact_methods:      list[ContactMethod] = Field(default_factory=list)
+    notes:                Optional[str] = None
+    available_hours:      Optional[str] = None
+    last_verified_at:     Optional[datetime] = Field(
+        default=None, description="Server time (UTC) of the last verification; null = never verified.")
+    verified_by_id:       Optional[UUID] = None
+    verified_by_username: Optional[str] = None
+    created_at:           datetime
+    updated_at:           datetime
+
+
+class OrgContactCreate(BaseModel):
+    name:            str              = Field(min_length=1, max_length=255)
+    title:           Optional[str]    = Field(default=None, max_length=128)
+    organization:    Optional[str]    = Field(default=None, max_length=256)
+    type:            StakeholderType  = "other"
+    contact_methods: list[ContactMethod] = Field(default_factory=list, max_length=20)
+    notes:           Optional[str]    = Field(default=None, max_length=4096)
+    available_hours: Optional[str]    = Field(default=None, max_length=64)
+
+
+class OrgContactUpdate(BaseModel):
+    name:            Optional[str]    = Field(default=None, min_length=1, max_length=255)
+    title:           Optional[str]    = Field(default=None, max_length=128)
+    organization:    Optional[str]    = Field(default=None, max_length=256)
+    type:            Optional[StakeholderType] = None
+    contact_methods: Optional[list[ContactMethod]] = Field(default=None, max_length=20)
+    notes:           Optional[str]    = Field(default=None, max_length=4096)
+    available_hours: Optional[str]    = Field(default=None, max_length=64)
+    verified:        Optional[Literal[True]] = Field(
+        default=None,
+        description="true = you checked this entry is still right: stamps last_verified_at with the "
+                    "server time and verified_by with you. The time can't be supplied.")
+
+
+class OrgContactList(BaseModel):
+    items:       list[OrgContactOut]
+    next_cursor: Optional[str] = None
 
 
 # ─── Respond — actions + decisions ──────────────────────────────────────────
@@ -1834,7 +1925,12 @@ class TimelineEventCreate(BaseModel):
     mitre_technique_id:   Optional[str]   = Field(default=None, max_length=16)
     mitre_technique_name: Optional[str]   = Field(default=None, max_length=128)
     is_system:            bool            = False
-    system_source:        Optional[str]   = Field(default=None, max_length=32)
+    system_source:        Optional[str]   = Field(
+        default=None, max_length=32,
+        description="Label of an analyst annotation (is_system=true), e.g. \"manual\". The sources the server "
+                    "writes itself (closure, gate_override, milestone, triage, respond_action, "
+                    "respond_action_revert, decision, legal_deadline) are refused: 422 reserved_system_source. "
+                    "Ignored by the batch import.")
 
 
 class TimelineEventUpdate(BaseModel):
@@ -2591,6 +2687,10 @@ class OnCallEntryOut(BaseModel):
     notes:               Optional[str] = None
     created_by_username: Optional[str] = None
     created_at:          datetime
+    oob_contact_methods: Optional[list[ContactMethod]] = Field(
+        default=None,
+        description="The responder's out-of-band contact methods (their roster profile). Returned to "
+                    "analysts and admins; the key is omitted for viewers.")
 
     class Config:
         from_attributes = True
@@ -2707,6 +2807,10 @@ class ResponderProfileUpdate(BaseModel):
     skills:       Optional[list[str]] = None
     availability: Optional[Literal["available", "on_call", "unavailable", "out_of_office"]] = None
     notes:        Optional[str] = None
+    oob_contact_methods: Optional[list[ContactMethod]] = Field(
+        default=None, max_length=10,
+        description="How to reach this responder when email or chat may be compromised (e.g. a mobile "
+                    "number or Signal). Replaces the whole list; [] clears it.")
 
 
 class RosterEntry(BaseModel):
@@ -2718,6 +2822,10 @@ class RosterEntry(BaseModel):
     availability:         str = "available"
     notes:                Optional[str] = None
     active_incident_count: int = 0
+    oob_contact_methods:  Optional[list[ContactMethod]] = Field(
+        default=None,
+        description="Out-of-band contact methods. Personal data: returned to analysts and admins; the key "
+                    "is omitted for viewers.")
 
     class Config:
         from_attributes = True

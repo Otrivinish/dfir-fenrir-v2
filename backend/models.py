@@ -501,6 +501,15 @@ class EntityFile(Base):
     nonce_hex      = Column(String(24),  nullable=False)
     uploaded_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     uploaded_at    = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+    # E4: a screenshot picked for the report's Figures section. Only PNG/JPEG/GIF/WebP by
+    # content (checked when it is set, files/routes.py); the caption is printed under it.
+    include_in_report = Column(Boolean, nullable=False, default=False, server_default="false")
+    report_caption    = Column(String(512))
+    # E-fix L5: SHA-256 (hex) and sniffed image type of the original, stored when the file is picked
+    # (files/routes.py) so report data needn't decrypt it on every call. NULL = not picked, or picked
+    # before these columns existed (report data then hashes it on the fly).
+    report_sha256     = Column(String(64))
+    report_mime       = Column(String(16))
 
 
 # ─── Evidence (chain of custody) ─────────────────────────────────────────────
@@ -1145,6 +1154,30 @@ class IncidentStakeholder(Base):
     created_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at    = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at    = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+# ─── Contacts directory (org-wide, E2) ───────────────────────────────────────
+# External parties the organisation prepares before an incident: supervisory authority,
+# national CSIRT, police cyber unit, insurer, IR retainer, PR. Same columns as
+# IncidentStakeholder plus verification. Adding one to an incident COPIES it into
+# incident_stakeholders, so later directory edits never rewrite a case record.
+
+class OrgContact(Base):
+    __tablename__ = "org_contacts"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name            = Column(String(255), nullable=False)
+    title           = Column(String(128))
+    organization    = Column(String(256))
+    type            = Column(String(32), nullable=False, default="other")   # StakeholderType
+    contact_methods = Column(JSON, nullable=False, default=list)
+    notes           = Column(Text)
+    available_hours = Column(String(64))
+    last_verified_at = Column(DateTime(timezone=True), nullable=True)       # server time of the last check
+    verified_by_id  = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_by_id   = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at      = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at      = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 # ─── Timeline events (per-incident) ─────────────────────────────────────────
@@ -1860,6 +1893,10 @@ class ResponderProfile(Base):
     availability = Column(String(32), nullable=False, default="available")
     # available | on_call | unavailable | out_of_office
     notes        = Column(Text)
+    # E2: how to reach this responder when email / chat may be compromised. Same JSON shape as
+    # IncidentStakeholder.contact_methods. Personal data: returned to analysts and admins only,
+    # never copied into reports or the LE package.
+    oob_contact_methods = Column(JSON, nullable=False, default=list, server_default="[]")
     updated_at   = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 

@@ -1,4 +1,8 @@
-"""On-call schedule — org-wide rota. Admin CRUD; anyone can read."""
+"""On-call schedule — org-wide rota. Admin CRUD; anyone can read.
+
+Each entry also carries the responder's out-of-band contact methods (E2, from their roster
+profile) for analysts and admins; for viewers the key is left out of the response.
+"""
 import uuid
 from datetime import timezone
 
@@ -8,14 +12,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.deps import current_user, require_admin
 from core.database import get_db
-from models import OnCallEntry, User, utc_today
-from schemas import OnCallEntryCreate, OnCallEntryList, OnCallEntryOut, OnCallEntryUpdate
+from models import OnCallEntry, ResponderProfile, User, utc_today
+from schemas import ContactMethod, OnCallEntryCreate, OnCallEntryList, OnCallEntryOut, OnCallEntryUpdate
 
 router = APIRouter()
 
 
-def _to_out(e: OnCallEntry) -> OnCallEntryOut:
-    return OnCallEntryOut.model_validate(e)
+_OOB_READERS = {"admin", "analyst"}          # effective role (an API token's cap applies)
+
+
+async def _oob_by_user(db: AsyncSession, user: User, rows: list) -> dict | None:
+    """user_id -> out-of-band contact methods for the entries' responders; None for a viewer."""
+    if user.role not in _OOB_READERS:
+        return None
+    ids = {r.user_id for r in rows if r is not None and r.user_id}
+    if not ids:
+        return {}
+    res = await db.execute(select(ResponderProfile.user_id, ResponderProfile.oob_contact_methods)
+                           .where(ResponderProfile.user_id.in_(ids)))
+    return {uid: methods or [] for uid, methods in res.all()}
+
+
+def _to_out(e: OnCallEntry, oob: dict | None) -> OnCallEntryOut:
+    out = OnCallEntryOut.model_validate(e)
+    if oob is not None:          # left unset for viewers, so response_model_exclude_unset drops the key
+        out.oob_contact_methods = [ContactMethod.model_validate(m) for m in oob.get(e.user_id, [])]
+    return out
 
 
 async def _get_entry(db: AsyncSession, entry_id: uuid.UUID) -> OnCallEntry:
@@ -27,7 +49,8 @@ async def _get_entry(db: AsyncSession, entry_id: uuid.UUID) -> OnCallEntry:
     return row
 
 
-@router.get("", response_model=OnCallEntryList, summary="Get the on-call schedule")
+@router.get("", response_model=OnCallEntryList, response_model_exclude_unset=True,
+            summary="Get the on-call schedule")
 async def list_on_call(
     include_past: bool = False,
     user: User = Depends(current_user),
@@ -36,7 +59,8 @@ async def list_on_call(
     """List on-call rota entries ordered by start date. Any authenticated user
     may read. By default only entries ending today (UTC date) or later are returned;
     set `include_past=true` to include past entries. Also returns the entry covering
-    today as `current`, if any.
+    today as `current`, if any. Analysts and admins also get each responder's
+    `oob_contact_methods`; for viewers that key is omitted.
     """
     q = select(OnCallEntry)
     if not include_past:
@@ -49,20 +73,22 @@ async def list_on_call(
     current = next(
         (r for r in rows if r.start_date <= today <= r.end_date), None
     )
+    oob = await _oob_by_user(db, user, rows)
     return OnCallEntryList(
-        items=[_to_out(r) for r in rows],
-        current=_to_out(current) if current else None,
+        items=[_to_out(r, oob) for r in rows],
+        current=_to_out(current, oob) if current else None,
     )
 
 
-@router.get("/current", response_model=OnCallEntryOut | None,
+@router.get("/current", response_model=OnCallEntryOut | None, response_model_exclude_unset=True,
             summary="Get the current on-call responder")
 async def get_current_on_call(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Return the on-call entry covering today (UTC date), or null if none is in effect.
-    Any authenticated user may read.
+    Any authenticated user may read; analysts and admins also get the responder's
+    `oob_contact_methods` (omitted for viewers).
     """
     today = utc_today()
     row = (await db.execute(
@@ -71,7 +97,7 @@ async def get_current_on_call(
         .order_by(OnCallEntry.start_date.desc())
         .limit(1)
     )).scalar_one_or_none()
-    return _to_out(row) if row else None
+    return _to_out(row, await _oob_by_user(db, user, [row])) if row else None
 
 
 @router.post("", response_model=OnCallEntryOut, status_code=status.HTTP_201_CREATED,
@@ -106,7 +132,7 @@ async def create_on_call(
     db.add(row)
     await db.commit()
     await db.refresh(row)
-    return _to_out(row)
+    return _to_out(row, await _oob_by_user(db, admin, [row]))
 
 
 @router.patch("/{entry_id}", response_model=OnCallEntryOut,
@@ -144,7 +170,7 @@ async def update_on_call(
 
     await db.commit()
     await db.refresh(row)
-    return _to_out(row)
+    return _to_out(row, await _oob_by_user(db, admin, [row]))
 
 
 @router.delete("/{entry_id}", status_code=status.HTTP_204_NO_CONTENT,

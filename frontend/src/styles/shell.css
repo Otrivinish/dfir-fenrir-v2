@@ -80,8 +80,10 @@
 }
 /* Groups (D5): a caption per group; collapsed, a divider between groups instead. */
 .sb-group { display: flex; flex-direction: column; gap: 1px; }
+/* E2 density: 17 admin links + 6 captions fit a 900 px-tall screen, expanded and collapsed
+   (captions 27 → 21 px; links 33 → 32 px expanded, 41 → 36 px collapsed). */
 .sb-group-label {
-  padding: var(--space-2) 10px var(--space-1);
+  padding: var(--space-1) 10px 2px;
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.14em;
@@ -89,7 +91,6 @@
   text-transform: uppercase;
   white-space: nowrap;
 }
-.sb-group:first-child .sb-group-label { padding-top: var(--space-1); }
 .sb.collapsed .sb-group + .sb-group {
   border-top: 1px solid var(--border);
   margin-top: var(--space-1);
@@ -101,6 +102,7 @@
   align-items: center;
   gap: var(--space-3);
   padding: 6px 10px;   /* 8px before the D5 group captions; keeps all groups on a 900 px screen */
+  line-height: 20px;   /* E2: 32 px tall (was 33 with the icon's 'normal' line box) */
   color: var(--muted);
   border-radius: var(--radius-sm);
   border-left: 2px solid transparent;
@@ -122,7 +124,7 @@
   font-size: 14px;
   flex-shrink: 0;
 }
-.sb.collapsed .nav-item { justify-content: center; padding: 10px 6px; border-left: none; border-right: 2px solid transparent; }
+.sb.collapsed .nav-item { justify-content: center; padding: 8px 6px; border-left: none; border-right: 2px solid transparent; }
 .sb.collapsed .nav-item.active { border-right-color: var(--accent); }
 
 .sb-foot {
@@ -156,7 +158,7 @@
   .sb .sb-foot .who,
   .sb .sb-toggle { display: none; }
   .sb .sb-brand { flex-direction: column; align-items: center; gap: var(--space-1); padding: 12px 0; }
-  .sb .nav-item { justify-content: center; padding: 10px 6px; border-left: none; border-right: 2px solid transparent; }
+  .sb .nav-item { justify-content: center; padding: 8px 6px; border-left: none; border-right: 2px solid transparent; }
   .sb .nav-item.active { border-right-color: var(--accent); }
   .sb .sb-group + .sb-group {
     border-top: 1px solid var(--border);

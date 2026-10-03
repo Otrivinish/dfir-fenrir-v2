@@ -74,31 +74,50 @@ function markdownToHtml(s) {
 }
 
 // ─── Report sections (single source) ─────────────────────────────────────────
-// Order, title and executive-report rule for every numbered section. Used by
+// Order, title, executive-report rule and NIST CSF 2.0 subcategory IDs (`csf`,
+// printed under the heading) for every numbered section. Used by
 // generateProReport(), the "Show structure" preview and the Reports page's
 // "Include sections" checkboxes — add or rename a section here, nowhere else.
+// The section → CSF table is documented in docs/reports.md §2.
 export const REPORT_SECTIONS = [
-  { key: 'exec_summary',  title: 'Executive Summary' },
-  { key: 'details',       title: 'Incident Details' },
-  { key: 'assignments',   title: 'Assignments' },
-  { key: 'stakeholders',  title: 'Stakeholders' },
-  { key: 'detection',     title: 'Detection & Identification', fullOnly: true },
-  { key: 'cer',           title: 'Containment, Eradication & Recovery', fullOnly: true },
-  { key: 'decisions',     title: 'Decisions Log' },
-  { key: 'impact',        title: 'Impact Assessment' },
-  { key: 'legal',         title: 'Legal & Regulatory Deadlines' },
-  { key: 'root_cause',    title: 'Root Cause Analysis' },
-  { key: 'attack_chain',  title: 'Attack Chain' },
-  { key: 'attribution',   title: 'Threat Actor Attribution' },
-  { key: 'entities',      title: 'Entities & Attack Path' },
-  { key: 'evidence',      title: 'Evidence & Artifacts', fullOnly: true },
-  { key: 'playbook',      title: 'Playbook', fullOnly: true },
-  { key: 'closure',       title: 'Closure Checklist Completion' },
-  { key: 'lessons',       title: 'Lessons Learned & Recommendations' },
-  { key: 'remediation',   title: 'Remediation Plan' },
-  { key: 'costs',         title: 'Cost Tracking' },
+  { key: 'exec_summary',  title: 'Executive Summary',                   csf: ['RS.CO-03', 'RS.AN-03'] },
+  { key: 'details',       title: 'Incident Details',                    csf: ['DE.AE-08', 'RS.MA-02', 'RS.MA-03'] },
+  { key: 'assignments',   title: 'Assignments',                         csf: ['GV.RR-02'] },
+  { key: 'stakeholders',  title: 'Stakeholders',                        csf: ['RS.CO-02', 'RS.CO-03'] },
+  { key: 'detection',     title: 'Detection & Identification', fullOnly: true, csf: ['DE.AE-02', 'DE.AE-03', 'DE.AE-07'] },
+  { key: 'cer',           title: 'Containment, Eradication & Recovery', fullOnly: true, csf: ['RS.MI-01', 'RS.MI-02', 'RC.RP-02'] },
+  { key: 'decisions',     title: 'Decisions Log',                       csf: ['RS.AN-06', 'RS.MA-04'] },
+  { key: 'impact',        title: 'Impact Assessment',                   csf: ['RS.AN-08', 'DE.AE-04'] },
+  { key: 'legal',         title: 'Legal & Regulatory Deadlines',        csf: ['GV.OC-03', 'RS.CO-02'] },
+  { key: 'comms_log',     title: 'Communications & Notification Log', fullOnly: true, csf: ['RS.CO-02', 'RS.CO-03'] },
+  { key: 'root_cause',    title: 'Root Cause Analysis',                 csf: ['RS.AN-03'] },
+  { key: 'attack_chain',  title: 'Attack Chain',                        csf: ['RS.AN-03', 'DE.AE-02'] },
+  { key: 'attribution',   title: 'Threat Actor Attribution',            csf: ['ID.RA-03', 'DE.AE-07'] },
+  { key: 'entities',      title: 'Entities & Attack Path',              csf: ['RS.AN-08', 'ID.AM-05'] },
+  { key: 'evidence',      title: 'Evidence & Artifacts', fullOnly: true, csf: ['RS.AN-07'] },
+  { key: 'attachments',   title: 'Figures',                             csf: ['RS.AN-06'] },
+  { key: 'playbook',      title: 'Playbook', fullOnly: true,            csf: ['RS.MA-01'] },
+  { key: 'closure',       title: 'Closure Checklist Completion',        csf: ['RC.RP-06'] },
+  { key: 'lessons',       title: 'Lessons Learned & Recommendations',   csf: ['ID.IM-03', 'ID.IM-04'] },
+  { key: 'remediation',   title: 'Remediation Plan',                    csf: ['ID.IM-03', 'ID.RA-06'] },
+  { key: 'costs',         title: 'Cost Tracking',                       csf: ['RS.AN-08', 'RC.RP-06'] },
+  { key: 'sign_off',      title: 'Approval & Sign-off',                 csf: ['RC.RP-06', 'GV.RR-02'] },
 ]
 const SECTION_BY_KEY = Object.fromEntries(REPORT_SECTIONS.map(s => [s.key, s]))
+// Appendices carry CSF IDs too (keyed by appendix title; same list for report and structure).
+const APPENDIX_CSF = {
+  'Affected Systems':  ['RS.AN-08', 'ID.AM-05'],
+  'Incident Timeline': ['RS.AN-03', 'RS.AN-06'],
+}
+// NCISS severity label (the server maps internal severity → NCISS: incident.nciss_severity).
+// It is a fixed mapping, not an NCISS scoring, so every place it is shown says so.
+function ncissLabel(v) { return v ? v.charAt(0).toUpperCase() + v.slice(1) : '—' }
+const NCISS_TITLE = 'NCISS (mapped from internal severity)'
+function csfLine(ids) {
+  return ids && ids.length
+    ? `<div class="csf-line">NIST CSF 2.0: ${ids.map(id => `<span class="csf-id">${esc(id)}</span>`).join(' ')}</div>`
+    : ''
+}
 // Checkbox list for the Reports page: the cover stats strip + every section.
 export const REPORT_SECTION_OPTIONS = [
   { key: 'kpis', title: 'Key metrics strip (cover)' },
@@ -356,6 +375,13 @@ function _fmtLate(hours) {
   return hours >= 48 ? `${Math.round(hours / 24)}d` : `${Math.round(hours)}h`
 }
 
+function _fmtSize(n) {
+  if (n == null) return '—'
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`
+  return `${(n / (1024 * 1024)).toFixed(2)} MiB`
+}
+
 // Regulatory-deadline compliance badge. `compliance` is computed server-side
 // (met | violated | pending | waived).
 function _proComplianceHtml(d) {
@@ -464,6 +490,7 @@ function generateProReport(data, opts = {}) {
     audience = '',
     includeTimelineAppendix = false,
     sections: sectionToggles = {},
+    figures: preparedFigures = null,
   } = opts
   // Every section is included unless its "Include sections" checkbox is off.
   const include = (key) => sectionToggles[key] !== false
@@ -494,6 +521,14 @@ function generateProReport(data, opts = {}) {
   const stakeholders = data.stakeholders || []
   const attributions = data.attributions || []
   const affected    = data.affected_systems || []
+  const oobLog      = data.oob_log || []
+  const closure     = data.closure || {}
+  const signOffs    = data.sign_offs || []
+  // Figures: images prepared by the Reports page (fetched, hashed, embedded); without
+  // them (e.g. a caller that only has the data) every figure is listed, not embedded.
+  const figures = preparedFigures
+    || (data.report_files || []).map((f, i) => ({ ...f, n: i + 1, src: null, note: 'Image not embedded.' }))
+  const nciss = ncissLabel(inc.nciss_severity)
   const malicIocs = iocs.filter(i => i.malicious === true).length
   const taskDone  = tasks.filter(t => t.status === 'done').length
   const taskPct   = pct(taskDone, tasks.length)
@@ -699,6 +734,69 @@ function generateProReport(data, opts = {}) {
   const notClosed = '<span style="color:#d97706">Not closed</span>'
   const pending   = '<span style="color:#d97706">Pending</span>'
 
+  // Communications & Notification Log — the out-of-band log (never the passphrase or contact details)
+  const commsLogHtml = oobLog.length
+    ? `<p class="small" style="color:var(--text-muted);margin-bottom:12px">Contacts logged out of band (Comms &amp; stakeholders → Out-of-band). Contact details and the verification passphrase are not printed.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Time</th><th>Direction</th><th>Channel</th><th>Stakeholder</th><th>Summary</th><th>Identity verified</th><th>Logged by</th></tr></thead>
+        <tbody>${oobLog.map(o => `<tr>
+          <td class="mono small">${esc(fmtTs(o.created_at))}</td>
+          <td style="text-transform:capitalize">${esc(o.direction || '')}</td>
+          <td style="text-transform:capitalize">${esc((o.channel || '').replace(/_/g, ' '))}</td>
+          <td style="font-weight:600">${esc(o.stakeholder_name || '')}</td>
+          <td class="small">${esc(o.summary || '')}</td>
+          <td>${o.verified
+            ? `<span class="status-ok">✓ Yes</span>${o.verification_method ? `<div class="tiny" style="color:var(--text-dim)">${esc(o.verification_method)}</div>` : ''}`
+            : '<span class="status-unk">No</span>'}</td>
+          <td class="mono small">${esc(o.created_by_username || '—')}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`
+    : '<div class="placeholder-box"><strong>[ NO OUT-OF-BAND COMMUNICATIONS LOGGED ]</strong></div>'
+
+  // Figures — numbered, caption + SHA-256 of the original file. '' when none are picked
+  // (the section is then omitted). Only a raster data: URI is ever embedded.
+  const RASTER_DATA_URI = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+=*$/
+  const figuresHtml = figures.length
+    ? `<p class="small" style="color:var(--text-muted);margin-bottom:16px">Screenshots picked in Supporting documents. Each SHA-256 is of the original file as stored in FENRIR.</p>`
+      + figures.map(f => {
+        const title = f.caption || f.name
+        const src = f.src && RASTER_DATA_URI.test(f.src) ? f.src : null
+        return `<figure class="fig">
+      ${src
+        ? `<img src="${src}" alt="Figure ${f.n}: ${esc(title)}">`
+        : `<div class="placeholder-box"><strong>[ FIGURE ${f.n} NOT EMBEDDED ]</strong>${esc(f.note || '')}</div>`}
+      <figcaption><strong>Figure ${f.n}.</strong> ${esc(title)}
+        <div class="fig-meta">${esc(f.name)} · ${esc(f.mime || 'unknown type')} · ${esc(_fmtSize(f.size))} · SHA-256 ${f.integrity === 'failed' ? '<strong class="fig-integrity-failed">integrity check failed</strong>' : f.sha256 ? `<span class="fig-sha">${esc(f.sha256)}</span>` : 'not available'}</div>
+        ${src && f.note ? `<div class="fig-meta">${esc(f.note)}</div>` : ''}
+      </figcaption>
+    </figure>`
+      }).join('')
+    : ''
+
+  // Approval & Sign-off — the recorded close sign-off, then a signature line per named role
+  const signOffHtml = `
+  <div class="two-col" style="margin-bottom:24px">
+    <div class="info-card"><div class="label">Closed by</div><div class="value">${closure.closed ? esc(closure.closed_by || 'Not recorded') : notClosed}</div></div>
+    <div class="info-card"><div class="label">Closed at</div><div class="value mono">${closure.closed_at ? esc(fmtTs(closure.closed_at)) : notClosed}</div></div>
+  </div>
+  <h3>Close sign-off statement</h3>
+  ${closure.reason
+    ? `<div class="prose" style="white-space:pre-wrap">${esc(closure.reason)}</div>`
+    : `<div class="placeholder-box"><strong>[ ${closure.closed ? 'NO SIGN-OFF STATEMENT RECORDED' : 'NOT CLOSED — NO SIGN-OFF STATEMENT YET'} ]</strong></div>`}
+  <h3>Signatures</h3>
+  <div class="table-wrap"><table class="table-fixed">
+    <colgroup><col style="width:26%"><col style="width:26%"><col style="width:30%"><col style="width:18%"></colgroup>
+    <thead><tr><th>Role</th><th>Name</th><th>Signature</th><th>Date</th></tr></thead>
+    <tbody>${signOffs.flatMap(r => (r.assignees && r.assignees.length ? r.assignees : [null]).map(a => `<tr class="sig-row">
+      <td style="font-weight:600">${esc(r.role_label)}</td>
+      <td>${a
+        ? `${esc(a.name)}${a.name !== a.username ? `<div class="tiny mono" style="color:var(--text-dim)">${esc(a.username)}</div>` : ''}`
+        : '<span class="status-unk">Not assigned</span>'}</td>
+      <td><span class="sig-line"></span></td>
+      <td><span class="sig-line"></span></td>
+    </tr>`)).join('')}</tbody>
+  </table></div>`
+
   // ── Sections ─────────────────────────────────────────────────────────────
   // KEEP IN SYNC: keys/titles/fullOnly come from REPORT_SECTIONS; "Show structure"
   // (_skeletonSections / _skeletonAppendices below) describes this list — order, titles, fullOnly / conditional rules
@@ -715,7 +813,7 @@ function generateProReport(data, opts = {}) {
     { key: 'details', body: `
   <div class="two-col" style="margin-bottom:24px">
     <div class="info-card"><div class="label">Incident Type</div><div class="value">${esc(inc.incident_type ? inc.incident_type.replace(/_/g, ' ') : '[Not specified]')}</div></div>
-    <div class="info-card"><div class="label">Severity</div><div class="value" style="color:${sevColor}">${esc(sev.toUpperCase())}</div></div>
+    <div class="info-card"><div class="label">Severity</div><div class="value" style="color:${sevColor}">${esc(sev.toUpperCase())}</div><div class="small nciss" style="color:var(--text-muted);margin-top:4px">${NCISS_TITLE}: <strong>${esc(nciss)}</strong></div></div>
     <div class="info-card"><div class="label">TLP Classification</div><div class="value" style="color:${tlpColor}">TLP:${tlpUpper}</div></div>
     <div class="info-card"><div class="label">Current Phase</div><div class="value">${esc(phaseLabel(inc.phase))}</div></div>
     <div class="info-card"><div class="label">Triage State</div><div class="value">${esc(inc.triage_state || '—')}</div></div>
@@ -788,6 +886,8 @@ function generateProReport(data, opts = {}) {
 
     { key: 'legal', body: deadlinesHtml },
 
+    { key: 'comms_log', body: commsLogHtml },
+
     { key: 'root_cause', body: `
   <h3>Initial Attack Vector / Root Cause Category</h3>
   ${ll && ll.root_cause_category
@@ -824,6 +924,8 @@ function generateProReport(data, opts = {}) {
          <div class="info-card"><div class="label">Physical Items</div><div class="value">${ev.physical || 0}</div></div>
        </div>`
     : '<div class="placeholder-box"><strong>[ NO EVIDENCE ITEMS COLLECTED ]</strong></div>' },
+
+    { key: 'attachments', body: figuresHtml },
 
     { key: 'playbook',
       body: playbookSections || '<div class="placeholder-box"><strong>[ NO PLAYBOOK TASKS RECORDED ]</strong></div>' },
@@ -877,12 +979,16 @@ function generateProReport(data, opts = {}) {
          </tr>`).join('')}</tbody>
        </table></div>`
     : ((bia && bia.financial) ? '' : '<div class="placeholder-box"><strong>[ NO COSTS RECORDED ]</strong></div>')}` },
+
+    { key: 'sign_off', body: signOffHtml },
   ].map(s => ({ ...SECTION_BY_KEY[s.key], ...s }))
+   .sort((a, b) => REPORT_SECTIONS.indexOf(SECTION_BY_KEY[a.key]) - REPORT_SECTIONS.indexOf(SECTION_BY_KEY[b.key]))
    .filter(s => !(isExec && s.fullOnly) && include(s.key) && s.body)
 
   const sectionsHtml = sections.map((s, i) => `
-<div class="section${i % 2 ? ' section-alt' : ''}">
+<div class="section${i % 2 ? ' section-alt' : ''}" data-section="${esc(s.key)}">
   <div class="section-header"><span class="section-number">§ ${String(i + 1).padStart(2, '0')}</span><h2>${esc(s.title)}</h2></div>
+  ${csfLine(s.csf)}
   ${s.body}
 </div>`).join('\n')
 
@@ -903,6 +1009,7 @@ function generateProReport(data, opts = {}) {
     <span class="section-number" style="letter-spacing:1px">${letter}</span>
     <h2>Appendix ${letter} — ${esc(a.title)}</h2>
   </div>
+  ${csfLine(APPENDIX_CSF[a.title])}
   ${a.body}
 </div>`
   }).join('\n')
@@ -937,6 +1044,7 @@ function generateProReport(data, opts = {}) {
 <div class="doc-control">
   <div class="doc-control-item"><div class="label">Classification</div><div class="value">${esc(classDisplay)}</div></div>
   <div class="doc-control-item"><div class="label">Severity</div><div class="value" style="color:${sevColor}">${esc(sev.toUpperCase())}</div></div>
+  <div class="doc-control-item"><div class="label">${NCISS_TITLE}</div><div class="value nciss">${esc(nciss)}</div></div>
   <div class="doc-control-item"><div class="label">IR Phase</div><div class="value">${esc(phaseLabel(inc.phase))}</div></div>
   <div class="doc-control-item"><div class="label">Timeline Events</div><div class="value">${evs.length}</div></div>
   <div class="doc-control-item"><div class="label">IOCs</div><div class="value">${iocs.length} (${malicIocs} malicious)</div></div>
@@ -1041,6 +1149,14 @@ ${appendicesHtml}
   .info-card .value { font-size: 15px; font-weight: 600; color: var(--text); }
   .footer { padding: 24px 64px; display: flex; justify-content: space-between; align-items: flex-start; color: var(--text-dim); font-size: 11px; background: var(--bg-card); border-top: 1px solid var(--border); font-family: var(--mono); gap: 12px; flex-wrap: wrap; }
   .footer-tlp { color: ${tlpColor}; font-weight: 700; letter-spacing: 1px; }
+  .csf-line { margin: -18px 0 24px; font-size: 11px; color: var(--text-dim); font-family: var(--mono); letter-spacing: 0.5px; }
+  .csf-id { display: inline-block; padding: 1px 6px; border: 1px solid var(--border); border-radius: 3px; color: var(--text-muted); background: var(--bg-card); }
+  .fig { margin: 0 0 32px; page-break-inside: avoid; }
+  .fig img { display: block; max-width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; }
+  .fig figcaption { margin-top: 8px; font-size: 13px; color: var(--text); }
+  .fig-meta { margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--text-dim); overflow-wrap: anywhere; }
+  .sig-row td { height: 56px; vertical-align: bottom; }
+  .sig-line { display: block; border-bottom: 1px solid var(--text-muted); height: 24px; }
   .table-fixed { table-layout: fixed; }
   .table-fixed th { white-space: normal; }
   .table-fixed td { overflow-wrap: anywhere; }
@@ -1139,6 +1255,7 @@ const SKELETON_CSS = `
   .sk-num { display: inline-block; min-width: 38px; margin-right: 8px; padding: 1px 6px; border: 1px solid #f8717155; border-radius: 3px; color: #f87171; font: 700 10px 'JetBrains Mono', Consolas, monospace; letter-spacing: 0.1em; text-align: center; }
   .sk-tag { margin-left: 8px; padding: 1px 6px; border-radius: 3px; background: #1e1e30; color: #8888aa; font-size: 10px; font-weight: 600; }
   .sk-cond { margin: 0 0 6px; color: #fbbf24; font-size: 12px; font-style: italic; }
+  .sk-csf { margin: 0 0 6px; color: #8888aa; font: 600 11px 'JetBrains Mono', Consolas, monospace; letter-spacing: 0.04em; }
   .legend { display: flex; gap: 10px; margin-bottom: 24px; font-size: 11px; color: #8888aa; flex-wrap: wrap; }
   .legend > span { display: inline-flex; align-items: center; gap: 6px; }
   .meta { font-size: 11px; color: #555570; font-family: 'JetBrains Mono', Consolas, monospace; margin-top: 32px; padding-top: 16px; border-top: 1px solid #1e1e30; }
@@ -1169,6 +1286,7 @@ function _skeletonSections() {
     ]},
     { key: 'details', items: [
       `Type · Severity · TLP · Triage state · Reporter: ${ph('incident.incident_type / severity / tlp / triage_state / reporter', 'auto')} ${where('Details → Classification')}`,
+      `${NCISS_TITLE}, next to the severity: ${ph('incident.nciss_severity', 'auto')} <span class="static">— critical → Emergency, high → Severe, medium → Medium, low → Low</span>`,
       `Current phase: ${ph('incident.phase', 'auto')} ${where('phase stepper in the incident header')}`,
       `Occurred · Detected at: ${ph('incident.occurred_at / detected_at', 'auto')} ${where('Details → Classification')}`,
       `Contained · Eradicated · Recovered at: ${ph('incident.contained_at / eradicated_at / recovered_at', 'auto')} ${where('Declare … in the incident header, or Details → Classification')} <span class="static">— "Pending" until declared</span>`,
@@ -1202,6 +1320,10 @@ function _skeletonSections() {
       `Table: ${ph('regulatory_deadlines[*] (regulation, article, obligation, recipient, deadline, status, completed)', 'auto')} ${where('Legal & regulatory')}`,
       `Compliance: ${ph('met / violated (late or overdue) / pending / waived', 'auto')} <span class="static">— computed by the server</span>`,
     ]},
+    { key: 'comms_log', items: [
+      `Table: ${ph('oob_log[*] (time, direction, channel, stakeholder, summary, identity verified + method, logged by)', 'auto')} ${where('Comms & stakeholders → Out-of-band')}`,
+      `<span class="static">Contact details and the verification passphrase are never printed.</span>`,
+    ]},
     { key: 'root_cause', items: [
       `Root cause category + description · Contributing factors: ${ph('lessons_learned.root_cause_*, contributing_factors[]', 'auto')} ${where('Post-Incident → Lessons Learned → Root Cause Analysis')}`,
       `MITRE ATT&CK table: ${ph('timeline_events[*] with a MITRE technique', 'auto')} ${where('Timeline tab')}`,
@@ -1217,6 +1339,11 @@ function _skeletonSections() {
     ]},
     { key: 'evidence', items: [
       `Counts: ${ph('evidence_summary (total, active, digital, physical)', 'auto')} ${where('Evidence tab')}`,
+    ]},
+    { key: 'attachments', conditional: 'Only when at least one file is ticked "Include in report" in Supporting documents — otherwise omitted and the sections below move up one number.', items: [
+      `Numbered figures (Figure 1, 2 …), oldest first: image + ${ph('report_files[*].caption (or file name)', 'auto')} ${where('Supporting documents → Include in report')}`,
+      `Under each: file name · type · size · ${ph('SHA-256 of the original file', 'auto')} <span class="static">(computed in the browser from the downloaded original; checked against the server's)</span>`,
+      `<span class="static">Images over 1.5 MB are downscaled to at most 1920 px (JPEG) for the report. Embedded images are capped at 7 MiB in total; you are warned before saving and figures over the cap are listed without the image.</span>`,
     ]},
     { key: 'playbook', items: [
       `Per-phase tasks + progress: ${ph('playbook_tasks[*] (title, phase, status)', 'auto')} ${where('Playbook tab')}`,
@@ -1240,8 +1367,15 @@ function _skeletonSections() {
       `Financial impact narrative: ${ph('business_impact.financial', 'auto')} ${where('Post-Incident → Reports → Business Impact')}`,
       `Totals per currency and by category + itemised costs: ${ph('costs[*] (category, description, amount, currency)', 'auto')} ${where('Post-Incident → Reports → Cost Tracking')}`,
     ]},
+    { key: 'sign_off', items: [
+      `Closed by · Closed at: ${ph('closure.closed_by / closed_at', 'auto')} ${where('Close (Post-Incident) in the incident header')} <span class="static">— "Not closed" while open</span>`,
+      `Close sign-off statement: ${ph('closure.reason', 'auto')} <span class="static">— the reason given at Close</span>`,
+      `Signature line per role: ${ph('sign_offs[*] (Incident Commander, Deputy, Legal Liaison, DPO → assignees)', 'auto')} ${where('Team')} <span class="static">— "Not assigned" when the role is empty; signature and date are left blank for ink</span>`,
+    ]},
   ]
-  return list.map(s => ({ ...SECTION_BY_KEY[s.key], ...s }))
+  // Order and titles always follow REPORT_SECTIONS (the single source).
+  const byKey = Object.fromEntries(list.map(s => [s.key, s]))
+  return REPORT_SECTIONS.map(s => ({ items: [], ...byKey[s.key], ...s }))
 }
 
 // Mirrors the `appendices` array in generateProReport() — see KEEP IN SYNC above.
@@ -1294,6 +1428,7 @@ export function generateSkeleton(opts = {}) {
       <h3>Cover · document control · stats bar</h3>
       <ul>
         <li>Title · severity · TLP · phase · status badges: ${ph('incident.title / severity / tlp / phase / status', 'auto')}</li>
+        <li>Document control: classification · severity · ${ph('incident.nciss_severity', 'auto')} (${NCISS_TITLE}) · phase · counts · report type</li>
         <li>Logo: ${ph('Branding → Company logo', 'user')}</li>
         <li>Incident ID: ${ph('incident.ref (e.g. INC-2026-00009)', 'auto')} · Opened: ${ph('incident.created_at', 'auto')} · Closed: ${ph('incident.closed_at', 'auto')} <span class="static">("Not closed" while open)</span> · Generated: ${ph('report time', 'auto')}</li>
         <li>Classification: ${ph('Advanced options → Classification marking', 'user')} or fallback ${ph('incident.tlp', 'auto')}</li>
@@ -1307,6 +1442,7 @@ export function generateSkeleton(opts = {}) {
   const secs = shown.map((s) => include(s.key) ? `
       <div class="sk-section">
         <h3><span class="sk-num">§ ${String(++n).padStart(2, '0')}</span>${esc(s.title)}${s.fullOnly ? '<span class="sk-tag">full report only</span>' : ''}</h3>
+        <p class="sk-csf">NIST CSF 2.0: ${s.csf.map(esc).join(' · ')}</p>
         ${s.conditional ? `<p class="sk-cond">${esc(s.conditional)}</p>` : ''}
         <ul>${s.items.filter(Boolean).map(item => `<li>${item}</li>`).join('')}</ul>
       </div>` : `
@@ -1320,6 +1456,7 @@ export function generateSkeleton(opts = {}) {
       <div class="sk-section${a.included ? '' : ' excluded'}">
         ${a.included ? '' : '<span class="excluded-badge">Not included</span>'}
         <h3><span class="sk-num">${a.letter}</span>Appendix ${a.letter} — ${esc(a.title)}</h3>
+        <p class="sk-csf">NIST CSF 2.0: ${APPENDIX_CSF[a.title].map(esc).join(' · ')}</p>
         ${a.hint ? `<p class="sk-cond">${esc(a.hint)}</p>` : ''}
         <ul>${a.items.map(item => `<li>${item}</li>`).join('')}</ul>
       </div>`).join('')

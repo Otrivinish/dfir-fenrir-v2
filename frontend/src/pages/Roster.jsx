@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '../api/client.js'
 import { useAuth } from '../hooks/useAuth.jsx'
+import { CHANNEL_OPTS } from './incident/comms/Stakeholders.jsx'
 
 const AVAILABILITY_OPTIONS = [
   { value: 'available',      label: 'Available',      color: 'var(--ok)'     },
@@ -35,6 +36,9 @@ function EditProfileModal({ entry, onClose, onSaved }) {
   const [skillInput, setSkillInput]       = useState('')
   const [availability, setAvailability]   = useState(entry.availability ?? 'available')
   const [notes, setNotes]                 = useState(entry.notes ?? '')
+  // E2: out-of-band contact methods. The API returns them to analysts and admins (the only
+  // roles that can open this modal); same shape as an incident stakeholder's contact methods.
+  const [oob, setOob]                     = useState(() => (entry.oob_contact_methods ?? []).map(m => ({ ...m, notes: m.notes ?? '' })))
   const [saving, setSaving]               = useState(false)
   const [error, setError]                 = useState(null)
 
@@ -47,6 +51,11 @@ function EditProfileModal({ entry, onClose, onSaved }) {
 
   const removeSkill = (s) => setSkills(prev => prev.filter(x => x !== s))
 
+  const addOob    = () => setOob(prev => [...prev, { channel: 'mobile', value: '', preferred: prev.length === 0, notes: '' }])
+  const removeOob = (i) => setOob(prev => prev.filter((_, j) => j !== i))
+  const setOobAt  = (i, k, v) => setOob(prev => prev.map((m, j) =>
+    j === i ? { ...m, [k]: v } : (k === 'preferred' && v ? { ...m, preferred: false } : m)))
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     setSaving(true)
@@ -56,6 +65,9 @@ function EditProfileModal({ entry, onClose, onSaved }) {
         skills,
         availability,
         notes: notes.trim() || null,
+        oob_contact_methods: oob
+          .filter(m => m.value.trim())
+          .map(m => ({ channel: m.channel, value: m.value.trim(), preferred: !!m.preferred, notes: m.notes.trim() || null })),
       })
       onSaved(updated)
     } catch (err) {
@@ -139,6 +151,37 @@ function EditProfileModal({ entry, onClose, onSaved }) {
                 ))}
               </div>
             </div>
+
+            <fieldset className="oob-editor" style={{ border: 'none', margin: 0, padding: 0, minWidth: 0 }}>
+              <legend className="field-label" style={{ padding: 0 }}>Out-of-band contact</legend>
+              <div id="oob-help" style={{ fontSize: 11, color: 'var(--muted)', margin: '2px 0 6px' }}>
+                How to reach you if email or chat is compromised, e.g. a mobile number or Signal. Analysts and
+                admins see it on On-call and the Dashboard; it never goes into reports or the LE package.
+              </div>
+              {oob.length === 0 && (
+                <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>None recorded.</div>
+              )}
+              {oob.map((m, i) => (
+                <div key={i} className="oob-row" style={{ display: 'grid', gridTemplateColumns: '112px minmax(0, 1fr) auto auto', gap: 'var(--space-2)', alignItems: 'center', marginBottom: 6 }}>
+                  <select className="select compact" aria-label={`Channel ${i + 1}`} value={m.channel}
+                          onChange={e => setOobAt(i, 'channel', e.target.value)}>
+                    {CHANNEL_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                  <input className="input compact" aria-label={`Number or handle ${i + 1}`} aria-describedby="oob-help"
+                         value={m.value} maxLength={512} placeholder="+46 70 123 45 67"
+                         onChange={e => setOobAt(i, 'value', e.target.value)} />
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+                    <input type="checkbox" checked={!!m.preferred} onChange={e => setOobAt(i, 'preferred', e.target.checked)} />
+                    Preferred
+                  </label>
+                  <button type="button" className="btn ghost" aria-label={`Remove out-of-band contact ${i + 1}`}
+                          onClick={() => removeOob(i)}>✕</button>
+                </div>
+              ))}
+              {oob.length < 10 && (
+                <button type="button" className="btn" style={{ fontSize: 12 }} onClick={addOob}>+ Add out-of-band contact</button>
+              )}
+            </fieldset>
 
             <label className="field-label">
               Notes <span className="muted">(optional)</span>
