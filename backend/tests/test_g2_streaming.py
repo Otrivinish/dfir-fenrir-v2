@@ -400,12 +400,25 @@ class _Passthrough(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+# The test registers each stored file here; requests carry only an opaque key, never a path.
+_FILES: dict[str, tuple[str, str, int]] = {}
+
+
+def _register(r: str, n: str, size: int) -> str:
+    key = str(len(_FILES))
+    _FILES[key] = (r, n, size)
+    return key
+
+
 def _app() -> FastAPI:
     app = FastAPI()
     app.add_middleware(_Passthrough)
 
     @app.get("/f")
-    async def get_file(r: str, n: str, size: int):
+    async def get_file(k: str):
+        if k not in _FILES:
+            raise ApiError(404, "file_not_found", "unknown test file key")
+        r, n, size = _FILES[k]
         try:
             return await st.decrypted_download(r, n, size, media_type="application/octet-stream",
                                                headers={"Content-Disposition": 'attachment; filename="x"'})
@@ -432,7 +445,7 @@ class Downloads(Base):
     async def fetch(self, base, r, n, size):
         """(status, headers, body bytes, error or None) — reads the body as a client would."""
         async with httpx.AsyncClient(base_url=base, timeout=120) as cli:
-            async with cli.stream("GET", "/f", params={"r": r, "n": n, "size": size}) as resp:
+            async with cli.stream("GET", "/f", params={"k": _register(r, n, size)}) as resp:
                 body = bytearray()
                 try:
                     async for piece in resp.aiter_raw():
@@ -513,7 +526,7 @@ class Downloads(Base):
         async def go():
             async with serve(_app()) as base:
                 async with httpx.AsyncClient(base_url=base, timeout=600) as cli:
-                    async with cli.stream("GET", "/f", params={"r": r, "n": s.nonce_hex, "size": n}) as resp:
+                    async with cli.stream("GET", "/f", params={"k": _register(r, s.nonce_hex, n)}) as resp:
                         hh, got = hashlib.sha256(), 0
                         async for piece in resp.aiter_raw():
                             hh.update(piece)
