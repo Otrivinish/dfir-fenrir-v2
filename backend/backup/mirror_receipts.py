@@ -104,12 +104,13 @@ async def ingest_receipts(db) -> int:
             AuditLog.request_id == rec["receipt_id"], AuditLog.action == ACTION).limit(1))).first()
         if done:
             continue
-        for item in rec["items"]:
+        for idx, item in enumerate(rec["items"], start=1):
             ev = (await db.execute(select(Evidence.id, Evidence.incident_id, Evidence.status, Evidence.identifier)
                                    .where(Evidence.id == uuid.UUID(item["evidence_id"])))).first()
             if ev is None or ev.status != "destroyed":
-                log.warning("mirror purge receipt %s: %s is not a destroyed exhibit here; not recorded",
-                            name, item["evidence_id"])
+                # Log the item's position, not the receipt-supplied value (it stays in the receipt file).
+                log.warning("mirror purge receipt %s: item %d is not a destroyed exhibit here; not recorded",
+                            name, idx)
                 continue
             await write_audit(
                 db, ACTION, username="backup:mirror-purge", role_at_time="backup-sidecar", outcome="success",

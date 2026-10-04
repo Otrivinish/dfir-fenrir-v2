@@ -667,18 +667,18 @@ _INPLACE_MIGRATIONS: list[str] = [
                           "system_time_offset_seconds IS NULL "
                           "OR system_time_offset_seconds BETWEEN -3155760000 AND 3155760000"),
     "ALTER TABLE forensic_imports ADD COLUMN IF NOT EXISTS clock_offset_seconds BIGINT",
-    "ALTER TABLE defender_pdf_imports ADD COLUMN IF NOT EXISTS evidence_id UUID "
+    "ALTER TABLE defender_pdf_imports ADD COLUMN IF NOT EXISTS evidence_id UUID " +
     "REFERENCES evidence(id) ON DELETE SET NULL",
     "ALTER TABLE defender_pdf_imports ADD COLUMN IF NOT EXISTS parser_name VARCHAR(64)",
     "ALTER TABLE defender_pdf_imports ADD COLUMN IF NOT EXISTS parser_version VARCHAR(32)",
     "ALTER TABLE defender_pdf_imports ADD COLUMN IF NOT EXISTS clock_offset_seconds BIGINT",
-    "CREATE INDEX IF NOT EXISTS ix_defender_pdf_imports_evidence_id ON defender_pdf_imports(evidence_id) "
+    "CREATE INDEX IF NOT EXISTS ix_defender_pdf_imports_evidence_id ON defender_pdf_imports(evidence_id) " +
     "WHERE evidence_id IS NOT NULL",
-    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS defender_import_id UUID "
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS defender_import_id UUID " +
     "REFERENCES defender_pdf_imports(id) ON DELETE RESTRICT",
     "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS recorded_event_time TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS clock_offset_seconds BIGINT",
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_defender_import_event "
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_defender_import_event " +
     "ON timeline_events(defender_import_id, import_event_index) WHERE defender_import_id IS NOT NULL",
     _add_check_if_missing("timeline_events", "ck_timeline_events_clock_offset",
                           "(recorded_event_time IS NULL) = (clock_offset_seconds IS NULL)"),
@@ -686,9 +686,9 @@ _INPLACE_MIGRATIONS: list[str] = [
                           "forensic_import_id IS NULL OR defender_import_id IS NULL"),
     "ALTER TABLE collection_packages ADD COLUMN IF NOT EXISTS container_sha256 VARCHAR(64)",
     "ALTER TABLE collection_packages ADD COLUMN IF NOT EXISTS container_size BIGINT",
-    "ALTER TABLE collection_packages ADD COLUMN IF NOT EXISTS evidence_id UUID "
+    "ALTER TABLE collection_packages ADD COLUMN IF NOT EXISTS evidence_id UUID " +
     "REFERENCES evidence(id) ON DELETE SET NULL",
-    "CREATE INDEX IF NOT EXISTS ix_collection_packages_evidence_id ON collection_packages(evidence_id) "
+    "CREATE INDEX IF NOT EXISTS ix_collection_packages_evidence_id ON collection_packages(evidence_id) " +
     "WHERE evidence_id IS NOT NULL",
 
     # G3 — register-first Email, Browser history and PCAP (R02). Additive and nullable, NO backfill:
@@ -709,7 +709,7 @@ _INPLACE_MIGRATIONS: list[str] = [
     "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS exhibit_link VARCHAR(16)",
     _add_check_if_missing("email_analysis", "ck_email_analysis_exhibit_link",
                           "exhibit_link IS NULL OR exhibit_link IN ('registered', 'sha256_match', 'from_evidence')"),
-    "CREATE INDEX IF NOT EXISTS ix_email_analysis_evidence_id ON email_analysis(evidence_id) "
+    "CREATE INDEX IF NOT EXISTS ix_email_analysis_evidence_id ON email_analysis(evidence_id) " +
     "WHERE evidence_id IS NOT NULL",
     "ALTER TABLE pcap_analyses ADD COLUMN IF NOT EXISTS evidence_id UUID REFERENCES evidence(id) ON DELETE SET NULL",
     "ALTER TABLE pcap_analyses ADD COLUMN IF NOT EXISTS input_sha256 VARCHAR(64)",
@@ -720,9 +720,9 @@ _INPLACE_MIGRATIONS: list[str] = [
     "ALTER TABLE pcap_analyses ADD COLUMN IF NOT EXISTS timeline_candidates JSON",
     _add_check_if_missing("pcap_analyses", "ck_pcap_analyses_exhibit_link",
                           "exhibit_link IS NULL OR exhibit_link IN ('registered', 'sha256_match', 'from_evidence')"),
-    "CREATE INDEX IF NOT EXISTS ix_pcap_analyses_evidence_id ON pcap_analyses(evidence_id) "
+    "CREATE INDEX IF NOT EXISTS ix_pcap_analyses_evidence_id ON pcap_analyses(evidence_id) " +
     "WHERE evidence_id IS NOT NULL",
-    "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS form_history_evidence_id UUID "
+    "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS form_history_evidence_id UUID " +
     "REFERENCES evidence(id) ON DELETE SET NULL",
     "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS parser_name VARCHAR(64)",
     "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS parser_version VARCHAR(32)",
@@ -730,18 +730,18 @@ _INPLACE_MIGRATIONS: list[str] = [
     "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS clock_offset_seconds BIGINT",
     _add_check_if_missing("browser_history_uploads", "ck_browser_history_uploads_exhibit_link",
                           "exhibit_link IS NULL OR exhibit_link IN ('registered', 'sha256_match', 'from_evidence')"),
-    "CREATE INDEX IF NOT EXISTS ix_browser_history_uploads_evidence_id ON browser_history_uploads(evidence_id) "
+    "CREATE INDEX IF NOT EXISTS ix_browser_history_uploads_evidence_id ON browser_history_uploads(evidence_id) " +
     "WHERE evidence_id IS NOT NULL",
-    "CREATE INDEX IF NOT EXISTS ix_browser_history_uploads_form_history_evidence_id "
+    "CREATE INDEX IF NOT EXISTS ix_browser_history_uploads_form_history_evidence_id " +
     "ON browser_history_uploads(form_history_evidence_id) WHERE form_history_evidence_id IS NOT NULL",
-    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS pcap_analysis_id UUID "
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS pcap_analysis_id UUID " +
     "REFERENCES pcap_analyses(id) ON DELETE RESTRICT",
-    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS browser_history_upload_id UUID "
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS browser_history_upload_id UUID " +
     "REFERENCES browser_history_uploads(id) ON DELETE RESTRICT",
     "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS source_record_id UUID",
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_pcap_event "
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_pcap_event " +
     "ON timeline_events(pcap_analysis_id, import_event_index) WHERE pcap_analysis_id IS NOT NULL",
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_webhistory_record "
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_webhistory_record " +
     "ON timeline_events(browser_history_upload_id, source_record_id) WHERE browser_history_upload_id IS NOT NULL",
     _add_check_if_missing("timeline_events", "ck_timeline_events_one_run_g3",
                           "num_nonnulls(forensic_import_id, defender_import_id, pcap_analysis_id, "
@@ -793,7 +793,7 @@ _INPLACE_MIGRATIONS: list[str] = [
     _add_check_if_missing("evidence_copies", "ck_evidence_copies_status",
                           "status IS NULL OR status IN ('issued', 'downloading', 'complete', 'aborted', "
                           "'failed_integrity', 'verified', 'mismatch')"),
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_copies_copy_seq ON evidence_copies(evidence_id, copy_seq) "
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_copies_copy_seq ON evidence_copies(evidence_id, copy_seq) " +
     "WHERE copy_seq IS NOT NULL",
 
     # G-fix B (L26) — a mail relay hop imported from an email analysis with a run record (G3) names that
@@ -804,9 +804,9 @@ _INPLACE_MIGRATIONS: list[str] = [
     # FKs (the G3 four-run CHECK is left as it is). Safe on the live table: every existing row has the
     # new column NULL and already satisfies the four-run CHECK, so validating it (1 056 rows / 18 MB on
     # 2026-10-04) takes milliseconds under the 5 s lock_timeout.
-    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS email_analysis_id UUID "
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS email_analysis_id UUID " +
     "REFERENCES email_analysis(id) ON DELETE RESTRICT",
-    "CREATE INDEX IF NOT EXISTS ix_timeline_events_email_analysis_id ON timeline_events(email_analysis_id) "
+    "CREATE INDEX IF NOT EXISTS ix_timeline_events_email_analysis_id ON timeline_events(email_analysis_id) " +
     "WHERE email_analysis_id IS NOT NULL",
     _add_check_if_missing("timeline_events", "ck_timeline_events_one_run_gfixb",
                           "num_nonnulls(forensic_import_id, defender_import_id, pcap_analysis_id, "
