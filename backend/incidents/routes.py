@@ -15,14 +15,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
-from core.tags import normalize_tags
+from core.tags import canonical_tag_or_422, normalize_tags
 from incidents.access import (accessible_filter, get_accessible_incident, incident_capabilities,
                               is_incident_lead, not_incident_lead)
 from incidents.gates import GATE_LABEL, GATES, evaluate_gate
@@ -70,6 +70,7 @@ async def _fire_hooks(db, event: str, inc: Incident, extra_facts=None) -> None:
 # Cursor pagination per CLAUDE.md § API-first. Opaque to clients — clients
 # never construct or mutate cursors, only echo them back.
 
+# L11, accepted: a row deleted between two page reads makes an offset cursor skip one row; the war room pages by keyset.
 def _encode_cursor(offset: int) -> str:
     return base64.urlsafe_b64encode(json.dumps({"o": offset}).encode()).decode().rstrip("=")
 
@@ -165,14 +166,14 @@ def _phase_reason(raw: Optional[str]) -> str:
     return reason
 
 
-def _triage_reason(raw: Optional[str]) -> str:
+def _triage_reason(raw: Optional[str],
+                   why: str = "to mark the incident a false or benign positive outside Detection & Analysis") -> str:
     """The trimmed triage_reason; 422 triage_reason_required when missing or under 10 characters."""
     reason = (raw or "").strip()
     if len(reason) < REASON_MIN:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "triage_reason_required",
-                       f"triage_reason is required: at least {REASON_MIN} characters, to mark the incident "
-                       "a false or benign positive outside Detection & Analysis (it can then be closed "
-                       "without Gate 2)")
+                       f"triage_reason is required: at least {REASON_MIN} characters, {why} "
+                       "(it can then be closed without Gate 2)")
     return reason
 
 
@@ -234,7 +235,7 @@ async def list_incidents(
     phase:         Optional[Phase]         = Query(default=None),
     tlp:           Optional[Tlp]           = Query(default=None),
     tag:           Optional[str]           = Query(default=None,
-                                                   description="Filter by tag (canonical lowercase-dashed)"),
+                                                   description="Filter by tag (canonical lowercase-dashed); a value with no usable characters is 422 invalid_tag"),
     mine:          bool                    = Query(default=False),
     ref:           Optional[str]           = Query(default=None, max_length=32,
                                                    description="Exact incident reference, e.g. INC-2026-00009 or INC-0002 (case-insensitive)"),
@@ -261,15 +262,11 @@ async def list_incidents(
     if mine:          stmt = stmt.where(Incident.created_by_id == user.id)
     if ref:           stmt = stmt.where(Incident.ref == ref.strip().upper())
     if tag:
-        # tags is a JSON list — case-folded match against the canonical form.
-        # Cast to text and ILIKE keeps things index-free but readable; tag
-        # volume is small per row.
-        from core.tags import normalize_tag
-        canonical = normalize_tag(tag)
-        if canonical:
-            stmt = stmt.where(
-                func.cast(Incident.tags, type_=None).ilike(f'%"{canonical}"%')
-            )
+        # tags is a `json` list — case-folded whole-tag match against the canonical form.
+        # The canonical form is [a-z0-9-./:] only (no LIKE wildcard, quote or JSON escape),
+        # so '%"tag"%' on the JSON text matches exactly one complete element. Unindexed:
+        # tag volume is small per row.
+        stmt = stmt.where(cast(Incident.tags, Text).ilike(f'%"{canonical_tag_or_422(tag)}"%'))
 
     # Fetch limit+1 to determine if there's a next page.
     stmt = stmt.offset(offset).limit(limit + 1)
@@ -283,7 +280,32 @@ async def list_incidents(
 
 # ─── Create ──────────────────────────────────────────────────────────────────
 
-@router.post("", response_model=IncidentOut, status_code=status.HTTP_201_CREATED)
+async def _create_team_ids(db: AsyncSession, user: User, requested: list[uuid.UUID]) -> list[uuid.UUID]:
+    """F2 — the teams a new incident starts restricted to, de-duplicated. 422 team_not_found
+    for an unknown team; a non-admin may only pick teams they belong to (409 would_lock_out,
+    the PATCH rule for a lead), so the creator can always see what they opened."""
+    team_ids = list(dict.fromkeys(requested or []))
+    if not team_ids:
+        return []
+    known = set((await db.execute(select(Team.id).where(Team.id.in_(team_ids)))).scalars())
+    if unknown := [str(t) for t in team_ids if t not in known]:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "team_not_found",
+                       f"Unknown team id(s): {', '.join(unknown)}")
+    if user.role != "admin":
+        mine = set((await db.execute(
+            select(user_team.c.team_id).where(user_team.c.user_id == user.id))).scalars())
+        if foreign := [str(t) for t in team_ids if t not in mine]:
+            raise ApiError(status.HTTP_409_CONFLICT, "would_lock_out",
+                           f"You can only restrict a new incident to teams you belong to (not a member of: "
+                           f"{', '.join(foreign)}). Ask an admin to add other teams.")
+    return team_ids
+
+
+@router.post("", response_model=IncidentOut, status_code=status.HTTP_201_CREATED,
+             responses={409: {"model": ApiErrorBody, "description": "would_lock_out (team_ids)"},
+                        422: {"model": ApiErrorBody,
+                              "description": "team_not_found, detected_before_occurred, detected_in_future "
+                                             "or triage_reason_required"}})
 async def create_incident(
     req: IncidentCreate, request: Request,
     user: User = Depends(require_analyst),
@@ -292,8 +314,24 @@ async def create_incident(
     """Open an incident. phase must be detection_and_analysis or
     containment_eradication_recovery. detected_at is stored as given (the
     server never fills it in); 422 when it is before occurred_at or in the
-    future (2 min clock-skew allowance)."""
+    future (2 min clock-skew allowance).
+
+    team_ids restricts the incident to those teams from the start (empty = visible to
+    everyone). An unknown team is 422 code team_not_found. An admin may pick any team; an
+    analyst only teams they belong to (409 code would_lock_out otherwise), so the creator
+    always keeps access. The teams are audited with the creation.
+
+    triage_state false_positive or benign_positive with a phase other than
+    detection_and_analysis needs triage_reason (at least 10 characters; 422 code
+    triage_reason_required), as on PATCH: such an incident can be closed without Gate 2.
+    A triage_reason is audited with the creation and adds a system timeline event
+    ("Triage set")."""
     _check_detected_at(req.occurred_at, req.detected_at)
+    if req.triage_state in CLOSABLE_ANY_PHASE and req.phase != "detection_and_analysis":
+        triage_reason = _triage_reason(req.triage_reason)
+    else:
+        triage_reason = (req.triage_reason or "").strip() or None
+    team_ids = await _create_team_ids(db, user, req.team_ids)
     inc_num, inc_ref, created_at = await assign_reference(db)
     inc = Incident(
         id=uuid.uuid4(),
@@ -318,11 +356,27 @@ async def create_incident(
     db.add(inc)
     await db.flush()
 
-    if req.team_ids and user.role == "admin":
-        for team_id in req.team_ids:
-            await db.execute(
-                incident_teams.insert().values(incident_id=inc.id, team_id=team_id)
-            )
+    for team_id in team_ids:
+        await db.execute(
+            incident_teams.insert().values(incident_id=inc.id, team_id=team_id)
+        )
+
+    if triage_reason:
+        db.add(TimelineEvent(
+            id=uuid.uuid4(),
+            incident_id=inc.id,
+            event_time=created_at,
+            source="Incident",
+            event_type="Triage set",
+            description=f"Opened as {_TRIAGE_LABEL.get(inc.triage_state, inc.triage_state)} in "
+                        f"{_PHASE_LABEL.get(inc.phase, inc.phase)}: {triage_reason}",
+            ir_phase=inc.phase,
+            origin="system",
+            is_system=True,
+            external_safe=False,
+            system_source="triage",
+            created_by_id=user.id,
+        ))
 
     await write_audit(
         db, "incident_create",
@@ -330,7 +384,9 @@ async def create_incident(
         resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
         details={"ref": inc.ref, "severity": inc.severity, "phase": inc.phase, "tlp": inc.tlp,
                  "dark_operation": inc.dark_operation,
-                 "detected_at": inc.detected_at.isoformat() if inc.detected_at else None},
+                 "detected_at": inc.detected_at.isoformat() if inc.detected_at else None,
+                 **({"team_ids": [str(t) for t in team_ids]} if team_ids else {}),
+                 **({"triage_state": inc.triage_state, "triage_reason": triage_reason} if triage_reason else {})},
     )
     await db.commit()
     await db.refresh(inc)
@@ -514,7 +570,18 @@ async def update_incident(
     not_incident_lead); only an admin can clear the teams of a restricted incident (409
     code would_unrestrict); an unknown team is 422 code team_not_found. A lead who is not
     an admin may only add teams they belong to, and must keep at least one of their own
-    teams on the incident (409 code would_lock_out)."""
+    teams on the incident (409 code would_lock_out).
+
+    dark_operation is not changed here: sending it is 422 code use_dark_operation_endpoint
+    (toggle it with PATCH /api/incidents/{id}/oob/dark-operation, which audits the change).
+
+    Moving a false or benign positive out of detection_and_analysis (a phase change, with
+    triage_state staying false_positive / benign_positive) also needs triage_reason (422 code
+    triage_reason_required); it is audited and posted as a system timeline event ("Triage set")."""
+    if "dark_operation" in req.model_fields_set:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "use_dark_operation_endpoint",
+                       "dark_operation can't be changed with PATCH /api/incidents/{id}: use "
+                       "PATCH /api/incidents/{id}/oob/dark-operation with {\"enabled\": true|false}.")
     # A phase change checks gates and order against the row, so lock it until commit.
     inc = await get_accessible_incident(db, incident_id, user, for_update=req.phase is not None)
     if inc.status == "closed":
@@ -572,12 +639,19 @@ async def update_incident(
 
     # A false / benign positive closes without Gate 2: outside D&A that needs a reason.
     triage_reason = None
+    leaves_da_as_fp = False
     if req.triage_state is not None and req.triage_state != inc.triage_state:
         end_phase = req.phase if req.phase is not None else inc.phase
         if req.triage_state in CLOSABLE_ANY_PHASE and end_phase != "detection_and_analysis":
             triage_reason = _triage_reason(req.triage_reason)
         elif (req.triage_reason or "").strip():
             triage_reason = req.triage_reason.strip()
+    elif phase_change and inc.phase == "detection_and_analysis" and inc.triage_state in CLOSABLE_ANY_PHASE:
+        # M2: an FP/BP set inside D&A (no reason needed there) must not leave D&A without one,
+        # or it reaches closure without Gate 2 and without any recorded justification.
+        triage_reason = _triage_reason(req.triage_reason,
+                                       "to move a false or benign positive out of Detection & Analysis")
+        leaves_da_as_fp = True
 
     if "occurred_at" in sent or "detected_at" in sent:
         _check_detected_at(
@@ -651,6 +725,23 @@ async def update_incident(
         await _record_override(db, inc, user, overridden, phase_reason, inc.phase,
                                {"from_phase": old_phase, "to_phase": inc.phase})
 
+    if leaves_da_as_fp and "phase" in changed:
+        db.add(TimelineEvent(
+            id=uuid.uuid4(),
+            incident_id=inc.id,
+            event_time=utcnow(),
+            source="Incident",
+            event_type="Triage set",
+            description=f"Moved to {_PHASE_LABEL.get(inc.phase, inc.phase)} as "
+                        f"{_TRIAGE_LABEL.get(inc.triage_state, inc.triage_state)}: {triage_reason}",
+            ir_phase=inc.phase,
+            origin="system",
+            is_system=True,
+            external_safe=False,
+            system_source="triage",
+            created_by_id=user.id,
+        ))
+
     if "triage_state" in changed and triage_reason:
         db.add(TimelineEvent(
             id=uuid.uuid4(),
@@ -678,6 +769,9 @@ async def update_incident(
             details["from_triage_state"] = old_triage
             if triage_reason:
                 details["triage_reason"] = triage_reason
+        elif leaves_da_as_fp and "phase" in changed:
+            details["triage_state"] = inc.triage_state
+            details["triage_reason"] = triage_reason
         await write_audit(
             db, "incident_update",
             outcome="success",
@@ -829,7 +923,11 @@ async def close_incident(
 
 # ─── Reopen ──────────────────────────────────────────────────────────────────
 
-@router.post("/{incident_id}/reopen", response_model=IncidentOut)
+@router.post("/{incident_id}/reopen", response_model=IncidentOut,
+             responses={409: {"model": GateUnmetBody,
+                              "description": "gate_unmet (body adds gate and unmet[]): re-opening into "
+                                             "post_incident from another phase with Gate 1 unmet"},
+                        403: {"model": ApiErrorBody, "description": "not_incident_lead (override_gate)"}})
 async def reopen_incident(
     incident_id: uuid.UUID, req: IncidentReopen, request: Request,
     user: User = Depends(require_analyst),
@@ -840,10 +938,20 @@ async def reopen_incident(
     containment_eradication_recovery or post_incident (missing: 422 code
     phase_required).
 
+    Re-opening into post_incident an incident that was closed in another phase (a false or
+    benign positive closed from detection_and_analysis or containment_eradication_recovery)
+    enters Post-Incident, so Gate 1 runs as on PATCH (see GET …/gates): unmet is 409 code
+    gate_unmet with {gate, unmet[]}. override_gate=true re-opens anyway, with the reason as
+    the justification, and writes an incident_gate_override audit row plus a system timeline
+    event. override_gate=true needs incident-lead rights (admin, or an analyst assigned as
+    Incident Commander or Deputy): 403 code not_incident_lead otherwise. An incident closed
+    in post_incident and re-opened there does not change phase, so Gate 1 does not run. The
+    incident row is locked, and the gate check and the re-open are one transaction.
+
     Sets status=open and the phase; clears closed_at and closed_by_id; unticks the
     "incident_closed" closure-checklist item; writes an audit row (with the previous
-    closer) and a system timeline event carrying the reason. Already open: returned
-    unchanged."""
+    closer, and `gate` met / overridden when Gate 1 ran) and a system timeline event
+    carrying the reason. Already open: returned unchanged."""
     reason = _reason(req.reason)
     if req.phase is None:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "phase_required",
@@ -852,6 +960,15 @@ async def reopen_incident(
     inc = await get_accessible_incident(db, incident_id, user, for_update=True)
     if inc.status == "open":
         return IncidentOut.model_validate(inc)
+    if req.override_gate and not await is_incident_lead(db, user, inc):
+        raise not_incident_lead("override a phase gate")
+
+    # Gate 1 runs before anything is changed; an unmet gate or an error leaves the incident closed.
+    gate_state, overridden = None, None
+    if req.phase == "post_incident" and inc.phase != "post_incident":
+        gate = await evaluate_gate(db, inc, "post_incident")
+        overridden = _require_gate(gate, req.override_gate, "(the reason is recorded as the justification)")
+        gate_state = "overridden" if overridden else "met"
 
     previous = {"from_phase": inc.phase,
                 "previous_closed_at": inc.closed_at.isoformat() if inc.closed_at else None,
@@ -863,12 +980,16 @@ async def reopen_incident(
     unticked = await _set_closed_item(db, inc.id, None)
     db.add(_closure_event(inc, user, "Incident re-opened",
                           f"Incident re-opened to {_PHASE_LABEL[req.phase]}: {reason}", utcnow()))
+    if overridden:
+        await _record_override(db, inc, user, overridden, reason, inc.phase,
+                               {"from_phase": previous["from_phase"], "to_phase": inc.phase, "on": "reopen"})
 
     await write_audit(
         db, "incident_reopen",
         outcome="success",
         resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
-        details={"reason": reason, "phase": inc.phase, **previous, "checklist_item_unticked": unticked},
+        details={"reason": reason, "phase": inc.phase, **previous, "checklist_item_unticked": unticked,
+                 **({"gate": gate_state} if gate_state else {})},
     )
     await db.commit()
     await db.refresh(inc)

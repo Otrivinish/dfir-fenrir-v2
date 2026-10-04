@@ -20,15 +20,18 @@ evident; the password ZIP is the confidentiality layer only.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
 import json
+import os
 import secrets
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import pyzipper
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -97,7 +100,7 @@ Verification (after extracting)
      row_hash = sha256(prev_hash_ascii || canonical_json(payload))
    The chain in this slice should reproduce byte-for-byte.
 
-Reference: NIST SP 800-86 §3.1.3, ISO/IEC 27037.
+Reference: NIST SP 800-86 §3.1.2, ISO/IEC 27037 §6.1.
 """
 
 
@@ -192,9 +195,10 @@ async def build_audit_export(
     retain    = now + BUNDLE_TTL
 
     # ── 1. Canonical JSONL + Ed25519 signature ──────────────────────────────
-    jsonl_bytes   = render_jsonl(rows)
-    jsonl_sha     = _sha256_hex(jsonl_bytes)
-    signature     = sign_bytes(jsonl_bytes)            # 64 bytes raw
+    # Steps 1 and 3–5 are CPU-bound / blocking and scale with the slice (up to
+    # 50k rows; ReportLab ≈ 5 ms a row), so they run in worker threads: the
+    # backend has one event loop, and inline they froze every request.
+    jsonl_bytes, jsonl_sha, signature = await asyncio.to_thread(_jsonl_signed, rows)
     pubkey_pem    = public_key_pem()
     pubkey_fpr    = public_key_fingerprint()
     # GS-4 — RFC 3161 trusted timestamp over sha256(audit.jsonl), best-effort.
@@ -254,40 +258,18 @@ async def build_audit_export(
     }
     manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
 
-    # ── 3. PDF (renders from rows + manifest) ───────────────────────────────
-    pdf_bytes = render_pdf(rows=rows, manifest=manifest, incident=incident)
-
-    # ── 4. AES-256 password-protected ZIP ──────────────────────────────────
+    # ── 3–5. PDF, AES-256 password-protected ZIP, hash, write ───────────────
     # 24-char URL-safe base64 password — ~144 bits of entropy, well past the
     # WZAES brute-force horizon and short enough for an OOB handoff.
     password = secrets.token_urlsafe(18)
-    pw_bytes = password.encode("utf-8")
-
-    buf = io.BytesIO()
-    with pyzipper.AESZipFile(
-        buf, "w",
-        compression=pyzipper.ZIP_DEFLATED,
-        encryption=pyzipper.WZ_AES,
-    ) as zf:
-        zf.setpassword(pw_bytes)
-        zf.writestr("audit.pdf",       pdf_bytes)
-        zf.writestr("audit.jsonl",     jsonl_bytes)
-        zf.writestr("audit.jsonl.sig", signature)
-        if jsonl_tst:
-            zf.writestr("audit.jsonl.tst", base64.b64decode(jsonl_tst["tst_b64"]))
-        zf.writestr("public_key.pem",  pubkey_pem)
-        zf.writestr("manifest.json",   manifest_bytes)
-        zf.writestr(
-            "README.txt",
-            README_TEMPLATE.format(fingerprint=pubkey_fpr),
-        )
-    enc_bundle = buf.getvalue()
-    bundle_sha = _sha256_hex(enc_bundle)
-
     rel_path = f"audit-exports/{export_id}.zip"
     target   = Path(settings.evidence_path) / rel_path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(enc_bundle)
+    bundle_sha, bundle_size = await asyncio.to_thread(
+        _write_bundle, target, password,
+        rows=rows, manifest=manifest, manifest_bytes=manifest_bytes, incident=incident,
+        jsonl_bytes=jsonl_bytes, signature=signature, jsonl_tst=jsonl_tst,
+        pubkey_pem=pubkey_pem, pubkey_fpr=pubkey_fpr,
+    )
 
     # ── 6. Persist ──────────────────────────────────────────────────────────
     token = secrets.token_urlsafe(32)
@@ -307,7 +289,7 @@ async def build_audit_export(
         signature_b64=__b64_signature(signature),
         pubkey_fpr=pubkey_fpr,
         file_path=rel_path,
-        file_size=len(enc_bundle),
+        file_size=bundle_size,
         bundle_sha256=bundle_sha,
         key_hint=_password_hint(password),
         token=token,
@@ -322,6 +304,52 @@ async def build_audit_export(
     return row, password, f"/api/audit-exports/{token}"
 
 
+def _jsonl_signed(rows: list[AuditLog]) -> tuple[bytes, str, bytes]:
+    """Blocking: canonical JSONL, its SHA-256 and the raw 64-byte Ed25519 signature over it."""
+    jsonl_bytes = render_jsonl(rows)
+    return jsonl_bytes, _sha256_hex(jsonl_bytes), sign_bytes(jsonl_bytes)
+
+
+# ReportLab keeps module-level state; renders were serialised on the event loop before
+# they moved to threads, so keep them one at a time.
+_PDF_LOCK = threading.Lock()
+
+
+def _write_bundle(
+    target: Path, password: str, *,
+    rows: list[AuditLog], manifest: dict[str, Any], manifest_bytes: bytes,
+    incident: Incident | None, jsonl_bytes: bytes, signature: bytes,
+    jsonl_tst: dict | None, pubkey_pem: str, pubkey_fpr: str,
+) -> tuple[str, int]:
+    """Blocking (ReportLab PDF, AES-256 ZIP, SHA-256, disk write): run via
+    asyncio.to_thread. Returns (bundle_sha256, size in bytes)."""
+    with _PDF_LOCK:
+        pdf_bytes = render_pdf(rows=rows, manifest=manifest, incident=incident)
+
+    buf = io.BytesIO()
+    with pyzipper.AESZipFile(
+        buf, "w",
+        compression=pyzipper.ZIP_DEFLATED,
+        encryption=pyzipper.WZ_AES,
+    ) as zf:
+        zf.setpassword(password.encode("utf-8"))
+        zf.writestr("audit.pdf",       pdf_bytes)
+        zf.writestr("audit.jsonl",     jsonl_bytes)
+        zf.writestr("audit.jsonl.sig", signature)
+        if jsonl_tst:
+            zf.writestr("audit.jsonl.tst", base64.b64decode(jsonl_tst["tst_b64"]))
+        zf.writestr("public_key.pem",  pubkey_pem)
+        zf.writestr("manifest.json",   manifest_bytes)
+        zf.writestr(
+            "README.txt",
+            README_TEMPLATE.format(fingerprint=pubkey_fpr),
+        )
+    enc_bundle = buf.getvalue()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(enc_bundle)
+    return _sha256_hex(enc_bundle), len(enc_bundle)
+
+
 def __b64_signature(sig: bytes) -> str:
     """Internal: base64 the 64-byte signature for stable persistence."""
     import base64
@@ -330,19 +358,19 @@ def __b64_signature(sig: bytes) -> str:
 
 # ── Bundle read ──────────────────────────────────────────────────────────────
 
-def open_bundle_for_download(export: AuditExport) -> tuple[bytes, str]:
-    """Read the encrypted bundle from disk. Returns (bytes, suggested_filename).
-
-    Status / expiry checks belong to the caller.
+def open_bundle_for_download(export: AuditExport) -> tuple[BinaryIO, int, str]:
+    """Open the encrypted bundle on disk for streaming. Returns (open file, size in
+    bytes, suggested_filename); stream it with evidence.exports.iter_bundle(), which
+    closes it. Blocking: call via asyncio.to_thread. Raises FileNotFoundError when
+    the bundle is gone. Status / expiry checks belong to the caller.
     """
     if not export.file_path:
         raise FileNotFoundError("Bundle path missing on AuditExport row")
     path = Path(settings.evidence_path) / export.file_path
-    if not path.exists():
-        raise FileNotFoundError(f"Bundle file missing: {path}")
     scope = "global" if export.incident_id is None else f"inc-{export.incident_id}"
     suggested = f"fenrir-audit-{scope}-{export.id}.zip"
-    return path.read_bytes(), suggested
+    f = open(path, "rb")
+    return f, os.fstat(f.fileno()).st_size, suggested
 
 
 def is_expired(export: AuditExport) -> bool:

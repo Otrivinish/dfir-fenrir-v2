@@ -19,7 +19,8 @@ from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
 import lolbins.service as lolbins_svc
 from incidents.access import get_accessible_incident
-from models import Entity, Evidence, ForensicImport, Incident, TimelineEvent, User
+from models import (BrowserHistoryUpload, DefenderPdfImport, EmailAnalysis, Entity, Evidence, ForensicImport, Incident,
+                    PCAPAnalysis, TimelineEvent, User)
 from schemas import (
     TimelineEventBatchCreate,
     TimelineEventBatchResult,
@@ -32,6 +33,7 @@ from schemas import (
 router = APIRouter()
 
 
+# L11, accepted: a row deleted between two page reads makes an offset cursor skip one row; the war room pages by keyset.
 def _encode_cursor(offset: int, desc: bool = False) -> str:
     data = {"o": offset, "d": 1} if desc else {"o": offset}
     return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
@@ -67,6 +69,21 @@ RESERVED_SYSTEM_SOURCES = frozenset({
     "respond_action", "respond_action_revert", "decision", "legal_deadline",
 })
 
+
+def _server_generated(ev: TimelineEvent) -> bool:
+    """F3 (R59) — a system event the server wrote itself (reserved system_source). It is the
+    record of what the platform did (closure, gate override, milestone, triage, respond action /
+    revert, decision, legal deadline), so no client may edit or delete it: 409
+    system_event_immutable. Analyst annotations ("manual" and other labels) stay editable."""
+    return bool(ev.is_system and (ev.system_source or "").strip().lower() in RESERVED_SYSTEM_SOURCES)
+
+
+def _refuse_server_event(ev: TimelineEvent, verb: str) -> None:
+    if _server_generated(ev):
+        raise ApiError(status.HTTP_409_CONFLICT, "system_event_immutable",
+                       f"This event was recorded by FENRIR itself ({ev.system_source}); it can't be {verb}. "
+                       "Add an annotation event instead.")
+
 _ENTITY_ERRORS = {404: {"model": ApiErrorBody, "description": "entity_not_found"},
                   409: {"model": ApiErrorBody, "description": "incident_closed"},
                   422: {"model": ApiErrorBody, "description": "entity_other_incident (or a validation error)"}}
@@ -83,17 +100,49 @@ async def _entity(db: AsyncSession, incident_id: uuid.UUID, entity_id: uuid.UUID
     return ent
 
 
+# The parser named in a Timeline Import run record (forensic/routes.py audits the same name).
+_TIMELINE_PARSER = "FENRIR timeline parser"
+
+
 async def _resolve_provenance(db: AsyncSession, events) -> None:
-    """C5 — set the read-only evidence_identifier / parser_version of imported events (2 queries)."""
+    """C5/G4/G3 — set the read-only evidence_identifier / parser_name / parser_version of imported
+    events (at most 6 queries; L26: email relay hops name their analysis run)."""
     ev_ids  = {e.evidence_id for e in events if e.evidence_id}
     imp_ids = {e.forensic_import_id for e in events if e.forensic_import_id}
+    def_ids = {e.defender_import_id for e in events if e.defender_import_id}
+    pcap_ids = {e.pcap_analysis_id for e in events if e.pcap_analysis_id}
+    web_ids = {e.browser_history_upload_id for e in events if e.browser_history_upload_id}
+    mail_ids = {e.email_analysis_id for e in events if e.email_analysis_id}
+    runs = {}      # G3 — PCAP analyses / browser-history uploads (/ L26 email analyses): (name, version)
+    if pcap_ids:
+        runs.update({r[0]: (r[1], r[2]) for r in (await db.execute(
+            select(PCAPAnalysis.id, PCAPAnalysis.analyser_name, PCAPAnalysis.analyser_version)
+            .where(PCAPAnalysis.id.in_(pcap_ids)))).all()})
+    if web_ids:
+        runs.update({r[0]: (r[1], r[2]) for r in (await db.execute(
+            select(BrowserHistoryUpload.id, BrowserHistoryUpload.parser_name, BrowserHistoryUpload.parser_version)
+            .where(BrowserHistoryUpload.id.in_(web_ids)))).all()})
+    if mail_ids:
+        runs.update({r[0]: (r[1], r[2]) for r in (await db.execute(
+            select(EmailAnalysis.id, EmailAnalysis.analyser_name, EmailAnalysis.analyser_version)
+            .where(EmailAnalysis.id.in_(mail_ids)))).all()})
     idents = dict((await db.execute(
         select(Evidence.id, Evidence.identifier).where(Evidence.id.in_(ev_ids)))).all()) if ev_ids else {}
     versions = dict((await db.execute(
         select(ForensicImport.id, ForensicImport.parser_version).where(ForensicImport.id.in_(imp_ids)))).all()) if imp_ids else {}
+    defender = {r[0]: (r[1], r[2]) for r in (await db.execute(
+        select(DefenderPdfImport.id, DefenderPdfImport.parser_name, DefenderPdfImport.parser_version)
+        .where(DefenderPdfImport.id.in_(def_ids)))).all()} if def_ids else {}
     for e in events:
         e.evidence_identifier = idents.get(e.evidence_id)
-        e.parser_version = versions.get(e.forensic_import_id)
+        if e.defender_import_id in defender:
+            e.parser_name, e.parser_version = defender[e.defender_import_id]
+        elif (e.pcap_analysis_id or e.browser_history_upload_id or e.email_analysis_id) in runs:
+            e.parser_name, e.parser_version = runs[e.pcap_analysis_id or e.browser_history_upload_id
+                                                   or e.email_analysis_id]
+        else:
+            e.parser_version = versions.get(e.forensic_import_id)
+            e.parser_name = _TIMELINE_PARSER if e.forensic_import_id and e.parser_version else None
 
 
 # C5 — fields copied from the exhibit by an import promote; immutable once promoted.
@@ -161,6 +210,7 @@ async def list_timeline_events(
     umap        = await _username_map(db, [r.created_by_id for r in page])
     for r in page:
         r.created_by_username = umap.get(r.created_by_id)
+        r.server_generated = _server_generated(r)
     await _resolve_provenance(db, page)
     items       = [TimelineEventOut.model_validate(r) for r in page]
     next_cursor = _encode_cursor(offset + limit, desc) if has_more else None
@@ -259,7 +309,8 @@ async def create_timeline_event(
 
 @router.patch("/{incident_id}/timeline/{event_id}", response_model=TimelineEventOut,
               responses={**_ENTITY_ERRORS,
-                         409: {"model": ApiErrorBody, "description": "incident_closed or imported_fact_immutable"}},
+                         409: {"model": ApiErrorBody, "description": "incident_closed, system_event_immutable "
+                                                                     "or imported_fact_immutable"}},
               summary="Update a timeline event")
 async def update_timeline_event(
     incident_id: uuid.UUID,
@@ -275,14 +326,20 @@ async def update_timeline_event(
     null fields stay as they are, except `entity_id` and `ir_phase`: sent as null they unlink /
     clear. A linked entity is checked as on create (404 / 422); when the event then has no
     hostname it takes the entity's value. An event with recorded provenance — promoted from a
-    Timeline Import or an exhibit, or carrying a `time_basis` (e.g. a YARA match placed at its
-    scan time): `forensic_import_id`, `evidence_id` or `time_basis` set — keeps its recorded facts:
+    Timeline Import, a Defender import, a PCAP analysis (`pcap_analysis_id`), a browser history
+    upload (`browser_history_upload_id`), an email analysis's relay hops (`email_analysis_id`) or an
+    exhibit, or carrying a `time_basis` (e.g. a YARA match placed at its scan time):
+    `forensic_import_id`, `defender_import_id`, `pcap_analysis_id`, `browser_history_upload_id`,
+    `email_analysis_id`, `evidence_id` or `time_basis` set — keeps its recorded facts:
     event_time, hostname, source, event_type, description, raw_log: changing one returns 409
     `imported_fact_immutable` (sending the unchanged value is fine; descriptions compare
     without surrounding whitespace); ir_phase, ATT&CK and entity_id stay editable, and linking
     an entity doesn't fill its hostname. Rejects edits on a closed incident with 409 `incident_closed` and
-    returns 404 if the event is not in this incident. Requires the analyst role and write access.
-    Returns the updated TimelineEventOut.
+    returns 404 if the event is not in this incident. An event the server recorded itself
+    (`server_generated`: is_system with a reserved system_source — closure, gate_override, milestone,
+    triage, respond_action, respond_action_revert, decision, legal_deadline) can't be edited at all,
+    IR phase and ATT&CK included: 409 `system_event_immutable`. Requires the analyst role and write
+    access. Returns the updated TimelineEventOut.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -296,11 +353,13 @@ async def update_timeline_event(
     )).scalar_one_or_none()
     if not ev:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    _refuse_server_event(ev, "edited")
     sent = req.model_fields_set
     # Provenance, not just the import link (M3): the import FK is RESTRICT now, but an event that
     # names an exhibit or a time basis is a recorded fact either way.
-    imported = (ev.forensic_import_id is not None or ev.evidence_id is not None
-                or ev.time_basis is not None)
+    imported = (ev.forensic_import_id is not None or ev.defender_import_id is not None
+                or ev.pcap_analysis_id is not None or ev.browser_history_upload_id is not None
+                or ev.email_analysis_id is not None or ev.evidence_id is not None or ev.time_basis is not None)
 
     # Proposed new values, by the same "is it a change?" rules as before.
     new: dict[str, object] = {}
@@ -317,8 +376,13 @@ async def update_timeline_event(
     if req.raw_log              is not None and req.raw_log != (ev.raw_log or ""):
         new["raw_log"] = req.raw_log
     if imported and (locked := [f for f in _IMPORTED_FACTS if f in new]):
-        origin = ("an exhibit" if ev.evidence_id else
-                  "a Timeline Import" if ev.forensic_import_id else "a recorded detection")
+        # L32: name the run first (each run event also names its exhibit), then the exhibit.
+        origin = ("a Timeline Import" if ev.forensic_import_id else
+                  "a Defender import" if ev.defender_import_id else
+                  "a PCAP analysis" if ev.pcap_analysis_id else
+                  "a browser history upload" if ev.browser_history_upload_id else
+                  "an email analysis (mail relay hops)" if ev.email_analysis_id else
+                  "an exhibit" if ev.evidence_id else "a recorded detection")
         raise ApiError(status.HTTP_409_CONFLICT, "imported_fact_immutable",
                        f"This event was imported from {origin}; "
                        f"its facts can't be edited ({', '.join(locked)}). Annotate it with the IR phase, "
@@ -487,7 +551,8 @@ async def lolbin_scan_timeline(
 
 # ─── Delete ───────────────────────────────────────────────────────────────────
 
-@router.delete("/{incident_id}/timeline/{event_id}", summary="Delete a timeline event")
+@router.delete("/{incident_id}/timeline/{event_id}", summary="Delete a timeline event",
+               responses={409: {"model": ApiErrorBody, "description": "incident_closed or system_event_immutable"}})
 async def delete_timeline_event(
     incident_id: uuid.UUID,
     event_id:    uuid.UUID,
@@ -497,9 +562,10 @@ async def delete_timeline_event(
 ) -> dict:
     """Permanently delete a timeline event from an incident.
 
-    Rejects deletion on a closed incident with 409 and returns 404 if the event is not in this
-    incident. Requires the analyst role and write access; the deletion is audit-logged. Returns
-    `{"status": "ok"}`.
+    Rejects deletion on a closed incident with 409 `incident_closed` and returns 404 if the event is
+    not in this incident. An event the server recorded itself (`server_generated`) can't be deleted:
+    409 `system_event_immutable`. Requires the analyst role and write access; the deletion is
+    audit-logged. Returns `{"status": "ok"}`.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -513,6 +579,7 @@ async def delete_timeline_event(
     )).scalar_one_or_none()
     if not ev:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    _refuse_server_event(ev, "deleted")
 
     await write_audit(
         db, "timeline_event_delete",
@@ -526,7 +593,14 @@ async def delete_timeline_event(
             "event_time":         ev.event_time.isoformat() if ev.event_time else None,
             "evidence_id":        str(ev.evidence_id) if ev.evidence_id else None,
             "forensic_import_id": str(ev.forensic_import_id) if ev.forensic_import_id else None,
+            "defender_import_id": str(ev.defender_import_id) if ev.defender_import_id else None,
+            "pcap_analysis_id":   str(ev.pcap_analysis_id) if ev.pcap_analysis_id else None,
+            "browser_history_upload_id": str(ev.browser_history_upload_id) if ev.browser_history_upload_id else None,
+            "email_analysis_id":  str(ev.email_analysis_id) if ev.email_analysis_id else None,
+            "source_record_id":   str(ev.source_record_id) if ev.source_record_id else None,
             "import_event_index": ev.import_event_index,
+            "recorded_event_time": ev.recorded_event_time.isoformat() if ev.recorded_event_time else None,
+            "clock_offset_seconds": ev.clock_offset_seconds,
         },
         ip_address=request.client.host if request.client else None,
     )

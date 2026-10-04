@@ -15,7 +15,7 @@ from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
-from incidents.access import get_accessible_incident
+from incidents.access import get_accessible_incident, require_incident_person
 from models import (
     ClosureChecklistItem, Entity, Evidence, Incident,
     IOC, LessonsLearned, PlaybookTask, RespondAction, TimelineEvent, User,
@@ -253,7 +253,11 @@ async def toggle_checklist_item(
 
 @router.patch("/{incident_id}/post-incident/checklist/{item_id}/meta",
               response_model=ClosureChecklistItemOut,
-              responses={409: {"model": ApiErrorBody, "description": "incident_closed"}},
+              responses={409: {"model": ApiErrorBody, "description": "incident_closed"},
+                         404: {"model": ApiErrorBody, "description": "user_not_found (unknown assigned_to_id), "
+                                                                     "or the item"},
+                         422: {"model": ApiErrorBody, "description": "assignee_no_access (assignee deactivated "
+                                                                     "or can't see the incident)"}},
               summary="Update checklist item notes and assignee")
 async def update_checklist_meta(
     incident_id: uuid.UUID,
@@ -266,9 +270,10 @@ async def update_checklist_meta(
     """Update the notes and/or assignee of a closure checklist item.
 
     Requires the analyst role; the incident must not be closed (409 code
-    incident_closed); returns 404 if the item is not found, or if a supplied
-    assignee is not an active user. An explicit null `assigned_to_id` clears the
-    assignment. The change is audited and the updated item is returned.
+    incident_closed); returns 404 if the item is not found. A new
+    `assigned_to_id` must be an active user who can see the incident (404 code
+    user_not_found, 422 code assignee_no_access). An explicit null `assigned_to_id`
+    clears the assignment. The change is audited and the updated item is returned.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -287,14 +292,10 @@ async def update_checklist_meta(
         item.notes = req.notes or None
 
     if req.assigned_to_id is not None:
-        from models import User as UserModel
-        assignee = (await db.execute(
-            select(UserModel).where(UserModel.id == req.assigned_to_id, UserModel.is_active == True)
-        )).scalar_one_or_none()
-        if not assignee:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-        item.assigned_to_id = assignee.id
-        item.assigned_to    = assignee.full_name or assignee.username
+        if req.assigned_to_id != item.assigned_to_id:     # F2 — re-sending the current one keeps it as is
+            assignee = await require_incident_person(db, incident_id, req.assigned_to_id)
+            item.assigned_to_id = assignee.id
+            item.assigned_to    = assignee.full_name or assignee.username
     elif req.assigned_to_id is None and "assigned_to_id" in req.model_fields_set:
         # Explicit null clears the assignment
         item.assigned_to_id = None

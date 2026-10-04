@@ -2,15 +2,19 @@ import { useCallback, useEffect, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal, formatLocalShort } from '../../../lib/datetime.js'
+import { ClockOffsetNotice, OffsetMark, fmtOffset } from '../../../components/ClockOffset.jsx'
+import { exhibitBlock } from '../../../components/ExhibitPicker.jsx'
 
 // Defender Import — upload a Microsoft Defender XDR incident PDF ("Evidence
-// and response" export) and get back candidate IOCs/Entities/Timeline
-// events, each with a suggested destination the analyst can accept or
-// override before committing. Nothing is committed as an IOC/Entity/Timeline
-// event until "Commit selected" is clicked, but the upload itself IS
-// persisted (raw PDF quarantined as an Artifact, parsed candidates saved) so
-// the page survives a refresh — same pattern as Timeline Import's saved
-// imports.
+// and response" export), or parse one already registered as an exhibit (G4),
+// and get back candidate IOCs/Entities/Timeline events, each with a suggested
+// destination the analyst can accept or override before committing. Nothing is
+// committed as an IOC/Entity/Timeline event until "Commit selected" is clicked;
+// the server then copies the chosen candidates (the browser sends only idx +
+// destination), so each fact carries the run's exhibit and, for timeline events,
+// the import and the candidate index. The import itself is persisted with its
+// run record (input SHA-256, exhibit, parser version, clock offset applied) so
+// the page survives a refresh — same pattern as Logs & triage.
 //
 // Some fields (long free-text table cells with no ruling lines in
 // Microsoft's PDF layout) can't always be extracted reliably — those are
@@ -29,17 +33,27 @@ const OVERVIEW_FIELDS = [
   'Time created', 'First activity', 'Last activity', 'Time closed', 'Description',
 ]
 
+const MAX_PDF_BYTES = 25 * 1024 * 1024
+
+// Why an exhibit can't be parsed as a Defender PDF right now (the shared rule, FE-L8), or null.
+const pdfBlock = (ev) => exhibitBlock(ev, MAX_PDF_BYTES, '25 MiB')
+
 export default function DefenderPdfImport() {
-  const { inc } = useOutletContext()
+  const { inc, viewer } = useOutletContext()
   const incidentId = inc.id
   const isClosed = inc?.status === 'closed'
+  // G-fix FE-L12: viewers get the closed-incident view of the write controls (the API refuses them).
+  const ro = isClosed || !!viewer
+  const RO_TITLE = isClosed ? 'Closed incidents are read-only' : 'Read-only: viewers can’t change the incident'
 
+  const [mode, setMode] = useState('upload')          // 'upload' | 'exhibit'
+  const [exhibits, setExhibits] = useState(null)      // digital evidence items (exhibit mode)
+  const [exhibitId, setExhibitId] = useState('')
   const [file, setFile] = useState(null)
   const [parsing, setParsing] = useState(false)
   const [parseErr, setParseErr] = useState(null)
-  const [incidentMeta, setIncidentMeta] = useState(null)
+  const [detail, setDetail] = useState(null)           // the active import (run record + meta)
   const [candidates, setCandidates] = useState([])
-  const [activeImportId, setActiveImportId] = useState(null)
 
   const [committing, setCommitting] = useState(false)
   const [commitResult, setCommitResult] = useState(null)
@@ -59,26 +73,62 @@ export default function DefenderPdfImport() {
 
   useEffect(() => { loadImports() }, [loadImports])
 
-  const applyDetail = (detail) => {
-    setIncidentMeta(detail.incident)
-    setCandidates(detail.candidates.map((c, i) => ({
-      ...c, _id: i, selected: true, destination: c.suggested_destination,
+  // Exhibit mode: every digital evidence item of the incident (all pages).
+  useEffect(() => {
+    if (mode !== 'exhibit' || exhibits !== null) return
+    let live = true
+    ;(async () => {
+      const all = []
+      let cursor = null
+      do {
+        const res = await api.listEvidence(incidentId, { kind: 'digital_file', limit: 200, ...(cursor ? { cursor } : {}) })
+        all.push(...res.items)
+        cursor = res.next_cursor
+      } while (cursor)
+      if (live) setExhibits(all)
+    })().catch(e => { if (live) { setExhibits([]); setParseErr(e.message || 'Could not list exhibits.') } })
+    return () => { live = false }
+  }, [mode, exhibits, incidentId])
+
+  const exhibit = (exhibits || []).find(x => x.id === exhibitId) || null
+  const activeImportId = detail?.id || null
+  const legacy = !!detail && !detail.parser_version
+
+  const applyDetail = (d) => {
+    setDetail(d)
+    setCandidates(d.candidates.map((c, i) => ({
+      ...c, idx: c.idx ?? i, selected: true, destination: c.suggested_destination,
     })))
-    setActiveImportId(detail.id)
     setCommitResult(null)
   }
+
+  const clearDetail = () => { setDetail(null); setCandidates([]) }
 
   const onParse = async () => {
     if (!file) return
     setParsing(true); setParseErr(null); setCommitResult(null)
     try {
-      const detail = await api.createDefenderPdfImport(incidentId, file)
-      applyDetail(detail)
+      applyDetail(await api.createDefenderPdfImport(incidentId, file))
       setFile(null)
       await loadImports()
     } catch (e) {
       setParseErr(e.message || 'Parse failed.')
-      setIncidentMeta(null); setCandidates([]); setActiveImportId(null)
+      clearDetail()
+    } finally {
+      setParsing(false)
+    }
+  }
+
+  const onParseExhibit = async () => {
+    if (!exhibit) return
+    setParsing(true); setParseErr(null); setCommitResult(null)
+    try {
+      applyDetail(await api.importDefenderPdfFromEvidence(incidentId, exhibit.id))
+      await loadImports()
+    } catch (e) {
+      setParseErr(e.message || 'Could not parse the exhibit.')
+      clearDetail()
+      if (e.status === 409) setExhibits(null)   // e.g. frozen after a hash mismatch: refresh the list
     } finally {
       setParsing(false)
     }
@@ -87,8 +137,7 @@ export default function DefenderPdfImport() {
   const loadImport = async (importId) => {
     setParsing(true); setParseErr(null)
     try {
-      const detail = await api.getDefenderPdfImport(incidentId, importId)
-      applyDetail(detail)
+      applyDetail(await api.getDefenderPdfImport(incidentId, importId))
     } catch (e) {
       setParseErr(e.message || 'Load failed.')
     } finally {
@@ -97,120 +146,119 @@ export default function DefenderPdfImport() {
   }
 
   const onDeleteImport = async (imp) => {
-    if (!confirm(`Dispose "${imp.filename}"?\n\n${imp.candidate_count} candidate(s) will be removed from this incident. Items already committed as IOCs/Entities/Timeline events are not affected. Audit-logged.`)) return
+    if (!confirm(`Dispose "${imp.filename}"?\n\n${imp.candidate_count} candidate(s) will be removed from this incident. Items already committed as IOCs/Entities are not affected; an import with committed timeline events can't be disposed. Audit-logged.`)) return
     try {
       await api.deleteDefenderPdfImport(incidentId, imp.id)
-      if (activeImportId === imp.id) {
-        setIncidentMeta(null); setCandidates([]); setActiveImportId(null)
-      }
+      if (activeImportId === imp.id) clearDetail()
       await loadImports()
     } catch (e) {
       setImportsErr(e.message || 'Dispose failed.')
     }
   }
 
-  const toggleSelect = (id) => setCandidates(prev =>
-    prev.map(c => c._id === id ? { ...c, selected: !c.selected } : c))
-  const setDestination = (id, destination) => setCandidates(prev =>
-    prev.map(c => c._id === id ? { ...c, destination } : c))
+  const toggleSelect = (idx) => setCandidates(prev =>
+    prev.map(c => c.idx === idx ? { ...c, selected: !c.selected } : c))
+  const setDestination = (idx, destination) => setCandidates(prev =>
+    prev.map(c => c.idx === idx ? { ...c, destination } : c))
   const toggleAll = () => {
     const allSelected = candidates.every(c => c.selected)
     setCandidates(prev => prev.map(c => ({ ...c, selected: !allSelected })))
   }
 
+  // The server copies the chosen candidates from the stored import (G4): only idx + destination go.
   const onCommit = async () => {
     const selected = candidates.filter(c => c.selected)
-    if (selected.length === 0) return
+    if (selected.length === 0 || !activeImportId) return
     setCommitting(true); setCommitResult(null)
-    const errors = []
-    let created = 0, skipped = 0
-
-    const iocItems = []
-    const entityItems = []
-    const timelineItems = []
-    for (const c of selected) {
-      if (c.destination === 'ioc') {
-        iocItems.push({
-          type: c.ioc_type || 'other',
-          value: c.value || c.description,
-          notes: c.raw_log || undefined,
-          source: c.source || 'Microsoft Defender PDF import',
-        })
-      } else if (c.destination === 'entity') {
-        entityItems.push(c)
-      } else if (c.destination === 'timeline_event') {
-        if (!c.event_time) {
-          skipped++
-          errors.push(`Skipped "${(c.value || c.description).slice(0, 60)}" — no parseable timestamp for a Timeline event`)
-          continue
-        }
-        timelineItems.push({
-          event_time: c.event_time,
-          hostname: c.hostname || undefined,
-          source: c.source || 'Microsoft Defender PDF import',
-          event_type: c.event_type || undefined,
-          description: c.description,
-          raw_log: c.raw_log || undefined,
-        })
-      }
-    }
-
     try {
-      if (iocItems.length) {
-        const r = await api.batchCreateIocs(incidentId, { items: iocItems })
-        created += r.created; skipped += r.skipped; errors.push(...(r.errors || []))
-      }
-      if (timelineItems.length) {
-        const r = await api.batchCreateTimelineEvents(incidentId, { events: timelineItems })
-        created += r.created; errors.push(...(r.errors || []))
-      }
-      for (const c of entityItems) {
-        try {
-          await api.createEntity(incidentId, {
-            type: c.entity_type_hint || 'other',
-            value: c.value || c.description,
-            name: c.value || undefined,
-            description: c.description,
-            criticality: c.criticality || 'medium',
-          })
-          created++
-        } catch (e) {
-          if (e.status === 409) skipped++
-          else errors.push(`Entity "${c.value}": ${e.message}`)
-        }
-      }
+      const r = await api.promoteDefenderPdfImport(incidentId, activeImportId, {
+        items: selected.map(c => ({ idx: c.idx, destination: c.destination })),
+      })
+      setCommitResult({ ok: true, ...r })
     } catch (e) {
-      errors.push(e.message || 'Commit failed.')
+      setCommitResult({ ok: false, error: e.message || 'Commit failed.' })
     } finally {
-      setCommitResult({ created, skipped, errors })
       setCommitting(false)
     }
   }
 
   const selectedCount = candidates.filter(c => c.selected).length
+  const incidentMeta = detail?.incident
 
   return (
     <section className="panel">
       <div className="panel-toolbar">
         <h2 className="panel-h">Defender Import</h2>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-          Upload a Microsoft Defender incident PDF → review suggested IOCs, Entities, and Timeline events before committing
+          Parse a Microsoft Defender incident PDF → review suggested IOCs, Entities, and Timeline events before committing
         </span>
       </div>
 
-      <div style={{
-        display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap',
-        padding: 'var(--space-3)', background: 'var(--surface-2)', borderRadius: 'var(--radius)',
-        marginBottom: 'var(--space-3)',
-      }}>
-        <input type="file" accept="application/pdf" disabled={parsing || isClosed}
-               onChange={e => setFile(e.target.files?.[0] || null)} />
-        <button type="button" className="btn primary" onClick={onParse} disabled={!file || parsing || isClosed}>
-          {parsing ? 'Parsing…' : 'Parse PDF'}
-        </button>
-        <span style={{ color: 'var(--dim)', fontSize: 11 }}>
-          The incident PDF exported from Defender's "Evidence and response" tab — up to 25 MB. The upload is saved (quarantined + candidates persisted); nothing is committed as an IOC/Entity/Timeline event until you click "Commit selected" below.
-        </span>
+      {/* Source (G4): upload a PDF, or parse a registered exhibit without re-uploading it */}
+      <div className="form" style={{ marginBottom: 'var(--space-3)' }}>
+        <div role="radiogroup" aria-label="Import source" style={{ display: 'flex', gap: 'var(--space-4)', flexWrap: 'wrap', fontSize: 13 }}>
+          {[['upload', 'Upload a PDF'], ['exhibit', 'From a registered exhibit']].map(([v, label]) => (
+            <label key={v} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', cursor: 'pointer' }}>
+              <input type="radio" name="dfimp-mode" value={v} checked={mode === v}
+                     onChange={() => { setMode(v); setParseErr(null) }} />
+              {label}
+            </label>
+          ))}
+        </div>
+
+        {mode === 'upload' && (
+          <div style={{
+            display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap',
+            padding: 'var(--space-3)', background: 'var(--surface-2)', borderRadius: 'var(--radius)',
+          }}>
+            <input type="file" accept="application/pdf" disabled={parsing || ro}
+                   onChange={e => setFile(e.target.files?.[0] || null)} />
+            <button type="button" className="btn primary" onClick={onParse} disabled={!file || parsing || ro}>
+              {parsing ? 'Parsing…' : 'Parse PDF'}
+            </button>
+            <span style={{ color: 'var(--dim)', fontSize: 11 }}>
+              The incident PDF exported from Defender's "Evidence and response" tab — up to 25 MiB. The upload is saved (quarantined + candidates persisted); a PDF whose SHA-256 matches exactly one registered exhibit is linked to it. Nothing is committed as an IOC/Entity/Timeline event until you click "Commit selected" below.
+            </span>
+          </div>
+        )}
+
+        {mode === 'exhibit' && (
+          <>
+            <div className="form-row">
+              <div className="field">
+                <label className="field-label" htmlFor="dfimp-exhibit">Exhibit *</label>
+                <select id="dfimp-exhibit" className="select" value={exhibitId}
+                        onChange={(e) => setExhibitId(e.target.value)} disabled={exhibits === null}>
+                  <option value="">{exhibits === null ? 'Loading exhibits…' : exhibits.length ? '— choose an exhibit —' : 'No digital exhibits registered'}</option>
+                  {(exhibits || []).map(x => {
+                    const block = pdfBlock(x)
+                    return (
+                      <option key={x.id} value={x.id} disabled={!!block}>
+                        {x.identifier} · {x.name}{x.original_filename ? ` (${x.original_filename})` : ''}{block ? ` — ${block}` : ''}
+                      </option>
+                    )
+                  })}
+                </select>
+              </div>
+              <div className="field" style={{ justifyContent: 'flex-end' }}>
+                <button type="button" className="btn primary" onClick={onParseExhibit}
+                        disabled={ro || parsing || !exhibit || !!pdfBlock(exhibit)}
+                        title={ro ? (isClosed ? 'Closed incidents are read-only — re-open the incident to import' : RO_TITLE)
+                          : 'Verify the exhibit’s hash, parse it and save the candidates (recorded in its custody log)'}>
+                  {parsing ? 'Parsing…' : 'Parse exhibit'}
+                </button>
+              </div>
+            </div>
+            {exhibit && (
+              <div className="field-hint" role="status" data-testid="dfimp-exhibit-hint">
+                Device clock offset: <strong>not applied</strong> — a Defender incident PDF holds Microsoft cloud times,
+                {' '}not the device&rsquo;s clock{exhibit.system_time_offset_seconds !== null && exhibit.system_time_offset_seconds !== undefined
+                  ? <> (the exhibit records {fmtOffset(exhibit.system_time_offset_seconds)})</> : null}.
+                {' · '}The exhibit is re-hashed before parsing; a mismatch freezes it and nothing is parsed.
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {parseErr && (
@@ -241,6 +289,7 @@ export default function DefenderPdfImport() {
             return (
               <div
                 key={imp.id}
+                data-testid="dfimp-saved"
                 onClick={() => !isActive && loadImport(imp.id)}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
@@ -253,6 +302,15 @@ export default function DefenderPdfImport() {
                   fontFamily: 'var(--font-mono)', color: isActive ? 'var(--accent)' : 'var(--text)',
                   flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                 }} title={imp.filename}>{imp.filename}</span>
+                {imp.evidence_identifier && (
+                  <span className="pill" style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }}
+                        title="Parsed from this registered exhibit">⛁ {imp.evidence_identifier}</span>
+                )}
+                {(imp.clock_offset_status === 'text_only' || imp.clock_offset_status === 'changed') && (
+                  <span style={{ color: 'var(--high)', fontSize: 11 }}
+                        title={imp.clock_offset_status === 'changed' ? 'The exhibit’s clock offset changed after this import'
+                          : 'Clock offset recorded only as text: not applied'}>⚠ clock</span>
+                )}
                 <span style={{ color: 'var(--muted)' }}>{imp.candidate_count} candidates</span>
                 {imp.low_confidence_count > 0 && (
                   <span style={{ color: 'var(--high)' }} title={`${imp.low_confidence_count} low confidence`}>
@@ -267,17 +325,59 @@ export default function DefenderPdfImport() {
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); onDeleteImport(imp) }}
-                  disabled={isClosed}
-                  title={isClosed ? 'Closed incidents are read-only' : 'Dispose this import (audit-logged)'}
+                  disabled={ro}
+                  title={ro ? RO_TITLE : 'Dispose this import (audit-logged)'}
                   style={{
                     background: 'transparent', border: '1px solid var(--border)', color: 'var(--crit)',
                     borderRadius: 'var(--radius-sm)', padding: '2px 8px', fontSize: 11,
-                    cursor: isClosed ? 'not-allowed' : 'pointer',
+                    cursor: ro ? 'not-allowed' : 'pointer',
                   }}
                 >× dispose</button>
               </div>
             )
           })}
+        </div>
+      )}
+
+      {/* Run record of the active import (G4, R03) */}
+      {detail && (
+        <dl className="kv" data-testid="dfimp-run-record" style={{
+          padding: 'var(--space-3)', background: 'var(--surface-2)', borderRadius: 'var(--radius)',
+          marginBottom: 'var(--space-3)', fontSize: 13,
+        }}>
+          <dt>Input</dt>
+          <dd>
+            <span style={{ fontFamily: 'var(--font-mono)' }}>{detail.filename}</span>
+            {detail.evidence_identifier && (
+              <> <span className="pill" data-testid="dfimp-exhibit-pill" style={{ fontSize: 11, fontFamily: 'var(--font-mono)' }}
+                       title="Parsed from this registered exhibit">⛁ {detail.evidence_identifier}</span></>
+            )}
+          </dd>
+          <dt>Input SHA-256</dt>
+          <dd data-testid="dfimp-sha256" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all' }}>{detail.sha256_hash}</dd>
+          <dt>Parser</dt>
+          <dd data-testid="dfimp-parser">
+            {detail.parser_version
+              ? <>{detail.parser_name || 'FENRIR Defender PDF parser'} {detail.parser_version}</>
+              : <span style={{ color: 'var(--dim)' }}>not recorded (imported before run records)</span>}
+          </dd>
+          <dt>Run</dt>
+          <dd>{formatLocal(detail.uploaded_at)}{detail.uploaded_by ? ` by ${detail.uploaded_by}` : ''}</dd>
+          {detail.clock_offset_status === 'not_applicable' ? (
+            <><dt>Clock offset</dt>
+              <dd data-testid="dfimp-offset-na">Not applicable — Defender incident times are Microsoft cloud times, not the device clock, so no exhibit offset is applied.</dd></>
+          ) : detail.clock_offset_seconds !== null && detail.clock_offset_seconds !== undefined && (
+            <><dt>Clock offset</dt><dd>{fmtOffset(detail.clock_offset_seconds)} applied</dd></>
+          )}
+        </dl>
+      )}
+
+      {detail && <ClockOffsetNotice imp={detail} />}
+
+      {legacy && (
+        <div className="alert warn" role="status" data-testid="dfimp-legacy" style={{ marginBottom: 'var(--space-3)' }}>
+          <span className="alert-icon">!</span>
+          <span>This import was made before run records: its candidates carry no time basis, so they can&rsquo;t be committed. Import the PDF or exhibit again.</span>
         </div>
       )}
 
@@ -303,47 +403,62 @@ export default function DefenderPdfImport() {
       {candidates.length > 0 && (
         <>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-2)' }}>
-            <button type="button" className="btn primary" onClick={onCommit} disabled={committing || selectedCount === 0 || isClosed}>
+            <button type="button" className="btn primary" onClick={onCommit}
+                    disabled={committing || selectedCount === 0 || ro || legacy}
+                    title={legacy ? 'Imported before run records — import it again to commit' : undefined}>
               {committing ? 'Committing…' : `Commit ${selectedCount} selected`}
             </button>
             <span style={{ color: 'var(--muted)', fontSize: 12 }}>{candidates.length} candidates found</span>
           </div>
 
           {commitResult && (
-            <div className={`alert ${commitResult.errors.length ? 'error' : 'info'}`} role="alert" style={{ marginBottom: 'var(--space-2)' }}>
-              <span className="alert-icon">{commitResult.errors.length ? '!' : '✓'}</span>
-              <span>
-                Created {commitResult.created}, skipped {commitResult.skipped}.
-                {commitResult.errors.length > 0 && (
-                  <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
-                    {commitResult.errors.map((e, i) => <li key={i}>{e}</li>)}
-                  </ul>
-                )}
-              </span>
+            <div className={`alert ${commitResult.ok ? 'info' : 'error'}`} role="alert" data-testid="dfimp-commit-result"
+                 style={{ marginBottom: 'var(--space-2)' }}>
+              <span className="alert-icon">{commitResult.ok ? '✓' : '!'}</span>
+              {commitResult.ok ? (
+                <span>
+                  Created {commitResult.created} ({commitResult.created_iocs} IOC{commitResult.created_iocs === 1 ? '' : 's'},
+                  {' '}{commitResult.created_entities} entit{commitResult.created_entities === 1 ? 'y' : 'ies'},
+                  {' '}{commitResult.created_events} timeline event{commitResult.created_events === 1 ? '' : 's'}).
+                  {commitResult.skipped_untimestamped.length > 0 && ` ${commitResult.skipped_untimestamped.length} without a timestamp not placed on the timeline.`}
+                  {commitResult.already_promoted.length > 0 && ` ${commitResult.already_promoted.length} already on the timeline from this import.`}
+                  {commitResult.already_exists.length > 0 && ` ${commitResult.already_exists.length} already on the incident (left as they are).`}
+                </span>
+              ) : <span>{commitResult.error}</span>}
             </div>
           )}
 
-          <div style={{ overflowX: 'auto' }}>
+          <div className="table-scroll">
             <table className="settings-table">
               <thead>
                 <tr>
-                  <th style={{ width: 32 }}><input type="checkbox" checked={candidates.every(c => c.selected)} onChange={toggleAll} /></th>
-                  <th style={{ width: 150 }}>Time (UTC)</th>
+                  <th style={{ width: 32 }}><input type="checkbox" aria-label="Select all candidates"
+                                                    checked={candidates.every(c => c.selected)} onChange={toggleAll} /></th>
+                  <th style={{ width: 170 }}>Time</th>
                   <th>Item</th>
                   <th style={{ width: 130 }}>Destination</th>
                 </tr>
               </thead>
               <tbody>
                 {candidates.map(c => (
-                  <tr key={c._id}>
-                    <td><input type="checkbox" checked={c.selected} onChange={() => toggleSelect(c._id)} /></td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} title={c.event_time ? formatLocal(c.event_time) : ''}>
-                      {c.event_time ? c.event_time.replace('T', ' ').slice(0, 19) : '—'}
+                  <tr key={c.idx} data-testid="dfimp-row">
+                    <td><input type="checkbox" aria-label="Select candidate" checked={c.selected} onChange={() => toggleSelect(c.idx)} /></td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} title={c.event_time ? `${c.event_time} (UTC)` : 'No timestamp'}>
+                      {c.event_time ? formatLocal(c.event_time) : '—'}
+                      {c.time_basis === 'assumed_tz' && (
+                        <> <span className="pill" data-basis="assumed_tz"
+                                 style={{ fontSize: 9, padding: '0 4px', color: 'var(--med)', borderColor: 'var(--med)' }}
+                                 title="The PDF does not state its UTC offset: read as UTC">TZ assumed</span></>
+                      )}
+                      {c.recorded_time && <> <OffsetMark seconds={detail?.clock_offset_seconds} recorded={c.recorded_time} size={9} /></>}
                     </td>
                     <td style={{ fontSize: 13, maxWidth: 480 }}>
                       <div style={{ fontWeight: 600 }}>{c.description}</div>
                       {c.low_confidence && (
                         <div style={{ color: 'var(--high)', fontSize: 11 }}>⚠ low confidence — verify against Defender directly</div>
+                      )}
+                      {c.destination === 'timeline_event' && !c.event_time && (
+                        <div style={{ color: 'var(--muted)', fontSize: 11 }}>No timestamp — won&rsquo;t be placed on the timeline</div>
                       )}
                       {c.raw_log && (
                         <details style={{ marginTop: 2 }}>
@@ -353,8 +468,8 @@ export default function DefenderPdfImport() {
                       )}
                     </td>
                     <td>
-                      <select className="select" style={{ fontSize: 12 }} value={c.destination}
-                              onChange={e => setDestination(c._id, e.target.value)}>
+                      <select className="select compact" value={c.destination} aria-label="Destination"
+                              onChange={e => setDestination(c.idx, e.target.value)}>
                         {DESTINATIONS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
                       </select>
                     </td>

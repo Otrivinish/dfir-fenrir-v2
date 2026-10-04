@@ -52,7 +52,7 @@ const PHASES = [
     summary: 'Establish legal basis, assign unique identifiers, document source context',
     citations: [
       { type: 'nist',  label: 'NIST SP 800-86 §3.1' },
-      { type: 'iso',   label: 'ISO 27037 §9.1' },
+      { type: 'iso',   label: 'ISO 27037 §5.4.2' },
       { type: 'acpo',  label: 'ACPO P1' },
     ],
     steps: [
@@ -61,8 +61,8 @@ const PHASES = [
         title: 'Assign a unique, immutable evidence identifier',
         body: 'Each item must carry a stable reference number that appears on all documentation, labels, and transfer records throughout its lifetime. Do not reuse identifiers.',
         cites: [
-          { type: 'nist', label: 'NIST SP 800-86 §3.1.1' },
-          { type: 'iso',  label: 'ISO 27037 §9.1.2' },
+          { type: 'nist', label: 'NIST SP 800-86 §3.1.2' },
+          { type: 'iso',  label: 'ISO 27037 §6.1' },
         ],
         autoCheck: (items) => {
           if (!items.length) return null
@@ -75,7 +75,7 @@ const PHASES = [
         title: 'Document source description and relevance',
         body: 'Record what the item is, where it came from, why it is relevant to the investigation, and its condition at the time of identification.',
         cites: [
-          { type: 'iso',   label: 'ISO 27037 §9.1.3' },
+          { type: 'iso',   label: 'ISO 27037 §5.4.2' },
           { type: 'swgde', label: 'SWGDE §4.1' },
         ],
         autoCheck: (items) => {
@@ -104,7 +104,7 @@ const PHASES = [
         title: 'Photograph and document the source in situ',
         body: 'Before any collection activity, photograph the scene, device, or storage media in its original state. For physical items, capture the physical location, connected cables, and surrounding context. Attach photos to the evidence record.',
         cites: [
-          { type: 'iso',   label: 'ISO 27037 §9.1.4' },
+          { type: 'iso',   label: 'ISO 27037 §6.2.1' },
           { type: 'swgde', label: 'SWGDE §4.2' },
         ],
         autoCheck: (items) => {
@@ -126,8 +126,8 @@ const PHASES = [
     title: 'Collection / Acquisition',
     summary: 'Capture evidence with documented methodology and cryptographic integrity verification',
     citations: [
-      { type: 'nist',  label: 'NIST SP 800-86 §3.2' },
-      { type: 'iso',   label: 'ISO 27037 §9.2' },
+      { type: 'nist',  label: 'NIST SP 800-86 §3.1.2' },
+      { type: 'iso',   label: 'ISO 27037 §5.4.3–5.4.4' },
       { type: 'swgde', label: 'SWGDE §5' },
     ],
     steps: [
@@ -136,7 +136,7 @@ const PHASES = [
         title: 'Record collector identity, date, time, and location',
         body: 'The collecting officer or analyst must be identified by name and role. The exact time, date, and physical or logical location of collection must be recorded. This creates an unambiguous starting point for the chain.',
         cites: [
-          { type: 'nist',  label: 'NIST SP 800-86 §3.2.1' },
+          { type: 'nist',  label: 'NIST SP 800-86 §3.1.2' },
           { type: 'swgde', label: 'SWGDE §5.1' },
         ],
         autoCheck: (items) => {
@@ -160,8 +160,8 @@ const PHASES = [
         title: 'Generate cryptographic hash values at acquisition',
         body: 'Compute MD5, SHA-1, and SHA-256 hashes of each digital item at the moment of acquisition, before any analysis. Record all three values. SHA-256 is the minimum; MD5 and SHA-1 are retained for backward compatibility with legacy tooling.',
         cites: [
-          { type: 'nist', label: 'NIST SP 800-86 §3.2.3' },
-          { type: 'iso',  label: 'ISO 27037 §9.2.3' },
+          { type: 'nist', label: 'NIST SP 800-86 §4.2.2' },
+          { type: 'iso',  label: 'ISO 27037 §5.4.4' },
         ],
         autoCheck: (items) => {
           const digital = items.filter(i => i.kind === 'digital_file')
@@ -180,8 +180,8 @@ const PHASES = [
         body: 'Where possible, acquire a forensic image rather than copying the original. Write-blockers must be used for storage media. For live systems, justify the collection method and document any deviation from best practice.',
         cites: [
           { type: 'acpo', label: 'ACPO Principle 2' },
-          { type: 'iso',  label: 'ISO 27037 §9.2.1' },
-          { type: 'nist', label: 'NIST SP 800-86 §3.2.2' },
+          { type: 'iso',  label: 'ISO 27037 §5.4.4' },
+          { type: 'nist', label: 'NIST SP 800-86 §4.2.2' },
         ],
         autoCheck: () => null,
       },
@@ -190,7 +190,7 @@ const PHASES = [
         title: 'Document acquisition tool, version, and parameters',
         body: 'Record the tool name, version, hash, and command-line parameters used for acquisition. This enables independent verification and supports admissibility arguments.',
         cites: [
-          { type: 'nist',  label: 'NIST SP 800-86 §3.2.4' },
+          { type: 'nist',  label: 'NIST SP 800-86 §3.1.2' },
           { type: 'swgde', label: 'SWGDE §5.3' },
         ],
         autoCheck: () => null,
@@ -203,8 +203,8 @@ const PHASES = [
     title: 'Preservation',
     summary: 'Encrypted storage, access controls, TLP classification, and continuous integrity assurance',
     citations: [
-      { type: 'nist', label: 'NIST SP 800-86 §3.3' },
-      { type: 'iso',  label: 'ISO 27037 §9.3' },
+      { type: 'nist', label: 'NIST SP 800-86 §3.1.2' },
+      { type: 'iso',  label: 'ISO 27037 §5.4.5' },
       { type: 'acpo', label: 'ACPO P3 & P4' },
       { type: 'tlp',  label: 'TLP 2.0' },
     ],
@@ -227,8 +227,8 @@ const PHASES = [
         title: 'Store encrypted at rest under access control',
         body: 'Digital evidence files are stored using AES-256-GCM encryption with a per-file nonce. The evidence KEK (key-encryption key) is held separately from the evidence volume. Physical items must be secured in a locked container with logged access.',
         cites: [
-          { type: 'nist', label: 'NIST SP 800-86 §3.3.1' },
-          { type: 'iso',  label: 'ISO 27037 §9.3.1' },
+          { type: 'nist', label: 'NIST SP 800-86 §3.1.2' },
+          { type: 'iso',  label: 'ISO 27037 §6.9.2' },
         ],
         autoCheck: (items) => {
           if (!items.length) return null
@@ -246,7 +246,7 @@ const PHASES = [
         title: 'Document and maintain a named custodian',
         body: 'Every active evidence item must have an identified current custodian who is accountable for its integrity and security. Custodian changes must go through the formal transfer procedure (Phase 4).',
         cites: [
-          { type: 'nist', label: 'NIST SP 800-86 §3.3.2' },
+          { type: 'nist', label: 'NIST SP 800-86 §3.1.2' },
           { type: 'acpo', label: 'ACPO Principle 4' },
         ],
         autoCheck: (items) => {
@@ -266,7 +266,7 @@ const PHASES = [
         body: 'Every access, transfer, analysis, and verification event must be recorded in the custody log. The audit chain uses hash-chaining so that any tampering with historical records is detectable.',
         cites: [
           { type: 'acpo', label: 'ACPO Principle 3' },
-          { type: 'nist', label: 'NIST SP 800-86 §3.3.3' },
+          { type: 'nist', label: 'NIST SP 800-86 §3.1.2' },
         ],
         autoCheck: (items, events) => {
           if (!items.length) return null
@@ -290,7 +290,7 @@ const PHASES = [
     summary: 'Documented handoff between custodians with verified condition at each transition',
     citations: [
       { type: 'swgde', label: 'SWGDE §6' },
-      { type: 'nist',  label: 'NIST SP 800-86 §3.3.3' },
+      { type: 'nist',  label: 'NIST SP 800-86 §3.1.2' },
       { type: 'acpo',  label: 'ACPO P3' },
     ],
     steps: [
@@ -300,7 +300,7 @@ const PHASES = [
         body: 'No evidence may change hands without a corresponding transfer record stating: transferring party, receiving party, timestamp, reason, and condition at transfer. Both parties should acknowledge the transfer.',
         cites: [
           { type: 'swgde', label: 'SWGDE §6.1' },
-          { type: 'nist',  label: 'NIST SP 800-86 §3.3.3' },
+          { type: 'nist',  label: 'NIST SP 800-86 §3.1.2' },
         ],
         autoCheck: (items, events) => {
           const transferEvents = events.filter(e => e.event_type === 'evidence_transfer' || (e.details && e.details.action === 'transfer'))
@@ -314,7 +314,7 @@ const PHASES = [
         body: 'Before accepting custody, the receiving party must inspect the item and confirm it matches the recorded description and that seals are intact. Any discrepancy must be documented immediately.',
         cites: [
           { type: 'swgde', label: 'SWGDE §6.2' },
-          { type: 'iso',   label: 'ISO 27037 §9.3.2' },
+          { type: 'iso',   label: 'ISO 27037 §6.9.4' },
         ],
         autoCheck: (items, events) => {
           const t = internalTransfers(events)
@@ -351,7 +351,7 @@ const PHASES = [
         title: 'Do not leave evidence unattended outside secure storage during transit',
         body: 'Evidence in transit is at maximum vulnerability. Use tamper-evident packaging. For digital transfers, use encrypted channels only. Document transport method and duration.',
         cites: [
-          { type: 'iso',   label: 'ISO 27037 §9.3.2' },
+          { type: 'iso',   label: 'ISO 27037 §6.9.4' },
           { type: 'swgde', label: 'SWGDE §6.4' },
         ],
         autoCheck: () => null,
@@ -364,8 +364,8 @@ const PHASES = [
     title: 'Analysis',
     summary: 'Forensic examination on copies only, with documented tools, methodology, and analyst identity',
     citations: [
-      { type: 'nist', label: 'NIST SP 800-86 §3.4' },
-      { type: 'iso',  label: 'ISO 27037 §9.4' },
+      { type: 'nist', label: 'NIST SP 800-86 §3.2–3.3' },
+      { type: 'iso',  label: 'ISO/IEC 27042' },
       { type: 'acpo', label: 'ACPO P2' },
     ],
     steps: [
@@ -375,7 +375,7 @@ const PHASES = [
         body: 'Originals must be preserved unmodified. All analysis is performed on verified forensic copies. The copy must be verified against the original hash before analysis begins.',
         cites: [
           { type: 'acpo', label: 'ACPO Principle 1' },
-          { type: 'nist', label: 'NIST SP 800-86 §3.4.1' },
+          { type: 'nist', label: 'NIST SP 800-86 §3.1.2' },
         ],
         autoCheck: () => null,
       },
@@ -384,13 +384,14 @@ const PHASES = [
         title: 'Verify hash integrity before and after examination',
         body: 'Recompute the SHA-256 hash of the forensic copy before beginning analysis and again at the conclusion. Hash mismatches must be investigated and documented before results can be relied upon.',
         cites: [
-          { type: 'nist', label: 'NIST SP 800-86 §3.4.3' },
-          { type: 'iso',  label: 'ISO 27037 §9.4.2' },
+          { type: 'nist', label: 'NIST SP 800-86 §3.1.2' },
+          { type: 'iso',  label: 'ISO 27037 §5.4.5' },
         ],
         autoCheck: (items, events) => {
           if (!items.length) return null
           const verifyEvents = events.filter(e =>
             e.event_type === 'evidence_verify' ||
+            e.event_type === 'evidence_working_copy_verify' ||   // G5: the copy's hash, before/after an examination
             (e.details && e.details.action === 'verify')
           )
           if (!verifyEvents.length) return null
@@ -422,7 +423,7 @@ const PHASES = [
         title: 'Document all tools, versions, and methodologies used',
         body: 'For each analysis tool: record name, version, hash, configuration, and the specific technique applied. This documentation enables peer review, independent verification, and courtroom testimony.',
         cites: [
-          { type: 'nist',  label: 'NIST SP 800-86 §3.4.2' },
+          { type: 'nist',  label: 'NIST SP 800-86 §3.3' },
           { type: 'swgde', label: 'SWGDE §7.2' },
         ],
         autoCheck: () => null,
@@ -435,9 +436,8 @@ const PHASES = [
     title: 'Disposition',
     summary: 'Documented return, destruction, or archival with final integrity verification and approver sign-off',
     citations: [
-      { type: 'nist',  label: 'NIST SP 800-86 §3.5' },
       { type: 'swgde', label: 'SWGDE §8' },
-      { type: 'iso',   label: 'ISO 27037 §9.5' },
+      { type: 'iso',   label: 'ISO 27037 §6.1' },
     ],
     steps: [
       {
@@ -445,7 +445,7 @@ const PHASES = [
         title: 'Generate and record final integrity hash at disposition',
         body: 'Immediately before disposal or return, recompute the SHA-256 hash and record it. This proves the item was not altered during its time in custody and provides a definitive endpoint to the chain.',
         cites: [
-          { type: 'nist',  label: 'NIST SP 800-86 §3.5.1' },
+          { type: 'iso',   label: 'ISO 27037 §5.4.5' },
           { type: 'swgde', label: 'SWGDE §8.1' },
         ],
         autoCheck: (items) => {
@@ -477,7 +477,6 @@ const PHASES = [
         title: 'Document disposition method, date, and outcome',
         body: 'Record how the item was disposed of: secure erasure with certified overwrites, physical destruction with certificate, or return to owner with receipt. Each method has specific requirements to prevent data recovery or re-use.',
         cites: [
-          { type: 'nist',  label: 'NIST SP 800-86 §3.5.2' },
           { type: 'swgde', label: 'SWGDE §8.3' },
         ],
         autoCheck: (items) => {
@@ -493,7 +492,7 @@ const PHASES = [
         body: 'Chain-of-custody documentation must be retained for the duration required by applicable law or organisational policy — typically 3–7 years for civil matters, longer for criminal proceedings. Records must remain intact and accessible.',
         cites: [
           { type: 'swgde', label: 'SWGDE §8.4' },
-          { type: 'nist',  label: 'NIST SP 800-86 §3.5.3' },
+          { type: 'iso',   label: 'ISO 27037 §6.1' },
         ],
         autoCheck: () => null,
       },
@@ -558,16 +557,19 @@ export default function EvidenceSOP() {
     standard === 'all' ? cites : cites.filter(c => c.type === standard)
 
   useEffect(() => {
+    const ctl = new AbortController()
     Promise.all([
-      api.listEvidence(inc.id, { limit: 200 }),
+      api.listAllPages(api.listEvidence, inc.id, {}, 200, { signal: ctl.signal }),   // every page: compliance covers every exhibit
       api.incidentCustodyLog(inc.id),
     ])
       .then(([ev, log]) => {
-        setItems(ev.items || [])
+        if (ctl.signal.aborted) return
+        setItems(ev)
         setEvents(Array.isArray(log) ? log : (log.items || []))
       })
-      .catch(e => setError(e.message || 'Failed to load evidence data'))
-      .finally(() => setLoading(false))
+      .catch(e => { if (!ctl.signal.aborted) setError(e.message || 'Failed to load evidence data') })
+      .finally(() => { if (!ctl.signal.aborted) setLoading(false) })
+    return () => ctl.abort()
   }, [inc.id])
 
   if (loading) return <div className="panel-empty"><div>Loading…</div></div>

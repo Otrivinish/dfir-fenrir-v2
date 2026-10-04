@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
-from core.errors import ApiError
+from core.errors import ApiError, ApiErrorBody
 from incidents.access import get_accessible_incident
 from models import Incident, IncidentStakeholder, OrgContact, User
 from schemas import (
@@ -187,6 +187,7 @@ async def update_stakeholder(
 
 @router.delete("/{incident_id}/stakeholders/{stakeholder_id}",
                status_code=status.HTTP_204_NO_CONTENT,
+               responses={409: {"model": ApiErrorBody, "description": "incident_closed"}},
                summary="Remove a stakeholder")
 async def delete_stakeholder(
     incident_id:    uuid.UUID,
@@ -195,9 +196,12 @@ async def delete_stakeholder(
     db:   AsyncSession = Depends(get_db),
 ) -> None:
     """Remove a stakeholder contact from the incident. Requires the analyst
-    role. The deletion is audited. Returns 204 No Content.
+    role; 409 incident_closed on a closed incident (who was involved stays on the
+    record). The deletion is audited. Returns 204 No Content.
     """
-    await _get_incident(db, incident_id, user)
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
     row = await _get_stakeholder(db, incident_id, stakeholder_id)
     await write_audit(
         db, "stakeholder_delete",

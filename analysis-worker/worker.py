@@ -13,6 +13,7 @@ import socket
 import struct
 import subprocess
 import tempfile
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Optional
 
@@ -63,6 +64,17 @@ async def health():
 
 # ── PCAP Analysis ─────────────────────────────────────────────────────────────
 
+# G3 (R02) run record: the backend stores this name + version with every analysis. Bump the version
+# whenever what the worker derives from the same capture changes.
+#   2.1.0  G3: per-row capture times (frame.time_epoch), conversation first/last seen, a timeline list,
+#          DNS answers merged into their query, conversation tables parsed for tshark 4.x (units),
+#          truncation flags.
+PCAP_ANALYSER_NAME = "FENRIR PCAP analyser"
+PCAP_ANALYSER_VERSION = "2.1.0"
+# Caps on the lists the result keeps (the timeline is built from these lists).
+_CAPS = {"tcp": 50, "udp": 30, "dns_queries": 200, "http_requests": 200, "tls_info": 100}
+
+
 @app.post("/analyze/pcap")
 def analyze_pcap(file: UploadFile = File(...)):
     """Analyze a PCAP/PCAPNG file — extract conversations, DNS, HTTP, TLS,
@@ -93,6 +105,10 @@ def analyze_pcap(file: UploadFile = File(...)):
         "port_summary":     {},
         "protocol_summary": {},
         "errors":           [],
+        "analyser":         {"name": PCAP_ANALYSER_NAME, "version": PCAP_ANALYSER_VERSION, "engine": None},
+        "capture":          {"first_packet_epoch": None, "earliest_epoch": None, "latest_epoch": None},
+        "truncated":        {},
+        "timeline":         [],
     }
 
     with tempfile.NamedTemporaryFile(suffix=".pcap", delete=False) as tmp:
@@ -102,8 +118,11 @@ def analyze_pcap(file: UploadFile = File(...)):
     try:
         has_tshark = subprocess.run(["which", "tshark"], capture_output=True).returncode == 0
         if has_tshark:
+            ver, _ = _run_tshark(["--version"])
+            result["analyser"]["engine"] = (ver.splitlines() or ["tshark"])[0].strip()[:120]
             result.update(_analyze_with_tshark(tmppath, result))
         else:
+            result["analyser"]["engine"] = "basic parser (no tshark)"
             result.update(_analyze_raw_pcap(content, result))
             result["errors"].append(
                 "tshark not available — using basic parser. "
@@ -136,69 +155,91 @@ def _analyze_with_tshark(tmppath: str, result: dict) -> dict:
             except ValueError:
                 pass
 
-    # TCP conversations
-    out, _ = _run_tshark(["-r", tmppath, "-q", "-z", "conv,tcp"])
-    for line in out.splitlines():
-        if "<->" in line:
-            parts = line.split()
-            if len(parts) >= 9:
-                try:
-                    result["conversations"]["tcp"].append({
-                        "src": parts[0], "dst": parts[2],
-                        "frames_ab": int(parts[3]), "bytes_ab": int(parts[4]),
-                        "frames_ba": int(parts[5]), "bytes_ba": int(parts[6]),
-                        "total_frames": int(parts[7]), "total_bytes": int(parts[8]),
-                    })
-                except (ValueError, IndexError):
-                    pass
-    result["conversations"]["tcp"] = sorted(
-        result["conversations"]["tcp"], key=lambda x: x.get("total_bytes", 0), reverse=True
-    )[:50]
+    # Capture window: the first frame's time (the reference tshark's relative times count from)
+    # and the earliest / latest packet times (capinfos; a capture may be out of order).
+    out, _ = _run_tshark(["-r", tmppath, "-c", "1", "-T", "fields", "-e", "frame.time_epoch"])
+    first = out.strip().splitlines()[0].strip() if out.strip() else None
+    result["capture"]["first_packet_epoch"] = first if _epoch_ok(first) else None
+    try:
+        r = subprocess.run(["capinfos", "-a", "-e", "-S", "-T", "-r", tmppath],
+                           capture_output=True, text=True, timeout=30)
+        parts = r.stdout.strip().rsplit("\t", 2)
+        if len(parts) == 3:
+            result["capture"]["earliest_epoch"] = parts[1].strip() if _epoch_ok(parts[1].strip()) else None
+            result["capture"]["latest_epoch"] = parts[2].strip() if _epoch_ok(parts[2].strip()) else None
+    except Exception:
+        pass
 
-    # UDP conversations
-    out, _ = _run_tshark(["-r", tmppath, "-q", "-z", "conv,udp"])
-    for line in out.splitlines():
-        if "<->" in line:
-            parts = line.split()
-            if len(parts) >= 9:
+    # TCP / UDP conversations ("->" = A to B, "<-" = B to A; tshark 4.x prints sizes with units).
+    # First / last seen = the first frame's time + the relative start (+ the duration).
+    for proto in ("tcp", "udp"):
+        out, _ = _run_tshark(["-r", tmppath, "-q", "-z", f"conv,{proto}"])
+        convs = []
+        for line in out.splitlines():
+            m = _CONV_RE.match(line.strip())
+            if not m:
+                continue
+            g = m.groupdict()
+            c = {
+                "src": g["a"], "dst": g["b"],
+                "frames_ab": int(g["f_ab"].replace(",", "")), "bytes_ab": _size_bytes(g["b_ab"]),
+                "frames_ba": int(g["f_ba"].replace(",", "")), "bytes_ba": _size_bytes(g["b_ba"]),
+                "total_frames": int(g["f_t"].replace(",", "")), "total_bytes": _size_bytes(g["b_t"]),
+                "rel_start": g["start"], "duration": g["dur"],
+                "first_seen_epoch": None, "last_seen_epoch": None,
+            }
+            if result["capture"]["first_packet_epoch"]:
                 try:
-                    result["conversations"]["udp"].append({
-                        "src": parts[0], "dst": parts[2],
-                        "frames_ab": int(parts[3]), "bytes_ab": int(parts[4]),
-                        "total_frames": int(parts[7]), "total_bytes": int(parts[8]),
-                    })
-                except (ValueError, IndexError):
+                    f0 = Decimal(result["capture"]["first_packet_epoch"]) + Decimal(g["start"])
+                    c["first_seen_epoch"] = str(f0)
+                    c["last_seen_epoch"] = str(f0 + Decimal(g["dur"]))
+                except InvalidOperation:
                     pass
-    result["conversations"]["udp"] = sorted(
-        result["conversations"]["udp"], key=lambda x: x.get("total_bytes", 0), reverse=True
-    )[:30]
+            convs.append(c)
+        convs.sort(key=lambda x: x.get("total_bytes", 0), reverse=True)
+        result["truncated"][proto] = len(convs) > _CAPS[proto]
+        result["conversations"][proto] = convs[:_CAPS[proto]]
 
     # DNS queries
     out, _ = _run_tshark([
         "-r", tmppath, "-Y", "dns", "-T", "fields",
         "-e", "frame.time_relative", "-e", "ip.src", "-e", "dns.qry.name",
         "-e", "dns.resp.name", "-e", "dns.a", "-e", "dns.cname",
-        "-e", "dns.qry.type",  "-e", "dns.flags.response",
+        "-e", "dns.qry.type",  "-e", "dns.flags.response", "-e", "frame.time_epoch",
     ])
-    dns_seen: set[str] = set()
+    dns_seen: dict[str, dict] = {}
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) >= 4:
             name = parts[2] or parts[3]
-            if name and name not in dns_seen:
-                dns_seen.add(name)
-                result["dns_queries"].append({
+            # tshark 4.x prints booleans as True/False (older releases: 1/0)
+            is_resp = parts[7].strip().lower() in ("1", "true") if len(parts) > 7 else False
+            if name and name in dns_seen:
+                # The first record of a name is kept (usually the query); an answer that follows fills
+                # in what it resolved to (G3: answers were dropped before).
+                seen = dns_seen[name]
+                if is_resp and not seen.get("resolved_ip"):
+                    seen["resolved_ip"] = parts[4] if len(parts) > 4 else ""
+                    seen["cname"] = seen.get("cname") or (parts[5] if len(parts) > 5 else "")
+                    seen["response"] = seen.get("response") or parts[3]
+                continue
+            if name:
+                entry = {
                     "time":        parts[0],
+                    "time_epoch":  parts[8].strip() if len(parts) > 8 and _epoch_ok(parts[8].strip()) else None,
                     "src":         parts[1],
                     "query":       parts[2],
                     "response":    parts[3],
                     "resolved_ip": parts[4] if len(parts) > 4 else "",
                     "cname":       parts[5] if len(parts) > 5 else "",
                     "type":        parts[6] if len(parts) > 6 else "",
-                    "is_response": parts[7].strip() == "1" if len(parts) > 7 else False,
+                    "is_response": is_resp,
                     "suspicious":  _suspicious_domain(name),
-                })
-    result["dns_queries"] = result["dns_queries"][:200]
+                }
+                dns_seen[name] = entry
+                result["dns_queries"].append(entry)
+    result["truncated"]["dns_queries"] = len(result["dns_queries"]) > _CAPS["dns_queries"]
+    result["dns_queries"] = result["dns_queries"][:_CAPS["dns_queries"]]
 
     # HTTP requests
     out, _ = _run_tshark([
@@ -206,6 +247,7 @@ def _analyze_with_tshark(tmppath: str, result: dict) -> dict:
         "-e", "frame.time_relative", "-e", "ip.src", "-e", "ip.dst",
         "-e", "http.request.method", "-e", "http.request.uri",
         "-e", "http.host", "-e", "http.response.code", "-e", "http.user_agent",
+        "-e", "frame.time_epoch",
     ])
     for line in out.splitlines():
         parts = line.split("\t")
@@ -215,6 +257,7 @@ def _analyze_with_tshark(tmppath: str, result: dict) -> dict:
             ua     = parts[7][:200] if len(parts) > 7 else ""
             entry = {
                 "time":          parts[0],
+                "time_epoch":    parts[8].strip() if len(parts) > 8 and _epoch_ok(parts[8].strip()) else None,
                 "src":           parts[1],
                 "dst":           parts[2],
                 "method":        method,
@@ -226,14 +269,15 @@ def _analyze_with_tshark(tmppath: str, result: dict) -> dict:
             }
             if entry["method"] or entry["response_code"]:
                 result["http_requests"].append(entry)
-    result["http_requests"] = result["http_requests"][:200]
+    result["truncated"]["http_requests"] = len(result["http_requests"]) > _CAPS["http_requests"]
+    result["http_requests"] = result["http_requests"][:_CAPS["http_requests"]]
 
     # TLS/SSL — Client Hello SNI
     out, _ = _run_tshark([
         "-r", tmppath, "-Y", "tls.handshake.type == 1", "-T", "fields",
         "-e", "ip.src", "-e", "ip.dst",
         "-e", "tls.handshake.extensions_server_name",
-        "-e", "tls.handshake.version",
+        "-e", "tls.handshake.version", "-e", "frame.time_epoch",
     ])
     tls_seen: set[str] = set()
     for line in out.splitlines():
@@ -248,9 +292,11 @@ def _analyze_with_tshark(tmppath: str, result: dict) -> dict:
                     "dst":        parts[1],
                     "sni":        sni,
                     "version":    parts[3] if len(parts) > 3 else "",
+                    "time_epoch": parts[4].strip() if len(parts) > 4 and _epoch_ok(parts[4].strip()) else None,
                     "suspicious": _suspicious_domain(sni),
                 })
-    result["tls_info"] = result["tls_info"][:100]
+    result["truncated"]["tls_info"] = len(result["tls_info"]) > _CAPS["tls_info"]
+    result["tls_info"] = result["tls_info"][:_CAPS["tls_info"]]
 
     # Top talkers by bytes
     out, _ = _run_tshark(["-r", tmppath, "-q", "-z", "endpoints,ip"])
@@ -282,7 +328,94 @@ def _analyze_with_tshark(tmppath: str, result: dict) -> dict:
                 pass
 
     _find_suspicious(result)
+    result["timeline"] = _build_timeline(result)
     return result
+
+
+# A conversation-table row: "A <-> B  frames bytes  frames bytes  frames bytes  rel_start  duration";
+# tshark 4.x prints sizes with a unit ("425 bytes", "12 kB").
+_SIZE = r"[\d.,]+(?:\s*(?:bytes|[kKMGT]i?B))?"
+_CONV_RE = re.compile(
+    r"^(?P<a>\S+)\s+<->\s+(?P<b>\S+)\s+"
+    rf"(?P<f_ba>[\d,]+)\s+(?P<b_ba>{_SIZE})\s+(?P<f_ab>[\d,]+)\s+(?P<b_ab>{_SIZE})\s+"
+    rf"(?P<f_t>[\d,]+)\s+(?P<b_t>{_SIZE})\s+(?P<start>\d+(?:\.\d+)?)\s+(?P<dur>\d+(?:\.\d+)?)$")
+_UNIT = {"bytes": 1, "": 1, "kB": 10**3, "KB": 10**3, "KiB": 2**10, "MB": 10**6, "MiB": 2**20,
+         "GB": 10**9, "GiB": 2**30, "TB": 10**12, "TiB": 2**40}
+
+
+def _size_bytes(text: str) -> int:
+    """'425 bytes' → 425, '12 kB' → 12000 (tshark rounds large sizes: approximate)."""
+    m = re.match(r"([\d.,]+)\s*(\w*)", text.strip())
+    if not m:
+        return 0
+    try:
+        return int(Decimal(m.group(1).replace(",", "")) * _UNIT.get(m.group(2), 1))
+    except (InvalidOperation, ValueError):
+        return 0
+
+
+def _epoch_ok(v) -> bool:
+    try:
+        d = Decimal(str(v))
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    return d.is_finite() and 0 <= d < 253402300800
+
+
+def _ip_of(endpoint: str) -> str:
+    """'10.0.0.5:49200' → '10.0.0.5'. An IPv6 endpoint is returned as printed (address and port are
+    both colon-separated there, so they are not split)."""
+    if "." in endpoint and endpoint.count(":") == 1:
+        return endpoint.split(":")[0]
+    return endpoint
+
+
+def _build_timeline(result: dict) -> list[dict]:
+    """Time-ordered network events with their capture time (epoch seconds as tshark printed them):
+    the capture window, conversation first / last seen, DNS queries (first per name), HTTP requests
+    and TLS ClientHello SNI. Built from the (capped) lists above; entries without a time are kept
+    with epoch null (the backend never places those on the timeline)."""
+    tl: list[dict] = []
+    cap = result.get("capture") or {}
+    if cap.get("earliest_epoch"):
+        tl.append({"epoch": cap["earliest_epoch"], "kind": "capture_start", "summary": "Earliest packet in the capture"})
+    for proto in ("tcp", "udp"):
+        for c in result.get("conversations", {}).get(proto, []):
+            a, b = c.get("src", ""), c.get("dst", "")
+            base = {"protocol": proto.upper(), "src": _ip_of(a), "dst": _ip_of(b), "src_endpoint": a, "dst_endpoint": b,
+                    "frames": c.get("total_frames"), "bytes": c.get("total_bytes")}
+            tl.append({**base, "epoch": c.get("first_seen_epoch"), "kind": "conversation_start",
+                       "summary": f"{proto.upper()} conversation {a} ↔ {b} first seen "
+                                  f"({c.get('total_frames')} frames, {c.get('total_bytes')} bytes in the capture)"})
+            tl.append({**base, "epoch": c.get("last_seen_epoch"), "kind": "conversation_end",
+                       "summary": f"{proto.upper()} conversation {a} ↔ {b} last seen (duration {c.get('duration')} s)"})
+    for d in result.get("dns_queries", []):
+        if d.get("is_response"):
+            continue
+        ans = d.get("resolved_ip") or d.get("cname")
+        tl.append({"epoch": d.get("time_epoch"), "kind": "dns_query", "protocol": "DNS", "src": d.get("src"),
+                   "query": d.get("query"), "answer": ans or None,
+                   "summary": f"DNS query {d.get('query')} from {d.get('src')}" + (f" → {ans}" if ans else "")})
+    for h in result.get("http_requests", []):
+        if not h.get("method"):
+            continue
+        tl.append({"epoch": h.get("time_epoch"), "kind": "http_request", "protocol": "HTTP", "src": h.get("src"),
+                   "dst": h.get("dst"), "host": h.get("host"), "uri": h.get("uri"), "user_agent": h.get("user_agent"),
+                   "summary": f"HTTP {h.get('method')} {h.get('host') or h.get('dst')}{h.get('uri') or ''} "
+                              f"from {h.get('src')} to {h.get('dst')}"[:2000]})
+    for t in result.get("tls_info", []):
+        tl.append({"epoch": t.get("time_epoch"), "kind": "tls_client_hello", "protocol": "TLS", "src": t.get("src"),
+                   "dst": t.get("dst"), "sni": t.get("sni") or None,
+                   "summary": f"TLS ClientHello SNI {t.get('sni') or '(none)'} from {t.get('src')} to {t.get('dst')}"})
+    if cap.get("latest_epoch"):
+        tl.append({"epoch": cap["latest_epoch"], "kind": "capture_end", "summary": "Latest packet in the capture"})
+
+    def key(e):
+        try:
+            return (0, Decimal(str(e["epoch"])))
+        except (InvalidOperation, ValueError, TypeError, KeyError):
+            return (1, Decimal(0))
+    return sorted(tl, key=key)
 
 
 def _analyze_raw_pcap(content: bytes, result: dict) -> dict:

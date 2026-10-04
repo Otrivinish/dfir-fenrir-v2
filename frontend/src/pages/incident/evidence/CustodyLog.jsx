@@ -2,48 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
+import { CUSTODY_ACTION_COLOR, CUSTODY_ACTION_LABEL } from '../../../lib/custodyLabels.js'
 
-const ACTION_COLOR = {
-  evidence_collect:                  'var(--ok)',
-  evidence_collect_rejected:         'var(--crit)',
-  email_mint_evidence:               'var(--ok)',
-  webhistory_mint_evidence:          'var(--ok)',
-  evidence_update:                   'var(--muted)',
-  evidence_transfer_request:         'var(--med)',
-  evidence_transfer:                 'var(--accent)',
-  evidence_transfer_declined:        'var(--high)',
-  evidence_examine:                  'var(--med)',
-  evidence_verify:                   'var(--ok)',
-  evidence_verify_failed:            'var(--crit)',
-  evidence_destroy:                  'var(--crit)',
-  evidence_return:                   'var(--high)',
-  evidence_archive:                  'var(--muted)',
-  evidence_export:                   'var(--accent)',
-  evidence_export_create:            'var(--accent)',
-  evidence_export_download:          'var(--accent)',
-  evidence_export_download_denied:   'var(--crit)',
-}
-
-const ACTION_LABEL = {
-  evidence_collect:                'Collected',
-  evidence_collect_rejected:       'Collection REFUSED',
-  email_mint_evidence:             'Collected (from Email)',
-  webhistory_mint_evidence:        'Collected (from Browser history)',
-  evidence_update:                 'Updated',
-  evidence_transfer_request:       'Transfer requested',
-  evidence_transfer:               'Transferred',
-  evidence_transfer_declined:      'Transfer declined',
-  evidence_examine:                'Examined',
-  evidence_verify:                 'Verified',
-  evidence_verify_failed:          'Verify FAILED',
-  evidence_destroy:                'Destroyed',
-  evidence_return:                 'Returned',
-  evidence_archive:                'Archived',
-  evidence_export:                 'Exported',
-  evidence_export_create:          'Export bundle created',
-  evidence_export_download:        'Export downloaded',
-  evidence_export_download_denied: 'Export download denied',
-}
+// G-fix FE-L8: the labels and colours live in lib/custodyLabels.js (shared with the item detail).
+const ACTION_COLOR = CUSTODY_ACTION_COLOR
+const ACTION_LABEL = CUSTODY_ACTION_LABEL
 
 export default function CustodyLog() {
   const { inc } = useOutletContext()

@@ -72,7 +72,8 @@ I="/api/incidents/$INC"
 
 # ── Phase gates (own dark incident, kept in C/E/R; only refused moves, so nothing changes) ─
 GTAG="smoke-phase-gates"
-api GET "/api/incidents?tag=$GTAG&limit=50" >/dev/null
+# Only an open one can be reused (a closed one stays closed; the step then makes a new one).
+api GET "/api/incidents?tag=$GTAG&status=open&limit=50" >/dev/null
 GINC="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(next((i["id"] for i in d.get("items",[]) if i.get("title")==sys.argv[2]),""))' "$TMP/body" "[SMOKE] phase gates")"
 if [ -z "$GINC" ]; then
   c=$(api POST /api/incidents -H 'Content-Type: application/json' -d "{\"title\":\"[SMOKE] phase gates\",\"severity\":\"low\",\"phase\":\"containment_eradication_recovery\",\"dark_operation\":true,\"tags\":[\"$GTAG\"],\"description\":\"Automated smoke-test incident for the phase gates (scripts/smoke-test.sh). Keep it in C/E/R.\"}")

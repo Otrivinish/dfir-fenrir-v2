@@ -161,6 +161,17 @@
   text-overflow: ellipsis;
 }
 
+/* Inside an incident the drawer is locked to that incident's room (no picker). */
+.warroom-incident-locked {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.warroom-incident-locked-ref { color: var(--text); font-weight: 700; }
+
 .warroom-sev {
   width: 6px;
   height: 6px;
@@ -181,6 +192,12 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+
+/* "Load older messages": first in the feed, centred; never squeezed by the flex column. */
+.warroom-load-older {
+  align-self: center;
+  flex-shrink: 0;
 }
 
 .warroom-msg {

@@ -1,8 +1,12 @@
 """DFIR-FENRIR v2 — backend entrypoint."""
+import errno
 import logging
+import re
+import tempfile
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+import starlette.formparsers
+from fastapi import FastAPI, Request
 from fastapi.routing import APIRoute
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -31,9 +35,13 @@ from entities.routes import router as entities_router
 from files.routes import router as files_router
 from notes.routes import router as notes_router
 from webhistory.routes import router as webhistory_router
-from evidence.crypto import assert_kek_configured
+from evidence.crypto import STALE_PARTIAL_MINUTES, assert_kek_configured, check_storage_gate, sweep_staging
 from evidence.download import router as exports_download_router
+from evidence.exports import sweep_stale_pending as sweep_stale_pending_exports
+from evidence.read_alarms import install as install_read_alarms
+from audit.service import write_audit
 from evidence.routes import router as evidence_router
+from evidence.uploads import router as uploads_router, start_reaper as start_upload_reaper, stop_reaper as stop_upload_reaper
 from incidents.routes import router as incidents_router
 from iocs.exports import router as iocs_exports_router
 from iocs.routes import router as iocs_router
@@ -51,7 +59,7 @@ from comms.routes import router as comms_router
 from mitre.routes import router as mitre_router, global_router as mitre_global_router
 from respond.routes import router as respond_router
 from forensic.routes import router as forensic_router
-from forensic.parser import sweep_parse_tmp
+from forensic.parser import PARSE_TMP_DIR, sweep_parse_tmp
 from defender_pdf.routes import router as defender_pdf_router
 from osint.routes import router as osint_router
 from osint.session_routes import router as osint_session_router
@@ -84,6 +92,7 @@ from warroom.routes import router as warroom_router
 from notifications.routes import router as notifications_router
 from assignments.routes import router as assignments_router
 from backup.routes import router as backup_router
+from backup import mirror_receipts
 from storage.routes import router as storage_router
 from presence.routes import router as presence_router
 from threat_actors.routes import global_router as threat_actors_global_router
@@ -107,6 +116,55 @@ logging.basicConfig(
 )
 
 
+class _RedactQueryToken(logging.Filter):
+    """G-fix B (L3 / L15, owner 2026-10-04): a one-time link carries its secret in the query string
+    (…/working-copies/{id}/download?token=…). uvicorn's access log writes the request path WITH its query
+    string, so the token would sit in the backend's container log. Redact the value of every `token`
+    query parameter in the record's arguments; the line is kept (access logs stay on)."""
+    _TOKEN = re.compile(r"([?&]token=)[^&#\s\"]*", re.IGNORECASE)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._TOKEN.sub(r"\1[REDACTED]", a) if isinstance(a, str) else a
+                                for a in record.args)
+        elif isinstance(record.msg, str):
+            record.msg = self._TOKEN.sub(r"\1[REDACTED]", record.msg)
+        return True
+
+
+# uvicorn configures its loggers before it imports this module; a filter on the logger survives that.
+logging.getLogger("uvicorn.access").addFilter(_RedactQueryToken())
+
+
+def _scratch_full() -> ApiError:
+    return ApiError(507, "insufficient_storage",
+                    "The server's memory-only upload scratch space is full (uploads and parses in progress). "
+                    "Nothing was stored; try again shortly, or use the chunked upload sessions for large files.")
+
+
+class _TmpfsSpool(tempfile.SpooledTemporaryFile):
+    """R80 (G-fix): Starlette spools a multipart file part over 1 MiB to a temporary file, by default in
+    /tmp, the backend-scratch volume on disk: an upload's plaintext reached the disk. The spool goes to
+    the RAM-only parser tmpfs instead (PARSE_TMP_DIR, /run/fenrir-parse: never swapped, private to the
+    backend, 1 GiB; unnamed O_TMPFILE files, gone when closed). A full tmpfs is 507 insufficient_storage,
+    never a 500 (FastAPI would turn any other error while reading the form into a 400). Only the multipart
+    spool moves: other temporary files (e.g. collector builds, which run binaries) stay where they were."""
+
+    def __init__(self, max_size=0, *args, **kwargs):
+        super().__init__(max_size=max_size, dir=PARSE_TMP_DIR)
+
+    def write(self, s):
+        try:
+            return super().write(s)
+        except OSError as e:
+            if e.errno == errno.ENOSPC:
+                raise _scratch_full() from None
+            raise
+
+
+starlette.formparsers.SpooledTemporaryFile = _TmpfsSpool
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Fail-fast on a weak SECRET_KEY — it derives the Fernet key that encrypts
@@ -127,6 +185,15 @@ async def lifespan(app: FastAPI):
     swept = sweep_parse_tmp()
     if swept:
         logging.getLogger("fenrir.forensic").warning("startup: removed %d stale parser temp file(s)", swept)
+    # Stored files (G1 stage 3a, docs/streaming-aes-gcm-format.md §6.4, §4.4): refuse to start while
+    # a KEK rotation or a v2 rewrite may have left a file half done; then drop the staging files a
+    # crash left behind (they never had a row).
+    stores = (settings.evidence_path, settings.logs_path)
+    check_storage_gate(stores)
+    stale = {root: sweep_staging(root) for root in stores}
+    if any(stale.values()):
+        logging.getLogger("fenrir.evidence").warning(
+            "startup: removed stale staging files (idle > %d min): %s", STALE_PARTIAL_MINUTES, stale)
     # Schema DDL is NOT run here: the `migrate` one-shot (python -m core.migrate) runs
     # it as the owner role before the backend starts, so the long-running app
     # connects as fenrir_app with data privileges only.
@@ -135,6 +202,21 @@ async def lifespan(app: FastAPI):
         await seed_playbook_templates(db)
         await fix_bad_feeds(db)
         await seed_threat_actors(db)
+        if any(stale.values()):
+            await write_audit(db, "storage_staging_cleanup", outcome="success",
+                              details={"removed": stale, "older_than_minutes": STALE_PARTIAL_MINUTES})
+            await db.commit()
+        # R105: custody exports left `pending` by a build that died with the previous process.
+        swept_exports = await sweep_stale_pending_exports(db, by="startup")
+        if swept_exports:
+            logging.getLogger("fenrir.evidence").warning(
+                "startup: revoked %d abandoned pending export(s)", swept_exports)
+    # Every stored-file read that cannot be read is audited + admins notified (evidence/read_alarms.py).
+    install_read_alarms()
+    # Mirror grace-period purge receipts written by the backup container → custody log (G-fix).
+    mirror_receipts.start()
+    # G1 stage 3b: idle chunked-upload sessions are aborted (their staged files deleted).
+    start_upload_reaper()
     # Background syslog forwarder — idles when disabled, picks up config changes
     # via /api/integrations/syslog PUT calling forwarder.reload().
     from syslog_forwarder import start_forwarder, stop_forwarder
@@ -145,6 +227,8 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await mirror_receipts.stop()
+        await stop_upload_reaper()
         await stop_reminders()
         await stop_forwarder()
 
@@ -168,6 +252,18 @@ app = FastAPI(
 )
 # Flat {detail, code} error body for routes that raise core.errors.ApiError.
 app.add_exception_handler(ApiError, api_error_handler)
+
+
+async def _oserror_handler(request: Request, exc: OSError):
+    """A full disk or tmpfs that nothing else handled is 507 insufficient_storage, not a 500 (R80 G-fix);
+    every other OSError keeps its default handling."""
+    if exc.errno == errno.ENOSPC:
+        return await api_error_handler(request, ApiError(507, "insufficient_storage",
+                                                         "The server ran out of storage space; nothing was stored."))
+    raise exc
+
+
+app.add_exception_handler(OSError, _oserror_handler)
 
 _allowed_hosts = [h.strip() for h in settings.allowed_hosts.split(",") if h.strip()]
 if not _allowed_hosts:
@@ -286,6 +382,7 @@ app.include_router(files_router,     prefix="/api/incidents",          tags=["Fi
 app.include_router(notes_router,     prefix="/api/incidents",          tags=["Notes"])
 app.include_router(webhistory_router, prefix="/api/incidents",         tags=["Browser History"])
 app.include_router(evidence_router,  prefix="/api/incidents",          tags=["Evidence"])
+app.include_router(uploads_router,   prefix="/api/incidents",          tags=["Uploads"])
 app.include_router(playbook_tasks_router,     prefix="/api/incidents",          tags=["Playbook"])
 app.include_router(playbook_templates_router, prefix="/api/playbook-templates", tags=["Playbook templates"])
 app.include_router(respond_router,            prefix="/api/incidents",          tags=["Respond"])

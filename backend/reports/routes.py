@@ -227,8 +227,8 @@ async def get_report_data(
     )).scalars().all()
     figure_rows = [(f.file_path, f.nonce_hex, f.file_size, f.report_sha256, f.report_mime) for f in report_files]
     digests = await asyncio.to_thread(lambda: [
-        ((sha, mime) if report_file_present(path, size) else (None, None)) if sha
-        else report_image_digest(path, nonce)
+        ((sha, mime) if report_file_present(path, size, nonce) else (None, None)) if sha
+        else report_image_digest(path, nonce, size)
         for path, nonce, size, sha, mime in figure_rows])
 
     oob_log = (await db.execute(

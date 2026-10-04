@@ -1,4 +1,6 @@
+import { useMemo } from 'react'
 import { NavLink, Outlet, useOutletContext } from 'react-router-dom'
+import { useAuth } from '../../hooks/useAuth.jsx'
 
 // Examine (route segment `forensic`) — the analysis tooling, in three labelled groups in
 // workflow order: acquire first (ISO/IEC 27037), then analyse each kind of artefact,
@@ -40,6 +42,11 @@ export default function Forensic() {
   // Pass the parent IncidentDetail's Outlet context through so inner tabs
   // can reach `inc`, `editing`, etc. without prop drilling.
   const ctx = useOutletContext()
+  // G-fix FE-L12: a viewer reads every result here but can't upload, analyse, import or promote (the API
+  // refuses it). The tabs get `viewer` and hide those controls; this line says why they're missing.
+  const { user } = useAuth()
+  const viewer = user?.role === 'viewer'
+  const outlet = useMemo(() => ({ ...ctx, viewer }), [ctx, viewer])
   return (
     <>
       <nav className="tabs-h tabs-grouped" aria-label="Examine sections">
@@ -52,7 +59,12 @@ export default function Forensic() {
           </div>
         ))}
       </nav>
-      <Outlet context={ctx} />
+      {viewer && (
+        <div className="field-hint" role="note" data-testid="forensic-viewer-note" style={{ marginBottom: 'var(--space-2)' }}>
+          Read-only: viewers see the results. Uploading, analysing, importing and promoting need the analyst role.
+        </div>
+      )}
+      <Outlet context={outlet} />
     </>
   )
 }

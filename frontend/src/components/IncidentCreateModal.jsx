@@ -14,6 +14,7 @@ const INITIAL = {
   incident_type: '',
   detection_method: '',
   triage_state: 'suspected',
+  triage_reason: '',
   reporter: '',
   occurred_at: '',
   detected_at: '',
@@ -22,12 +23,15 @@ const INITIAL = {
 
 // An incident is opened because something was detected: the API accepts only these start phases.
 const START_PHASES = PHASE.filter(p => p.value === 'detection_and_analysis' || p.value === 'containment_eradication_recovery')
+const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
 
 export default function IncidentCreateModal({ open, onClose, onCreated }) {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
   // GET /api/readiness is admin + analyst only; viewers never ask for it.
   const readsReadiness = isAdmin || user?.role === 'analyst'
+  // Admins may restrict a new incident to any team, analysts to their own (the API says 409 would_lock_out otherwise).
+  const canPickTeams = readsReadiness
   const [form, setForm] = useState(INITIAL)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -52,10 +56,10 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
   }, [open, readsReadiness])
 
   useEffect(() => {
-    if (open && isAdmin && allTeams.length === 0) {
+    if (open && canPickTeams && allTeams.length === 0) {
       api.listTeams().then(data => setAllTeams(data.items ?? data)).catch(() => {})
     }
-  }, [open, isAdmin])
+  }, [open, canPickTeams])
 
   useEffect(() => {
     if (!open) return
@@ -67,6 +71,9 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
   if (!open) return null
 
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }))
+  // A false / benign positive asks for a reason (the API requires one outside Detection &
+  // Analysis: such an incident can be closed without Gate 2; 422 triage_reason_required).
+  const askTriageReason = ['false_positive', 'benign_positive'].includes(form.triage_state)
 
   const onSubmit = async (e) => {
     e.preventDefault()
@@ -83,6 +90,7 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
         incident_type: form.incident_type || null,
         detection_method: form.detection_method || null,
         triage_state: form.triage_state,
+        ...(askTriageReason && form.triage_reason.trim() ? { triage_reason: form.triage_reason.trim() } : {}),
         reporter: form.reporter.trim() || null,
         occurred_at: form.occurred_at || null,
         detected_at: form.detected_at,
@@ -92,7 +100,9 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
       })
       onCreated(created)
     } catch (err) {
-      setError(err.message || 'Could not create incident.')
+      // 409 would_lock_out / 422 team_not_found name teams by id: show their names instead.
+      const names = new Map(allTeams.map(t => [String(t.id).toLowerCase(), t.name]))
+      setError((err.message || 'Could not create incident.').replace(UUID_RE, id => names.has(id.toLowerCase()) ? `“${names.get(id.toLowerCase())}”` : id))
     } finally {
       setBusy(false)
     }
@@ -177,13 +187,27 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
                 </div>
               </div>
 
+              {askTriageReason && (
+                <div className="field">
+                  <label className="field-label" htmlFor="inc-triage-reason">Reason for the triage state</label>
+                  <textarea id="inc-triage-reason" className="input" rows={2} maxLength={2000}
+                            aria-describedby="inc-triage-reason-hint"
+                            value={form.triage_reason} onChange={set('triage_reason')}
+                            placeholder="e.g. Alert fired on the scheduled pen test (ticket SEC-1234)…" />
+                  <span id="inc-triage-reason-hint" className="field-hint" style={{ color: 'var(--muted)' }}>
+                    Required outside Detection &amp; Analysis (at least 10 characters): a false or benign
+                    positive can be closed without Gate 2. Saved to the audit log and the Timeline.
+                  </span>
+                </div>
+              )}
+
               <div className="field">
                 <label className="field-label" htmlFor="inc-reporter">Reporter (optional)</label>
                 <input id="inc-reporter" className="input" value={form.reporter} onChange={set('reporter')}
                        maxLength={128} placeholder="e.g. SOC L1, soc@example.com" />
               </div>
 
-              {isAdmin && allTeams.length > 0 && (
+              {canPickTeams && allTeams.length > 0 && (
                 <div className="field">
                   <label className="field-label">Restrict to teams (optional)</label>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -202,7 +226,7 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
                     ))}
                   </div>
                   <span style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, display: 'block' }}>
-                    Leave unchecked to make this incident visible to all users.
+                    {isAdmin ? '' : 'Pick only teams you belong to. '}Leave unchecked to make this incident visible to all users.
                   </span>
                 </div>
               )}

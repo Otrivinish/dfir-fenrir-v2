@@ -33,8 +33,10 @@ function truncHash(h) {
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export default function Artifacts() {
-  const { inc } = useOutletContext()
+  const { inc, viewer } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  // G-fix FE-L12: viewers get the closed-incident view of the write controls (the API refuses them).
+  const ro = isClosed || !!viewer
 
   const [artifacts, setArtifacts] = useState([])
   const [loading,   setLoading]   = useState(true)
@@ -79,7 +81,7 @@ export default function Artifacts() {
 
   const onDrop = (e) => {
     e.preventDefault(); setDragOver(false)
-    if (isClosed || uploading) return
+    if (ro || uploading) return
     const f = e.dataTransfer.files?.[0]
     if (f) handleUpload(f)
   }
@@ -106,7 +108,7 @@ export default function Artifacts() {
       )}
 
       {/* Upload zone */}
-      {!isClosed && (
+      {!ro && (
         <div
           onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
           onDragLeave={() => setDragOver(false)}
@@ -126,7 +128,7 @@ export default function Artifacts() {
           <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={onFileChange} />
           <div style={{ fontSize: 22, marginBottom: 8, color: 'var(--muted)' }}>⬆</div>
           <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-            {uploading ? 'Uploading…' : 'Drop a file here or click to select (max 500 MB)'}
+            {uploading ? 'Uploading…' : 'Drop a file here or click to select (max 500 MiB)'}
           </div>
           {!uploading && (
             <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 6 }}>
@@ -148,7 +150,7 @@ export default function Artifacts() {
               key={a.id}
               artifact={a}
               incidentId={inc.id}
-              isClosed={isClosed}
+              isClosed={ro}
               isSelected={selected?.id === a.id}
               onSelect={() => setSelected(prev => prev?.id === a.id ? null : a)}
               onDelete={() => onDelete(a)}
@@ -248,6 +250,7 @@ function ArtifactCard({ artifact, incidentId, isClosed, isSelected, onSelect, on
         <AnalysisPanel
           artifact={artifact}
           incidentId={incidentId}
+          isClosed={isClosed}
           onResult={onAnalysisResult}
         />
       )}
@@ -257,7 +260,9 @@ function ArtifactCard({ artifact, incidentId, isClosed, isSelected, onSelect, on
 
 // ─── Analysis panel ──────────────────────────────────────────────────────────
 
-function AnalysisPanel({ artifact, incidentId, onResult }) {
+// A closed incident is read-only (the API refuses a run: 409 incident_closed): a tool tab then
+// shows the stored result, and tools never run are unavailable.
+function AnalysisPanel({ artifact, incidentId, isClosed, onResult }) {
   const [activeTool, setActiveTool] = useState(null)
   const [running,    setRunning]    = useState(false)
   const [error,      setError]      = useState(null)
@@ -300,8 +305,9 @@ function AnalysisPanel({ artifact, incidentId, onResult }) {
             <button
               key={t.id}
               type="button"
-              onClick={() => runTool(t.id)}
-              disabled={running}
+              onClick={() => isClosed ? setActiveTool(t.id) : runTool(t.id)}
+              disabled={running || (isClosed && !hasResult)}
+              title={isClosed && !hasResult ? 'Closed incidents are read-only — re-open the incident to run analysis' : undefined}
               style={{
                 padding: '8px 12px',
                 fontSize: 11,
@@ -325,7 +331,9 @@ function AnalysisPanel({ artifact, incidentId, onResult }) {
       <div style={{ padding: 'var(--space-3)' }}>
         {!activeTool && (
           <div style={{ fontSize: 12, color: 'var(--dim)', textAlign: 'center', paddingTop: 8 }}>
-            Select a tool above to run static analysis against this artifact.
+            {isClosed
+              ? 'Closed incident: select a tool above to see its stored result. Re-open the incident to run analysis.'
+              : 'Select a tool above to run static analysis against this artifact.'}
           </div>
         )}
 

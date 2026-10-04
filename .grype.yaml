@@ -2,6 +2,9 @@
 # scan.sh fails on any High/Critical vulnerability that HAS a fix and is not
 # excepted below. Every exception carries a reason and an `expires:` date (UTC);
 # scan.sh FAILS once an expiry has passed — then upgrade, or renew with evidence.
+# Grype can't scope an ignore rule to one image, so a rule whose reason starts with
+# "[image <name:tag>]" is image-scoped by scan.sh: if it excepts a finding in any other
+# image, that image FAILS (the same package there is not covered by this exception).
 ignore:
   # expires: 2026-12-31
   # Velociraptor v0.76.6 (the ISO/IEC 27041-validated acquisition tool) embeds Go
@@ -21,3 +24,40 @@ ignore:
     package:
       name: python
     reason: "tarfile extraction filters unused (in-memory extractfile only); fixed only in 3.14 (expires 2026-12-31)"
+  # expires: 2026-10-17
+  # redis:7.4-alpine ships OpenSSL 3.3.7-r1 (libssl3/libcrypto3) with High CVE-2026-72897,
+  # CVE-2026-84782 (DTLS) and CVE-2026-84784 (QUIC); no redis 7.4 image on a fixed Alpine yet
+  # (upstream digest unchanged, checked 2026-10-03). Not reachable: redis-server uses only
+  # OpenSSL's plain TLS server setup — no DTLS, no QUIC, never the function CVE-2026-72897
+  # needs. Pinned to 3.3.7-r1 so the exception stops matching once a fixed package lands.
+  # Re-check the upstream digest (scripts/refresh-digests.sh) before this date. Owner-approved 2026-10-03.
+  - vulnerability: CVE-2026-72897
+    package:
+      name: libssl3
+      version: "3.3.7-r1"
+    reason: "[image redis:7.4-alpine] OpenSSL; no fixed upstream image; not reachable by redis-server (no DTLS/QUIC/affected API) (expires 2026-10-17)"
+  - vulnerability: CVE-2026-72897
+    package:
+      name: libcrypto3
+      version: "3.3.7-r1"
+    reason: "[image redis:7.4-alpine] OpenSSL; no fixed upstream image; not reachable by redis-server (no DTLS/QUIC/affected API) (expires 2026-10-17)"
+  - vulnerability: CVE-2026-84782
+    package:
+      name: libssl3
+      version: "3.3.7-r1"
+    reason: "[image redis:7.4-alpine] OpenSSL; no fixed upstream image; not reachable by redis-server (no DTLS/QUIC/affected API) (expires 2026-10-17)"
+  - vulnerability: CVE-2026-84782
+    package:
+      name: libcrypto3
+      version: "3.3.7-r1"
+    reason: "[image redis:7.4-alpine] OpenSSL; no fixed upstream image; not reachable by redis-server (no DTLS/QUIC/affected API) (expires 2026-10-17)"
+  - vulnerability: CVE-2026-84784
+    package:
+      name: libssl3
+      version: "3.3.7-r1"
+    reason: "[image redis:7.4-alpine] OpenSSL; no fixed upstream image; not reachable by redis-server (no DTLS/QUIC/affected API) (expires 2026-10-17)"
+  - vulnerability: CVE-2026-84784
+    package:
+      name: libcrypto3
+      version: "3.3.7-r1"
+    reason: "[image redis:7.4-alpine] OpenSSL; no fixed upstream image; not reachable by redis-server (no DTLS/QUIC/affected API) (expires 2026-10-17)"

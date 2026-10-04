@@ -53,6 +53,294 @@ function extractMessage(data, status) {
   return `Request failed (${status})`
 }
 
+// ── G1 stage 3b — chunked, resumable upload (R80) ─────────────────────────────────────────────
+// A multipart upload is spooled by the server before the route sees it. An upload session instead
+// sends the file as raw 8 MiB chunks that the server hashes and encrypts as they arrive; nothing is
+// stored until `complete` succeeds (the server checks the hash then).
+//   onProgress(sentBytes, totalBytes, phase) after each accepted chunk; phase 'completing' while the
+//     server checks and stores the file (no Cancel then: the result would be unknown)
+//   signal: an AbortSignal — aborting cancels the session (DELETE: its staged file is deleted). A cancel
+//     that lands while the server completes it throws err.code 'upload_result_unknown'.
+//   a failed chunk is retried with backoff after re-reading the session (resume from next_index),
+//   a 429 waits for Retry-After; a lost session (expired, or the server restarted) throws
+//   err.code === 'upload_interrupted'; 503 upload_storage_error is final (the server ended the upload).
+//   onLimit(openUploads | null): 409 upload_limit_reached at create — the caller's open sessions when the
+//     server lists them (the 409's open_uploads, or GET …/uploads), else null. Also on err.openUploads.
+//   retainOnError (G-fix FE-M2): a complete error the server keeps the session open for (identifier_exists,
+//     507 insufficient_storage, a 422 input error) leaves the upload on the server. The error then has
+//     err.retained = true, err.retryComplete(completeBody, { signal, onProgress }) → the complete result
+//     (no re-upload) and err.discard() → DELETE. Without it, every failed session is cancelled.
+//   Leaving the page (pagehide) cancels every session still open, with a keepalive DELETE (FE-M5).
+// Returns the complete result {exhibit_link, evidence_id, evidence}.
+const UPLOAD_RETRIES = 5
+
+function apiError(res, data, fallback) {
+  const err = new Error(extractMessage(data, res.status) || fallback)
+  err.status = res.status
+  err.code = data && typeof data === 'object' ? data.code : undefined
+  err.data = data
+  if (res.status === 401) onUnauthorized?.()
+  return err
+}
+
+function interrupted() {
+  const err = new Error('Upload interrupted — the server no longer has this upload (it expired after 30 minutes '
+    + 'without progress, or the server restarted). Nothing was stored. Start the upload again.')
+  err.code = 'upload_interrupted'
+  return err
+}
+
+function cancelled() {
+  const err = new Error('Upload cancelled. Nothing was stored.')
+  err.code = 'upload_cancelled'
+  err.name = 'AbortError'
+  return err
+}
+
+// FE-L16 — cancelled or cut off while the server was completing the upload: it may have stored it.
+function resultUnknown() {
+  const err = new Error('Result unknown — the connection was cancelled or lost while the server was storing the '
+    + 'upload, and it may have finished. Check Evidence › Items (and this page’s list) before uploading again.')
+  err.code = 'upload_result_unknown'
+  return err
+}
+
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  const onAbort = () => { clearTimeout(t); reject(cancelled()) }
+  const t = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve() }, ms)
+  signal?.addEventListener('abort', onAbort, { once: true })
+})
+
+async function sendJson(method, path, body, signal) {
+  const init = { method, credentials: 'same-origin', signal, headers: { Accept: 'application/json' } }
+  if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body) }
+  const res = await fetch(path, init)
+  const text = await res.text()
+  return { res, data: text ? safeJson(text) : null }
+}
+
+// FE-M5 — sessions this page has open. Leaving the page (reload, tab close, navigation away) sends
+// each a keepalive DELETE, so a reload doesn't hold a session (and one of the 3 slots) for 30 minutes.
+const openSessions = new Set()
+let pagehideBound = false
+function trackSession(url) {
+  if (!pagehideBound && typeof window !== 'undefined') {
+    pagehideBound = true
+    window.addEventListener('pagehide', () => {
+      for (const u of openSessions) {
+        try { fetch(u, { method: 'DELETE', credentials: 'same-origin', keepalive: true }).catch(() => {}) } catch { /* leaving */ }
+      }
+      openSessions.clear()
+    })
+  }
+  openSessions.add(url)
+}
+
+// M7 / FE-M5 — the caller's open upload sessions, when the server lists them: the 409's open_uploads,
+// else GET …/uploads (items or a bare list). null when neither exists.
+async function openUploadsFor(incidentId, data) {
+  if (data && typeof data === 'object' && Array.isArray(data.open_uploads)) return data.open_uploads
+  try {
+    const r = await fetch(`/api/incidents/${incidentId}/uploads`, { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+    if (!r.ok) return null
+    const j = safeJson(await r.text())
+    return Array.isArray(j) ? j : Array.isArray(j?.items) ? j.items : null
+  } catch { return null }
+}
+
+// The complete errors after which the server keeps the session open (it refused the metadata, or the
+// volume is below its reserve); content refusals and storage errors end it (uploads.py).
+const COMPLETE_ENDS_SESSION = new Set(['upload_hash_mismatch', 'hash_mismatch', 'not_a_capture', 'not_sqlite'])
+function keptOpen(status, code) {
+  if (status === 507) return true
+  if (status === 409) return code === 'identifier_exists' || code === 'upload_busy'
+  if (status === 422) return !COMPLETE_ENDS_SESSION.has(code)
+  if (status === 404) return !!code && code !== 'upload_not_found' && code !== 'incident_not_found'
+  return false
+}
+
+export async function uploadInChunks(incidentId, file, {
+  purpose, completeBody = {}, mimeType, onProgress, signal, onLimit, retainOnError = false,
+} = {}) {
+  const base = `/api/incidents/${incidentId}/uploads`
+  if (signal?.aborted) throw cancelled()
+  const opening = {
+    purpose, filename: file.name || 'upload.bin', size: file.size,
+    ...(purpose === 'evidence' && mimeType ? { mime_type: mimeType.slice(0, 128) } : {}),
+  }
+  const open = (body) => sendJson('POST', base, body, signal).catch(e => { throw e.name === 'AbortError' ? cancelled() : e })
+  // G-fix L12: the complete body goes along as `metadata`, so the server checks its fields (enums, types)
+  // before a byte is sent. A server without that field refuses it (422 extra_forbidden): open without.
+  let created = await open({ ...opening, metadata: completeBody })
+  if (created.res.status === 422 && Array.isArray(created.data?.detail)
+      && created.data.detail.some(d => d?.loc?.[1] === 'metadata' && d?.type === 'extra_forbidden')) {
+    created = await open(opening)
+  }
+  if (!created.res.ok) {
+    const err = apiError(created.res, created.data, `Upload failed (${created.res.status})`)
+    if (err.code === 'upload_limit_reached') {
+      err.openUploads = await openUploadsFor(incidentId, created.data)
+      onLimit?.(err.openUploads)
+    }
+    throw err
+  }
+  const session = created.data
+  const url = `${base}/${session.upload_id}`
+  trackSession(url)
+  // DELETE; resolves to the HTTP status (204 = cancelled, nothing stored), 0 when it didn't get through.
+  const cancel = async () => {
+    openSessions.delete(url)
+    try { return (await fetch(url, { method: 'DELETE', credentials: 'same-origin' })).status } catch { return 0 }
+  }
+  let next = session.next_index
+  onProgress?.(0, file.size)
+  try {
+    let failures = 0
+    while (next < session.chunk_count) {
+      const blob = file.slice(next * session.chunk_size, Math.min(file.size, (next + 1) * session.chunk_size))
+      let res = null, data = null
+      try {
+        res = await fetch(`${url}/chunks/${next}`, {
+          method: 'PUT', credentials: 'same-origin', signal, body: blob,
+          headers: { 'Content-Type': 'application/octet-stream', Accept: 'application/json' },
+        })
+        const text = await res.text()
+        data = text ? safeJson(text) : null
+      } catch (e) {
+        if (signal?.aborted || e.name === 'AbortError') throw cancelled()
+        res = null                               // network failure: retry below
+      }
+      if (res?.ok) {
+        next = data.next_index
+        failures = 0
+        onProgress?.(data.received_bytes, file.size)
+        continue
+      }
+      const code = data && typeof data === 'object' ? data.code : undefined
+      if (res?.status === 404 && code === 'upload_not_found') throw interrupted()
+      if (res?.status === 409 && code === 'upload_out_of_order') { next = data.next_index; continue }
+      // FE-L17: the server ended the upload (its staging write failed): final, with its own detail.
+      if (code === 'upload_storage_error') throw apiError(res, data, `Upload failed (${res.status})`)
+      const retryable = !res || res.status >= 500 || res.status === 429 || code === 'upload_busy'
+      if (!retryable) throw apiError(res, data, `Upload failed (${res.status})`)
+      if (++failures > UPLOAD_RETRIES) {
+        throw res ? apiError(res, data, `Upload failed (${res.status})`)
+          : Object.assign(new Error('Upload failed: the connection to the server keeps failing.'), { code: 'upload_network' })
+      }
+      const after = Number(res?.headers.get('Retry-After'))
+      await sleep(after > 0 ? after * 1000 : Math.min(16000, 1000 * 2 ** (failures - 1)), signal)
+      // Resume from what the server has (a chunk whose answer was lost may have landed).
+      const st = await sendJson('GET', url, undefined, signal).catch(e => {
+        if (e.name === 'AbortError') throw cancelled()
+        return null
+      })
+      if (st?.res.status === 404) throw interrupted()
+      if (st?.res.ok) next = st.data.next_index
+    }
+  } catch (e) {
+    cancel()                                     // a session that failed is never left open
+    throw e
+  }
+
+  const retained = (err) => Object.assign(err, {
+    retained: true,
+    retryComplete: (body = completeBody, opts = {}) => complete(body, opts.signal ?? signal, opts.onProgress ?? onProgress),
+    discard: () => cancel(),
+  })
+
+  // Cancelled (or the connection lost) during complete: did the server finish? (FE-L16)
+  const completeLost = async (e, sig) => {
+    const aborted = e.name === 'AbortError' || !!sig?.aborted
+    if (!aborted && retainOnError) {
+      const st = await sendJson('GET', url).catch(() => null)
+      if (st?.res.ok) {
+        return retained(Object.assign(new Error('The server did not answer while completing the upload. It still '
+          + 'has the file: try again (nothing is re-sent).'), { code: 'upload_complete_no_answer' }))
+      }
+      return resultUnknown()                     // 404: the session ended (stored, or refused); no answer
+    }
+    const st = await cancel()
+    if (st === 204) {
+      return aborted ? cancelled()
+        : Object.assign(new Error('The connection failed while completing the upload; it was cancelled and nothing '
+          + 'was stored. Start the upload again.'), { code: 'upload_network' })
+    }
+    return resultUnknown()                       // 404: the session ended (stored, or refused); 409: still completing
+  }
+
+  async function complete(body, sig, progress) {
+    progress?.(file.size, file.size, 'completing')
+    let done
+    try {
+      done = await sendJson('POST', `${url}/complete`, { purpose, ...body }, sig)
+    } catch (e) {
+      throw await completeLost(e, sig)
+    }
+    if (done.res.ok) { openSessions.delete(url); return done.data }
+    if (done.res.status === 404 && done.data?.code === 'upload_not_found') { openSessions.delete(url); throw interrupted() }
+    const err = apiError(done.res, done.data, `Upload failed (${done.res.status})`)
+    if (retainOnError && keptOpen(done.res.status, err.code)) throw retained(err)
+    cancel()                                     // FE-M2: only when the caller can't complete it again
+    throw err
+  }
+
+  return complete(completeBody, signal, onProgress)
+}
+
+// FE-M1 — the first file of a two-file upload is already registered (or linked) when the second fails:
+// say so, and name the exhibit, so it can be parsed from "From a registered exhibit".
+function mainStoredButFailed(e, done, filename, what) {
+  const ident = done.evidence?.identifier || 'an exhibit'
+  const stored = done.exhibit_link === 'sha256_match' ? `matched the existing exhibit ${ident}` : `was registered as ${ident}`
+  const why = e.code === 'upload_cancelled' ? 'was cancelled'
+    : e.code === 'upload_result_unknown' ? 'has an unknown result (check Evidence › Items)'
+    : `failed: ${e.message || 'unknown error'}`
+  const err = new Error(`${filename} ${stored}; the ${what} upload ${why}. Nothing was parsed. Parse ${ident} under `
+    + '“From a registered exhibit” (with the form history once it is registered).')
+  err.code = e.code
+  err.status = e.status
+  err.openUploads = e.openUploads
+  err.data = { ...(e.data && typeof e.data === 'object' ? e.data : {}), evidence_id: done.evidence_id,
+               evidence_identifier: done.evidence?.identifier, exhibit_link: done.exhibit_link }
+  return err
+}
+
+// The `complete` body of a digital collection: the multipart route's fields as JSON (empty ones left out).
+function digitalCompleteBody({ name, identifier, description, tlp, collected_location, entity_id, wizard }) {
+  const meta = { name, identifier }
+  if (description)        meta.description = description
+  if (tlp)                meta.tlp = tlp
+  if (collected_location) meta.collected_location = collected_location
+  if (entity_id)          meta.entity_id = entity_id
+  for (const [k, v] of Object.entries(wizard || {})) {
+    if (v === null || v === undefined || v === '') continue
+    if (Array.isArray(v) && v.length === 0) continue
+    meta[k] = v
+  }
+  return meta
+}
+
+// After a chunked G3 upload: the analysis runs on the registered exhibit. If it fails, the error
+// still names the exhibit (as the multipart route's did), so the page can offer it under "From a
+// registered exhibit". G-fix R93: the run names its upload (?upload_id=…), so its record keeps the
+// upload's exhibit link (registered / sha256_match); a server that can't match it (422
+// upload_link_not_found) is asked again without, and records from_evidence.
+async function analyseUploaded(done, fn) {
+  try {
+    const qs = done.upload_id ? `?upload_id=${encodeURIComponent(done.upload_id)}` : ''
+    try {
+      return await fn(done.evidence_id, qs)
+    } catch (e) {
+      if (qs && e.code === 'upload_link_not_found') return await fn(done.evidence_id, '')
+      throw e
+    }
+  } catch (e) {
+    e.data = { ...(e.data && typeof e.data === 'object' ? e.data : {}), evidence_id: done.evidence_id,
+               evidence_identifier: done.evidence?.identifier, exhibit_link: done.exhibit_link }
+    throw e
+  }
+}
+
 export const api = {
   // health
   health:        ()        => request('GET',  '/api/health'),
@@ -147,7 +435,8 @@ export const api = {
   getIncidentAccess:   (id)       => request('GET',   `/api/incidents/${id}/access`),
   closeIncident:       (id, reason, overrideGate = false) => request('POST', `/api/incidents/${id}/close`,
                          overrideGate ? { reason, override_gate: true } : { reason }),
-  reopenIncident:      (id, reason, phase) => request('POST',  `/api/incidents/${id}/reopen`, { reason, phase }),
+  reopenIncident:      (id, reason, phase, overrideGate = false) => request('POST', `/api/incidents/${id}/reopen`,
+                         overrideGate ? { reason, phase, override_gate: true } : { reason, phase }),
 
   // IOC export — triggers a browser file download
   exportIocs: async (incidentId, fmt, params = {}) => {
@@ -266,7 +555,28 @@ export const api = {
     } while (cursor)
     return [...byId.values()]
   },
-  createEntity: (incidentId, payload)             => request('POST',   `/api/incidents/${incidentId}/entities`, payload),
+  // Every page of any cursor-paged per-incident list (listFn = api.listIocs, api.listEvidence, …),
+  // keyed by id: a row shifted onto the next page by a concurrent insert is kept once.
+  // `limit` = that endpoint's maximum page size.
+  // `signal` (AbortSignal): once aborted, no further page is requested and the call rejects with
+  // an AbortError (a page already in flight still completes). `maxPages` (default 50, i.e. 10 000
+  // rows at 200 a page) bounds a runaway list: the result then carries `truncated = true`.
+  listAllPages: async (listFn, incidentId, params = {}, limit = 200, { signal, maxPages = 50 } = {}) => {
+    const byId = new Map()
+    let cursor = null
+    let pages = 0
+    do {
+      signal?.throwIfAborted()
+      const res = await listFn(incidentId, { ...params, limit, ...(cursor ? { cursor } : {}) })
+      signal?.throwIfAborted()
+      for (const it of res.items) byId.set(it.id, it)
+      cursor = res.next_cursor
+    } while (cursor && ++pages < maxPages)
+    const all = [...byId.values()]
+    if (cursor) all.truncated = true
+    return all
+  },
+  createEntity:(incidentId, payload)             => request('POST',   `/api/incidents/${incidentId}/entities`, payload),
   updateEntity: (incidentId, entityId, payload)   => request('PATCH',  `/api/incidents/${incidentId}/entities/${entityId}`, payload),
   deleteEntity: (incidentId, entityId)            => request('DELETE', `/api/incidents/${incidentId}/entities/${entityId}`),
 
@@ -298,7 +608,7 @@ export const api = {
     if (!res.ok) {
       const err = new Error(
         (data && typeof data === 'object' && (data.detail || data.message)) ||
-        (res.status === 413 ? 'File exceeds 50 MB limit.' : `Upload failed (${res.status})`)
+        (res.status === 413 ? 'File exceeds the 50 MiB limit.' : `Upload failed (${res.status})`)
       )
       err.status = res.status
       throw err
@@ -326,7 +636,7 @@ export const api = {
     if (!res.ok) {
       const err = new Error(
         (data && typeof data === 'object' && (data.detail || data.message)) ||
-        (res.status === 413 ? 'File exceeds 50 MB limit.' : `Upload failed (${res.status})`)
+        (res.status === 413 ? 'File exceeds the 50 MiB limit.' : `Upload failed (${res.status})`)
       )
       err.status = res.status
       throw err
@@ -347,55 +657,20 @@ export const api = {
   updateEvidence:     (incidentId, evidenceId, payload) =>
     request('PATCH', `/api/incidents/${incidentId}/evidence/${evidenceId}`, payload),
 
-  // Collect — digital_file uses multipart/form-data (no JSON wrapper).
-  // `wizard` is the optional Wizard-A AcquisitionMetadata payload; passed as
-  // additional Form fields so the back-end endpoint stays one route.
-  collectDigital: async (incidentId, { name, identifier, description, tlp, collected_location, entity_id, file, wizard }) => {
-    const form = new FormData()
-    form.append('name', name)
-    form.append('identifier', identifier)
-    if (description)        form.append('description', description)
-    if (tlp)                form.append('tlp', tlp)
-    if (collected_location) form.append('collected_location', collected_location)
-    if (entity_id)          form.append('entity_id', entity_id)
-    if (wizard) {
-      for (const [k, v] of Object.entries(wizard)) {
-        if (v === null || v === undefined || v === '') continue
-        if (Array.isArray(v)) {
-          // Lists ride as a JSON string (multipart list binding varies by
-          // framework version) — backend parses via _json_list (e.g. device_types).
-          if (v.length === 0) continue
-          form.append(k, JSON.stringify(v))
-        } else if (typeof v === 'object') {
-          // Nested objects can't ride multipart natively → JSON string the
-          // backend parses (e.g. decision_factors, device_details).
-          form.append(k, JSON.stringify(v))
-        } else {
-          // Booleans need explicit "true"/"false" so FastAPI parses them.
-          form.append(k, typeof v === 'boolean' ? String(v) : v)
-        }
-      }
-    }
-    form.append('file', file)
-    const res = await fetch(`/api/incidents/${incidentId}/evidence/digital`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      body: form,
-    })
-    const text = await res.text()
-    const data = text ? (() => { try { return JSON.parse(text) } catch { return text } })() : null
-    if (!res.ok) {
-      const err = new Error(
-        (data && typeof data === 'object' && (data.detail || data.message)) ||
-        (res.status === 413 ? 'File exceeds upload limit.' : `Upload failed (${res.status})`)
-      )
-      err.status = res.status
-      err.code = data && typeof data === 'object' ? data.code : undefined
-      err.data = data
-      throw err
-    }
-    return data
+  // Collect — digital_file. G1 stage 3b: a chunked upload session (encrypted on arrival), completed
+  // with the same fields the (deprecated) multipart route took, as JSON. `wizard` = the optional
+  // Wizard-A acquisition metadata. opts: { onProgress, signal, onLimit, retainOnError } (see
+  // uploadInChunks). With retainOnError, a refused complete (identifier_exists, 507, a 422 input
+  // error) keeps the upload: err.retryComplete(api.digitalCompleteBody(fields)) finishes it without
+  // re-sending the file.
+  collectDigital: async (incidentId, fields, opts = {}) => {
+    const done = await uploadInChunks(incidentId, fields.file, {
+      purpose: 'evidence', completeBody: digitalCompleteBody(fields), mimeType: fields.file.type, ...opts })
+    return done.evidence
   },
+  digitalCompleteBody: (fields) => digitalCompleteBody(fields),
+  // FE-M5 / M7 — cancel one of your open upload sessions (e.g. one left by a closed tab).
+  cancelUpload: (incidentId, uploadId) => request('DELETE', `/api/incidents/${incidentId}/uploads/${uploadId}`),
 
   collectPhysical: (incidentId, payload) =>
     request('POST', `/api/incidents/${incidentId}/evidence/physical`, payload),
@@ -418,10 +693,19 @@ export const api = {
     request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/dispose`, payload),
 
   // U8.1 — Email analyzer (Forensic → Email)
-  analyzeEmail: async (incidentId, { raw, file }) => {
+  // G3 — register-first: the upload (or pasted source) becomes a draft exhibit, then it is analysed.
+  // A file goes through a chunked upload session (G1 stage 3b: registered as the exhibit, encrypted
+  // on arrival), then the exhibit is analysed; pasted source stays a form post. opts: { onProgress, signal }.
+  analyzeEmail: async (incidentId, { raw, file, acquiredAt }, opts = {}) => {
+    if (file) {
+      const done = await uploadInChunks(incidentId, file, {
+        purpose: 'email', completeBody: acquiredAt ? { acquired_at: acquiredAt } : {}, ...opts })
+      return analyseUploaded(done, (id, qs) => request('POST', `/api/incidents/${incidentId}/email/from-evidence/${id}${qs}`))
+    }
     const form = new FormData()
     if (file) form.append('file', file)
     if (raw != null && raw !== '') form.append('raw', raw)
+    if (acquiredAt) form.append('acquired_at', acquiredAt)
     const res = await fetch(`/api/incidents/${incidentId}/email/analyze`, {
       method: 'POST', credentials: 'same-origin', body: form,
     })
@@ -429,14 +713,18 @@ export const api = {
     const data = text ? (() => { try { return JSON.parse(text) } catch { return text } })() : null
     if (!res.ok) {
       const err = new Error((data && typeof data === 'object' && (data.detail || data.message)) || `Analyze failed (${res.status})`)
-      err.status = res.status; err.data = data
+      err.status = res.status; err.data = data; err.code = data && typeof data === 'object' ? data.code : undefined
       throw err
     }
     return data
   },
-  analyzeEmailBulk: async (incidentId, files) => {
+  // G3 — analyse a registered exhibit (hash re-verified server-side, no upload)
+  analyzeEmailFromEvidence: (incidentId, evidenceId) =>
+    request('POST', `/api/incidents/${incidentId}/email/from-evidence/${evidenceId}`),
+  analyzeEmailBulk: async (incidentId, files, { acquiredAt } = {}) => {
     const form = new FormData()
     for (const f of files) form.append('files', f)
+    if (acquiredAt) form.append('acquired_at', acquiredAt)
     const res = await fetch(`/api/incidents/${incidentId}/email/analyze-bulk`, {
       method: 'POST', credentials: 'same-origin', body: form,
     })
@@ -483,6 +771,10 @@ export const api = {
     return data
   },
 
+  // G3 — complete the acquisition record of an unsealed item (only the fields sent change), then seal.
+  updateAcquisitionRecord: (incidentId, evidenceId, payload) =>
+    request('PATCH', `/api/incidents/${incidentId}/evidence/${evidenceId}/acquisition-record`, payload),
+
   // Wizard A — Seal: validates ISO 27037 + GDPR Art. 5.1(c) minimum fields and locks the row.
   sealEvidence:     (incidentId, evidenceId) =>
     request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/seal`, { confirm: true }),
@@ -501,8 +793,17 @@ export const api = {
   // Working-copy ledger (ISO/IEC 27037 §7.1.3.1.1, Slice C)
   listWorkingCopies: (incidentId, evidenceId) =>
     request('GET',  `/api/incidents/${incidentId}/evidence/${evidenceId}/working-copies`),
+  // G5 — record a lab copy made outside FENRIR with the hash(es) its tool reported:
+  // {purpose, copy_sha256 | copy_sha1 | copy_md5, copy_tool?, destination_note?} → the copy (verified | mismatch)
   mintWorkingCopy:   (incidentId, evidenceId, payload) =>
     request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/working-copy`, payload),
+  // G5 — issue a working copy to download: {purpose, destination_note?} → {copy, download_url, token_expires_at}.
+  // download_url is one-time and works only for you; the server records the hash of the bytes it sends.
+  issueWorkingCopy:  (incidentId, evidenceId, payload) =>
+    request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/working-copies`, payload),
+  // G5 — set / release a legal hold: {legal_hold: bool, reason} (release: incident lead or admin)
+  setLegalHold:      (incidentId, evidenceId, payload) =>
+    request('PUT',  `/api/incidents/${incidentId}/evidence/${evidenceId}/legal-hold`, payload),
   incidentCustodyLog: (incidentId) =>
     request('GET',  `/api/incidents/${incidentId}/evidence/custody-log`),
   verifyCustodyChain: (incidentId) =>
@@ -669,7 +970,7 @@ export const api = {
     if (!res.ok) {
       const err = new Error(
         (data && typeof data === 'object' && (data.detail || data.message)) ||
-        (res.status === 413 ? 'File exceeds 100 MB limit.' : `Parse failed (${res.status})`)
+        (res.status === 413 ? 'File exceeds the 500 MiB limit.' : `Parse failed (${res.status})`)
       )
       err.status = res.status
       err.data = data
@@ -696,7 +997,7 @@ export const api = {
     if (!res.ok) {
       const err = new Error(
         (data && typeof data === 'object' && (data.detail || data.message)) ||
-        (res.status === 413 ? 'File exceeds 500 MB limit.' : `Upload failed (${res.status})`)
+        (res.status === 413 ? 'File exceeds the 500 MiB limit.' : `Upload failed (${res.status})`)
       )
       err.status = res.status
       err.data   = data
@@ -740,7 +1041,7 @@ export const api = {
     if (!res.ok) {
       const err = new Error(
         (data && typeof data === 'object' && (data.detail || data.message)) ||
-        (res.status === 413 ? 'File exceeds 500 MB limit.' : `Upload failed (${res.status})`)
+        (res.status === 413 ? 'File exceeds the 500 MiB limit.' : `Upload failed (${res.status})`)
       )
       err.status = res.status
       throw err
@@ -773,7 +1074,7 @@ export const api = {
     if (!res.ok) {
       const err = new Error(
         (data && typeof data === 'object' && (data.detail || data.message)) ||
-        (res.status === 413 ? 'Collection output exceeds the size limit.' : `Ingest failed (${res.status})`)
+        (res.status === 413 ? 'Collection output exceeds the 512 MiB limit.' : `Ingest failed (${res.status})`)
       )
       err.status = res.status
       throw err
@@ -796,23 +1097,35 @@ export const api = {
   updateIncidentRefSettings: (prefix) => request('PATCH', '/api/settings/incident-ref', { prefix }),
 
   // Browser history (per-incident)
-  uploadWebHistory: async (incidentId, { file, browser, formHistoryFile }) => {
-    const form = new FormData()
-    form.append('file', file)
-    form.append('browser', browser)
-    if (formHistoryFile) form.append('form_history_file', formHistoryFile)
-    const res = await fetch(`/api/incidents/${incidentId}/webhistory`, {
-      method: 'POST', credentials: 'same-origin', body: form,
-    })
-    const text = await res.text()
-    const data = text ? (() => { try { return JSON.parse(text) } catch { return text } })() : null
-    if (!res.ok) {
-      const err = new Error((data && typeof data === 'object' && (data.detail || data.message)) || `Upload failed (${res.status})`)
-      err.status = res.status; err.data = data
-      throw err
+  // G3 — register-first: the file(s) become draft exhibits, then they are parsed.
+  // G1 stage 3b: each file goes through a chunked upload session (registered as an exhibit, encrypted on
+  // arrival; Firefox formhistory.sqlite as the companion of places.sqlite), then the exhibit(s) are parsed.
+  // opts: { onProgress(sent, total) over both files, signal }.
+  uploadWebHistory: async (incidentId, { file, browser, formHistoryFile, acquiredAt }, { onProgress, signal, onLimit } = {}) => {
+    const total = file.size + (formHistoryFile?.size || 0)
+    const at = acquiredAt ? { acquired_at: acquiredAt } : {}
+    const main = await uploadInChunks(incidentId, file, {
+      purpose: 'webhistory', completeBody: { browser, ...at }, signal, onLimit,
+      onProgress: (sent, _t, phase) => onProgress?.(sent, total, phase) })
+    let form = null
+    if (formHistoryFile) {
+      try {
+        form = await uploadInChunks(incidentId, formHistoryFile, {
+          purpose: 'webhistory', completeBody: { browser, companion_of: main.evidence_id, ...at }, signal, onLimit,
+          onProgress: (sent, _t, phase) => onProgress?.(file.size + sent, total, phase) })
+      } catch (e) {
+        throw mainStoredButFailed(e, main, file.name || 'places.sqlite', 'form history (formhistory.sqlite)')
+      }
     }
-    return data
+    return analyseUploaded(main, (id, qs) => request('POST', `/api/incidents/${incidentId}/webhistory/from-evidence/${id}${qs}`,
+      { browser, ...(form ? { form_history_evidence_id: form.evidence_id } : {}) }))
   },
+  // G3 — parse a registered exhibit as browser history: { browser, form_history_evidence_id? }
+  webHistoryFromEvidence: (incidentId, evidenceId, payload) =>
+    request('POST', `/api/incidents/${incidentId}/webhistory/from-evidence/${evidenceId}`, payload),
+  // G3 — server-side copy onto the Timeline: { visit_ids, download_ids, ir_phase? }
+  promoteWebHistory: (incidentId, payload) =>
+    request('POST', `/api/incidents/${incidentId}/webhistory/promote`, payload),
   parseDefenderPdf: async (incidentId, file) => {
     const form = new FormData()
     form.append('file', file)
@@ -838,7 +1151,7 @@ export const api = {
     const data = text ? (() => { try { return JSON.parse(text) } catch { return text } })() : null
     if (!res.ok) {
       const err = new Error((data && typeof data === 'object' && (data.detail || data.message)) ||
-        (res.status === 413 ? 'File exceeds 25 MB limit.' : `Upload failed (${res.status})`))
+        (res.status === 413 ? 'File exceeds the 25 MiB limit.' : `Upload failed (${res.status})`))
       err.status = res.status; err.data = data
       throw err
     }
@@ -850,6 +1163,12 @@ export const api = {
     request('GET',    `/api/incidents/${incidentId}/forensic/defender-pdf/imports/${importId}`),
   deleteDefenderPdfImport: (incidentId, importId) =>
     request('DELETE', `/api/incidents/${incidentId}/forensic/defender-pdf/imports/${importId}`),
+  // G4 — parse a registered exhibit as a Defender PDF (hash re-verified server-side, no upload)
+  importDefenderPdfFromEvidence: (incidentId, evidenceId) =>
+    request('POST', `/api/incidents/${incidentId}/forensic/defender-pdf/from-evidence/${evidenceId}`),
+  // G4 — the server copies the chosen candidates: { items: [{ idx, destination }], ir_phase? }
+  promoteDefenderPdfImport: (incidentId, importId, payload) =>
+    request('POST', `/api/incidents/${incidentId}/forensic/defender-pdf/imports/${importId}/promote`, payload),
   listWebHistoryUploads:  (incidentId) => request('GET', `/api/incidents/${incidentId}/webhistory`),
   deleteWebHistoryUpload: (incidentId, uploadId) => request('DELETE', `/api/incidents/${incidentId}/webhistory/${uploadId}`),
   mintWebHistoryEvidence: (incidentId, uploadId) => request('POST', `/api/incidents/${incidentId}/webhistory/${uploadId}/mint-evidence`),
@@ -939,27 +1258,18 @@ export const api = {
     request('POST', `/api/incidents/${incidentId}/pcap/${resultId}/import-iocs`, payload),
   getPcapDnsRecon: (incidentId, resultId) =>
     request('GET',  `/api/incidents/${incidentId}/pcap/${resultId}/dns-recon`),
+  // G3 — analyse a registered exhibit (hash re-verified server-side) / promote timeline candidates
+  analyzePcapFromEvidence: (incidentId, evidenceId) =>
+    request('POST', `/api/incidents/${incidentId}/pcap/from-evidence/${evidenceId}`),
+  promotePcap: (incidentId, resultId, payload) =>
+    request('POST', `/api/incidents/${incidentId}/pcap/${resultId}/promote`, payload),
 
-  uploadPcap: async (incidentId, file) => {
-    const form = new FormData()
-    form.append('file', file)
-    const res = await fetch(`/api/incidents/${incidentId}/pcap`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      body: form,
-    })
-    const text = await res.text()
-    const data = text ? (() => { try { return JSON.parse(text) } catch { return text } })() : null
-    if (!res.ok) {
-      const err = new Error(
-        (data && typeof data === 'object' && (data.detail || data.message)) ||
-        `Upload failed (${res.status})`
-      )
-      err.status = res.status
-      err.data = data
-      throw err
-    }
-    return data
+  // G3 — register-first: the capture is kept as a draft exhibit, then analysed. G1 stage 3b: through a
+  // chunked upload session (encrypted on arrival). opts: { acquiredAt, onProgress, signal }.
+  uploadPcap: async (incidentId, file, { acquiredAt, ...opts } = {}) => {
+    const done = await uploadInChunks(incidentId, file, {
+      purpose: 'pcap', completeBody: acquiredAt ? { acquired_at: acquiredAt } : {}, ...opts })
+    return analyseUploaded(done, (id, qs) => request('POST', `/api/incidents/${incidentId}/pcap/from-evidence/${id}${qs}`))
   },
 
   // Stakeholder Matrix (global notification rules)
@@ -987,7 +1297,9 @@ export const api = {
     request('PATCH', `/api/incidents/${incidentId}/post-incident/lessons`, payload),
   exportLessonsLearned:   (incidentId) => `/api/incidents/${incidentId}/post-incident/lessons/export`,
   getMitreSummary:        (incidentId) => request('GET',   `/api/incidents/${incidentId}/post-incident/mitre-summary`),
-  listAssignableUsers:    () => request('GET', '/api/users/assignable'),
+  // incidentId (optional): only the users who can see that incident (what its person fields accept).
+  listAssignableUsers:    (incidentId) =>
+    request('GET', `/api/users/assignable${incidentId ? `?incident_id=${encodeURIComponent(incidentId)}` : ''}`),
 
   // YARA rule library (global)
   listYaraRules:   ()                => request('GET',    '/api/yara'),
@@ -1078,7 +1390,9 @@ export const api = {
   deleteCost:           (incidentId, costId)      => request('DELETE', `/api/incidents/${incidentId}/costs/${costId}`),
 
   // War Room chat (per-incident)
-  listWarRoomMessages: (incidentId) => request('GET',  `/api/incidents/${incidentId}/warroom/messages`),
+  // Newest page first; pass { cursor: next_cursor } for the next OLDER page (items in chat order).
+  listWarRoomMessages: (incidentId, { cursor } = {}) =>
+    request('GET', `/api/incidents/${incidentId}/warroom/messages${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
   sendWarRoomMessage:  (incidentId, body) => request('POST', `/api/incidents/${incidentId}/warroom/messages`, { body }),
   warRoomOnline:       (incidentId) => request('GET',  `/api/incidents/${incidentId}/warroom/online`),
 

@@ -322,6 +322,7 @@ async def _run_scan(incident_id: uuid.UUID) -> YaraScanResult:
 
 
 @incident_router.post("/{incident_id}/yara/scan", response_model=YaraScanResult,
+                      responses={409: {"model": ApiErrorBody, "description": "incident_closed"}},
                       summary="Scan an incident's artifacts with YARA")
 async def scan_incident(
     incident_id: uuid.UUID,
@@ -331,9 +332,10 @@ async def scan_incident(
 ) -> YaraScanResult:
     """Run all active library rules against every artifact for the incident via
     the analysis worker. Idempotent — matches are deduped by rule and artifact.
-    Requires the analyst role and access to the incident. Returns counts of
-    artifacts scanned, matches found, and any errors."""
-    await _get_incident(db, incident_id, user)
+    Requires the analyst role and access to the incident; 409 incident_closed on a
+    closed incident (a scan records new matches). Returns counts of artifacts scanned,
+    matches found, and any errors."""
+    await _get_open_incident(db, incident_id, user)
     await write_audit(
         db, "yara_scan_trigger",
         user_id=user.id, username=user.username,
@@ -365,6 +367,7 @@ async def list_matches(
 
 
 @incident_router.delete("/{incident_id}/yara/matches", status_code=status.HTTP_204_NO_CONTENT,
+                        responses={409: {"model": ApiErrorBody, "description": "incident_closed"}},
                         summary="Clear all YARA matches for an incident")
 async def clear_matches(
     incident_id: uuid.UUID,
@@ -373,8 +376,9 @@ async def clear_matches(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Delete all recorded YARA matches for the incident. Requires the analyst
-    role and access to the incident. Returns 204 No Content."""
-    await _get_incident(db, incident_id, user)
+    role and access to the incident; 409 incident_closed on a closed incident.
+    Returns 204 No Content."""
+    await _get_open_incident(db, incident_id, user)
     rows = (await db.execute(
         select(YaraMatch).where(YaraMatch.incident_id == incident_id)
     )).scalars().all()

@@ -90,33 +90,44 @@ export default function IOCs() {
   const [pickerOpen, setPickerOpen]         = useState(false)
   const pickerRef = useRef(null)
 
+  // Each load gets a sequence number; only the newest one may set state, so an
+  // older multi-page load that finishes late can't overwrite a newer view.
+  const loadSeq = useRef(0)
+  // The running load's controller: a newer load, an incident change or unmount aborts it.
+  const loadAbort = useRef(null)
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
+    loadAbort.current?.abort()
+    const { signal } = (loadAbort.current = new AbortController())
     setError(null)
     try {
-      const res = await api.listIocs(inc.id, { limit: 200 })
-      setAllIocs(res.items)
-      setIocs(typeFilter ? res.items.filter(i => i.type === typeFilter) : res.items)
+      // Every page, so the table, the type filter and the exports hold all of the incident's IOCs.
+      const all = await api.listAllPages(api.listIocs, inc.id, {}, 200, { signal })
+      if (seq !== loadSeq.current) return
+      setAllIocs(all)
+      setIocs(typeFilter ? all.filter(i => i.type === typeFilter) : all)
       // Load cross-incident correlations for badge display (best-effort — don't block render)
       try {
         const corr = await api.listIocCorrelations(inc.id)
         const map = {}
         for (const hit of corr.items) map[hit.ioc_id] = hit.matched_incidents
-        setCorrMap(map)
+        if (seq === loadSeq.current) setCorrMap(map)
       } catch {}
       try {
-        const er = await api.listEntities(inc.id, { limit: 200 })
+        const ents = await api.listAllEntities(inc.id)
         const emap = {}
-        for (const e of er.items || []) emap[e.id] = { name: e.name || e.value, type: e.type }
-        setEntityMap(emap)
+        for (const e of ents) emap[e.id] = { name: e.name || e.value, type: e.type }
+        if (seq === loadSeq.current) setEntityMap(emap)
       } catch {}
     } catch (e) {
-      setError(e.message || 'Could not load IOCs')
+      if (seq === loadSeq.current && !signal.aborted) setError(e.message || 'Could not load IOCs')
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [inc.id, typeFilter])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load(); return () => loadAbort.current?.abort() }, [load])
   // After a write: re-read the list and the rail's counts.
   const reload = useCallback(() => { bumpRail?.(); return load() }, [bumpRail, load])
 
@@ -250,7 +261,7 @@ export default function IOCs() {
 
   const hasAnyResults = Object.keys(enrichResults).length > 0
 
-  // ── Sorting (client-side; the list is capped at 200 rows) ──────────────────
+  // ── Sorting (client-side, over every IOC: the list loads all pages) ────────
   const toggleSort = (key) => {
     if (sortKey === key) { setSortDir(d => (d === 'asc' ? 'desc' : 'asc')); return }
     setSortKey(key); setSortDir('asc')
@@ -846,9 +857,15 @@ function TagChips({ tags }) {
 
 // ─── IOC ↔ timeline event links ───────────────────────────────────────────────
 
+// The picker reads one page of the timeline per drawer open (the list API has no search); a
+// "Load more events" button fetches the next page on request.
+const LINK_PICKER_PAGE = 500
+
 function IocTimelineLinks({ incidentId, ioc, isClosed }) {
   const [links, setLinks]   = useState([])
   const [events, setEvents] = useState([])
+  const [eventsCursor, setEventsCursor] = useState(null)   // next_cursor of the last page read
+  const [loadingMore, setLoadingMore]   = useState(false)
   const [pick, setPick]     = useState('')
   const [busy, setBusy]     = useState(false)
   const [err, setErr]       = useState(null)
@@ -864,10 +881,29 @@ function IocTimelineLinks({ incidentId, ioc, isClosed }) {
 
   useEffect(() => { load() }, [load])
   useEffect(() => {
-    api.listTimelineEvents(incidentId, { limit: 500 })
-      .then(r => setEvents(r.items || []))
+    // First page only; a closed incident shows no picker, so it reads nothing.
+    if (isClosed) return
+    let cancelled = false
+    api.listTimelineEvents(incidentId, { limit: LINK_PICKER_PAGE })
+      .then(r => { if (!cancelled) { setEvents(r.items || []); setEventsCursor(r.next_cursor || null) } })
       .catch(() => {})
-  }, [incidentId])
+    return () => { cancelled = true }
+  }, [incidentId, isClosed])
+
+  const loadMoreEvents = async () => {
+    if (!eventsCursor || loadingMore) return
+    setLoadingMore(true); setErr(null)
+    try {
+      const r = await api.listTimelineEvents(incidentId, { limit: LINK_PICKER_PAGE, cursor: eventsCursor })
+      // Keyed by id: an event shifted onto this page by a concurrent insert is listed once.
+      setEvents(prev => { const seen = new Set(prev.map(e => e.id)); return [...prev, ...(r.items || []).filter(e => !seen.has(e.id))] })
+      setEventsCursor(r.next_cursor || null)
+    } catch (e) {
+      setErr(e.message || 'Could not load more events')
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   const linkedIds  = new Set(links.map(l => l.event_id))
   const candidates = events.filter(e => !linkedIds.has(e.id))
@@ -941,7 +977,8 @@ function IocTimelineLinks({ incidentId, ioc, isClosed }) {
             style={{ flex: 1, fontSize: 12 }}
           >
             <option value="">
-              {candidates.length ? '— link a timeline event —' : 'No more events to link'}
+              {candidates.length ? '— link a timeline event —'
+                : eventsCursor ? 'Load more events to pick one' : 'No more events to link'}
             </option>
             {candidates.map(e => (
               <option key={e.id} value={e.id}>
@@ -958,6 +995,19 @@ function IocTimelineLinks({ incidentId, ioc, isClosed }) {
           >
             Link
           </button>
+          {eventsCursor && (
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={loadMoreEvents}
+              disabled={loadingMore}
+              title={`The picker lists ${events.length} events so far; load the next ${LINK_PICKER_PAGE}`}
+              style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+              data-link-load-more
+            >
+              {loadingMore ? 'Loading…' : 'Load more events'}
+            </button>
+          )}
         </div>
       )}
       {err && <div style={{ fontSize: 11, color: 'var(--crit)', marginTop: 4 }}>{err}</div>}
@@ -1165,7 +1215,7 @@ function IocModal({ incidentId, onClose, onCreated }) {
   const [error, setError]       = useState(null)
 
   useEffect(() => {
-    api.listEntities(incidentId, { limit: 200 }).then(r => setEntities(r.items || [])).catch(() => {})
+    api.listAllEntities(incidentId).then(setEntities).catch(() => {})
   }, [incidentId])
 
   useEffect(() => {
@@ -1307,7 +1357,7 @@ function EditIocModal({ incidentId, ioc, onClose, onSaved }) {
   const [error, setError]             = useState(null)
 
   useEffect(() => {
-    api.listEntities(incidentId, { limit: 200 }).then(r => setEntities(r.items || [])).catch(() => {})
+    api.listAllEntities(incidentId).then(setEntities).catch(() => {})
   }, [incidentId])
 
   useEffect(() => {

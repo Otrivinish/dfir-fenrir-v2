@@ -17,18 +17,27 @@ export default function Comments() {
   const [editBody,    setEditBody]    = useState('')
   const bottomRef = useRef(null)
 
+  // Each load gets a sequence number; only the newest one may set state, so an
+  // older multi-page load that finishes late can't overwrite a newer view.
+  const loadSeq = useRef(0)
+  // The running load's controller: a newer load, an incident change or unmount aborts it.
+  const loadAbort = useRef(null)
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
+    loadAbort.current?.abort()
+    const { signal } = (loadAbort.current = new AbortController())
     try {
-      const data = await api.listComments(inc.id, { limit: 200 })
-      setComments(data.items)
+      // Every page (oldest first), so the newest comments are never cut off.
+      const all = await api.listAllPages(api.listComments, inc.id, {}, 200, { signal })
+      if (seq === loadSeq.current) setComments(all)
     } catch (e) {
-      setError(e.message || 'Failed to load comments.')
+      if (seq === loadSeq.current && !signal.aborted) setError(e.message || 'Failed to load comments.')
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [inc.id])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load(); return () => loadAbort.current?.abort() }, [load])
 
   const submit = async (e) => {
     e.preventDefault()

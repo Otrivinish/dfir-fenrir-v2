@@ -20,6 +20,7 @@ router        = APIRouter()   # per-incident, mounted at /api/incidents
 global_router = APIRouter()   # global,       mounted at /api/admin
 
 
+# L11, accepted: a row deleted between two page reads makes an offset cursor skip one row; the war room pages by keyset.
 def _encode_cursor(offset: int) -> str:
     return base64.urlsafe_b64encode(json.dumps({"o": offset}).encode()).decode().rstrip("=")
 
@@ -70,7 +71,7 @@ async def get_incident_audit_log(
                 and_(AuditLog.resource_type == "incident", AuditLog.resource_id == str(incident_id)),
             )
         )
-        .order_by(AuditLog.timestamp.desc())
+        .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
         .offset(offset)
         .limit(limit + 1)
     )

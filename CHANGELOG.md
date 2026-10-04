@@ -2,7 +2,7 @@
 
 All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
-## [Unreleased] — `feature/ux-002` (merged, #28) and branch `fix/ebm` (2026-10-01)
+## [Released] — `feature/ux-002` (merged, #28) and branch `fix/ebm` (2026-10-01)
 
 ### Changed
 
@@ -360,8 +360,137 @@ Built from the IR-expert workflow audit of 2026-10-01: 21 approved pieces (A1–
   - The new report-data timestamps end in `Z`.
   - Migration adds `entity_files.report_sha256` and `report_mime`.
 
+### Backlog wave F (2026-10-03)
+
+- **Security updates in images.** Images take distro security updates at build time; the High OpenSSL/PCRE2 CVEs are fixed in the backend, worker and frontend. (F1)
+- **Exports don't freeze the app.** LE package and audit-log export builds run off the event loop, and audit-export downloads stream from disk. (F1)
+- **Migrations don't hang.** They give up after 5 s on a locked table and roll back whole. (F1)
+- ⚠ **People references are checked.** Assignee, decider, witness, handoff recipient and checklist owner must be an active user who can see the incident (404 `user_not_found`, 422 `assignee_no_access`). An explicit `null` unassigns. Analysts may restrict new incidents only to their own teams (409 `would_lock_out`). (F2)
+- ⚠ **Closed record integrity.** (F3)
+  - Defender, PCAP, Artifacts and Timeline Import writes return 409 on closed incidents.
+  - Re-opening into Post runs Gate 1.
+  - A false positive created outside D&A needs `triage_reason`.
+  - Server-recorded timeline events are immutable (409 `system_event_immutable`).
+  - The War Room drawer is locked to the current incident.
+- **Disclosure accuracy.** (F4)
+  - Exports record working copies only for items whose bytes are included.
+  - ISO 27037 and NIST SP 800-86 clause citations are corrected.
+  - LE packages describe their real encryption and include eradicated/recovered times and acquisition and hash-check columns.
+  - Legal and custody timestamps end in Z.
+- **List correctness.** (F5)
+  - Tag filters and threat-actor search return results instead of 500.
+  - Incident pages load every row of IOCs, entities, evidence, exports, actions, decisions and comments.
+  - Paged lists have no duplicates or gaps.
+  - The audit log shows when it's partial.
+- **Redis CVE exception.** The 6 OpenSSL Highs in `redis:7.4-alpine` have no upstream fix and aren't reachable. They are excepted in `.grype.yaml` until 2026-10-17, pinned to 3.3.7-r1; `make scan` is green. (F1)
+
+### Wave F fix pass (2026-10-04)
+
+- **Deploys no longer fail while the app is open.** WebSockets no longer hold a database transaction.
+- ⚠ **API contract changes:**
+  - Sending `dark_operation` to PATCH incident returns 422 `use_dark_operation_endpoint`.
+  - A corrupt PDF returns 422 `parse_failed`.
+  - A tag with no usable characters returns 422 `invalid_tag`.
+  - A false or benign positive leaving Detection & Analysis needs `triage_reason`.
+- ⚠ **Closed incidents:** more evidence writes and deletes return 409 `incident_closed`. Communication records stay writable.
+- ⚠ **War Room:** messages are paged newest-first with `next_cursor`, and `before` is honoured.
+- **LE package:**
+  - README, SOP and MANIFEST statements are corrected.
+  - MANIFEST schema is 1.1.
+  - `detected_at` is included.
+  - Custody-export ZIP entry names are sanitised.
+- **Smaller fixes:**
+  - Deactivated users are no longer named in errors.
+  - Exports lock their items.
+  - Null threat-actor lists are stored as `[]`.
+  - Correction notes were added for 6 historical working copies.
+
+- **UI:**
+  - The War Room has "Load older messages".
+  - Phase change asks for the triage reason.
+  - The IOC link picker loads one page at a time.
+  - Page loads stop when you navigate away.
+  - Closed incidents hide the scan and write controls they refuse.
+- ⚠ **API:** a threat-actor PATCH with `name` or `motivation` set to null returns 422.
+- ⚠ **MCP:**
+  - `fenrir_artifact_write update` takes only `description`.
+  - `fenrir_respond_list` adds `limit`/`cursor`.
+  - `fenrir_intel_lookup` correlations add `tag`/`limit`/`cursor`.
+- **Supply chain:**
+  - `scan.sh` enforces image-scoped grype exceptions.
+  - ADR 0008 records why images take distro security updates at build.
+
+### Backlog wave G: evidence-first chain (2026-10-04)
+
+**Encrypted storage (G1)**
+- **New format, FENRGCM v2.** Every new evidence file, photo, entity file and incident file gets its own data key, wrapped by a key derived from the master key.
+  - Files are written in authenticated 1 MiB chunks, so truncation and tampering are detected.
+  - The format was frozen after two independent crypto reviews. Older files still read.
+- **Reads are checked before decrypting:** size, header and nonce prefix. Tampering freezes the exhibit. An unreadable file is audited and admins are notified (de-duplicated).
+- ⚠ **Chunked, resumable uploads** (`/api/incidents/{id}/uploads`) encrypt evidence as it arrives.
+  - Plaintext never reaches server disk; any remaining multipart upload spools to RAM only.
+  - `GET …/uploads` lists your open sessions.
+- ⚠ **KEK rotation tool,** `python -m evidence.rotation`, covers evidence, photos, entity and incident files, collector keys and the backup mirror.
+  - It is a dry run by default and crash-safe; `--breach` re-encrypts.
+  - The runbook is rewritten.
+
+**Streaming and limits (G2)**
+- ⚠ **Evidence limit is 10 GiB.** Downloads, exports and LE packages stream with bounded memory (ZIP64).
+- ⚠ **Size errors:**
+  - A full disk returns 507 `insufficient_storage`.
+  - An exhibit over an analyser's cap returns 413 `exhibit_too_large_for_analyser`.
+  - Legacy multipart routes are capped at 512 MiB and deprecated.
+- ⚠ **The export decrypt recipe now streams;** the old recipe fails above 2 GiB.
+
+**Register first, with run records (G3, G4)**
+- ⚠ **Email, PCAP and Browser history are register-first.** An upload creates an unsealed draft exhibit; analysis runs `from-evidence` with a run record.
+- **Complete & seal** finishes a draft.
+- ⚠ **Defender reports and Velociraptor collections link to exhibits:**
+  - Defender imports run from an exhibit with a server-side commit; pre-G4 imports must be re-imported.
+  - The collector container is hashed before decryption.
+- **Device clock offset.** Exhibit imports correct event times and keep the recorded time. Defender cloud times are not shifted.
+- **PCAP analyser 2.1.0:** capture times, conversations and DNS answers. PCAP and browser history feed the Timeline.
+
+**Working copies, legal hold, sealed record (G5)**
+- **Working copies:** analysts download a registered working copy, and the server records the hash of the exact bytes sent.
+  - ⚠ Record copy needs the copy's own hash.
+  - ⚠ Examinations name a verified copy, or "in place" with master pre/post verify.
+- ⚠ **Legal hold:** `PUT …/legal-hold`. Analysts set it; the lead or an admin releases it. A held item can't be destroyed.
+- ⚠ **Sealed items:** photos and collector role are immutable; other changes are logged as amended after seal.
+
+**Fixes from the wave review**
+- **Security:**
+  - Files named like rotation journals can no longer block startup or be deleted.
+  - Download tokens are redacted from the Caddy and backend logs.
+- **Data integrity:**
+  - Photo edits no longer drop stored photos.
+- **Tamper handling:**
+  - ⚠ LE packages label tampered exhibits `integrity_failed` and freeze them.
+  - ⚠ Exports hash every file; a mismatch discards the bundle (409).
+- ⚠ **Unsealed drafts are left out of LE packages and exports** unless a lead opts in (audited); inventories gain seal and lawful-basis columns.
+- **Backup:**
+  - ⚠ Backup skips runs during a key rotation and refuses unencrypted dumps.
+  - The mirror purge can't glob.
+  - Disposed exhibits are purged from the mirror after 30 days (audited).
+- **Closed incidents:** ⚠ passphrase and Dark Operation changes return 409.
+- **Bulk email** no longer holds the audit lock across a batch.
+- **Exports** no longer lock exhibits during the build.
+- ⚠ **MCP:**
+  - New and changed tools for uploads, from-evidence, promote, working copies and legal hold (release needs `confirm=true`).
+  - Long timeouts for export and LE.
+  - The MCP never downloads evidence bytes.
+
+**Verification:**
+- Each piece had rolled-back DB tests with negative controls, mocked UI tests in 3 themes, MCP tests, and live checks through Caddy.
+- The wave review found no Critical issues; regression found no real regressions.
+- Rotation was tested only in an isolated environment.
+
 ### Upgrade notes
 
+- **Wave G:**
+  - Rebuild the backend, analysis-worker, backup, caddy and frontend images.
+  - Run `fenrir-mcp login` and restart the MCP server.
+  - Use the rotation tool only by following `docs/evidence-kek-rotation.md`.
 - **Migrations run automatically** through the `migrate` service. They add columns and run guarded one-time backfills.
   - C2 copies affected systems into compromised entities.
   - C3 records a hash check for existing evidence.
@@ -379,4 +508,4 @@ Built from the IR-expert workflow audit of 2026-10-01: 21 approved pieces (A1–
 
 ### Known issue (pre-existing, not part of this release)
 
-- **Tag filters and threat-actor search return 500.** Any `?tag=` filter (incidents, IOCs, correlations) and threat-actor `?q=` search fail with a 500 error, caused by a cast with no type. This breaks the Dashboard "Top tags" click, and `make smoke` creates a duplicate "[SMOKE] phase gates" incident on each run.
+- ~~Tag filters and threat-actor search return 500.~~ Fixed in F5 (2026-10-04).

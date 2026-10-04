@@ -39,8 +39,10 @@ function StatusPill({ status, isStale }) {
 }
 
 export default function Collections() {
-  const { inc } = useOutletContext()
+  const { inc, viewer } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  // G-fix FE-L12: viewers get the closed-incident view of the write controls (the API refuses them).
+  const ro = isClosed || !!viewer
 
   const [profiles, setProfiles] = useState([])
   const [packages, setPackages] = useState([])
@@ -117,7 +119,9 @@ export default function Collections() {
     setIngesting(true); setError(null); setIngestMsg(null)
     try {
       const res = await api.ingestCollection(inc.id, ingestTarget.id, file)
-      setIngestMsg(`Ingested "${ingestTarget.name}" → artifact ${res.artifact?.original_filename} (${fmtSize(res.artifact?.file_size)}).`)
+      setIngestMsg(`Ingested "${ingestTarget.name}" → artifact ${res.artifact?.original_filename} (${fmtSize(res.artifact?.file_size)}).`
+        + ` Container SHA-256 ${res.container_sha256 ? `${res.container_sha256.slice(0, 16)}…` : '—'}`
+        + (res.evidence_identifier ? ` — matches exhibit ${res.evidence_identifier}.` : ' — no registered exhibit matched.'))
       setIngestTarget(null)
       await load()
     } catch (err) {
@@ -205,7 +209,7 @@ export default function Collections() {
       )}
 
       {/* Generate */}
-      {!isClosed && (
+      {!ro && (
         <div className="panel" style={{ marginBottom: 'var(--space-4)' }}>
           <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', alignItems: 'flex-end' }}>
             <div style={{ flex: '1 1 200px' }}>
@@ -290,26 +294,44 @@ export default function Collections() {
                     <div style={{ fontSize: 10, color: 'var(--dim)' }}>{p.created_by}</div>
                   </td>
                   <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', color: 'var(--dim)', fontFamily: 'var(--font-mono)', fontSize: 10 }}>
-                    {p.package_sha256 ? `${p.package_sha256.slice(0, 10)}…` : '—'}
+                    <span title={p.package_sha256 ? `Package SHA-256 ${p.package_sha256}` : undefined}>
+                      {p.package_sha256 ? `${p.package_sha256.slice(0, 10)}…` : '—'}
+                    </span>
+                    {/* G4 run record of the ingest: the container as received + the exhibit it matched */}
+                    {p.container_sha256 && (
+                      <div data-testid="col-container" style={{ marginTop: 2 }}
+                           title={`Container as received: SHA-256 ${p.container_sha256}${p.container_size != null ? ` (${p.container_size} bytes)` : ''}`
+                             + `${p.output_sha256 ? `\nDecrypted collection: SHA-256 ${p.output_sha256}` : ''}`
+                             + `\nCollector: ${p.collector_name || 'Velociraptor'}${p.velociraptor_version ? ` ${p.velociraptor_version}` : ''}`}>
+                        container {p.container_sha256.slice(0, 10)}…
+                      </div>
+                    )}
+                    {p.evidence_identifier && (
+                      <span className="pill" data-testid="col-exhibit"
+                            style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--accent)', marginTop: 2, display: 'inline-block' }}
+                            title="The received container's SHA-256 equals this registered exhibit's">⛁ {p.evidence_identifier}</span>
+                    )}
                   </td>
                   <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', textAlign: 'right', whiteSpace: 'nowrap' }}>
                     {p.status === 'ingested' && p.result_artifact_id && (
                       <>
-                        <Link to={`../timeline-import?artifact=${p.result_artifact_id}`} relative="path"
-                              className="btn ghost" style={{ fontSize: 11, textDecoration: 'none', marginRight: 6 }}>
-                          Review in Logs & triage
-                        </Link>
+                        {!ro && (
+                          <Link to={`../timeline-import?artifact=${p.result_artifact_id}`} relative="path"
+                                className="btn ghost" style={{ fontSize: 11, textDecoration: 'none', marginRight: 6 }}>
+                            Review in Logs & triage
+                          </Link>
+                        )}
                         <Link to="../artifacts" relative="path" className="btn ghost" style={{ fontSize: 11, textDecoration: 'none', marginRight: 6 }}>
                           View artifact ↗
                         </Link>
                       </>
                     )}
-                    {!isClosed && p.status !== 'deleted' && p.status !== 'ingested' && (
+                    {!ro && p.status !== 'deleted' && p.status !== 'ingested' && (
                       <button type="button" className="btn ghost" style={{ fontSize: 11, marginRight: 6 }}
                               disabled={ingesting}
                               onClick={() => startIngest(p)}>Ingest results</button>
                     )}
-                    {!isClosed && p.status !== 'deleted' && (
+                    {!ro && p.status !== 'deleted' && (
                       <button type="button" className="btn ghost" style={{ fontSize: 11 }}
                               onClick={() => onDelete(p)}>Delete</button>
                     )}

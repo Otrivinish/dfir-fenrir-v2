@@ -37,7 +37,7 @@ def score_evidence(ev: Evidence) -> dict:
     is_digital  = ev.kind == "digital_file"
     is_physical = ev.kind == "physical_item"
 
-    # ── ISO/IEC 27037 §9.1 — Identification ──
+    # ── ISO/IEC 27037 §5.4.2 — Identification (in-situ photo: §6.2.1) ──
     if is_physical:
         photos_ok = bool(ev.photos and len(ev.photos) > 0)
         checks.append(_check(
@@ -47,7 +47,7 @@ def score_evidence(ev: Evidence) -> dict:
             note=None if photos_ok else "Physical evidence requires at least one photo",
         ))
 
-    # Collector + location (ISO §9.2.1 + NIST 800-86 §3.2.1)
+    # Collector + location (ISO 27037 §6.1 + NIST 800-86 §3.1.2)
     has_collector = bool(ev.collected_by_id)
     has_location  = bool((ev.collected_location or "").strip())
     checks.append(_check(
@@ -72,7 +72,7 @@ def score_evidence(ev: Evidence) -> dict:
         note=None if ev.lawful_basis else "Required under GDPR Art. 5.1(c) — pick a basis or justify ad-hoc",
     ))
 
-    # ── ISO/IEC 27037 §9.2.3 — Hash at acquisition ──
+    # ── ISO/IEC 27037 §5.4.4 — Hash at acquisition ──
     if is_digital:
         checks.append(_check(
             code="iso_27037_9_2_3_sha256",
@@ -80,7 +80,7 @@ def score_evidence(ev: Evidence) -> dict:
             status=("pass" if ev.sha256 else "fail"),
             severity="mandatory",
         ))
-        # ISO §9.2.1 — write-blocker / live-acquisition justified
+        # ISO 27037 §5.4.4 — write-blocker / live-acquisition justified
         wb = ev.write_blocker_used
         sys_state = (ev.system_state or "").lower()
         if wb is None and not sys_state:
@@ -95,7 +95,7 @@ def score_evidence(ev: Evidence) -> dict:
             note = None
             if sys_state == "live" and not (ev.live_justification or "").strip():
                 live_ok = False
-                note = "Live acquisition requires justification (ISO §9.2.1)"
+                note = "Live acquisition requires justification (ISO 27037 §5.4.4)"
             checks.append(_check(
                 code="iso_27037_9_2_1_writeblocker",
                 label="Write-blocker / live-acquisition status recorded",
@@ -103,17 +103,17 @@ def score_evidence(ev: Evidence) -> dict:
                 severity="advisory", note=note,
             ))
 
-        # ISO §9.2.4 + NIST 800-86 §3.2.4 — acquisition tool + version
+        # ISO 27037 §5.4.4 + NIST 800-86 §3.1.2 — acquisition tool + version
         tool_ok = bool(ev.acquisition_tool and ev.acquisition_tool_version)
         checks.append(_check(
             code="iso_27037_9_2_4_tool",
             label="Acquisition tool + version documented",
             status=("pass" if tool_ok else "fail"),
             severity="mandatory" if ev.coc_sealed else "advisory",
-            note=None if tool_ok else "Required for reproducibility (ISO §9.2.4, NIST 800-86 §3.2.4)",
+            note=None if tool_ok else "Required for reproducibility (ISO 27037 §5.4.4, NIST 800-86 §3.1.2)",
         ))
 
-        # ISO §9.2.5 — source vs target hash match (acquisition integrity). C3: two hashes
+        # ISO 27037 §5.4.4 / §7.1.4 — source vs target hash match (acquisition integrity). C3: two hashes
         # of different algorithms (e.g. MD5 source, SHA-256 target) can't be compared here,
         # so that case is advisory ("manual"), never a mandatory fail.
         src_algo = hash_algorithm(ev.acquisition_hash_source)
@@ -150,7 +150,7 @@ def score_evidence(ev: Evidence) -> dict:
         note=chain_note,
     ))
 
-    # ── External-custody flag (ISO 27037 §9.3 — chain still has accountability,
+    # ── External-custody flag (ISO 27037 §6.1 — chain still has accountability,
     # but the current holder isn't a platform user so the integrity guarantees
     # we provide are paused while the row is externally held).
     is_external_now = (ev.current_custodian_id is None
@@ -174,7 +174,7 @@ def score_evidence(ev: Evidence) -> dict:
             severity="advisory",
         ))
 
-    # ── C4 — internal custody transfers accepted by the recipient (ISO/IEC 27037 §9.3;
+    # ── C4 — internal custody transfers accepted by the recipient (ISO/IEC 27037 §6.1;
     # SWGDE §6.2/§6.3). Transfers recorded before recipient acceptance existed are advisory
     # ("manual"), never a fail. No internal transfer → not applicable (no check).
     acked  = getattr(ev, "internal_transfers_acknowledged", 0)
@@ -242,7 +242,21 @@ def score_evidence(ev: Evidence) -> dict:
             label="Analysis used a master-verified working copy",
             status=("pass" if wc_ok else "manual"),
             severity="advisory",
-            note=None if wc_ok else "No verified working copy yet — an export auto-creates one, or record one in the evidence detail",
+            note=None if wc_ok else ("No verified working copy yet — download one, or record a lab copy with the hash "
+                                     "its tool reported, in the evidence detail (a legacy record holds the master's "
+                                     "hash, not the copy's, and doesn't count)"),
+        ))
+
+    # ── L10 — a working-copy record corrected by an append-only audit note (advisory) ──
+    corrections = getattr(ev, "copy_corrections", 0)
+    if corrections:
+        checks.append(_check(
+            code="working_copy_record_corrected",
+            label="Working-copy records accurate",
+            status="manual", severity="advisory",
+            note=(f"{corrections} working-copy record(s) minted by an export say 'verified against master' "
+                  "although the item's bytes were not in that export; a correction note "
+                  "(evidence_copy_correction) in the custody log says to read them as not verified"),
         ))
 
     # ── GS-4 — trusted timestamp on the seal (RFC 3161; advisory) ──

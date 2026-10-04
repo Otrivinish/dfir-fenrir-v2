@@ -265,9 +265,11 @@ function downloadReport(extracted, results, sources, inc, user) {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function OSINTLookup() {
-  const { inc } = useOutletContext()
+  const { inc, viewer } = useOutletContext()
   const { user } = useAuth()
   const isClosed = inc?.status === 'closed'
+  // G-fix FE-L12: viewers get the closed-incident view of the write controls (the API refuses them).
+  const ro = isClosed || !!viewer
 
   const [text, setText]               = useState('')
   const [extracted, setExtracted]     = useState([])  // [{id, type, value}]
@@ -566,7 +568,7 @@ export default function OSINTLookup() {
                   // For bulk, open modal with first item and note count
                   setIocTarget({ ...items[0], _bulkItems: items })
                 }}
-                disabled={isClosed}
+                disabled={ro}
               >
                 Add {selected.size} to IOCs
               </button>
@@ -627,7 +629,7 @@ export default function OSINTLookup() {
                     })}
                     onEnrich={() => enrichOne(item)}
                     onAddIoc={() => setIocTarget(item)}
-                    isClosed={isClosed}
+                    isClosed={ro}
                   />
                 ))}
               </tbody>

@@ -8,14 +8,19 @@ import { PHASE } from '../lib/incidentVocab.js'
 // fire `onPhaseClick(value)` so the caller can show a confirmation modal.
 // Preparation is never a target (the API refuses it: 409 phase_transition_invalid).
 // When `disabled` is true (e.g. closed incident, or an Observer), the stepper is static.
+// `hint` (with disabled) says why it can't be used right now: shown beside the steps and
+// as each step's tooltip (e.g. while the Details form has unsaved edits).
 const NOT_A_TARGET = 'preparation'
 
-export default function PhaseStepper({ current, onPhaseClick, disabled = false }) {
+export default function PhaseStepper({ current, onPhaseClick, disabled = false, hint = null }) {
   const idx       = PHASE.findIndex(p => p.value === current)
   const clickable = !disabled && typeof onPhaseClick === 'function'
+  const why       = disabled && hint ? hint : null
 
   return (
-    <div className="phase-steps" role={clickable ? 'group' : 'list'} aria-label="Incident phase">
+    <>
+    <div className="phase-steps" role={clickable ? 'group' : 'list'} aria-label="Incident phase"
+         aria-describedby={why ? 'phase-steps-hint' : undefined}>
       {PHASE.map((p, i) => {
         const isCurrent = i === idx
         const target    = clickable && !isCurrent && p.value !== NOT_A_TARGET
@@ -53,7 +58,7 @@ export default function PhaseStepper({ current, onPhaseClick, disabled = false }
               aria-current={isCurrent ? 'step' : undefined}
               title={clickable && p.value === NOT_A_TARGET && !isCurrent
                 ? `${p.label} is the readiness work before an incident; an incident can't be moved to it`
-                : p.label}
+                : why ? `${p.label} — ${why}` : p.label}
               className={cls}
               data-phase={p.value}
             >
@@ -67,5 +72,7 @@ export default function PhaseStepper({ current, onPhaseClick, disabled = false }
         )
       })}
     </div>
+    {why && <span id="phase-steps-hint" className="phase-steps-hint" role="note">{why}</span>}
+    </>
   )
 }

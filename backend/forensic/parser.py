@@ -40,7 +40,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from functools import lru_cache
 from typing import Optional, Union
 from urllib.parse import unquote
@@ -61,7 +61,9 @@ MAX_RAW_CHARS = 2_000
 #   2.1.0  The CSV/JSON/Velociraptor column heuristics (_TS_COL, _DESC_COL, …) walk ordered tuples
 #          in a documented priority. Before, they walked sets, so with several candidate columns
 #          the chosen time / description / host changed with each process's hash seed.
-PARSER_VERSION = "2.1.0"
+#   2.2.0  G4: an exhibit's recorded clock offset is applied (apply_clock_offset): event_time is
+#          corrected and the time as the device recorded it is kept in recorded_time.
+PARSER_VERSION = "2.2.0"
 
 # EVTX and SQLite need a file on disk for their libraries. When the parse is of an exhibit that
 # file is decrypted evidence, so it goes only to this RAM-only tmpfs (compose: backend tmpfs, never
@@ -1949,6 +1951,26 @@ def _try_parse_ts(s: Optional[str], *, declared_utc: bool = False) -> tuple[Opti
             return dt.replace(tzinfo=timezone.utc), "explicit"
         return _naive(dt)
     return None, "missing"
+
+
+def apply_clock_offset(events: list[dict], offset_seconds: Optional[int]) -> list[dict]:
+    """G4 (R35) — correct device-clock times by the exhibit's recorded offset, in place.
+
+    `offset_seconds` = device clock minus true UTC (positive = the device clock ran ahead). For
+    every event with a time, `recorded_time` keeps the time as the source recorded it (after any
+    timezone handling) and `event_time` becomes recorded_time − offset (sub-second precision kept).
+    Events without a time are left alone. `offset_seconds` None = no structured offset: no-op."""
+    if offset_seconds is None:
+        return events
+    delta = timedelta(seconds=offset_seconds)
+    for ev in events:
+        ts = ev.get("event_time")
+        if not ts or ev.get("time_basis") == "missing":
+            continue
+        recorded = datetime.fromisoformat(ts)
+        ev["recorded_time"] = recorded.isoformat()
+        ev["event_time"] = (recorded - delta).isoformat()
+    return events
 
 
 # ─── Normalized event builder ────────────────────────────────────────────────

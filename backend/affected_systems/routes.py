@@ -263,7 +263,7 @@ class PromoteToEntitiesResult(BaseModel):
 
 @router.post(
     "/{incident_id}/affected-systems/promote-to-entities",
-    response_model=PromoteToEntitiesResult, deprecated=True,
+    response_model=PromoteToEntitiesResult, deprecated=True, responses=_ERR_409,
     summary="Promote affected systems to entities (deprecated no-op)",
 )
 async def promote_to_entities(
@@ -274,9 +274,9 @@ async def promote_to_entities(
 ):
     """DEPRECATED no-op: affected systems ARE the incident's compromised entities, so there
     is nothing to promote. Returns `created: 0` and every compromised entity as `skipped`.
-    Writes nothing.
+    Writes nothing. 409 `incident_closed` on a closed incident, like the other writes here.
     """
-    await get_accessible_incident(db, incident_id, user)
+    _ensure_open(await get_accessible_incident(db, incident_id, user))
     n = len(await compromised_systems(db, incident_id))
     return PromoteToEntitiesResult(
         created=0, skipped=n, total=n,

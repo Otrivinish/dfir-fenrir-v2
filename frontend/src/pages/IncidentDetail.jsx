@@ -422,8 +422,8 @@ export default function IncidentDetail() {
     setClosureModal(null)
   }
 
-  const confirmReopen = async (reason, phase) => {
-    applyUpdate(await api.reopenIncident(id, reason, phase))
+  const confirmReopen = async (reason, phase, overrideGate) => {
+    applyUpdate(await api.reopenIncident(id, reason, phase, overrideGate))
     setClosureModal(null)
   }
 
@@ -438,6 +438,8 @@ export default function IncidentDetail() {
   const readOnly  = isClosed || !editing
   const canWrite  = user?.role !== 'viewer'
   const canEdit   = canWrite && !isClosed
+  // A phase change re-seeds the Details draft, so the stepper waits while the form is open or dirty.
+  const editLock  = editing || dirty
 
   // Memoised so state that only the header uses (presence avatars, modals) doesn't re-render
   // the active tab: the Outlet's consumers re-render only when a value here changes.
@@ -563,8 +565,9 @@ export default function IncidentDetail() {
       <div className={`status-band ${isClosed ? 'closed' : ''}`}>
         <PhaseStepper
           current={inc.phase}
-          disabled={isClosed || !canWrite}
-          onPhaseClick={isClosed || !canWrite ? undefined : setPhaseTarget}
+          disabled={isClosed || !canWrite || editLock}
+          onPhaseClick={isClosed || !canWrite || editLock ? undefined : setPhaseTarget}
+          hint={!isClosed && canWrite && editLock ? 'Save or discard your Details edits to change the phase.' : null}
         />
         <ClockChips incidentId={inc.id} rev={legalRev} />
         <span className="pills">
@@ -602,13 +605,14 @@ export default function IncidentDetail() {
         </div>
       </div>
 
-      <WarRoomDrawer incidentId={inc.id} />
+      <WarRoomDrawer incidentId={inc.id} incidentRef={inc.ref} />
 
       {phaseTarget && (
         <PhaseChangeModal
           incidentId={inc.id}
           currentPhase={inc.phase}
           targetPhase={phaseTarget}
+          triageState={inc.triage_state}
           canOverride={can('override_gate')}
           onConfirm={confirmPhaseChange}
           onClose={() => setPhaseTarget(null)}
@@ -633,6 +637,8 @@ export default function IncidentDetail() {
       )}
       {closureModal === 'reopen' && (
         <ReopenIncidentModal
+          incidentId={inc.id}
+          canOverride={can('override_gate')}
           onConfirm={confirmReopen}
           onClose={() => setClosureModal(null)}
         />

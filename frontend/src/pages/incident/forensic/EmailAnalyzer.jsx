@@ -2,6 +2,10 @@ import { useEffect, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
+import ExhibitPicker, { DraftBadge } from '../../../components/ExhibitPicker.jsx'
+import RunRecord from '../../../components/RunRecord.jsx'
+import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
+import UploadProgress, { useChunkedUpload } from '../../../components/UploadProgress.jsx'
 
 // U8.1 — Email analyzer (phishing triage). One input control: paste raw headers, pick a
 // single .eml/.msg, pick several, or a single .zip of them (multi/zip silently routes to
@@ -17,14 +21,23 @@ const VERDICT_COLOR = { red: 'var(--crit)', amber: 'var(--med)', green: 'var(--o
 const SEV_COLOR     = { high: 'var(--crit)', medium: 'var(--med)', low: 'var(--muted)' }
 // "Exhibit" is not used on the Evidence tab yet, so the button says what it means.
 const EXHIBIT_HINT  = 'Exhibit = an evidence item. Adds this message to Evidence, re-hashed, with a custody log.'
+const MAX_EMAIL_BYTES = 25 * 1024 * 1024
+// G3 — Received-header times are written by the mail servers, not the device: no clock offset applies.
+const EMAIL_OFFSET_NOTE = 'not applied — relay times come from the mail servers, not the device'
 
 export default function EmailAnalyzer() {
-  const { inc } = useOutletContext()
+  const { inc, isClosed: incidentClosed, viewer } = useOutletContext()
   const incidentId = inc.id
+  // G-fix FE-L12: viewers get the closed-incident view of the write controls (the API refuses them).
+  const isClosed = incidentClosed || !!viewer
+  // Closed incident: every write here is 409 incident_closed (R66) — analyses stay readable.
+  const CLOSED_TITLE = incidentClosed ? 'Closed incidents are read-only'
+    : isClosed ? 'Read-only: viewers can’t change the incident' : undefined
 
   const [raw, setRaw]         = useState('')
   const [files, setFiles]     = useState([])   // one file, many files, or a single .zip -- one control
   const [busy, setBusy]       = useState(false)
+  const up = useChunkedUpload()   // G1 stage 3b: a single message file goes up as a chunked upload
   const [error, setError]     = useState(null)
   const [analysis, setAnalysis] = useState(null)
   const [history, setHistory] = useState([])
@@ -34,6 +47,11 @@ export default function EmailAnalyzer() {
 
   const [batchResult, setBatchResult] = useState(null)
   const [batchFilter, setBatchFilter] = useState(null)
+  // G3 — Upload (registers a draft exhibit first) | From a registered exhibit
+  const [mode, setMode]           = useState('upload')
+  const [exhibitId, setExhibitId] = useState('')
+  const [acquiredAt, setAcquiredAt] = useState('')
+  const [exhibitsKey, setExhibitsKey] = useState(0)
 
   const loadHistory = () => api.listEmailAnalyses(incidentId).then(r => setHistory(r.items || [])).catch(() => {})
   useEffect(() => { loadHistory() }, [incidentId])
@@ -53,17 +71,35 @@ export default function EmailAnalyzer() {
     setBusy(true); setError(null); setNote(null); setBatchResult(null)
     try {
       if (isBatchUpload) {
-        const r = await api.analyzeEmailBulk(incidentId, files)
+        const r = await api.analyzeEmailBulk(incidentId, files, { acquiredAt: acquiredAt || null })
         setBatchResult(r); setBatchFilter(r.batch_id)
         if (r.analyzed.length) { setAnalysis(r.analyzed[r.analyzed.length - 1]); setPickedUrls({}) }
       } else {
-        const a = await api.analyzeEmail(incidentId, { raw: raw.trim() || null, file: files[0] || null })
+        const f = files[0] || null
+        const a = await api.analyzeEmail(incidentId, { raw: raw.trim() || null, file: f, acquiredAt: acquiredAt || null },
+                                         f ? up.start(f.size) : {})
         setAnalysis(a); setPickedUrls({})
       }
-      setRaw(''); setFiles([])
+      setRaw(''); setFiles([]); setAcquiredAt('')
+      loadHistory(); setExhibitsKey(k => k + 1)
+    } catch (e) {
+      setError(e.message || 'Analyze failed')
+      if (e.data?.evidence_id) setExhibitsKey(k => k + 1)   // registered, but not analysed: it can be picked below
+    }
+    finally { up.done(); setBusy(false) }
+  }
+
+  // G3 — analyse a registered exhibit (re-hashed first; a mismatch freezes it)
+  async function runExhibit() {
+    if (!exhibitId) return
+    setBusy(true); setError(null); setNote(null); setBatchResult(null)
+    try {
+      setAnalysis(await api.analyzeEmailFromEvidence(incidentId, exhibitId)); setPickedUrls({})
       loadHistory()
-    } catch (e) { setError(e.message || 'Analyze failed') }
-    finally { setBusy(false) }
+    } catch (e) {
+      setError(e.message || 'Could not analyse the exhibit')
+      if (e.status === 409) setExhibitsKey(k => k + 1)
+    } finally { setBusy(false) }
   }
 
   async function open(aid) {
@@ -112,16 +148,57 @@ export default function EmailAnalyzer() {
           happen locally — no URL from the message is ever fetched and no attachment is executed. SPF/DMARC/DKIM
           are additionally checked live against the claimed sender domain's own DNS (skipped under Dark Operation).
         </p>
+        {isClosed ? (
+          <div style={{ fontSize: 12, color: 'var(--muted)' }} data-email-closed>
+            {incidentClosed ? 'Closed incident: past analyses stay readable below. Re-open the incident to analyze email.'
+              : 'Read-only: past analyses are below. Analysing email needs the analyst role.'}
+          </div>
+        ) : <>
+        <div role="radiogroup" aria-label="Email source" data-testid="email-mode"
+             style={{ display: 'flex', gap: 'var(--space-4)', flexWrap: 'wrap', fontSize: 13, marginBottom: 'var(--space-2)' }}>
+          {[['upload', 'Upload or paste'], ['exhibit', 'From a registered exhibit']].map(([v, label]) => (
+            <label key={v} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', cursor: 'pointer' }}>
+              <input type="radio" name="email-mode" value={v} checked={mode === v}
+                     onChange={() => { setMode(v); setError(null) }} />
+              {label}
+            </label>
+          ))}
+        </div>
+        {mode === 'upload' ? <>
         <textarea className="input" rows={6} value={raw} onChange={e => setRaw(e.target.value)}
                   placeholder="Paste raw email headers or full source here…"
                   style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} disabled={busy || files.length > 0} />
         <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', marginTop: 'var(--space-2)', flexWrap: 'wrap' }}>
           <input type="file" multiple accept=".eml,.msg,.zip,message/rfc822,application/vnd.ms-outlook,application/zip,text/plain"
                  disabled={busy || !!raw.trim()} onChange={e => setFiles(Array.from(e.target.files || []))} />
+          <div style={{ width: 260, maxWidth: '100%' }}>
+            <LocalDateTimePicker id="email-acquired" value={acquiredAt} onChange={setAcquiredAt} clearable hint={false}
+                                 placeholder="Acquired at (optional)" />
+          </div>
           <button className="btn primary" onClick={run} disabled={busy || (!raw.trim() && files.length === 0)}>
             {busy ? 'Analyzing…' : (isBatchUpload ? `Analyze (${files.length})` : 'Analyze')}
           </button>
         </div>
+        <UploadProgress progress={up.progress} onCancel={up.cancel} testid="email-upload-progress"
+                        limit={up.limit} incidentId={incidentId} />
+        <div className="field-hint" data-testid="email-register-hint" style={{ marginTop: 'var(--space-1)' }}>
+          Registers first: each message (or the pasted source) is added to Evidence as an <strong>unsealed draft exhibit</strong> —
+          hashed, encrypted, custody-logged — and then that exhibit is analysed. A message whose SHA-256 matches an exhibit
+          already registered is analysed as that exhibit. Complete and seal the draft in Evidence › Items.
+        </div>
+        </> : (
+          <div className="form-row" style={{ alignItems: 'flex-end' }}>
+            <ExhibitPicker incidentId={incidentId} id="email-exhibit" value={exhibitId}
+                           onChange={(v) => setExhibitId(v)} maxBytes={MAX_EMAIL_BYTES} maxLabel="25 MiB" reloadKey={exhibitsKey} />
+            <div className="field" style={{ justifyContent: 'flex-end' }}>
+              <button type="button" className="btn primary" onClick={runExhibit} disabled={busy || !exhibitId}
+                      title="Re-hash the exhibit, then analyse it (recorded in its custody log)">
+                {busy ? 'Analyzing…' : 'Analyze exhibit'}
+              </button>
+            </div>
+          </div>
+        )}
+        </>}
         {error && <div className="alert error" role="alert" style={{ marginTop: 'var(--space-2)' }}><span className="alert-icon">!</span><span>{error}</span></div>}
         {note  && <div className="alert info"  role="status" style={{ marginTop: 'var(--space-2)' }}><span className="alert-icon">✓</span><span>{note}</span></div>}
         {batchResult && (
@@ -159,13 +236,24 @@ export default function EmailAnalyzer() {
               </div>
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-              <button className="btn ghost" disabled={busy || !hopImport.importable || hopsOnTimeline}
-                      onClick={() => act(() => api.importEmailHops(incidentId, a.id), 'Hops imported to Timeline.')}>
+              <button className="btn ghost" disabled={busy || isClosed || !hopImport.importable || hopsOnTimeline}
+                      title={CLOSED_TITLE} onClick={() => act(() => api.importEmailHops(incidentId, a.id), 'Hops imported to Timeline.')}>
                 {hopsOnTimeline ? 'Hops on Timeline ✓' : hopsMarked ? 'Re-import missing hops' : 'Import hops → Timeline'}</button>
-              <button className="btn ghost" disabled={busy || !!a.evidence_id} title={EXHIBIT_HINT}
-                      onClick={() => act(() => api.mintEmailEvidence(incidentId, a.id), 'Registered as exhibit.')}>
-                {a.evidence_id ? 'Registered as exhibit ✓' : 'Register as exhibit'}</button>
+              {/* G3 — new analyses already are of an exhibit; "Register as exhibit" is for older ones only */}
+              {!a.analyser_version && (
+                <button className="btn ghost" disabled={busy || isClosed || !!a.evidence_id} title={CLOSED_TITLE || EXHIBIT_HINT}
+                        data-testid="email-legacy-register"
+                        onClick={() => act(() => api.mintEmailEvidence(incidentId, a.id), 'Registered as exhibit.')}>
+                  {a.evidence_id ? 'Registered as exhibit ✓' : 'Register as exhibit'}</button>
+              )}
             </div>
+          </div>
+
+          <div style={{ marginTop: 'var(--space-3)' }}>
+            <RunRecord testid="email-run-record"
+                       evidenceIdentifier={a.evidence_identifier} evidenceSealed={a.evidence_sealed}
+                       inputSha256={a.input_sha256} analyserName={a.analyser_name} analyserVersion={a.analyser_version}
+                       exhibitLink={a.exhibit_link} at={a.created_at} by={a.created_by} offsetNote={EMAIL_OFFSET_NOTE} />
           </div>
 
           {/* Message summary — the fields analysts hunt for first, all in one place */}
@@ -348,7 +436,7 @@ export default function EmailAnalyzer() {
                        onChange={e => setPickedUrls(p => ({ ...p, __origin__: e.target.checked }))} disabled={!a.headers?.origin_ip} />
                 {' '}also promote originating IP{a.headers?.origin_ip ? ` (${a.headers.origin_ip})` : ''}
               </label>
-              <button className="btn" style={{ marginTop: 'var(--space-2)' }} disabled={busy}
+              <button className="btn" style={{ marginTop: 'var(--space-2)' }} disabled={busy || isClosed} title={CLOSED_TITLE}
                       onClick={() => act(() => api.promoteEmailIocs(incidentId, a.id, urlIocPayload()), 'Selected indicators promoted to IOCs.')}>
                 Promote selected → IOC
               </button>
@@ -372,7 +460,7 @@ export default function EmailAnalyzer() {
                       <td style={{ fontFamily: 'var(--font-mono)' }}>{(at.sha256 || '').slice(0, 12)}…</td>
                       <td>{at.artifact_id
                         ? <span style={{ color: 'var(--ok)' }}>extracted ✓</span>
-                        : <button className="btn ghost" disabled={busy}
+                        : <button className="btn ghost" disabled={busy || isClosed} title={CLOSED_TITLE}
                                   onClick={() => act(() => api.extractEmailAttachment(incidentId, a.id, i), 'Attachment extracted to quarantine Artifact.')}>Extract → Artifact</button>}</td>
                     </tr>
                   )
@@ -395,19 +483,26 @@ export default function EmailAnalyzer() {
               </span>
             )}
           </h4>
+          <div className="table-scroll">
           <table className="table" style={{ fontSize: 12 }}>
-            <thead><tr><th>When</th><th>Verdict</th><th>From</th><th>Subject</th></tr></thead>
+            <thead><tr><th>When</th><th>Verdict</th><th>From</th><th>Subject</th><th>Exhibit</th></tr></thead>
             <tbody>
               {history.filter(h => !batchFilter || h.batch_id === batchFilter).map(h => (
-                <tr key={h.id} style={{ cursor: 'pointer' }} onClick={() => open(h.id)}>
+                <tr key={h.id} style={{ cursor: 'pointer' }} onClick={() => open(h.id)} data-testid="email-history-row">
                   <td>{formatLocal(h.created_at)}</td>
                   <td><span style={{ color: VERDICT_COLOR[h.verdict], fontWeight: 700 }}>{h.verdict} · {h.score}</span></td>
                   <td style={{ fontFamily: 'var(--font-mono)' }}>{h.from_addr || '—'}</td>
                   <td>{h.subject || '(no subject)'}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    {h.evidence_identifier
+                      ? <><span style={{ fontFamily: 'var(--font-mono)' }}>⛁ {h.evidence_identifier}</span>{h.evidence_sealed === false && <> <DraftBadge /></>}</>
+                      : <span style={{ color: 'var(--dim)' }}>—</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

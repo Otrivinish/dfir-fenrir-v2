@@ -11,11 +11,50 @@ import { api } from '../../../api/client.js'
 // Steps:
 //   1. Case binding              — case ref + authority + retention
 //   2. Legal basis               — incl. EIO (Dir. 2014/41/EU) + MLA (Budapest Art. 31)
-//   3. Build options             — legal_hold_only + include_artifacts
+//   3. Build options             — legal_hold_only + include_artifacts + include_unsealed_drafts
 //   4. Recipient                 — name, role, ID, org, address, delivery channel
 //   5. Sender declaration        — operator certification text (in the HMAC-SHA-256-protected manifest)
 //   6. Acknowledgment            — enable single-use receipt URL
 //   7. Issue                     — final review + Generate
+
+// G-fix (M11, owner 2026-10-04) — LE packages leave unsealed drafts out unless the lead opts in (audited
+// on the package's anchor row). The build result doesn't list the drafts left out or the exhibits that
+// failed their integrity check (listed integrity_failed:<reason> and frozen), so the page compares the
+// incident's exhibits before and after the build — unless the response names them itself.
+async function exhibitStates(incidentId) {
+  const all = await api.listAllPages(api.listEvidence, incidentId, {}, 200)
+  return new Map(all.map(e => [e.id, e]))
+}
+export async function prepareLePackageChecked(incidentId, payload) {
+  const before = await exhibitStates(incidentId).catch(() => null)
+  const issued = await api.prepareLePackage(incidentId, payload)
+  const after = before && await exhibitStates(incidentId).catch(() => null)
+  const listed = after ? [...after.values()].filter(e => !payload.legal_hold_only || e.legal_hold) : []
+  const failures = Array.isArray(issued.integrity_failures)
+    ? issued.integrity_failures.map(f => f.identifier || f.evidence_id)
+    : after ? [...after.values()].filter(e => e.status === 'verify_failed' && before.get(e.id)?.status === 'active').map(e => e.identifier) : null
+  const drafts = Array.isArray(issued.unsealed_drafts_excluded) ? issued.unsealed_drafts_excluded
+    : payload.include_unsealed_drafts ? [] : after ? listed.filter(e => !e.coc_sealed).map(e => e.identifier) : null
+  return { ...issued, checks: { integrityFailed: failures, draftsExcluded: drafts, draftsIncluded: !!payload.include_unsealed_drafts } }
+}
+
+// The "Include unsealed drafts" option, shared by both LE dialogs.
+export function UnsealedDraftsOption({ checked, onChange }) {
+  return (
+    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} style={{ marginTop: 3 }}
+             data-testid="le-include-drafts" />
+      <span>
+        Include unsealed drafts
+        <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 2 }}>
+          Off (default): an exhibit whose chain of custody is not sealed is listed in Evidence_Inventory.csv as
+          {' '}<code style={{ fontFamily: 'var(--font-mono)' }}>excluded: unsealed draft</code>, with no custody log or file.
+          {' '}On: drafts go in like sealed exhibits; the choice is recorded on the package&rsquo;s audit anchor.
+        </div>
+      </span>
+    </label>
+  )
+}
 
 const LEGAL_BASIS = [
   { value: 'warrant',     label: 'Warrant' },
@@ -88,6 +127,7 @@ export default function HandoffWizard({ inc, onClose, onIssued }) {
     // Step 3
     legal_hold_only:   false,
     include_artifacts: false,
+    include_unsealed_drafts: false,
     // Step 4
     recipient_name:         '',
     recipient_role:         '',
@@ -154,6 +194,7 @@ export default function HandoffWizard({ inc, onClose, onIssued }) {
         legal_basis:          form.legal_basis,
         legal_hold_only:      form.legal_hold_only,
         include_artifacts:    form.include_artifacts,
+        include_unsealed_drafts: form.include_unsealed_drafts,
       }
       if (form.retention_until) {
         payload.retention_until = new Date(form.retention_until).toISOString()
@@ -178,7 +219,7 @@ export default function HandoffWizard({ inc, onClose, onIssued }) {
       }
       payload.enable_acknowledgment = form.enable_acknowledgment
 
-      const issued = await api.prepareLePackage(inc.id, payload)
+      const issued = await prepareLePackageChecked(inc.id, payload)
       onIssued(issued)
     } catch (e) {
       setError(e.message || 'Generation failed.')
@@ -349,6 +390,7 @@ export default function HandoffWizard({ inc, onClose, onIssued }) {
                 </div>
               </span>
             </label>
+            <UnsealedDraftsOption checked={form.include_unsealed_drafts} onChange={v => set('include_unsealed_drafts', v)} />
           </div>
         )}
 
@@ -483,6 +525,7 @@ export default function HandoffWizard({ inc, onClose, onIssued }) {
                 <span>
                   {form.legal_hold_only ? 'legal-hold only' : 'all evidence'}
                   {form.include_artifacts ? ' + artifacts' : ''}
+                  {form.include_unsealed_drafts ? ' · unsealed drafts included' : ' · unsealed drafts left out'}
                 </span>
                 <span style={{ color: 'var(--muted)' }}>Acknowledgment</span>
                 <span>{form.enable_acknowledgment ? '✓ enabled' : '— disabled'}</span>

@@ -1,13 +1,18 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { useAuth } from '../../../hooks/useAuth.jsx'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
 import { TLP, labelOf, pillOf } from '../../../lib/incidentVocab.js'
 import AcquisitionWizard from './AcquisitionWizard.jsx'
-import ExaminationWizard from './ExaminationWizard.jsx'
+import ExaminationWizard, { ExamTarget, examTargetMissing } from './ExaminationWizard.jsx'
 import { scoreEvidence, severityColor, aggregateIntegrity, hashAlgorithm } from '../../../lib/evidenceProvenance.js'
 import { SEV_PALETTE } from '../../../components/SevBadge.jsx'
+import { fmtOffset, parseOffsetSeconds } from '../../../components/ClockOffset.jsx'
+import { DraftBadge } from '../../../components/ExhibitPicker.jsx'
+import UploadProgress, { useChunkedUpload, useRetainedUpload } from '../../../components/UploadProgress.jsx'
+import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
+import { CUSTODY_ACTION_COLOR, CUSTODY_ACTION_LABEL } from '../../../lib/custodyLabels.js'
 
 const KIND_LABEL = { digital_file: 'Digital file', physical_item: 'Physical item' }
 const STATUS_LABEL = {
@@ -50,6 +55,31 @@ function fmtBytes(n) {
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
 }
 
+// The API's one rule set for an item's acquisition facts (the acquisition record and the clock offset,
+// G-fix M10): its collector, its current custodian, the incident lead or an admin; the item held
+// internally with no transfer pending. Why not, or null. (The API decides; this only hides controls.)
+function acquisitionFactsBlock(ev, me, isAdmin, isLead) {
+  if (!ev.current_custodian_id) return 'In external custody: take it back first'
+  if (ev.pending_custodian_id) return 'A custody transfer awaits acceptance'
+  if (!isAdmin && !isLead && me?.id !== ev.collected_by_id && me?.id !== ev.current_custodian_id)
+    return 'Only its collector, its custodian, the incident lead or an admin can record its acquisition facts'
+  return null
+}
+
+// G3 — an unsealed, active item is a draft exhibit (registered by an analyser upload or a Quick add):
+// "Complete & seal" fills in its acquisition record (acquisitionFactsBlock decides who).
+function draftState(ev, me, isAdmin, isClosed, isLead) {
+  const draft = !ev.coc_sealed && ev.status === 'active'
+  if (!draft) return { draft: false }
+  return { draft: true, blocked: isClosed ? 'Closed incidents are read-only' : acquisitionFactsBlock(ev, me, isAdmin, isLead) }
+}
+
+// G-fix FE-L11 — state badges that must stand out use SEV_PALETTE (CLAUDE.md), not the dim pill tints.
+function paletteStyle(sev) {
+  const p = SEV_PALETTE[sev]
+  return p ? { background: p.bg, color: p.text, borderColor: p.border } : undefined
+}
+
 function shorten(s, n = 12) {
   if (!s) return '—'
   return s.length > n ? `${s.slice(0, n)}…` : s
@@ -69,10 +99,11 @@ function PendingTransferBadge({ item, usernameOf }) {
 }
 
 export default function Items() {
-  const { inc, bumpRail } = useOutletContext()
+  const { inc, bumpRail, access } = useOutletContext()
   const { user } = useAuth()
   const isClosed = inc?.status === 'closed'
   const isAdmin  = user?.role === 'admin'
+  const canWrite = !!user && user.role !== 'viewer'   // FE-L12: viewers see the register read-only
 
   const [items, setItems]         = useState([])
   const [users, setUsers]         = useState([])
@@ -89,22 +120,32 @@ export default function Items() {
     []
   )
 
+  // Each load gets a sequence number; only the newest one may set state, so an
+  // older multi-page load that finishes late can't overwrite a newer view.
+  const loadSeq = useRef(0)
+  // The running load's controller: a newer load, an incident change or unmount aborts it.
+  const loadAbort = useRef(null)
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
+    loadAbort.current?.abort()
+    const { signal } = (loadAbort.current = new AbortController())
     setError(null)
     try {
-      const params = { limit: 200 }
+      const params = {}
       if (kindFilter)   params.kind   = kindFilter
       if (statusFilter) params.status = statusFilter
-      const res = await api.listEvidence(inc.id, params)
-      setItems(res.items)
+      // Every page, so the register lists every exhibit of the incident.
+      const all = await api.listAllPages(api.listEvidence, inc.id, params, 200, { signal })
+      if (seq === loadSeq.current) setItems(all)
     } catch (e) {
-      setError(e.message || 'Could not load evidence')
+      if (seq === loadSeq.current && !signal.aborted) setError(e.message || 'Could not load evidence')
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [inc.id, kindFilter, statusFilter])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load(); return () => loadAbort.current?.abort() }, [load])
   // After a write: re-read the list and the rail's counts.
   const reload = useCallback(() => { bumpRail?.(); return load() }, [bumpRail, load])
 
@@ -122,8 +163,8 @@ export default function Items() {
   // Load entities for the entity picker in the add modal and table display.
   useEffect(() => {
     let cancelled = false
-    api.listEntities(inc.id, { limit: 200 })   // backend caps limit at 200
-      .then(r => { if (!cancelled) setEntities(r.items || []) })
+    api.listAllEntities(inc.id)   // every page (200 each)
+      .then(all => { if (!cancelled) setEntities(all) })
       .catch(() => {})
     return () => { cancelled = true }
   }, [inc.id])
@@ -184,24 +225,28 @@ export default function Items() {
             <option value="">All statuses</option>
             {Object.entries(STATUS_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
           </select>
-          <button
-            type="button"
-            className="btn ghost"
-            onClick={() => setModal({ mode: 'add' })}
-            disabled={isClosed}
-            title={isClosed ? 'Closed incidents are read-only' : 'Quick add (no wizard)'}
-          >
-            + Quick add
-          </button>
-          <button
-            type="button"
-            className="btn primary"
-            onClick={() => setModal({ mode: 'wizard' })}
-            disabled={isClosed}
-            title={isClosed ? 'Closed incidents are read-only' : 'Court-grade acquisition wizard (ISO 27037 + GDPR)'}
-          >
-            🛡 Wizard add
-          </button>
+          {canWrite && (
+            <>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setModal({ mode: 'add' })}
+                disabled={isClosed}
+                title={isClosed ? 'Closed incidents are read-only' : 'Quick add (no wizard)'}
+              >
+                + Quick add
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => setModal({ mode: 'wizard' })}
+                disabled={isClosed}
+                title={isClosed ? 'Closed incidents are read-only' : 'Court-grade acquisition wizard (ISO 27037 + GDPR)'}
+              >
+                🛡 Wizard add
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -217,11 +262,12 @@ export default function Items() {
         <div className="panel-empty">
           <div className="panel-empty-mark" aria-hidden="true">⊞</div>
           <div>No evidence yet.</div>
-          {!isClosed && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Click "Add evidence" to register a file or physical item.</div>}
+          {!isClosed && canWrite && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Use “Quick add” or “Wizard add” to register a file or physical item.</div>}
         </div>
       ) : (
         <>
           <ChainIntegrityCard items={items} />
+          <div className="table-scroll">
           <table className="settings-table">
             <thead>
               <tr>
@@ -240,6 +286,7 @@ export default function Items() {
                 const prov = scoreEvidence(ev)
                 const provColor = severityColor(prov.score)
                 const sealed = ev.coc_sealed
+                const ds = draftState(ev, user, isAdmin, isClosed, !!access?.is_lead)
                 return (
                   <tr key={ev.id}>
                     <td>
@@ -253,6 +300,13 @@ export default function Items() {
                       <div style={{ color: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
                         {ev.identifier}
                       </div>
+                      {ds.draft && <div style={{ marginTop: 2 }}><DraftBadge /></div>}
+                      {ev.legal_hold && (
+                        <div style={{ marginTop: 2 }}>
+                          <span className="pill" data-legal-hold-badge title={ev.legal_hold_reason || 'On legal hold'}
+                                style={paletteStyle('medium')}>Legal hold</span>
+                        </div>
+                      )}
                       {ev.entity_id && entityLabelOf(ev.entity_id) && (
                         <div style={{ fontSize: 10, color: 'var(--accent)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
                           ↳ {entityLabelOf(ev.entity_id)}
@@ -303,6 +357,13 @@ export default function Items() {
                       </span>
                     </td>
                     <td className="actions">
+                      {ds.draft && user?.role !== 'viewer' && (
+                        <button type="button" className="btn ghost" data-testid="ev-complete-seal"
+                                onClick={() => setModal({ mode: 'complete', item: ev })} disabled={!!ds.blocked}
+                                title={ds.blocked || 'Complete the acquisition record, then seal (ISO/IEC 27037 §5.4.4)'}>
+                          Complete &amp; seal
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="btn ghost"
@@ -314,6 +375,7 @@ export default function Items() {
               })}
             </tbody>
           </table>
+          </div>
         </>
       )}
 
@@ -334,6 +396,16 @@ export default function Items() {
           onSaved={() => { setModal(null); reload() }}
         />
       )}
+      {modal?.mode === 'complete' && (
+        <AcquisitionWizard
+          incidentId={inc.id}
+          entities={entities}
+          users={users}
+          existing={modal.item}
+          onClose={() => setModal(null)}
+          onSaved={() => { setModal(null); reload() }}
+        />
+      )}
       {modal?.mode === 'detail' && (
         <DetailModal
           incidentId={inc.id}
@@ -346,6 +418,8 @@ export default function Items() {
           onClose={() => setModal(null)}
           onChanged={async () => { await reload() }}
           onReplaceItem={replaceItem}
+          onComplete={(it) => setModal({ mode: 'complete', item: it })}
+          isLead={!!access?.is_lead}
         />
       )}
     </section>
@@ -373,6 +447,8 @@ function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
 
   const [busy, setBusy]   = useState(false)
   const [error, setError] = useState(null)
+  const up = useChunkedUpload()   // G1 stage 3b: progress + cancel of the chunked upload
+  const kept = useRetainedUpload() // G-fix FE-M2: an upload the server kept after a refused complete
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
@@ -392,7 +468,7 @@ function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
     setBusy(true)
     try {
       if (kind === 'digital_file') {
-        await api.collectDigital(incidentId, {
+        const fields = {
           name: name.trim(),
           identifier: identifier.trim(),
           description: description.trim() || null,
@@ -400,7 +476,11 @@ function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
           collected_location: collectedLocation.trim() || null,
           entity_id: entityId || null,
           file,
-        })
+        }
+        const opts = up.start(file.size)
+        if (kept.held) await kept.held.retry(api.digitalCompleteBody(fields), opts)   // no re-upload
+        else await api.collectDigital(incidentId, fields, { ...opts, retainOnError: true })
+        kept.drop({ cancel: false })
       } else {
         await api.collectPhysical(incidentId, {
           name: name.trim(),
@@ -419,8 +499,14 @@ function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
       }
       onSaved()
     } catch (err) {
-      setError(err.message || 'Could not add evidence.')
+      if (err.retained) kept.keep(err, file)
+      else if (kept.held) kept.drop({ cancel: false })
+      setError((err.code === 'identifier_exists'
+        ? `The identifier “${identifier.trim()}” is already used on this incident: change it.`
+        : (err.message || 'Could not add evidence.'))
+        + (err.retained ? ' The file stays uploaded on the server: Add evidence again to finish without re-sending it.' : ''))
     } finally {
+      up.done()
       setBusy(false)
     }
   }
@@ -498,8 +584,16 @@ function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
                 <div className="field">
                   <label className="field-label" htmlFor="ev-file">File</label>
                   <input id="ev-file" className="input" type="file"
-                         onChange={(e) => setFile(e.target.files?.[0] || null)} required />
-                  <div className="field-hint">Hashed (SHA-256 + SHA-1 + MD5) and encrypted at rest on upload. 1 GiB max.</div>
+                         onChange={(e) => { if (kept.held) kept.drop(); setFile(e.target.files?.[0] || null) }} required />
+                  <div className="field-hint">Sent in 8 MiB pieces, each hashed (SHA-256 + SHA-1 + MD5) and encrypted as it arrives; nothing is stored until the whole file is in and checked. Up to 10 GiB (the server default).</div>
+                  <UploadProgress progress={up.progress} onCancel={up.cancel} testid="ev-add-upload-progress"
+                                  limit={up.limit} incidentId={incidentId} />
+                  {kept.held && !busy && (
+                    <div className="field-hint" data-testid="ev-add-upload-held">
+                      {kept.held.filename} is uploaded and held by the server (not stored yet): correct the field and add it again,
+                      {' '}or <button type="button" className="btn ghost" onClick={() => kept.drop()}>Discard upload</button>.
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -556,75 +650,443 @@ function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
 
 // ── Detail modal (read-only summary + per-item custody log + actions) ─────
 
-// Working-copy ledger (ISO/IEC 27037 §7.1.3.1.1, Slice C). The master is the stored
-// blob (never handed out directly); each row is a tracked, master-verified derivation.
-function WorkingCopiesPanel({ incidentId, item, usernameOf, isClosed, onChanged }) {
+// Working copies (ISO/IEC 27037 §7.1.3.1.1). G5: the master is never downloadable — a download is issued
+// as a registered working copy whose hash is of the bytes FENRIR sent; a copy made outside FENRIR is
+// recorded with the hash its tool reported. The API decides status, match and usability; this only shows them.
+const COPY_KIND = { download: 'Download', lab_copy: 'Lab copy', export: 'Export', legacy_record: 'Legacy record' }
+// sev = the SEV_PALETTE entry of the state badge (FE-L11); none = a neutral grey pill.
+const COPY_STATUS = {
+  issued:            { label: 'Link issued' },
+  downloading:       { label: 'Downloading',        sev: 'medium' },
+  complete:          { label: 'Complete',           sev: 'low' },
+  aborted:           { label: 'Aborted',            sev: 'high' },
+  failed_integrity:  { label: 'Failed integrity',   sev: 'critical' },
+  expired:           { label: 'Link expired' },
+  verified:          { label: 'Verified',           sev: 'low' },
+  mismatch:          { label: 'Hash mismatch',      sev: 'critical' },
+  exported:          { label: 'Exported' },
+  legacy_unverified: { label: 'Not verifiable' },
+}
+const END_REASON = {
+  client_disconnected: 'the transfer stopped before the end',
+  read_error:          'the stored file could not be read',
+  integrity:           'the stored master failed its integrity check (frozen)',
+  hash_mismatch:       'the bytes sent do not match the recorded hash (frozen)',
+  interrupted:         'interrupted (server restart)',
+}
+
+function copyMatchText(c) {
+  if (c.kind === 'legacy_record') return { color: 'var(--muted)', text: 'Holds the master\u2019s hash, not the copy\u2019s — not a verified copy' }
+  if (c.verified_against_master) return { color: 'var(--ok)', text: '✓ Copy hash matches the master' }
+  if (c.status === 'mismatch' || c.status === 'failed_integrity') return { color: 'var(--crit)', text: '✗ Copy hash does NOT match the master' }
+  return { color: 'var(--muted)', text: 'No copy hash (not complete)' }
+}
+
+// Why no new working copy can be made now (the API enforces the same rules), else null.
+function copyBlocked(item) {
+  if (item.kind !== 'digital_file') return 'Physical items have no working copies'
+  if (item.status === 'verify_failed') return 'Frozen pending admin review (verify failed)'
+  if (item.status !== 'active') return `The item is ${STATUS_LABEL[item.status] || item.status}`
+  if (!item.current_custodian_id) return 'In external custody: take it back first'
+  if (item.pending_custodian_id) return 'A custody transfer awaits acceptance'
+  return null
+}
+
+function WorkingCopiesPanel({ incidentId, item, usernameOf, canWrite, onChanged }) {
   const [copies,  setCopies]  = useState([])
   const [loading, setLoading] = useState(true)
+  const [mode,    setMode]    = useState(null)   // null | 'download' | 'lab'
   const [purpose, setPurpose] = useState('')
+  const [dest,    setDest]    = useState('')
+  const [tool,    setTool]    = useState('')
+  const [hashes,  setHashes]  = useState({ copy_sha256: '', copy_sha1: '', copy_md5: '' })
   const [busy,    setBusy]    = useState(false)
   const [err,     setErr]     = useState(null)
+  const [notice,  setNotice]  = useState(null)
+  const pollRef = useRef(null)
+  const alive = useRef(true)      // FE-L18: no poll or state change after the panel closes
 
   const load = useCallback(async () => {
-    setLoading(true)
-    try { const r = await api.listWorkingCopies(incidentId, item.id); setCopies(r.items || []) }
-    catch { /* non-fatal */ }
-    finally { setLoading(false) }
-  }, [incidentId, item.id])
-  useEffect(() => { load() }, [load])
-
-  const mint = async (e) => {
-    e.preventDefault()
-    if (!purpose.trim()) { setErr('Purpose is required.'); return }
-    setBusy(true); setErr(null)
     try {
-      await api.mintWorkingCopy(incidentId, item.id, { purpose: purpose.trim() })
-      setPurpose(''); await load(); await onChanged?.()
-    } catch (e2) { setErr(e2.message || 'Could not record working copy') }
+      const r = await api.listWorkingCopies(incidentId, item.id)
+      if (alive.current) setCopies(r.items || [])
+      return r.items || []
+    }
+    catch { return null }
+    finally { if (alive.current) setLoading(false) }
+  }, [incidentId, item.id])
+  useEffect(() => { alive.current = true; load(); return () => { alive.current = false; clearTimeout(pollRef.current) } }, [load])
+
+  // FE-L7 / FE-L18 — the browser downloads the link itself, so the page can't see a refusal (409 / 410 /
+  // 503): it follows the copy the server records instead. Re-read every 2 s, backing off to 15 s, for as
+  // long as the panel is open, until the copy's transfer ends (or its link expires unused).
+  const follow = (issued, n = 0, t0 = Date.now(), warned = false) => {
+    clearTimeout(pollRef.current)
+    pollRef.current = setTimeout(async () => {
+      if (!alive.current) return
+      const list = await load()
+      if (!alive.current) return
+      const c = list?.find(x => x.id === issued.copy.id)
+      const id = issued.copy.copy_identifier
+      const st = list === null ? 'unknown' : c?.status
+      if (st === 'unknown' || st === 'issued' || st === 'downloading') {
+        if (st === 'downloading') {
+          setErr(null)
+          setNotice(`Download started as ${id}. FENRIR hashes what it sends and records it here when the transfer ends — compare it with your own hash of the file.`)
+        } else if (st === 'issued' && !warned && Date.now() - t0 >= 15000) {   // the server has not started sending
+          warned = true
+          setNotice(null)
+          setErr(`The download of ${id} has not started. FENRIR may have refused the link (the item is frozen, held externally or in a transfer) or your browser blocked it. Check the item, then issue a new working copy; this link expires at ${formatLocal(issued.token_expires_at)}.`)
+        }
+        follow(issued, n + 1, t0, warned)
+        return
+      }
+      setNotice(null); setErr(null)
+      if (st === 'complete') {
+        setNotice(`${id} downloaded${c.bytes_sent != null ? ` (${fmtBytes(c.bytes_sent)})` : ''}. FENRIR recorded the SHA-256 of exactly what it sent (below) — compare it with your own hash of the file.`)
+      } else if (st === 'aborted') {
+        setErr(`The download of ${id} stopped: ${END_REASON[c.end_reason] || c.end_reason || 'unknown reason'}. The copy is not usable — issue a new one.`)
+      } else if (st === 'failed_integrity') {
+        setErr(`${id} FAILED: ${END_REASON[c.end_reason] || 'integrity check'}. Nothing usable was sent; the item has been frozen pending admin review.`)
+      } else if (st === 'expired') {
+        setErr(`The link for ${id} expired unused: nothing was downloaded. Issue a new working copy.`)
+      }
+      onChanged?.()
+    }, Math.min(15000, Math.round(2000 * 1.5 ** Math.min(n, 5))))
+  }
+
+  const blocked = copyBlocked(item)
+  const reset = () => { setMode(null); setPurpose(''); setDest(''); setTool(''); setHashes({ copy_sha256: '', copy_sha1: '', copy_md5: '' }) }
+
+  const download = async (e) => {
+    e.preventDefault()
+    if (!purpose.trim()) { setErr('Purpose is required (custody log).'); return }
+    setBusy(true); setErr(null); setNotice(null)
+    try {
+      const r = await api.issueWorkingCopy(incidentId, item.id, { purpose: purpose.trim(), destination_note: dest.trim() || null })
+      // A same-origin link: the browser streams it to disk with your session. It works once, for you.
+      const a = document.createElement('a')
+      a.href = r.download_url
+      a.rel = 'noopener'
+      a.setAttribute('download', '')
+      a.setAttribute('data-testid', 'wc-download-link')
+      document.body.appendChild(a); a.click(); a.remove()
+      setNotice(`Link issued as ${r.copy.copy_identifier}: your browser saves the file. Waiting for FENRIR to start sending…`)
+      reset(); await load(); follow(r)
+    } catch (e2) { setErr(e2.message || 'Could not issue a working copy') }
     finally { setBusy(false) }
   }
 
+  const record = async (e) => {
+    e.preventDefault()
+    if (!purpose.trim()) { setErr('Purpose is required (custody log).'); return }
+    const given = Object.fromEntries(Object.entries(hashes).map(([k, v]) => [k, v.trim()]).filter(([, v]) => v))
+    if (!Object.keys(given).length) { setErr('Enter at least one hash your copying tool reported for the copy.'); return }
+    setBusy(true); setErr(null); setNotice(null)
+    try {
+      const c = await api.mintWorkingCopy(incidentId, item.id, {
+        purpose: purpose.trim(), copy_tool: tool.trim() || null, destination_note: dest.trim() || null, ...given })
+      setNotice(c.status === 'verified'
+        ? `${c.copy_identifier} recorded: its hash matches the master.`
+        : `${c.copy_identifier} recorded as a MISMATCH: its hash does not match the master. It is flagged and can't be examined.`)
+      reset(); await load(); await onChanged?.()
+    } catch (e2) { setErr(e2.message || 'Could not record the lab copy') }
+    finally { setBusy(false) }
+  }
+
+  const hashField = (key, label, len) => (
+    <div className="field" key={key}>
+      <label className="field-label" htmlFor={`wc-${key}`}>{label}</label>
+      <input id={`wc-${key}`} className="input compact" value={hashes[key]} maxLength={len} spellCheck={false}
+             onChange={e => setHashes(h => ({ ...h, [key]: e.target.value }))}
+             style={{ fontFamily: 'var(--font-mono)' }} placeholder={`${len} hex characters`} />
+    </div>
+  )
+
   return (
-    <>
+    <section data-testid="ev-working-copies">
       <h3 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>
         Working copies{' '}
-        <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· ISO 27037 §7.1.3.1.1 — master is never handed out directly</span>
+        <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· ISO 27037 §7.1.3.1.1 — the master is never downloadable</span>
       </h3>
       {loading ? (
         <div style={{ color: 'var(--muted)', fontSize: 13 }}>Loading…</div>
       ) : copies.length === 0 ? (
-        <div style={{ color: 'var(--muted)', fontSize: 13 }}>No working copies yet. Exports auto-record one per item; or record an out-of-band copy below.</div>
+        <div style={{ color: 'var(--muted)', fontSize: 13 }}>No working copies yet. Download one, or record a copy you made in the lab with the hash your tool reported. An export records one for an item whose file is stored in FENRIR (not for physical items).</div>
       ) : (
         <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {copies.map(c => (
-            <li key={c.id} style={{ fontSize: 12, border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '6px 10px', background: 'var(--surface-2)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <span style={{ color: c.verified_against_master ? 'var(--ok)' : 'var(--crit)', fontWeight: 600 }}>
-                  {c.verified_against_master ? '✓ verified vs master' : '✗ NOT verified'}
-                </span>
-                <span style={{ color: 'var(--dim)', fontFamily: 'var(--font-mono)' }}>{(c.created_at || '').slice(0, 19).replace('T', ' ')}</span>
+          {copies.map(c => {
+            const st = COPY_STATUS[c.status] || { label: c.status }
+            const m = copyMatchText(c)
+            return (
+              <li key={c.id} data-copy-status={c.status} data-copy-kind={c.kind}
+                  style={{ fontSize: 12, border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '6px 10px', background: 'var(--surface-2)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <b style={{ fontFamily: 'var(--font-mono)' }}>{c.copy_identifier || COPY_KIND[c.kind]}</b>
+                    <span className="pill pill-gray">{COPY_KIND[c.kind] || c.kind}</span>
+                    <span className={`pill${st.sev ? '' : ' pill-gray'}`} data-copy-pill={c.status} style={paletteStyle(st.sev)}>{st.label}</span>
+                    {c.usable_for_examination && <span className="pill" style={paletteStyle('low')} title="An examination may name this copy">Usable for examination</span>}
+                    {c.altered_at && <span className="pill" style={paletteStyle('critical')} title={`Found altered at ${formatLocal(c.altered_at)}`}>Altered</span>}
+                  </span>
+                  <span style={{ color: 'var(--dim)', fontFamily: 'var(--font-mono)' }}>{formatLocal(c.created_at)}</span>
+                </div>
+                <div style={{ color: m.color, marginTop: 2 }}>{m.text}</div>
+                <div style={{ color: 'var(--muted)' }}>{c.purpose || '—'}{c.destination_note ? ` · to ${c.destination_note}` : ''}{c.copy_tool ? ` · ${c.copy_tool}` : ''}</div>
+                <div style={{ color: 'var(--dim)', fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all' }}>
+                  {c.kind === 'download' ? 'issued to ' : 'by '}{usernameOf(c.issued_to_id || c.created_by_id)}
+                  {c.kind === 'download' && c.bytes_sent != null ? ` · ${fmtBytes(c.bytes_sent)} sent` : ''}
+                  {c.completed_at ? ` · ended ${formatLocal(c.completed_at)}` : ''}
+                  {c.end_reason && END_REASON[c.end_reason] ? ` · ${END_REASON[c.end_reason]}` : ''}
+                </div>
+                {(c.sha256 || c.sha1 || c.md5) && (
+                  <div style={{ color: 'var(--dim)', fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all' }}>
+                    {c.sha256 && <div>SHA-256 {c.sha256}</div>}
+                    {c.sha1 && <div>SHA-1 {c.sha1}</div>}
+                    {c.md5 && <div>MD5 {c.md5}</div>}
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+      {canWrite && item.kind === 'digital_file' && !mode && (
+        <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-2)', flexWrap: 'wrap' }}>
+          <button type="button" className="btn" data-testid="wc-open-download" disabled={!!blocked || busy}
+                  title={blocked || 'Download a working copy: FENRIR registers it, hashes the bytes it sends and logs it'}
+                  onClick={() => { setErr(null); setNotice(null); setMode('download') }}>Download a working copy</button>
+          <button type="button" className="btn ghost" data-testid="wc-open-lab" disabled={!!blocked || busy}
+                  title={blocked || 'Record a copy you made outside FENRIR, with the hash its tool reported'}
+                  onClick={() => { setErr(null); setNotice(null); setMode('lab') }}>Record a lab copy</button>
+        </div>
+      )}
+      {mode && (
+        <form onSubmit={mode === 'download' ? download : record} className="form" data-testid={`wc-form-${mode}`}
+              style={{ marginTop: 'var(--space-2)', padding: 'var(--space-3)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--surface-2)' }}>
+          <div className="field">
+            <label className="field-label" htmlFor="wc-purpose">Purpose (required, audited)</label>
+            <input id="wc-purpose" className="input" value={purpose} maxLength={2048} onChange={e => setPurpose(e.target.value)}
+                   placeholder={mode === 'download' ? 'e.g. Memory analysis with Volatility on VM AN-07' : 'e.g. Imaged to lab WS-04 for Autopsy review'} />
+          </div>
+          {mode === 'lab' && (
+            <>
+              <div className="field">
+                <label className="field-label" htmlFor="wc-tool">Copying tool + version</label>
+                <input id="wc-tool" className="input" value={tool} maxLength={256} onChange={e => setTool(e.target.value)} placeholder="e.g. FTK Imager 4.7.1" />
               </div>
-              <div style={{ color: 'var(--muted)' }}>{c.purpose || '—'}</div>
-              <div style={{ color: 'var(--dim)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                by {usernameOf(c.created_by_id)}{c.export_id ? ' · via export' : ''}{c.sha256 ? ' · ' + c.sha256.slice(0, 12) + '…' : ''}
+              <div className="field-hint">The hash(es) your tool reported for the copy — at least one. Each is compared with the master's recorded hash of the same algorithm.</div>
+              <div className="form-row">
+                {hashField('copy_sha256', 'Copy SHA-256', 64)}
+                {hashField('copy_sha1', 'Copy SHA-1', 40)}
+                {hashField('copy_md5', 'Copy MD5', 32)}
               </div>
+            </>
+          )}
+          <div className="field">
+            <label className="field-label" htmlFor="wc-dest">{mode === 'download' ? 'Where the copy will go (optional)' : 'Where the copy is (optional)'}</label>
+            <input id="wc-dest" className="input" value={dest} maxLength={1024} onChange={e => setDest(e.target.value)} placeholder="e.g. analysis VM AN-07 · lab WS-04 D:\\cases" />
+          </div>
+          {mode === 'download' && (
+            <div className="field-hint">The link works once, for you, for 10 minutes. Your browser saves the file; FENRIR records the SHA-256 of exactly what it sent.</div>
+          )}
+          <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+            <button type="submit" className="btn primary" disabled={busy}>
+              {busy ? 'Working…' : mode === 'download' ? 'Issue and download' : 'Record lab copy'}
+            </button>
+            <button type="button" className="btn ghost" disabled={busy} onClick={() => { reset(); setErr(null) }}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {notice && <div className="alert info" role="status" style={{ marginTop: 6 }}><span className="alert-icon">i</span><span>{notice}</span></div>}
+      {err && <div className="alert error" role="alert" style={{ marginTop: 6 }}><span className="alert-icon">!</span><span>{err}</span></div>}
+    </section>
+  )
+}
+
+// G5 (R09) — legal hold: the current hold and its history (from the custody log). Setting one is open to
+// any analyst who can see the incident; releasing is for the incident lead or an admin (the API decides).
+function LegalHoldPanel({ incidentId, item, events, usernameOf, canWrite, isLead, onChanged }) {
+  const [mode, setMode]     = useState(null)   // null | 'set' | 'release'
+  const [reason, setReason] = useState('')
+  const [busy, setBusy]     = useState(false)
+  const [err, setErr]       = useState(null)
+  const history = events.filter(e => e.event_type === 'evidence_legal_hold_set' || e.event_type === 'evidence_legal_hold_released')
+
+  const submit = async (e) => {
+    e.preventDefault()
+    if (!reason.trim()) { setErr('A reason is required (custody log).'); return }
+    setBusy(true); setErr(null)
+    try {
+      await api.setLegalHold(incidentId, item.id, { legal_hold: mode === 'set', reason: reason.trim() })
+      setMode(null); setReason(''); await onChanged()
+    } catch (e2) { setErr(e2.message || 'Could not change the legal hold') }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <section data-testid="ev-legal-hold" data-legal-hold={item.legal_hold ? 'on' : 'off'}>
+      <h3 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>Legal hold</h3>
+      {item.legal_hold ? (
+        <div style={{ fontSize: 13 }}>
+          <span className="pill" style={paletteStyle('medium')}>On legal hold</span>{' '}
+          since <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{formatLocal(item.legal_hold_since)}</span>
+          {' '}by <b>{usernameOf(item.legal_hold_by_id)}</b>
+          {item.legal_hold_reason && <div style={{ color: 'var(--muted)', whiteSpace: 'pre-wrap' }}>{item.legal_hold_reason}</div>}
+          <div className="field-hint">While held it can't be destroyed; returning or archiving it needs a second approver.</div>
+        </div>
+      ) : (
+        <div style={{ color: 'var(--muted)', fontSize: 13 }}>Not on legal hold.</div>
+      )}
+      {canWrite && !mode && (
+        item.legal_hold ? (
+          <button type="button" className="btn ghost" style={{ marginTop: 'var(--space-2)' }} disabled={!isLead}
+                  data-testid="lh-open-release"
+                  title={isLead ? 'Release the hold (reason required, audited)' : 'Only the incident lead (IC / Deputy) or an admin can release a hold'}
+                  onClick={() => { setErr(null); setMode('release') }}>Release hold…</button>
+        ) : item.status !== 'destroyed' && (
+          <button type="button" className="btn" style={{ marginTop: 'var(--space-2)' }} data-testid="lh-open-set"
+                  onClick={() => { setErr(null); setMode('set') }}>Place on legal hold…</button>
+        )
+      )}
+      {mode && (
+        <form onSubmit={submit} className="form" style={{ marginTop: 'var(--space-2)' }} data-testid={`lh-form-${mode}`}>
+          <div className="field">
+            <label className="field-label" htmlFor="lh-reason">{mode === 'set' ? 'Why is it held? (required, audited)' : 'Why release it? (required, audited)'}</label>
+            <textarea id="lh-reason" className="input" rows={2} maxLength={2048} value={reason} onChange={e => setReason(e.target.value)}
+                      placeholder={mode === 'set' ? 'e.g. Litigation hold — counsel letter of 2026-10-04' : 'e.g. Counsel confirmed the matter is closed'} />
+          </div>
+          <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+            <button type="submit" className="btn primary" disabled={busy}>{busy ? 'Saving…' : mode === 'set' ? 'Place on hold' : 'Release hold'}</button>
+            <button type="button" className="btn ghost" disabled={busy} onClick={() => { setMode(null); setReason(''); setErr(null) }}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {history.length > 0 && (
+        <ul style={{ listStyle: 'none', margin: 'var(--space-2) 0 0', padding: 0, fontSize: 12 }} data-testid="lh-history">
+          {history.map(h => (
+            <li key={h.id} style={{ color: 'var(--muted)' }}>
+              <span style={{ fontFamily: 'var(--font-mono)' }}>{formatLocal(h.created_at)}</span>{' '}
+              <b style={{ color: 'var(--text)' }}>{h.event_type === 'evidence_legal_hold_set' ? 'Set' : 'Released'}</b>
+              {' by '}{h.username || '—'}{h.details?.reason ? ` — ${h.details.reason}` : ''}
             </li>
           ))}
         </ul>
       )}
-      {!isClosed && item.kind === 'digital_file' && (
-        <form onSubmit={mint} style={{ display: 'flex', gap: 6, marginTop: 'var(--space-2)' }}>
-          <input className="input" value={purpose} onChange={e => setPurpose(e.target.value)} maxLength={2048}
-                 placeholder="Record an out-of-band working copy (e.g. imaged to lab WS-04 for analysis)" />
-          <button type="submit" className="btn" disabled={busy}>{busy ? 'Recording…' : 'Record copy'}</button>
-        </form>
-      )}
       {err && <div className="alert error" role="alert" style={{ marginTop: 6 }}><span className="alert-icon">!</span><span>{err}</span></div>}
-    </>
+    </section>
   )
 }
 
-function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed, onClose, onChanged, onReplaceItem }) {
+// G5 (R09) — the acquisition record as captured (and sealed). Identity, server hashes, the C3 upload check,
+// acquisition time and the clock offset are in the summary above; this is the rest of the record.
+const LAWFUL_BASIS_LABEL = { ir: 'Incident response', consent: 'Consent', warrant: 'Warrant', court_order: 'Court order',
+  eio: 'European Investigation Order', mla: 'Mutual legal assistance', lia: 'Legitimate interest', other: 'Other' }
+const yesNo = (v) => v === true ? 'Yes' : v === false ? 'No' : null
+const SYSTEM_STATE_LABEL = { powered_off: 'Powered off', live: 'Live', live_critical: 'Live, mission-critical', unknown: 'Unknown' }
+const HANDLING_LABEL = { collect: 'Collect (seize the device)', acquire: 'Acquire (forensic copy)' }
+const SCOPE_LABEL = { full_image: 'Full image', logical: 'Logical / selected files' }
+
+function AcquisitionRecord({ item, usernameOf }) {
+  const rows = [
+    ['Lawful basis', item.lawful_basis ? (LAWFUL_BASIS_LABEL[item.lawful_basis] || item.lawful_basis) : null],
+    ['Basis note', item.lawful_basis_note],
+    ['Tool', [item.acquisition_tool, item.acquisition_tool_version].filter(Boolean).join(' ') || null],
+    ['Tool SHA-256', item.acquisition_tool_sha256, true],
+    ['Parameters', item.acquisition_params, true],
+    ['Tool validated', yesNo(item.acquisition_tool_validated) && [yesNo(item.acquisition_tool_validated),
+      item.acquisition_tool_validation_ref, item.acquisition_tool_validation_date].filter(Boolean).join(' · ')],
+    ['Source hash', item.acquisition_hash_source, true],
+    ['Target hash', item.acquisition_hash_target, true],
+    ['Write-blocker', yesNo(item.write_blocker_used) && [yesNo(item.write_blocker_used), item.write_blocker_serial].filter(Boolean).join(' · ')],
+    ['System state', item.system_state && (SYSTEM_STATE_LABEL[item.system_state] || item.system_state)],
+    ['Live justification', item.live_justification],
+    ['Network isolated', yesNo(item.network_isolated)],
+    ['Witness', [item.witness_user_id ? usernameOf(item.witness_user_id) : null, item.witness_name].filter(Boolean).join(' · ') || null],
+    ['Device types', (item.device_types || []).join(', ') || null],
+    ['Handling', item.handling_mode && (HANDLING_LABEL[item.handling_mode] || item.handling_mode)],
+    ['Scope', item.acquisition_scope && (SCOPE_LABEL[item.acquisition_scope] || item.acquisition_scope)],
+    ['Logical rationale', item.logical_acquisition_rationale],
+    ['Screen state', item.screen_state],
+    ['Changes made', item.changes_made],
+    ['Collector qualifications', item.collected_by_qualifications],
+  ].filter(([, v]) => v !== null && v !== undefined && v !== '')
+  const objRows = (obj) => Object.entries(obj || {}).filter(([, v]) => v !== null && v !== '' && v !== undefined)
+  const dd = objRows(item.device_details)
+  const df = objRows(item.decision_factors)
+
+  return (
+    <section data-testid="ev-acquisition-record" data-sealed={item.coc_sealed ? 'yes' : 'no'}>
+      <h3 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>
+        Acquisition record{' '}
+        <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· ISO 27037 §5.4.4, §6.1</span>
+      </h3>
+      <div style={{ fontSize: 13, marginBottom: 'var(--space-2)' }}>
+        {item.coc_sealed ? (
+          <span>🔒 <b>Sealed</b> at <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{formatLocal(item.coc_sealed_at)}</span> by <b>{usernameOf(item.coc_sealed_by_id)}</b>
+            {item.seal_tst_time
+              ? <span style={{ color: 'var(--muted)' }}> · trusted timestamp {formatLocal(item.seal_tst_time)}{item.seal_tsa ? ` (${item.seal_tsa})` : ''}</span>
+              : <span style={{ color: 'var(--muted)' }}> · server clock only (no TSA)</span>}
+            <div className="field-hint">Changes after the seal are logged as <b>Amended after seal</b>. The photos already attached and the collector's role can't change; a new photo can still be added (logged as <b>Photo added</b>).</div>
+          </span>
+        ) : (
+          <span><DraftBadge /> <span style={{ color: 'var(--muted)' }}>The record is incomplete or not yet sealed — use <b>Complete &amp; seal</b>.</span></span>
+        )}
+      </div>
+      {rows.length === 0 && dd.length === 0 && df.length === 0 ? (
+        <div style={{ color: 'var(--muted)', fontSize: 13 }}>No acquisition details recorded.</div>
+      ) : (
+        <dl className="kv">
+          {rows.map(([k, v, mono]) => (
+            <Fragment key={k}><dt>{k}</dt><dd style={mono ? { fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all' } : { whiteSpace: 'pre-wrap' }}>{String(v)}</dd></Fragment>
+          ))}
+          {dd.length > 0 && <><dt>Device details</dt><dd style={{ fontSize: 12 }}>{dd.map(([k, v]) => <div key={k}><span style={{ color: 'var(--muted)' }}>{k}:</span> {typeof v === 'object' ? JSON.stringify(v) : String(v)}</div>)}</dd></>}
+          {df.length > 0 && <><dt>Decision factors</dt><dd style={{ fontSize: 12 }}>{df.map(([k, v]) => <div key={k}><span style={{ color: 'var(--muted)' }}>{k}:</span> {typeof v === 'object' ? JSON.stringify(v) : String(v)}</div>)}</dd></>}
+        </dl>
+      )}
+    </section>
+  )
+}
+
+// G5 (R09) — what the custody log says about this item at a glance, and its examinations.
+function CustodySummary({ item, events, usernameOf }) {
+  const transfers = events.filter(e => e.event_type === 'evidence_transfer').length
+  const exams = events.filter(e => e.event_type === 'evidence_examine')
+  return (
+    <section data-testid="ev-custody-summary">
+      <h3 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>Custody and examinations</h3>
+      <div style={{ fontSize: 13 }}>
+        Collected by <b>{usernameOf(item.collected_by_id)}</b> · {transfers} custody transfer{transfers === 1 ? '' : 's'} ·
+        {' '}{item.current_custodian_id ? <>held by <b>{usernameOf(item.current_custodian_id)}</b></> : item.current_custodian_external_name ? <>held externally by <b>{item.current_custodian_external_name}</b></> : 'no custodian'}
+        {item.pending_custodian_id ? ' · transfer pending' : ''} · {exams.length} examination{exams.length === 1 ? '' : 's'}
+      </div>
+      {exams.length > 0 && (
+        <ul style={{ listStyle: 'none', margin: 'var(--space-2) 0 0', padding: 0, display: 'flex', flexDirection: 'column', gap: 4 }} data-testid="ev-exams">
+          {exams.map(x => {
+            const d = x.details || {}
+            const on = d.copy_identifier ? `on ${d.copy_identifier}`
+              : d.examined_in_place ? `in place — ${d.in_place_reason || ''}`
+              : d.examined_on ? d.examined_on
+              : d.working_copy_id ? 'on a working copy' : 'target not recorded'
+            return (
+              <li key={x.id} style={{ fontSize: 12, color: 'var(--muted)' }}>
+                <span style={{ fontFamily: 'var(--font-mono)' }}>{formatLocal(x.created_at)}</span>{' '}
+                <b style={{ color: 'var(--text)' }}>{[d.tool, d.version].filter(Boolean).join(' ') || 'Examination'}</b>
+                {' by '}{x.username || '—'} · {on}
+                {d.result && d.result !== 'timeline_import' ? ` · ${d.result}` : ''}
+                {d.findings ? <div style={{ whiteSpace: 'pre-wrap' }}>Findings: {String(d.findings).slice(0, 300)}</div> : null}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed, onClose, onChanged, onReplaceItem, onComplete, isLead }) {
+  // G5: a viewer sees the whole record read-only; the API refuses their writes anyway.
+  const canWrite = !!me && me.role !== 'viewer'
   const entityLabel = item.entity_id
     ? (() => { const e = entities.find(x => x.id === item.entity_id); return e ? `${e.type}: ${e.name || e.value}` : null })()
     : null
@@ -754,6 +1216,12 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
                   )}
                 </dd>
                 <dt>Encryption</dt><dd>{item.status === 'destroyed' ? 'File deleted (hashes retained)' : 'AES-256-GCM at rest'}</dd>
+                <dt>Device clock</dt><dd>
+                  <DeviceClock incidentId={incidentId} item={item}
+                    editable={canWrite && !isClosed && (item.status === 'active' || item.status === 'verify_failed')
+                      && !acquisitionFactsBlock(item, me, isAdmin, isLead)}
+                    onSaved={async (updated) => { onReplaceItem(updated); await reload(); await onChanged() }} />
+                </dd>
               </>
             )}
             {item.kind === 'physical_item' && (
@@ -789,8 +1257,15 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
             </div>
           )}
 
-          <PhotosPanel incidentId={incidentId} item={item} isClosed={isClosed}
-            onReplaceItem={onReplaceItem} />
+          <AcquisitionRecord item={item} usernameOf={usernameOf} />
+
+          <LegalHoldPanel incidentId={incidentId} item={item} events={events} usernameOf={usernameOf}
+            canWrite={canWrite} isLead={isLead} onChanged={async () => { await reload(); await onChanged() }} />
+
+          <PhotosPanel incidentId={incidentId} item={item} isClosed={isClosed || !canWrite}
+            onReplaceItem={onReplaceItem} onChanged={reload} />
+
+          <CustodySummary item={item} events={events} usernameOf={usernameOf} />
 
           <h3 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>Custody log</h3>
           {loading ? (
@@ -802,7 +1277,7 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
           )}
 
           <WorkingCopiesPanel incidentId={incidentId} item={item}
-            usernameOf={usernameOf} isClosed={isClosed} onChanged={reload} />
+            usernameOf={usernameOf} canWrite={canWrite} onChanged={reload} />
         </div>
 
         <div className="modal-foot" style={{ flexWrap: 'wrap', gap: 'var(--space-2)' }}>
@@ -823,7 +1298,7 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
             const pendingTip = pending ? 'Blocked while a custody transfer awaits acceptance' : null
             const canTransfer = !pending && (isAdmin || (!!me && item.current_custodian_id === me.id)
               || (isExternal && !!me && me.role !== 'viewer'))
-            return !isClosed && finalActive && (
+            return canWrite && !isClosed && finalActive && (
               <>
                 {canTransfer && (
                   <button type="button" className="btn" onClick={() => setAction('transfer')} disabled={busy}>
@@ -841,7 +1316,7 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
                     <button type="button" className="btn primary"
                             onClick={() => setAction('exam_session')}
                             disabled={busy || isExternal}
-                            title={externalTip || 'Pre-verify → record → post-verify (ISO 27037 §9.4.2)'}>
+                            title={externalTip || 'On a verified working copy: copy hash before → record → copy hash after (ISO 27037 §5.4.5)'}>
                       🛡 Exam wizard
                     </button>
                     <button type="button" className="btn"
@@ -852,6 +1327,16 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
                     </button>
                   </>
                 )}
+                {!item.coc_sealed && onComplete && (() => {
+                  const ds = draftState(item, me, isAdmin, isClosed, isLead)
+                  return (
+                    <button type="button" className="btn primary" data-testid="ev-detail-complete-seal"
+                            onClick={() => onComplete(item)} disabled={busy || !!ds.blocked}
+                            title={ds.blocked || 'Complete the acquisition record (lawful basis, device type, tool + version…), then seal'}>
+                      Complete &amp; seal
+                    </button>
+                  )
+                })()}
                 {!item.coc_sealed && (
                   <button type="button" className="btn"
                           onClick={async () => {
@@ -874,7 +1359,7 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
               </>
             )
           })()}
-          {!isClosed && item.status === 'verify_failed' && item.kind === 'digital_file' && (
+          {canWrite && !isClosed && item.status === 'verify_failed' && item.kind === 'digital_file' && (
             <button type="button" className="btn" onClick={onVerify} disabled={busy}>
               {busy ? 'Verifying…' : 'Re-verify'}
             </button>
@@ -913,6 +1398,7 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
             incidentId={incidentId}
             item={item}
             users={users}
+            me={me}
             onClose={() => setAction(null)}
             onSaved={async () => { setAction(null); await reload(); await onChanged() }}
           />
@@ -924,40 +1410,79 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
 
 // ── Custody timeline (vertical list inside detail modal) ──────────────────
 
-const ACTION_COLOR = {
-  evidence_collect:        'var(--ok)',
-  evidence_collect_rejected: 'var(--crit)',
-  email_mint_evidence:     'var(--ok)',
-  webhistory_mint_evidence: 'var(--ok)',
-  evidence_transfer_request: 'var(--med)',
-  evidence_transfer:       'var(--accent)',
-  evidence_transfer_declined: 'var(--high)',
-  evidence_examine:        'var(--med)',
-  evidence_verify:         'var(--ok)',
-  evidence_verify_failed:  'var(--crit)',
-  evidence_update:         'var(--muted)',
-  evidence_destroy:        'var(--crit)',
-  evidence_return:         'var(--high)',
-  evidence_archive:        'var(--muted)',
-  evidence_export:         'var(--accent)',
-}
+// G-fix FE-L8: the custody-log labels and colours are shared with Evidence › Custody log.
+const ACTION_COLOR = CUSTODY_ACTION_COLOR
+const ACTION_LABEL = CUSTODY_ACTION_LABEL
 
-const ACTION_LABEL = {
-  evidence_collect:       'Collected',
-  evidence_collect_rejected: 'Collection REFUSED',
-  email_mint_evidence:    'Collected (from Email)',
-  webhistory_mint_evidence: 'Collected (from Browser history)',
-  evidence_transfer_request: 'Transfer requested',
-  evidence_transfer:      'Transferred',
-  evidence_transfer_declined: 'Transfer declined',
-  evidence_examine:       'Examined',
-  evidence_verify:        'Verified',
-  evidence_verify_failed: 'Verify FAILED',
-  evidence_update:        'Updated',
-  evidence_destroy:       'Destroyed',
-  evidence_return:        'Returned',
-  evidence_archive:       'Archived',
-  evidence_export:        'Exported',
+// ─── Device clock offset (G4, R35) ───────────────────────────────────────────
+// The acquisition note (free text, never interpreted) and the structured offset in seconds that
+// imports from this exhibit apply. Setting / correcting it is audited {from, to} (an amendment
+// after seal on a sealed item); imports already made keep the offset they were parsed with.
+function DeviceClock({ incidentId, item, editable, onSaved }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue]     = useState('')
+  const [busy, setBusy]       = useState(false)
+  const [err, setErr]         = useState(null)
+  const parsed = parseOffsetSeconds(value)
+  const current = item.system_time_offset_seconds
+  const has = current !== null && current !== undefined
+
+  const save = async () => {
+    if (parsed === undefined) return
+    if (parsed === (has ? current : null)) { setEditing(false); return }
+    if (!confirm((item.coc_sealed ? 'This item is sealed: the change is recorded as an amendment after seal.\n\n' : '')
+      + 'Imports already made from this exhibit keep the offset they were parsed with — import it again to apply the new value. Continue?')) return
+    setBusy(true); setErr(null)
+    try {
+      const updated = await api.updateEvidence(incidentId, item.id, { system_time_offset_seconds: parsed })
+      setEditing(false)
+      await onSaved(updated)
+    } catch (e) {
+      setErr(e.message || 'Could not save the clock offset')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div data-testid="ev-device-clock">
+      <div>
+        {has
+          ? <><strong data-testid="ev-offset-seconds">{fmtOffset(current)}</strong> <span style={{ color: 'var(--muted)', fontSize: 12 }}>applied to imports</span></>
+          : <span style={{ color: 'var(--dim)' }}>No offset in seconds</span>}
+        {item.system_time_offset && (
+          <div style={{ fontSize: 12, color: 'var(--muted)' }}>Note: {item.system_time_offset}{!has && ' (text only: not applied)'}</div>
+        )}
+      </div>
+      {editable && !editing && (
+        <button type="button" className="btn ghost" style={{ fontSize: 11, marginTop: 4 }}
+                onClick={() => { setValue(has ? String(current) : ''); setErr(null); setEditing(true) }}>
+          {has ? 'Change offset' : 'Set offset'}
+        </button>
+      )}
+      {editing && (
+        <div style={{ marginTop: 'var(--space-2)' }}>
+          <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+            <label className="field-label" htmlFor="ev-offset-input" style={{ margin: 0 }}>Seconds</label>
+            <input id="ev-offset-input" className="input compact" inputMode="numeric" value={value}
+                   onChange={e => setValue(e.target.value)} maxLength={12} placeholder="e.g. +120 · empty = clear"
+                   aria-invalid={parsed === undefined || undefined} aria-describedby="ev-offset-hint"
+                   style={{ width: 160, ...(parsed === undefined ? { borderColor: 'var(--crit)' } : {}) }} />
+            <button type="button" className="btn primary" onClick={save} disabled={busy || parsed === undefined}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+            <button type="button" className="btn ghost" onClick={() => setEditing(false)} disabled={busy}>Cancel</button>
+          </div>
+          <div id="ev-offset-hint" className="field-hint">
+            {parsed === undefined
+              ? <span style={{ color: 'var(--crit)' }}>A whole number of seconds, e.g. +120 or -30.</span>
+              : 'Device clock minus true time, after its timezone: +120 = the device was 2 minutes ahead. Empty clears it.'}
+          </div>
+          {err && <div className="field-hint" role="alert" style={{ color: 'var(--crit)' }}>{err}</div>}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function CustodyTimeline({ events, usernameOf }) {
@@ -1114,7 +1639,7 @@ function PendingTransferPanel({ incidentId, item, me, isAdmin, usernameOf, onDon
 }
 
 function TransferModal({ incidentId, item, users, me, isAdmin, onClose, onSaved }) {
-  // Two-mode picker per ISO/IEC 27037 §9.3 chain coverage:
+  // Two-mode picker per ISO/IEC 27037 §6.1 chain coverage:
   //   internal — recipient has a Fenrir account (picker reuses /users/assignable). C4: a
   //              REQUEST — custody changes only when the recipient accepts. From external
   //              custody it is a take-back: you receive the item and record its condition.
@@ -1355,16 +1880,31 @@ function ExamineModal({ incidentId, item, onClose, onSaved }) {
   const [notes, setNotes] = useState('')
   const [busy, setBusy]   = useState(false)
   const [error, setError] = useState(null)
+  // G5 (R08): a digital exhibit names the verified working copy examined, or "in place" with a reason.
+  const isDigital = item.kind === 'digital_file'
+  const [copies, setCopies] = useState([])
+  const [target, setTarget] = useState({ workingCopyId: '', inPlace: false, inPlaceReason: '' })
+  useEffect(() => {
+    if (!isDigital) return
+    api.listWorkingCopies(incidentId, item.id).then(r => setCopies(r.items || [])).catch(() => {})
+  }, [incidentId, item.id, isDigital])
 
   const onSubmit = async (e) => {
     e.preventDefault()
     setError(null)
     if (!tool.trim()) { setError('Tool is required (audit log).'); return }
+    const missing = isDigital ? examTargetMissing(target) : null
+    if (missing) { setError(missing); return }
     setBusy(true)
     try {
       await api.examineEvidence(incidentId, item.id, {
         tool: tool.trim(),
         notes: notes.trim() || null,
+        ...(isDigital ? {
+          working_copy_id: target.inPlace ? null : target.workingCopyId,
+          examined_in_place: target.inPlace,
+          in_place_reason: target.inPlace ? target.inPlaceReason.trim() : null,
+        } : {}),
       })
       onSaved()
     } catch (e2) {
@@ -1397,6 +1937,7 @@ function ExamineModal({ incidentId, item, onClose, onSaved }) {
                           rows={4} maxLength={4096}
                           placeholder="What was examined, findings, hashes verified, …" />
               </div>
+              {isDigital && <ExamTarget copies={copies} value={target} onChange={setTarget} idPrefix="exq" />}
               <div className="alert info" role="status">
                 <span className="alert-icon">i</span>
                 <span>This records an examination event in the chain of custody. The platform doesn't run the tool — you run it externally and record what you did.</span>
@@ -1420,16 +1961,23 @@ function ExamineModal({ incidentId, item, onClose, onSaved }) {
   )
 }
 
-// GS-11 — photographs (ISO/IEC 27037 §9.1.4). Uploaded images are encrypted at
+// GS-11 — photographs (ISO/IEC 27037 §6.2.1). Uploaded images are encrypted at
 // rest; thumbnails fetch via the auth-gated photo route. Legacy caption-only
 // photos (no url) render as a caption chip.
-function PhotosPanel({ incidentId, item, isClosed, onReplaceItem }) {
+// G-fix (R101): a PATCH of the photo list is merged by photo id — every photo is sent with its id and
+// only its caption / taken_at change; none can be removed (422 photo_remove_not_supported) and after the
+// seal the list can't change at all (409). Adding a photo (POST …/photos) works before and after the seal.
+function PhotosPanel({ incidentId, item, isClosed, onReplaceItem, onChanged }) {
   const [caption, setCaption] = useState('')
+  const [takenAt, setTakenAt] = useState(item.acquired_at || '')   // FE-L9: the acquisition time, unless you change it
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState(null)
+  const [editIdx, setEditIdx] = useState(null)
+  const [editText, setEditText] = useState('')
   const photos = Array.isArray(item.photos) ? item.photos : []
   const filesGone = item.status === 'destroyed'
   const canEdit = !isClosed && (item.status === 'active' || item.status === 'verify_failed')
+  const canEditCaptions = canEdit && !item.coc_sealed
 
   async function onPick(e) {
     const file = e.target.files?.[0]
@@ -1439,12 +1987,41 @@ function PhotosPanel({ incidentId, item, isClosed, onReplaceItem }) {
     setBusy(true); setError(null)
     try {
       const updated = await api.addEvidencePhoto(incidentId, item.id, {
-        file, caption: caption.trim() || null, taken_at: new Date().toISOString(),
+        file, caption: caption.trim() || null, taken_at: takenAt || null,
       })
       setCaption('')
       onReplaceItem?.(updated)
+      await onChanged?.()
     } catch (e2) {
-      setError(e2.message || 'Photo upload failed')
+      setError(e2.status === 507
+        ? `${e2.message || 'The server has no room for the upload right now.'} Try again later or ask an admin.`
+        : (e2.message || 'Photo upload failed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Every photo is sent back with its id (stored photos keep their file and hashes server-side).
+  async function saveCaption(i) {
+    setBusy(true); setError(null)
+    try {
+      const list = photos.map((p, j) => ({
+        ...(p.id ? { id: p.id } : {}), url: p.url || '',
+        caption: j === i ? (editText.trim() || null) : (p.caption ?? null), taken_at: p.taken_at ?? null,
+      }))
+      const updated = await api.updateEvidence(incidentId, item.id, { photos: list })
+      setEditIdx(null)
+      onReplaceItem?.(updated)
+      await onChanged?.()
+    } catch (e2) {
+      const code = e2.code || e2.data?.code
+      setError(code === 'unknown_photo_id'
+        ? 'A photo on this item changed meanwhile (unknown photo id): nothing was changed. Close and reopen the item, then try again.'
+        : code === 'photo_remove_not_supported'
+          ? 'An uploaded photo can’t be removed: nothing was changed. Close and reopen the item, then try again.'
+          : code === 'sealed_field_immutable'
+            ? 'The item is sealed: its photos can’t change. Add a new photo instead.'
+            : (e2.message || 'Could not save the caption'))
     } finally {
       setBusy(false)
     }
@@ -1453,14 +2030,14 @@ function PhotosPanel({ incidentId, item, isClosed, onReplaceItem }) {
   return (
     <>
       <h3 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>
-        Photographs <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· ISO 27037 §9.1.4</span>
+        Photographs <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· ISO 27037 §6.2.1</span>
       </h3>
       {photos.length === 0 ? (
         <div style={{ color: 'var(--muted)', fontSize: 13 }}>No photographs attached.</div>
       ) : (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }} data-testid="ev-photos">
           {photos.map((p, i) => (
-            <figure key={p.id || i} style={{ margin: 0, width: 132 }}>
+            <figure key={p.id || i} style={{ margin: 0, width: 132 }} data-photo-id={p.id || ''}>
               {p.url && !filesGone ? (
                 <a href={p.url} target="_blank" rel="noreferrer">
                   <img src={p.url} alt={p.caption || `photo ${i + 1}`}
@@ -1474,18 +2051,52 @@ function PhotosPanel({ incidentId, item, isClosed, onReplaceItem }) {
                   {filesGone ? 'file deleted' : 'no image'}
                 </div>
               )}
-              {p.caption && <figcaption style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{p.caption}</figcaption>}
+              {editIdx === i ? (
+                <div style={{ marginTop: 2 }}>
+                  <input className="input compact" value={editText} maxLength={512} aria-label="Photo caption"
+                         onChange={e => setEditText(e.target.value)} disabled={busy} data-testid="ev-photo-caption-edit" />
+                  <div style={{ display: 'flex', gap: 4, marginTop: 2 }}>
+                    <button type="button" className="btn primary" onClick={() => saveCaption(i)} disabled={busy}>Save</button>
+                    <button type="button" className="btn ghost" onClick={() => setEditIdx(null)} disabled={busy}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {p.caption && <figcaption style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{p.caption}</figcaption>}
+                  {p.taken_at && <div style={{ fontSize: 10, color: 'var(--dim)', fontFamily: 'var(--font-mono)' }}>{formatLocal(p.taken_at)}</div>}
+                  {canEditCaptions && (
+                    <button type="button" className="btn ghost" style={{ fontSize: 11, marginTop: 2 }} disabled={busy}
+                            data-testid="ev-photo-edit" onClick={() => { setEditIdx(i); setEditText(p.caption || ''); setError(null) }}>
+                      Edit caption
+                    </button>
+                  )}
+                </>
+              )}
             </figure>
           ))}
         </div>
       )}
+      {photos.length > 0 && (
+        <div className="field-hint" data-testid="ev-photos-rule">
+          {item.coc_sealed
+            ? 'Sealed: these photos and their captions can’t change, and none can be removed. A new photo can still be added (logged as Photo added).'
+            : 'Captions can be edited until the seal. An attached photo can’t be removed.'}
+        </div>
+      )}
       {canEdit && (
         <div className="form" style={{ marginTop: 'var(--space-2)' }}>
-          <div className="field">
-            <label className="field-label" htmlFor="ev-photo-cap">Caption (optional)</label>
-            <input id="ev-photo-cap" className="input" value={caption} maxLength={512}
-                   onChange={e => setCaption(e.target.value)}
-                   placeholder="e.g. Drive in situ, serial visible" disabled={busy} />
+          <div className="form-row">
+            <div className="field">
+              <label className="field-label" htmlFor="ev-photo-cap">Caption (optional)</label>
+              <input id="ev-photo-cap" className="input" value={caption} maxLength={512}
+                     onChange={e => setCaption(e.target.value)}
+                     placeholder="e.g. Drive in situ, serial visible" disabled={busy} />
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="ev-photo-at">Taken at</label>
+              <LocalDateTimePicker id="ev-photo-at" value={takenAt} onChange={setTakenAt} clearable disabled={busy} />
+              <div className="field-hint">When the photo was taken: starts at the acquisition time. Blank = unknown.</div>
+            </div>
           </div>
           <label className="btn" style={{ alignSelf: 'flex-start', cursor: busy ? 'wait' : 'pointer' }}>
             {busy ? 'Uploading…' : 'Add photo'}
@@ -1503,17 +2114,19 @@ function PhotosPanel({ incidentId, item, isClosed, onReplaceItem }) {
 }
 
 
-function DisposeModal({ incidentId, item, users, onClose, onSaved }) {
+function DisposeModal({ incidentId, item, users, me, onClose, onSaved }) {
   const [kind, setKind]     = useState('archive')
   const [reason, setReason] = useState('')
   const [witnessId, setWitnessId] = useState('')
   const [busy, setBusy]     = useState(false)
   const [error, setError]   = useState(null)
   const isDestroy = kind === 'destroy'
-  // GS-10 — legal-hold disposal needs a second approver. The backend enforces
-  // "distinct from the disposing admin"; we surface all users and let it gate.
+  // GS-10 — legal-hold disposal needs a second approver, distinct from the admin disposing it (the
+  // backend refuses witness_id = you); the list leaves you out.
+  // G5: a held item can't be destroyed at all (409 legal_hold_active) — release the hold first.
   const needsWitness = !!item.legal_hold
-  const witnessCandidates = users || []
+  const holdBlocksDestroy = !!item.legal_hold && isDestroy
+  const witnessCandidates = (users || []).filter(u => u.id !== me?.id)
 
   const onSubmit = async (e) => {
     e.preventDefault()
@@ -1556,7 +2169,7 @@ function DisposeModal({ incidentId, item, users, onClose, onSaved }) {
                 <select id="ev-dispkind" className="select" value={kind} onChange={(e) => setKind(e.target.value)}>
                   <option value="archive">Archive (status only — file retained)</option>
                   <option value="return">Return to owner (status only — file retained)</option>
-                  <option value="destroy">Destroy (delete the encrypted file)</option>
+                  <option value="destroy" disabled={!!item.legal_hold}>Destroy (delete the encrypted file){item.legal_hold ? ' — not while on legal hold' : ''}</option>
                 </select>
               </div>
               <div className="field">
@@ -1575,10 +2188,16 @@ function DisposeModal({ incidentId, item, users, onClose, onSaved }) {
                       <option key={u.id} value={u.id}>{u.username}{u.full_name ? ` (${u.full_name})` : ''}</option>
                     ))}
                   </select>
-                  <div className="field-hint">Two-person integrity (SWGDE/ACPO): disposing legal-hold evidence requires a second accountable approver, distinct from the collector.</div>
+                  <div className="field-hint">Two-person integrity (SWGDE/ACPO): disposing legal-hold evidence requires a second accountable approver — another user, not you (the admin disposing it).</div>
                 </div>
               )}
-              {isDestroy && (
+              {item.legal_hold && (
+                <div className="alert warn" role="status" data-testid="dispose-hold-note">
+                  <span className="alert-icon">!</span>
+                  <span>On legal hold: it can't be destroyed until the incident lead or an admin releases the hold. Archive or return needs a second approver.</span>
+                </div>
+              )}
+              {isDestroy && !holdBlocksDestroy && (
                 <div className="alert warn" role="status">
                   <span className="alert-icon">!</span>
                   <span>Destruction permanently deletes the encrypted file. SHA-256 + custody chain are retained for legal record. This cannot be undone.</span>
@@ -1593,7 +2212,7 @@ function DisposeModal({ incidentId, item, users, onClose, onSaved }) {
           </div>
           <div className="modal-foot">
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
-            <button type="submit" className="btn primary" disabled={busy}>
+            <button type="submit" className="btn primary" disabled={busy || holdBlocksDestroy}>
               {busy ? 'Saving…' : (isDestroy ? 'Destroy evidence' : `Confirm ${kind}`)}
             </button>
           </div>

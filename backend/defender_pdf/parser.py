@@ -33,6 +33,16 @@ import pdfplumber  # noqa: E402  (must follow the pypdfium2 block above)
 
 MAX_PAGES = 50
 
+# G4 (R03) — recorded on every import as its run record. Bump the version whenever how candidates
+# or their times are derived changes. Imports made before G4 have parser_name/parser_version NULL.
+#   1.0.0  G4: versioned; each candidate carries time_basis — explicit when the PDF states its
+#          "Timestamps are generated in UTC±N" offset, assumed_tz (read as UTC) when it doesn't,
+#          missing without a parseable time.
+PARSER_NAME = "FENRIR Defender PDF parser"
+# 1.1.0 (G-fix): a "File" evidence entity becomes a hash IOC only when its value is a hash (R77), and the
+# exhibit's device clock offset is never applied (R78: these are Microsoft cloud times).
+PARSER_VERSION = "1.1.0"
+
 _MONTHS = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
            "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
 _DT_RE = re.compile(r'([A-Z][a-z]{2}) (\d{1,2}), (\d{4}) (\d{1,2}):(\d{2})(?::(\d{2}))? ([AP]M)')
@@ -62,8 +72,17 @@ _IOC_TYPE_MAP = {
     "ip address": "ip", "ip addresses": "ip",
     "url": "url", "urls": "url",
     "domain": "domain", "domains": "domain",
-    "file": "hash_sha256", "files": "hash_sha256",
 }
+_HASH_IOC_BY_LEN = {64: "hash_sha256", 40: "hash_sha1", 32: "hash_md5"}
+
+
+def _file_ioc_type(value: str) -> str:
+    """R77: a Defender "File" entity is a hash IOC only when its value is a hex hash (by length); a file
+    name or path is a file_path IOC, never a hash with a name for a value."""
+    v = value.strip()
+    if re.fullmatch(r"[0-9A-Fa-f]+", v) and len(v) in _HASH_IOC_BY_LEN:
+        return _HASH_IOC_BY_LEN[len(v)]
+    return "file_path"
 _RISK_TO_CRITICALITY = {"low": "low", "medium": "medium", "high": "high", "critical": "critical"}
 
 
@@ -81,6 +100,7 @@ def parse_defender_incident_pdf(content: bytes) -> dict:
             raise ValueError("This doesn't look like a Microsoft Defender incident PDF export")
 
         tz_offset = _detect_tz_offset_hours(texts[0])
+        tz_stated = _TZ_NOTE_RE.search(texts[0]) is not None
         incident = _extract_incident_meta(full_text)
         incident["title"] = _extract_title(texts[0])
 
@@ -108,6 +128,9 @@ def parse_defender_incident_pdf(content: bytes) -> dict:
                 "low_confidence": False,
             })
 
+    for c in candidates:
+        c["time_basis"] = ("missing" if not c.get("event_time")
+                           else "explicit" if tz_stated else "assumed_tz")
     return {"incident": incident, "candidates": candidates}
 
 
@@ -294,7 +317,8 @@ def _extract_evidence(pages, texts, tz_offset: int) -> list[dict]:
         candidates.append({
             "kind": "evidence",
             "suggested_destination": "ioc" if is_ioc else "entity",
-            "ioc_type": _IOC_TYPE_MAP.get(et_key, "other") if is_ioc else None,
+            "ioc_type": (_file_ioc_type(entity) if et_key in ("file", "files")
+                         else _IOC_TYPE_MAP.get(et_key, "other")) if is_ioc else None,
             "entity_type_hint": "ip" if et_key in ("ip address", "ip addresses") else
                                  ("domain" if et_key in ("domain", "domains") else
                                   ("host" if et_key == "device" else "other")),

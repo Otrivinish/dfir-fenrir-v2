@@ -15,6 +15,8 @@ Buckets:
   • `auth`  — anything carrying a session cookie or Bearer token. Looser.
             Keyed by a *hash of the credential*, so each token / session has
             its own bucket (no shared-NAT punishment).
+  • `upload` — the chunk PUTs of upload sessions (G1 stage 3b), per credential,
+            sized for a sequential stream of 8 MiB chunks.
 
 Excluded paths (always allowed):
   • Health / version (load-balancer probes)
@@ -23,6 +25,7 @@ Excluded paths (always allowed):
 """
 import hashlib
 import logging
+import re
 import time
 from typing import Tuple
 
@@ -106,9 +109,17 @@ def _credential_fingerprint(request: Request) -> str | None:
     return None
 
 
+# G1 stage 3b: an upload session's chunk PUT (evidence/uploads.py). Sized so a sequential chunk
+# stream is never throttled; see settings.rate_limit_upload_chunk_*.
+_UPLOAD_CHUNK = re.compile(r"/api/incidents/[^/]+/uploads/[^/]+/chunks/[^/]+")
+
+
 def _classify(request: Request) -> Tuple[str, str, int, float]:
     """Return (tier, identity_key, capacity, refill_per_sec) for a request."""
     cred = _credential_fingerprint(request)
+    if cred and request.method == "PUT" and _UPLOAD_CHUNK.fullmatch(request.url.path):
+        return ("upload", cred, settings.rate_limit_upload_chunk_burst,
+                settings.rate_limit_upload_chunk_per_min / 60.0)
     if cred:
         cap = settings.rate_limit_auth_burst
         rate = settings.rate_limit_auth_per_min / 60.0

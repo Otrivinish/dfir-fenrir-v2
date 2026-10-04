@@ -3,7 +3,7 @@ import asyncio
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
@@ -31,6 +31,9 @@ from schemas import (
 
 global_router = APIRouter()
 
+# JSON list columns: a PATCH null clears them to [] (L9) — a stored JSON null broke every ?q= search.
+_LIST_FIELDS = ("aliases", "associated_techniques", "typical_targets")
+
 
 def _actor_out(a: ThreatActor) -> ThreatActorOut:
     return ThreatActorOut.model_validate(a)
@@ -49,11 +52,18 @@ async def list_threat_actors(
     authenticated user. Returns the matching actors (no pagination)."""
     stmt = select(ThreatActor).order_by(ThreatActor.name)
     if q:
-        term = f"%{q.lower()}%"
+        # Case-insensitive substring of the name or of any one alias (aliases is a `json`
+        # list, matched per decoded element, so JSON quoting/escapes never match). LIKE
+        # wildcards in the user's text are literal.
+        term = "%" + q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        # A row holding JSON null (an old PATCH {"aliases": null}) reads as no aliases (L9).
+        aliases = case((func.json_typeof(ThreatActor.aliases) == "array", ThreatActor.aliases),
+                       else_=literal_column("'[]'::json"))
+        alias = func.json_array_elements_text(aliases).table_valued("value").alias("alias")
         stmt = stmt.where(
             or_(
-                func.lower(ThreatActor.name).like(term),
-                func.cast(ThreatActor.aliases, type_=None).ilike(term),
+                func.lower(ThreatActor.name).like(term, escape="\\"),
+                select(alias.c.value).where(func.lower(alias.c.value).like(term, escape="\\")).exists(),
             )
         )
     if motivation:
@@ -120,7 +130,8 @@ async def update_threat_actor(
     """Update a custom threat actor (only the supplied fields change). Locked
     for `is_system=True` rows — those are MITRE-synced and shouldn't drift from
     the upstream catalogue, so they return 409. Returns 404 if unknown. Admin
-    access required. Returns the updated actor."""
+    access required. Returns the updated actor. aliases, associated_techniques or
+    typical_targets sent as null clear the list (stored as [])."""
     actor = await _get_actor_or_404(db, actor_id)
     if actor.is_system:
         raise HTTPException(
@@ -128,6 +139,8 @@ async def update_threat_actor(
             "System threat actors are read-only (synced from MITRE ATT&CK)",
         )
     for field, value in req.model_dump(exclude_unset=True).items():
+        if value is None and field in _LIST_FIELDS:
+            value = []
         setattr(actor, field, value)
     await db.commit()
     await db.refresh(actor)

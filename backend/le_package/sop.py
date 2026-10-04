@@ -37,7 +37,7 @@ When a control in one standard is stricter than another, the strictest wins.
   4. The person in charge of the investigation has overall responsibility for
      ensuring the law and these principles are followed.
 
-## Collection (ISO 27037 §6.7 / NIST 800-86 §4.1)
+## Collection (ISO 27037 §5.4.3–§5.4.4, §6.1 / NIST 800-86 §3.1.2)
 
   • Every Evidence item is recorded with: who collected it, when (UTC),
     where (logical or physical location), the collection method used, the
@@ -55,10 +55,23 @@ When a control in one standard is stricter than another, the strictest wins.
 
 ## At-rest protection (ISO 27037 §6.9)
 
-  • Every uploaded evidence file is encrypted at rest with AES-256-GCM,
-    using a per-file 96-bit nonce, under a master Key Encryption Key (KEK)
-    that lives only in process memory (env var `EVIDENCE_KEK`).
-  • Plaintext is never persisted outside the encrypted volume.
+  • Every uploaded evidence file is encrypted at rest with AES-256-GCM.
+    Files stored since 2026-10-04 (format FENRGCM v2) are encrypted in 1 MiB
+    chunks under a random 256-bit data key of their own; that key is wrapped
+    with AES-KW (RFC 3394) under a key derived from the master Key Encryption
+    Key (K_wrap = HKDF-SHA256(KEK)) and kept in the file's header. Each chunk's
+    nonce is a random 56-bit per-file prefix, the 32-bit chunk index and a
+    final-chunk flag, so truncation, reordering and splicing are detected.
+    Files stored earlier (format v0) are one AES-256-GCM message under the KEK
+    with a random 96-bit nonce. The KEK is supplied to the backend as a
+    container secret file (never an environment variable) and held in process
+    memory; it never leaves the platform.
+  • Since 2026-10-04 an evidence file's plaintext is not written to disk:
+    uploads are encrypted as they arrive, or held only in a memory-only
+    scratch area (tmpfs, never swapped) until they are encrypted; analysers
+    decrypt into memory or into that memory-only area and delete it after
+    each parse. Files in the artifact quarantine (05_Artifacts) are the
+    exception: they are stored unencrypted on their own volume.
   • The /evidence volume is dedicated, runs non-root (uid 1001), and has no
     network access from the analysis worker (air-gapped Docker network).
 
@@ -109,40 +122,51 @@ is itself logged)
 
 When this LE Package was generated, the platform:
 
-  1. Opened a single read-only database transaction.
-  2. Queried the source-of-truth tables for the incident.
-  3. Decrypted each `digital_file` Evidence row from its at-rest AES-256-GCM
-     ciphertext using the in-memory master KEK.
-  4. Built every file in the bundle in memory, hashing each (SHA-256 + SHA-512)
-     immediately and recording the hash in MANIFEST.json.
-  5. Hashed MANIFEST.json (SHA-256) and recorded the fingerprint in a new
-     audit row with `action = 'le_package_generate'`. That row's `row_hash`
-     is exposed as `audit_anchor.row_hash` in MANIFEST.json — the package's
-     existence is now anchored in the tamper-evident chain.
-  6. Sealed the entire bundle as an AES-256 password-protected ZIP (WinZip
-     AE-2, written via pyzipper) under a freshly generated 24-character
-     URL-safe random password. The password is shown to the generator ONCE
-     and is never persisted by the platform. The same password is also used
-     to derive the HMAC key in step 5b below.
-     5b. The HMAC key over MANIFEST.json (written to `INTEGRITY.sig`) is
-         derived deterministically as `SHA-256(bundle_password)`. A recipient
-         who can open the ZIP can therefore re-derive the HMAC key and
-         independently verify that the manifest was assembled by the holder
-         of the bundle secret.
+  1. Queried the source-of-truth tables for the incident with ordinary
+     database queries in one session (PostgreSQL READ COMMITTED: not a
+     single snapshot and not a read-only transaction).
+  2. Decrypted each included `digital_file` Evidence row from its at-rest
+     AES-256-GCM ciphertext: a v2 file with its own data key, unwrapped (AES-KW)
+     with a key the platform derives from its in-memory master KEK by
+     HKDF-SHA256; a legacy v0 file directly with the KEK. No at-rest key is
+     placed in the package. Each file is authenticated in full before it is
+     written; one that fails is left out and recorded in its `.meta.json`.
+  3. Streamed every file into the bundle (bounded memory, built in a staging
+     file and published only when complete), hashing each (SHA-256 + SHA-512)
+     over the exact bytes written and recording the hash in MANIFEST.json.
+  4. Hashed MANIFEST.json (SHA-256). When a time-stamping authority is
+     configured, it also requested an RFC 3161 time-stamp token over that
+     hash and wrote it as `MANIFEST.tst` (README.md says whether this package
+     has one).
+  5. Generated a fresh 24-character URL-safe random password and derived the
+     HMAC key from it as `SHA-256(bundle_password)`; the HMAC-SHA-256 over
+     MANIFEST.json is `INTEGRITY.sig`. A recipient who can open the ZIP can
+     therefore re-derive the key and check that the manifest was assembled
+     by a holder of the bundle password.
+  6. Sealed the inner ZIP (`le_package.zip`, itself not encrypted) inside an
+     AES-256 password-protected ZIP (WinZip AE-2, written via pyzipper) under
+     that password. The password is shown to the generator ONCE and is never
+     persisted by the platform.
   7. Wrote the password-protected ZIP to `/evidence/exports/{id}.zip` and
      issued a single-use 24-hour download token for the recipient. The
      recipient opens the bundle with any standard archive tool (macOS
      Finder, 7-Zip, WinRAR, `unzip -P`) — no Python or `cryptography`
      library required.
+  8. Only then recorded the manifest SHA-256, bundle SHA-256 and HMAC in a
+     new audit row with `action = 'le_package_generate'`. Because it is
+     written after the build, that row is not in the package's `08_Audit/`
+     and MANIFEST.json carries no anchor; its id and `row_hash` are kept on
+     the platform's record of the package.
 
 ## Integrity verification at the receiving end
 
 The recipient can verify integrity at three independent layers:
 
   1. Per-file: `sha256sum --check INTEGRITY.sha256` (must report `OK` for every line).
-  2. Manifest: `sha256(MANIFEST.json)` must match the value recorded in the
-     audit row included in the package (`08_Audit/Audit_Trail.csv`, action
-     `le_package_generate`, `details.manifest_sha256`).
+  2. Manifest: `sha256(MANIFEST.json)` must match the Manifest SHA-256 on
+     README.md. The platform recorded the same value in its
+     `le_package_generate` audit row (`details.manifest_sha256`) after the
+     build; that row is not in the package, so ask the sender for it.
   3. Sender-of-record: HMAC-SHA-256 over MANIFEST.json under
      `SHA-256(bundle_password)` matches `INTEGRITY.sig`. The bundle
      password is delivered out-of-band; deriving the HMAC key from it
@@ -150,15 +174,18 @@ The recipient can verify integrity at three independent layers:
      Proves the package was assembled by a holder of that password — by
      construction, the platform at generation time.
 
-## Out of scope
+## Out of scope, and optional
 
   • Cryptographic signing under a public PKI (GPG / X.509) is not part of
     this SOP. It can be layered on top by the operator if required; in that
     case `INTEGRITY.sig` is replaced with a detached PGP/GPG signature and
     the receiver verifies with the operator's published key.
-  • Time-stamping authority (TSA / RFC 3161) integration is not part of this
-    SOP. The platform's UTC timestamps are taken from the container clock,
-    which is NTP-disciplined by the host.
+  • Trusted time-stamping (RFC 3161) is optional: only when the platform has a
+    time-stamping authority configured (and it answered) does the package
+    carry `MANIFEST.tst`; verify it with
+    `openssl ts -verify -data MANIFEST.json -in MANIFEST.tst -CAfile <TSA CA>`.
+    Otherwise the platform's UTC timestamps come from the container clock
+    only, which is NTP-disciplined by the host.
 
 — END OF SOP —
 """

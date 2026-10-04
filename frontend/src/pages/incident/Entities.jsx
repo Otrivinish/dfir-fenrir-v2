@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { formatLocal } from '../../lib/datetime.js'
@@ -71,31 +71,42 @@ export default function Entities() {
   const [editingNameId, setEditingNameId] = useState(null)
   const [nameDraft, setNameDraft]         = useState('')
 
+  // Each load gets a sequence number; only the newest one may set state, so an
+  // older multi-page load that finishes late can't overwrite a newer view.
+  const loadSeq = useRef(0)
+  // The running load's controller: a newer load, an incident change or unmount aborts it.
+  const loadAbort = useRef(null)
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
+    loadAbort.current?.abort()
+    const { signal } = (loadAbort.current = new AbortController())
     setError(null)
     try {
-      const params = { limit: 200 }
+      const params = {}
       if (typeFilter) params.type        = typeFilter
       if (critFilter) params.criticality = critFilter
-      const [entRes, relRes] = await Promise.all([
-        api.listEntities(inc.id, params),
+      // Every page, so the table and the graph hold all of the incident's entities.
+      const [ents, relRes] = await Promise.all([
+        api.listAllPages(api.listEntities, inc.id, params, 200, { signal }),
         api.listEntityRelations(inc.id),
       ])
-      setItems(entRes.items)
+      if (seq !== loadSeq.current) return
+      setItems(ents)
       setRelations(relRes.items)
       // Sync the detail drawer entity if one is open
       if (selectedEntity) {
-        const fresh = entRes.items.find(e => e.id === selectedEntity.id)
+        const fresh = ents.find(e => e.id === selectedEntity.id)
         setSelectedEntity(fresh ?? null)
       }
     } catch (e) {
-      setError(e.message || 'Could not load entities')
+      if (seq === loadSeq.current && !signal.aborted) setError(e.message || 'Could not load entities')
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [inc.id, typeFilter, critFilter]) // intentionally excludes selectedEntity to avoid loop
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load(); return () => loadAbort.current?.abort() }, [load])
   // After a write: re-read the list and the rail's counts.
   const reload = useCallback(() => { bumpRail?.(); return load() }, [bumpRail, load])
 

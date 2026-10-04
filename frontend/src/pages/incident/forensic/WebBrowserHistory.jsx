@@ -3,6 +3,12 @@ import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal, relative } from '../../../lib/datetime.js'
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
+import ExhibitPicker, { DraftBadge } from '../../../components/ExhibitPicker.jsx'
+import RunRecord from '../../../components/RunRecord.jsx'
+import { ClockOffsetNotice, fmtOffset } from '../../../components/ClockOffset.jsx'
+import UploadProgress, { useChunkedUpload } from '../../../components/UploadProgress.jsx'
+
+const MAX_HISTORY_BYTES = 500 * 1024 * 1024
 
 // Web Browser History — upload a Chrome/Edge/Brave `History` file or
 // Firefox `places.sqlite`, parsed offline (read-only SQLite, no BLOB/
@@ -51,9 +57,12 @@ const BROWSER_LABEL = Object.fromEntries(BROWSERS.map(b => [b.value, b.label]))
 const EXHIBIT_HINT = 'Exhibit = an evidence item. Adds this upload to Evidence, re-hashed, with a custody log.'
 
 export default function WebBrowserHistory() {
-  const { inc } = useOutletContext()
+  const { inc, viewer } = useOutletContext()
   const incidentId = inc.id
   const isClosed = inc?.status === 'closed'
+  // G-fix FE-L12: viewers get the closed-incident view of the write controls (the API refuses them).
+  const ro = isClosed || !!viewer
+  const RO_TITLE = isClosed ? 'Closed incidents are read-only' : 'Read-only: viewers can’t change the incident'
 
   const [uploads, setUploads]   = useState([])
   const [uploadsErr, setUploadsErr] = useState(null)
@@ -62,6 +71,7 @@ export default function WebBrowserHistory() {
   const [browser, setBrowser] = useState('chrome')
   const [formHistoryFile, setFormHistoryFile] = useState(null)
   const [uploading, setUploading] = useState(false)
+  const up = useChunkedUpload()   // G1 stage 3b: progress + cancel of the chunked upload
   const [uploadErr, setUploadErr] = useState(null)
 
   const [tab, setTab] = useState('visits')   // 'visits' | 'search-terms' | 'downloads'
@@ -87,6 +97,14 @@ export default function WebBrowserHistory() {
 
   const [selected, setSelected] = useState(new Set())
   const [iocTarget, setIocTarget] = useState(null)
+  // G3 — Upload (registers draft exhibits first) | From a registered exhibit; Timeline promote
+  const [mode, setMode]               = useState('upload')
+  const [exhibitId, setExhibitId]     = useState('')
+  const [formExhibitId, setFormExhibitId] = useState('')
+  const [acquiredAt, setAcquiredAt]   = useState('')
+  const [exhibitsKey, setExhibitsKey] = useState(0)
+  const [promoting, setPromoting]     = useState(false)
+  const [promoteMsg, setPromoteMsg]   = useState(null)
 
   const loadUploads = useCallback(() => {
     api.listWebHistoryUploads(incidentId)
@@ -212,9 +230,11 @@ export default function WebBrowserHistory() {
     if (!file) return
     setUploading(true); setUploadErr(null)
     try {
-      const created = await api.uploadWebHistory(incidentId, { file, browser, formHistoryFile: browser === 'firefox' ? formHistoryFile : null })
-      setFile(null); setFormHistoryFile(null)
-      loadUploads()
+      const fh = browser === 'firefox' ? formHistoryFile : null
+      const created = await api.uploadWebHistory(incidentId, { file, browser, formHistoryFile: fh, acquiredAt: acquiredAt || null },
+                                                 up.start(file.size + (fh?.size || 0)))
+      setFile(null); setFormHistoryFile(null); setAcquiredAt('')
+      loadUploads(); setExhibitsKey(k => k + 1)
       // Auto-select the just-uploaded file so its parsed data shows immediately,
       // instead of silently staying on "All uploads" (looked like nothing happened
       // when e.g. a 0-visit file was uploaded on top of other uploads' data).
@@ -222,8 +242,49 @@ export default function WebBrowserHistory() {
       runActiveSearch(created.id)
     } catch (e) {
       setUploadErr(e.message || 'Upload failed.')
+      if (e.data?.evidence_id) setExhibitsKey(k => k + 1)   // registered, but not parsed: pick it later
+    } finally {
+      up.done()
+      setUploading(false)
+    }
+  }
+
+  // G3 — parse a registered exhibit (re-hashed first; a mismatch freezes it)
+  const onParseExhibit = async () => {
+    if (!exhibitId) return
+    setUploading(true); setUploadErr(null)
+    try {
+      const created = await api.webHistoryFromEvidence(incidentId, exhibitId, {
+        browser, ...(browser === 'firefox' && formExhibitId ? { form_history_evidence_id: formExhibitId } : {}),
+      })
+      loadUploads()
+      setFilterUpload(created.id)
+      runActiveSearch(created.id)
+    } catch (e) {
+      setUploadErr(e.message || 'Could not parse the exhibit.')
+      if (e.status === 409) setExhibitsKey(k => k + 1)
     } finally {
       setUploading(false)
+    }
+  }
+
+  // G3 — the server copies the selected visits / downloads onto the Timeline (ids only go up)
+  const onPromote = async () => {
+    const ids = [...selected]
+    if (!ids.length) return
+    setPromoting(true); setPromoteMsg(null)
+    try {
+      const r = await api.promoteWebHistory(incidentId, tab === 'downloads' ? { download_ids: ids } : { visit_ids: ids })
+      setPromoteMsg({ ok: true, text: `Added ${r.created} event${r.created === 1 ? '' : 's'} to the Timeline.`
+        + (r.already_promoted.length ? ` ${r.already_promoted.length} already there.` : '')
+        + (r.skipped_untimestamped.length ? ` ${r.skipped_untimestamped.length} without a time not added.` : '')
+        + (r.reparse_required.length ? ` ${r.reparse_required.length} from an upload made before run records: upload it again to add them.` : '') })
+      setSelected(new Set())
+      runActiveSearch()
+    } catch (e) {
+      setPromoteMsg({ ok: false, text: e.message || 'Could not add to the Timeline.' })
+    } finally {
+      setPromoting(false)
     }
   }
 
@@ -265,36 +326,90 @@ export default function WebBrowserHistory() {
       <div className="panel-toolbar">
         <h2 className="panel-h">Web Browser History</h2>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-          Upload a browser history database → search, filter, promote to IOCs
+          Upload a browser history database or pick an exhibit → search, filter, promote to IOCs or the Timeline
         </span>
       </div>
 
-      {/* Upload */}
+      {/* Source (G3): upload (registered as draft exhibits first) or a registered exhibit */}
+      <div role="radiogroup" aria-label="History source" data-testid="webhist-mode"
+           style={{ display: 'flex', gap: 'var(--space-4)', flexWrap: 'wrap', fontSize: 13, marginBottom: 'var(--space-2)' }}>
+        {[['upload', 'Upload a history file'], ['exhibit', 'From a registered exhibit']].map(([v, label]) => (
+          <label key={v} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', cursor: 'pointer' }}>
+            <input type="radio" name="webhist-mode" value={v} checked={mode === v} disabled={ro}
+                   onChange={() => { setMode(v); setUploadErr(null) }} />
+            {label}
+          </label>
+        ))}
+      </div>
+      {mode === 'upload' ? (
       <div style={{
         display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap',
         padding: 'var(--space-3)', background: 'var(--surface-2)', borderRadius: 'var(--radius)',
         marginBottom: 'var(--space-3)',
       }}>
-        <select className="select" value={browser} onChange={e => setBrowser(e.target.value)} disabled={uploading || isClosed}>
+        <select className="select" value={browser} onChange={e => setBrowser(e.target.value)} disabled={uploading || ro}>
           {BROWSERS.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
         </select>
-        <input type="file" disabled={uploading || isClosed}
+        <input type="file" disabled={uploading || ro}
                onChange={e => setFile(e.target.files?.[0] || null)} />
         {browser === 'firefox' && (
           <label style={{ display: 'flex', gap: 'var(--space-1)', alignItems: 'center', fontSize: 12, color: 'var(--muted)' }}>
             + formhistory.sqlite (optional, for search terms)
-            <input type="file" disabled={uploading || isClosed}
+            <input type="file" disabled={uploading || ro}
                    onChange={e => setFormHistoryFile(e.target.files?.[0] || null)} />
           </label>
         )}
-        <button type="button" className="btn primary" onClick={onUpload} disabled={!file || uploading || isClosed}>
+        <div style={{ width: 240, maxWidth: '100%' }}>
+          <LocalDateTimePicker id="webhist-acquired" value={acquiredAt} onChange={setAcquiredAt} clearable hint={false}
+                               placeholder="Acquired at (optional)" disabled={uploading || ro} />
+        </div>
+        <button type="button" className="btn primary" onClick={onUpload} disabled={!file || uploading || ro}>
           {uploading ? 'Uploading…' : 'Upload & Parse'}
         </button>
-        <span style={{ color: 'var(--dim)', fontSize: 11 }}>
-          Chrome/Edge/Brave "History" or Firefox "places.sqlite" — up to 500 MB. Parsed offline, read-only; nothing is executed.
-          Firefox search-bar terms live in a separate formhistory.sqlite — upload both together.
+        <span style={{ color: 'var(--dim)', fontSize: 11 }} data-testid="webhist-register-hint">
+          Chrome/Edge/Brave "History" or Firefox "places.sqlite" — up to 500 MiB. Registers first: each file is added to Evidence
+          as an unsealed draft exhibit (hashed, encrypted, custody-logged) — or parsed as the exhibit with the same SHA-256 —
+          then parsed offline, read-only. Firefox search-bar terms live in a separate formhistory.sqlite — upload both together.
         </span>
+        {up.progress && (
+          <div style={{ flexBasis: '100%' }}>
+            <UploadProgress progress={up.progress} onCancel={up.cancel} testid="webhist-upload-progress" />
+          </div>
+        )}
+        {up.limit && (
+          <div style={{ flexBasis: '100%' }}>
+            <UploadProgress limit={up.limit} incidentId={incidentId} testid="webhist-upload-progress" />
+          </div>
+        )}
       </div>
+      ) : (
+      <div className="form" style={{
+        padding: 'var(--space-3)', background: 'var(--surface-2)', borderRadius: 'var(--radius)', marginBottom: 'var(--space-3)',
+      }}>
+        <div className="form-row" style={{ alignItems: 'flex-end' }}>
+          <div className="field" style={{ maxWidth: 180 }}>
+            <label className="field-label" htmlFor="webhist-ex-browser">Browser</label>
+            <select id="webhist-ex-browser" className="select" value={browser} onChange={e => setBrowser(e.target.value)} disabled={uploading || ro}>
+              {BROWSERS.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
+            </select>
+          </div>
+          <ExhibitPicker incidentId={incidentId} id="webhist-exhibit" label="History exhibit *" value={exhibitId}
+                         onChange={(v) => setExhibitId(v)} maxBytes={MAX_HISTORY_BYTES} maxLabel="500 MiB"
+                         reloadKey={exhibitsKey} disabled={ro} />
+          {browser === 'firefox' && (
+            <ExhibitPicker incidentId={incidentId} id="webhist-form-exhibit" label="formhistory.sqlite exhibit (optional)"
+                           value={formExhibitId} onChange={(v) => setFormExhibitId(v)} maxBytes={MAX_HISTORY_BYTES}
+                           maxLabel="500 MiB" reloadKey={exhibitsKey} disabled={ro} optional />
+          )}
+          <div className="field" style={{ justifyContent: 'flex-end' }}>
+            <button type="button" className="btn primary" onClick={onParseExhibit} disabled={!exhibitId || uploading || ro}
+                    title="Re-hash the exhibit, then parse it (recorded in its custody log)">
+              {uploading ? 'Parsing…' : 'Parse exhibit'}
+            </button>
+          </div>
+        </div>
+      </div>
+      )}
       {uploadErr && (
         <div className="alert error" role="alert" style={{ marginBottom: 'var(--space-3)' }}>
           <span className="alert-icon">!</span><span>{uploadErr}</span>
@@ -323,14 +438,32 @@ export default function WebBrowserHistory() {
               <span style={{ color: 'var(--muted)' }}>{u.record_count} visits · {u.search_term_count} search terms · {u.download_count} downloads</span>
               {u.truncated && <span style={{ color: 'var(--high)' }}>⚠ truncated at defensive cap</span>}
               <span style={{ color: 'var(--dim)' }} title={formatLocal(u.uploaded_at)}>{relative(u.uploaded_at)} · {u.uploaded_by}</span>
+              {u.evidence_identifier && (
+                <span className="pill" data-testid="webhist-exhibit-pill" style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }}
+                      title={u.parser_version ? 'The exhibit this upload is (parsed from it)' : 'Registered as an exhibit after parsing (before run records)'}>
+                  ⛁ {u.evidence_identifier}
+                </span>
+              )}
+              {u.evidence_identifier && u.evidence_sealed === false && <DraftBadge />}
+              {u.form_history_evidence_identifier && (
+                <span className="pill" style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} title="formhistory.sqlite exhibit">
+                  + ⛁ {u.form_history_evidence_identifier}
+                </span>
+              )}
+              {(u.clock_offset_status === 'changed' || u.clock_offset_status === 'text_only') && (
+                <span style={{ color: 'var(--high)', fontSize: 11 }}
+                      title={u.clock_offset_status === 'changed' ? 'The exhibit’s clock offset changed after this upload' : 'Clock offset recorded only as text: not applied'}>⚠ clock</span>
+              )}
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 'var(--space-2)' }} onClick={e => e.stopPropagation()}>
-                {u.evidence_id ? (
+                {/* G3 — new uploads already are exhibits; "Register as exhibit" is for older ones only */}
+                {!u.parser_version && (u.evidence_id ? (
                   <span style={{ color: 'var(--ok)' }} title={EXHIBIT_HINT}>Registered as exhibit ✓</span>
                 ) : (
                   <button type="button" className="btn ghost" style={{ fontSize: 12, padding: '2px 8px' }} title={EXHIBIT_HINT}
-                          onClick={() => onMintEvidence(u)} disabled={isClosed}>Register as exhibit</button>
-                )}
-                <button type="button" className="btn-link danger" onClick={() => onDeleteUpload(u)} disabled={isClosed}>Delete</button>
+                          data-testid="webhist-legacy-register"
+                          onClick={() => onMintEvidence(u)} disabled={ro}>Register as exhibit</button>
+                ))}
+                <button type="button" className="btn-link danger" onClick={() => onDeleteUpload(u)} disabled={ro}>Delete</button>
               </div>
             </div>
           ))}
@@ -371,11 +504,44 @@ export default function WebBrowserHistory() {
             )}
             <button type="button" className="btn primary" onClick={() => runActiveSearch()}>Search</button>
             {(tab === 'visits' || tab === 'downloads') && selected.size > 0 && (
-              <button type="button" className="btn ghost" onClick={() => setIocTarget([...selected])} disabled={isClosed}>
+              <button type="button" className="btn ghost" onClick={() => setIocTarget([...selected])} disabled={ro}>
                 Add {selected.size} to IOCs
               </button>
             )}
+            {(tab === 'visits' || tab === 'downloads') && selected.size > 0 && (
+              <button type="button" className="btn primary" data-testid="webhist-promote" onClick={onPromote}
+                      disabled={ro || promoting}
+                      title={ro ? RO_TITLE : 'FENRIR copies the selected records onto the Timeline (exhibit + clock offset)'}>
+                {promoting ? 'Adding…' : `Add ${selected.size} to Timeline`}
+              </button>
+            )}
           </div>
+          {promoteMsg && (
+            <div className={`alert ${promoteMsg.ok ? 'info' : 'error'}`} role="alert" data-testid="webhist-promote-result"
+                 style={{ marginBottom: 'var(--space-2)' }}>
+              <span className="alert-icon">{promoteMsg.ok ? '✓' : '!'}</span><span>{promoteMsg.text}</span>
+            </div>
+          )}
+          {(() => {
+            // G3 — the run record of the upload being shown
+            const u = uploads.find(x => x.id === filterUpload)
+            if (!u) return null
+            return (
+              <>
+                <RunRecord testid="webhist-run-record" filename={u.original_filename}
+                           evidenceIdentifier={u.evidence_identifier} evidenceSealed={u.evidence_sealed}
+                           inputSha256={u.sha256_hash} analyserName={u.parser_name} analyserVersion={u.parser_version}
+                           exhibitLink={u.exhibit_link} at={u.uploaded_at} by={u.uploaded_by}
+                           clockOffsetSeconds={u.clock_offset_seconds} />
+                {u.parser_version && <ClockOffsetNotice imp={u} />}
+                {u.clock_offset_seconds !== null && u.clock_offset_seconds !== undefined && (
+                  <div className="field-hint" style={{ marginBottom: 'var(--space-2)' }}>
+                    Times below are as the browser recorded them; {fmtOffset(u.clock_offset_seconds)} is applied to events added to the Timeline.
+                  </div>
+                )}
+              </>
+            )
+          })()}
 
           {tab === 'visits' ? (
             <>
@@ -402,6 +568,7 @@ export default function WebBrowserHistory() {
                         <td><input type="checkbox" checked={selected.has(v.id)} onChange={() => toggleSelect(v.id)} /></td>
                         <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} title={formatLocal(v.visit_time)}>
                           {v.visit_time.replace('T', ' ').slice(0, 19)}
+                          {v.timeline_event_id && <span title="On the Timeline" data-testid="webhist-on-timeline" style={{ color: 'var(--ok)', marginLeft: 4 }}>⏱✓</span>}
                         </td>
                         <td style={{ fontSize: 12, maxWidth: 360 }}><TruncatedUrl url={v.url} /></td>
                         <td style={{ fontSize: 12, color: 'var(--muted)' }}>{v.title || '—'}</td>
@@ -445,6 +612,7 @@ export default function WebBrowserHistory() {
                         <td><input type="checkbox" checked={selected.has(d.id)} onChange={() => toggleSelect(d.id)} disabled={!d.url} /></td>
                         <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} title={d.start_time ? formatLocal(d.start_time) : ''}>
                           {d.start_time ? d.start_time.replace('T', ' ').slice(0, 19) : '—'}
+                          {d.timeline_event_id && <span title="On the Timeline" style={{ color: 'var(--ok)', marginLeft: 4 }}>⏱✓</span>}
                         </td>
                         <td style={{ fontSize: 12 }}><TruncatedUrl url={d.target_path} /></td>
                         <td style={{ fontSize: 12, maxWidth: 300 }}>{d.url ? <TruncatedUrl url={d.url} /> : <span style={{ color: 'var(--dim)' }}>—</span>}</td>

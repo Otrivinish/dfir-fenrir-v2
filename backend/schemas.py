@@ -1,9 +1,9 @@
 """All Pydantic request/response schemas."""
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from core.config import settings
 
@@ -251,13 +251,22 @@ class IncidentCreate(BaseModel):
                                          description="Starting phase: detection_and_analysis or containment_eradication_recovery only.")
     tlp:              Tlp      = "amber"
     triage_state:     TriageState = "suspected"
+    triage_reason:    Optional[str] = Field(default=None, max_length=2000,
+                                            description="Why the incident starts as this triage state. Required (at least 10 "
+                                                        "characters; 422 triage_reason_required otherwise) to create a "
+                                                        "false_positive or benign_positive outside detection_and_analysis, "
+                                                        "since it can then be closed without Gate 2. When given, it is "
+                                                        "audited and added to the Timeline.")
     incident_type:    Optional[IncidentType]    = None
     detection_method: Optional[DetectionMethod] = None
     reporter:         Optional[str] = Field(default=None, max_length=128)
     occurred_at:      Optional[datetime] = None
     detected_at:      Optional[datetime] = Field(default=None,
                                                  description="When the incident was detected (UTC). Not before occurred_at, not in the future; never set by the server.")
-    team_ids:         list[UUID] = []
+    team_ids:         list[UUID] = Field(default_factory=list,
+                                         description="Restrict the new incident to these teams ([] = visible to everyone). "
+                                                     "An admin may pick any team; an analyst only teams they belong to (409 "
+                                                     "would_lock_out). An unknown team is 422 team_not_found.")
     tags:             list[str]  = Field(default_factory=list)
     dark_operation:   bool       = False  # open dark: no Teams/Slack/email alert from the start
 
@@ -304,10 +313,17 @@ class IncidentUpdate(BaseModel):
                                                          description="Why triage_state changes, at least 10 characters after trimming. "
                                                                      "Required when triage_state becomes false_positive or benign_positive "
                                                                      "and the incident is (or, with phase in the same request, ends up) "
-                                                                     "outside detection_and_analysis, because such an incident can then be "
-                                                                     "closed without Gate 2; missing or shorter is 422 code "
-                                                                     "triage_reason_required. When given with a triage change it is audited "
-                                                                     "and posted as a system timeline event (\"Triage changed\").")
+                                                                     "outside detection_and_analysis, and when a phase change moves a false "
+                                                                     "or benign positive out of detection_and_analysis, because such an "
+                                                                     "incident can then be closed without Gate 2; missing or shorter is 422 "
+                                                                     "code triage_reason_required. When given with a triage change it is "
+                                                                     "audited and posted as a system timeline event (\"Triage changed\"); "
+                                                                     "with such a phase change, as \"Triage set\".")
+    dark_operation:   Optional[bool]             = Field(default=None,
+                                                         description="Not settable here: sending it (any value) is 422 code "
+                                                                     "use_dark_operation_endpoint. Toggle Dark Operation with "
+                                                                     "PATCH /api/incidents/{id}/oob/dark-operation {\"enabled\": bool}, "
+                                                                     "which audits the change.")
 
 
 class IncidentOut(BaseModel):
@@ -374,7 +390,15 @@ class IncidentReopen(BaseModel):
     phase:  Optional[ReopenPhase] = Field(default=None,
                                           description="Phase to re-open into: detection_and_analysis, "
                                                       "containment_eradication_recovery or post_incident; "
-                                                      "missing is 422 code phase_required.")
+                                                      "missing is 422 code phase_required. Re-opening into "
+                                                      "post_incident an incident closed in another phase runs "
+                                                      "Gate 1 (409 gate_unmet when unmet).")
+    override_gate: bool = Field(default=False,
+                                description="Re-open into post_incident although Gate 1 is unmet; the reason "
+                                            "doubles as the override justification. Writes an "
+                                            "incident_gate_override audit row and a system timeline event. "
+                                            "Incident lead only (admin, or an analyst assigned as Incident "
+                                            "Commander or Deputy): true from anyone else is 403 not_incident_lead.")
 
     class Config:
         json_schema_extra = {"required": ["reason", "phase"]}
@@ -796,8 +820,13 @@ class EvidenceOut(BaseModel):
     dispose_witness_id:   Optional[UUID] = None             # GS-10 (two-person disposal)
     final_hash_at_disposition: Optional[str] = None
     legal_hold:           bool = False
+    # G5 (R09) — the current hold (all null when not held). Set / release: PUT …/legal-hold; the
+    # history is in the custody log (evidence_legal_hold_set / evidence_legal_hold_released).
+    legal_hold_since:     Optional[datetime] = None
+    legal_hold_by_id:     Optional[UUID] = None
+    legal_hold_reason:    Optional[str] = None
 
-    # Wizard A — acquisition (ISO/IEC 27037 §9.2 + GDPR Art. 5.1(c))
+    # Wizard A — acquisition (ISO/IEC 27037 §5.4.4 + GDPR Art. 5.1(c))
     lawful_basis:              Optional[str] = None
     lawful_basis_note:         Optional[str] = None
     acquisition_tool:          Optional[str] = None
@@ -822,6 +851,9 @@ class EvidenceOut(BaseModel):
     acquisition_scope:         Optional[str]  = None
     logical_acquisition_rationale: Optional[str] = None
     system_time_offset:        Optional[str]  = None
+    # G4 (R35) — device clock minus true UTC, in seconds (positive = the device clock ran ahead);
+    # null = not recorded as a number. Imports from the exhibit subtract it from the device's times.
+    system_time_offset_seconds: Optional[int] = None
     screen_state:              Optional[str]  = None
     changes_made:              Optional[str]  = None
     device_details:            Optional[dict] = None
@@ -852,6 +884,17 @@ class EvidenceOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# G4 (R35) — the structured device-clock offset. Bound: 100 years either way (a clock reset to 1970
+# is about -56 years); the database CHECK uses the same bound.
+TIME_OFFSET_MAX_SECONDS = 3_155_760_000
+TIME_OFFSET_DESCRIPTION = (
+    "Device clock minus true UTC, in whole seconds, after allowing for the device's timezone: "
+    "+120 = the device clock was 2 minutes ahead, -30 = 30 s behind. Optional; the free-text "
+    "system_time_offset is kept as it is and never parsed. When set, imports from this exhibit "
+    "(Logs & triage from-evidence, Defender from-evidence, an upload or collection linked to it) "
+    "subtract it from the device's times and keep the time as recorded.")
 
 
 # ── Wizard A: acquisition payload (additive to PhysicalEvidenceCreate /
@@ -888,6 +931,9 @@ class AcquisitionMetadata(BaseModel):
     acquisition_scope:         Optional[AcquisitionScope] = None
     logical_acquisition_rationale: Optional[str] = Field(default=None, max_length=4096)
     system_time_offset:        Optional[str]  = Field(default=None, max_length=128)
+    system_time_offset_seconds: Optional[int] = Field(
+        default=None, ge=-TIME_OFFSET_MAX_SECONDS, le=TIME_OFFSET_MAX_SECONDS,
+        description=TIME_OFFSET_DESCRIPTION)
     screen_state:              Optional[str]  = Field(default=None, max_length=4096)
     changes_made:              Optional[str]  = Field(default=None, max_length=4096)
     device_details:            Optional[dict] = None
@@ -964,6 +1010,9 @@ class PhysicalEvidenceCreate(BaseModel):
     acquisition_scope:         Optional[AcquisitionScope] = None
     logical_acquisition_rationale: Optional[str] = Field(default=None, max_length=4096)
     system_time_offset:        Optional[str] = Field(default=None, max_length=128)
+    system_time_offset_seconds: Optional[int] = Field(
+        default=None, ge=-TIME_OFFSET_MAX_SECONDS, le=TIME_OFFSET_MAX_SECONDS,
+        description=TIME_OFFSET_DESCRIPTION)
     screen_state:              Optional[str] = Field(default=None, max_length=4096)
     changes_made:              Optional[str] = Field(default=None, max_length=4096)
     device_details:            Optional[dict] = None
@@ -982,14 +1031,92 @@ class EvidenceUpdate(BaseModel):
     tlp:               Optional[Tlp] = None
     physical_location: Optional[str] = Field(default=None, max_length=256)
     condition:         Optional[str] = Field(default=None, max_length=4096)
-    photos:            Optional[list[PhotoRef]] = None
-    legal_hold:        Optional[bool] = None
-    collected_as_role: Optional[CollectorRole] = None   # GS-12 (DEFR/DES)
+    photos:            Optional[list[PhotoRef]] = Field(
+        default=None, description="Replaces the photo list. Not on a sealed item: 409 code sealed_field_immutable "
+                                  "(add a photo with POST …/photos instead).")
+    legal_hold:        Optional[bool] = Field(
+        default=None, description="Not settable here: sending it (any value) is 422 code use_legal_hold_endpoint. "
+                                  "Set or release a legal hold with PUT …/evidence/{id}/legal-hold "
+                                  "{\"legal_hold\": bool, \"reason\": …}, which is audited.")
+    collected_as_role: Optional[CollectorRole] = Field(
+        default=None, description="GS-12 (DEFR/DES). A fact of the collection: not on a sealed item (409 code "
+                                  "sealed_field_immutable).")
+    # G4 (R35) — set or correct the structured clock offset; an explicit null clears it. Audited
+    # {from, to} (plus evidence_amend_after_seal on a sealed item). Imports already made keep the
+    # offset they were parsed with: re-import from the exhibit to apply a new value.
+    system_time_offset_seconds: Optional[int] = Field(
+        default=None, ge=-TIME_OFFSET_MAX_SECONDS, le=TIME_OFFSET_MAX_SECONDS,
+        description=TIME_OFFSET_DESCRIPTION + " Send null to clear it.")
+
+
+# G-fix B (L12): what each code of the acquisition-record enums means, in the OpenAPI field descriptions
+# (the values themselves come from the Literal types).
+_LAWFUL_BASIS_DOC = ("Lawful basis for the acquisition: ir = incident response (legitimate interest), consent = "
+                     "the data subject authorised it, warrant = judicial authorisation, court_order, eio = European "
+                     "Investigation Order (Dir. 2014/41/EU), mla = mutual legal assistance (Budapest Convention "
+                     "Art. 31), lia = another legitimate-interest assessment, other = justify in lawful_basis_note")
+_SYSTEM_STATE_DOC = ("State of the system when acquired: powered_off (forensic image), live (justify in "
+                     "live_justification), live_critical (live, could not be powered off; justify), unknown")
+_DEVICE_TYPES_DOC = ("ISO/IEC 27037 §7 device types (a list): computer, peripheral, storage (media), mobile, "
+                     "network (device), cctv (CCTV / video surveillance)")
+_HANDLING_MODE_DOC = "ISO/IEC 27037 §7 handling: collect (seize the device) or acquire (copy the data)"
+_ACQUISITION_SCOPE_DOC = ("full_image (a complete image) or logical (selected data; give "
+                          "logical_acquisition_rationale)")
+_COLLECTOR_ROLE_DOC = ("Who collected it (GS-12): defr = digital evidence first responder (ISO/IEC 27037 §3.7), "
+                       "des = digital evidence specialist (§3.8)")
+_TARGET_HASH_SCOPE_DOC = ("What acquisition_hash_target is the hash of: uploaded_file (the default; compared with "
+                          "the stored file, a mismatch is 422 hash_mismatch) or container_media (an E01 / AFF4 "
+                          "media hash; recorded, advisory)")
+
+
+class EvidenceAcquisitionRecord(BaseModel):
+    """G3 — complete the acquisition record of an UNSEALED item (e.g. a draft exhibit registered by an
+    Email / PCAP / Browser history upload, or a Quick add) so it can be sealed. Only the fields sent
+    change (an explicit null clears one); the stored file and its hashes never change. Same rules as
+    the collect routes: hashes are MD5 / SHA-1 / SHA-256 hex (422 invalid_hash_format), a target hash
+    with target_hash_scope=uploaded_file is compared with the stored file's hash of the same
+    algorithm (422 hash_mismatch, nothing changed), acquired_at not in the future, the witness an
+    active user who can see the incident."""
+    lawful_basis:              Optional[LawfulBasis] = Field(default=None, description=_LAWFUL_BASIS_DOC)
+    lawful_basis_note:         Optional[str] = Field(default=None, max_length=4096)
+    acquisition_tool:          Optional[str] = Field(default=None, max_length=128)
+    acquisition_tool_version:  Optional[str] = Field(default=None, max_length=64)
+    acquisition_tool_sha256:   Optional[str] = Field(default=None, max_length=64)
+    acquisition_params:        Optional[str] = Field(default=None, max_length=4096)
+    acquisition_hash_source:   Optional[str] = Field(default=None, max_length=64)
+    acquisition_hash_target:   Optional[str] = Field(default=None, max_length=64)
+    target_hash_scope:         Literal["uploaded_file", "container_media"] = Field(
+        default="uploaded_file", description=_TARGET_HASH_SCOPE_DOC)
+    acquired_at:               Optional[datetime] = None
+    write_blocker_used:        Optional[bool] = None
+    write_blocker_serial:      Optional[str]  = Field(default=None, max_length=128)
+    system_state:              Optional[SystemState] = Field(default=None, description=_SYSTEM_STATE_DOC)
+    live_justification:        Optional[str]  = Field(default=None, max_length=4096)
+    network_isolated:          Optional[bool] = None
+    witness_user_id:           Optional[UUID] = None
+    witness_name:              Optional[str]  = Field(default=None, max_length=128)
+    collected_location:        Optional[str]  = Field(default=None, max_length=256)
+    collected_as_role:         Optional[CollectorRole] = Field(default=None, description=_COLLECTOR_ROLE_DOC)
+    device_types:              Optional[list[DeviceType]] = Field(default=None, description=_DEVICE_TYPES_DOC)
+    handling_mode:             Optional[HandlingMode] = Field(default=None, description=_HANDLING_MODE_DOC)
+    decision_factors:          Optional[dict] = None
+    acquisition_scope:         Optional[AcquisitionScope] = Field(default=None, description=_ACQUISITION_SCOPE_DOC)
+    logical_acquisition_rationale: Optional[str] = Field(default=None, max_length=4096)
+    system_time_offset:        Optional[str]  = Field(default=None, max_length=128)
+    system_time_offset_seconds: Optional[int] = Field(
+        default=None, ge=-TIME_OFFSET_MAX_SECONDS, le=TIME_OFFSET_MAX_SECONDS,
+        description=TIME_OFFSET_DESCRIPTION)
+    screen_state:              Optional[str]  = Field(default=None, max_length=4096)
+    changes_made:              Optional[str]  = Field(default=None, max_length=4096)
+    device_details:            Optional[dict] = None
+    acquisition_tool_validated:       Optional[bool] = None
+    acquisition_tool_validation_ref:  Optional[str]  = Field(default=None, max_length=256)
+    acquisition_tool_validation_date: Optional[str]  = Field(default=None, max_length=32)
 
 
 class ExternalCustodian(BaseModel):
     """A real-world custodian without a Fenrir account — courier, external counsel,
-    LE officer pre-formal-handoff, vendor IR team, etc. Captured for ISO 27037 §9.3
+    LE officer pre-formal-handoff, vendor IR team, etc. Captured for ISO 27037 §6.1
     chain-accountability coverage."""
     name:         str = Field(min_length=1, max_length=256)
     organisation: Optional[str] = Field(default=None, max_length=256)
@@ -1022,7 +1149,7 @@ class TransferRequest(BaseModel):
 
 
 class TransferAcceptRequest(BaseModel):
-    """C4 — the recipient confirms receipt after inspecting the item (ISO/IEC 27037 §9.3;
+    """C4 — the recipient confirms receipt after inspecting the item (ISO/IEC 27037 §6.1, §6.9.4;
     SWGDE §6.2/§6.3)."""
     condition_on_receipt: str = Field(min_length=1, max_length=4096)   # what the recipient found
     seals_intact:         bool                                         # tamper-evident seals / packaging intact
@@ -1033,9 +1160,30 @@ class TransferDeclineRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=2048)
 
 
+_EXAM_TARGET_DOC = (
+    "G5 (R08): a digital exhibit is examined on a working copy — `working_copy_id` names a verified one "
+    "(a complete analyst download whose hash matches the master, a lab copy recorded as verified, or an "
+    "export copy) — or, explicitly, in place: `examined_in_place: true` with an `in_place_reason` (audited). "
+    "Exactly one of the two (422 working_copy_required / working_copy_or_in_place / in_place_reason_required; "
+    "an unknown copy is 404 working_copy_not_found, an unverified or altered one 409 working_copy_not_verified). "
+    "A physical item is exempt (it has no working copies: working_copy_id is 422 working_copy_not_applicable).")
+
+
 class ExamineRequest(BaseModel):
+    __doc__ = "Record an examination action. " + _EXAM_TARGET_DOC
     tool:  str = Field(min_length=1, max_length=256)
     notes: Optional[str] = Field(default=None, max_length=4096)
+    working_copy_id:   Optional[UUID] = None
+    examined_in_place: bool = False
+    in_place_reason:   Optional[str] = Field(default=None, max_length=2048)
+
+
+class LegalHoldChange(BaseModel):
+    """G5 (R09/R75) — set (`legal_hold: true`) or release (`false`) a legal hold, with a reason (audited).
+    Setting: any analyst who can see the incident. Releasing: the incident's lead (IC / Deputy IC) or an
+    admin. While held, the item can't be destroyed; returning or archiving it needs a second approver."""
+    legal_hold: bool
+    reason:     str = Field(min_length=1, max_length=2048)
 
 
 class DisposeRequest(BaseModel):
@@ -1057,25 +1205,80 @@ class EvidenceList(BaseModel):
 
 
 # ── Working-copy ledger (ISO/IEC 27037 §7.1.3.1.1, Slice C) ──────────────────
+WorkingCopyKind   = Literal["download", "lab_copy", "export", "legacy_record"]
+WorkingCopyStatus = Literal["issued", "downloading", "complete", "aborted", "failed_integrity", "expired",
+                            "verified", "mismatch", "exported", "legacy_unverified"]
+
+
 class EvidenceCopyOut(BaseModel):
+    """One working copy (ISO/IEC 27037 §7.1.3.1.1). G5: `kind` = download (an analyst download, hashed by
+    the server over the bytes it sent) | lab_copy (made outside FENRIR; hashes as the copying tool
+    reported them) | export (an export bundle carried the bytes) | legacy_record (recorded before G5: its
+    sha256 is a re-hash of the master, not of the copy, so it never counts as verified). `status`:
+    download issued → downloading → complete | aborted | failed_integrity, or expired (the link was never
+    used); lab_copy verified | mismatch; export exported; legacy_record legacy_unverified.
+    `verified_against_master` = the copy's hash equals the master's recorded hash.
+    `usable_for_examination` = it can be named as the working copy of an examination."""
     id:                       UUID
     evidence_id:              UUID
     role:                     str
+    kind:                     WorkingCopyKind = "legacy_record"
+    copy_identifier:          Optional[str] = None
+    status:                   WorkingCopyStatus = "legacy_unverified"
     sha256:                   Optional[str] = None
+    sha1:                     Optional[str] = None
+    md5:                      Optional[str] = None
+    hash_source:              Literal["server_stream", "tool_reported", "master"] = "master"
     verified_against_master:  bool = False
+    usable_for_examination:   bool = False
     created_by_id:            Optional[UUID] = None
     created_by_qualifications: Optional[str] = None
     created_at:               datetime
+    issued_to_id:             Optional[UUID] = None   # download: the only user the link works for
+    token_expires_at:         Optional[datetime] = None
+    download_started_at:      Optional[datetime] = None
+    completed_at:             Optional[datetime] = None
+    bytes_sent:               Optional[int] = None
+    end_reason:               Optional[str] = None
     purpose:                  Optional[str] = None
+    destination_note:         Optional[str] = None
+    copy_tool:                Optional[str] = None
     export_id:                Optional[UUID] = None
     discarded_at:             Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
+    altered_at:               Optional[datetime] = None
 
 
 class WorkingCopyCreate(BaseModel):
-    purpose: str = Field(min_length=1, max_length=2048)
+    """G5 (R08) — record a copy made OUTSIDE FENRIR (e.g. imaged to a lab workstation) with the hash(es)
+    the copying tool reported for THAT copy: at least one of copy_sha256 / copy_sha1 / copy_md5 (422
+    copy_hash_required; hex of the right length, else 422 invalid_hash_format). Each is compared with the
+    master's recorded hash of the same algorithm: all equal → status verified; any differs → mismatch
+    (flagged, audited, never counted as verified). The master is not re-hashed (use Verify for that)."""
+    purpose:          str = Field(min_length=1, max_length=2048)
+    copy_sha256:      Optional[str] = Field(default=None, max_length=64)
+    copy_sha1:        Optional[str] = Field(default=None, max_length=40)
+    copy_md5:         Optional[str] = Field(default=None, max_length=32)
+    copy_tool:        Optional[str] = Field(default=None, max_length=256,
+                                            description="Tool + version that made the copy, e.g. FTK Imager 4.7.1")
+    destination_note: Optional[str] = Field(default=None, max_length=1024,
+                                            description="Where the copy is, e.g. lab WS-04 D:\\cases\\…")
+
+
+class WorkingCopyIssue(BaseModel):
+    """G5 (R08) — issue a working copy to download (you, the caller, only)."""
+    purpose:          str = Field(min_length=1, max_length=2048)
+    destination_note: Optional[str] = Field(default=None, max_length=1024,
+                                            description="Where the copy will go, e.g. analysis VM AN-07")
+
+
+class WorkingCopyIssued(BaseModel):
+    """The issued copy and its one-time link. `download_url` works once, for you only (your session or
+    API token must also be sent), until `token_expires_at`; it is not stored in clear and is never shown
+    again. The response body is the copy's bytes; FENRIR hashes exactly what it sends and records it on
+    the copy (GET …/working-copies to read it)."""
+    copy:             EvidenceCopyOut
+    download_url:     str
+    token_expires_at: datetime
 
 
 class EvidenceCopyList(BaseModel):
@@ -1122,6 +1325,45 @@ class ValidatedToolList(BaseModel):
     items: list[ValidatedToolOut]
 
 
+# G3 (R02) — how an Email / PCAP / Browser history analysis got its exhibit:
+#   registered     the upload was registered as a new unsealed draft exhibit, then analysed
+#   sha256_match   the upload's SHA-256 equals exactly one active exhibit of the incident: no new exhibit
+#   from_evidence  a registered exhibit was picked, decrypted and re-hashed, then analysed
+ExhibitLink = Literal["registered", "sha256_match", "from_evidence"]
+
+
+
+class PcapAnalysisOut(BaseModel):
+    """L17 (G-fix B): a PCAP analysis as POST …/pcap, POST …/pcap/from-evidence/{evidence_id} and
+    GET …/pcap/{result_id} return it — the analysis worker's result (its own keys: capture,
+    conversations, dns_queries, http_requests, tls_info, findings, iocs, timeline, analyser, …, passed
+    through as stored) plus the fields below. Run-record fields are null on an analysis made before
+    G3."""
+    model_config = ConfigDict(extra="allow")
+    result_id:           str = Field(description="The analysis id (use it for promote / import-iocs / delete)")
+    filename:            str
+    saved_at:            str = Field(description="When the analysis was stored (ISO 8601, UTC offset)")
+    evidence_id:         Optional[str] = Field(default=None, description="The exhibit analysed")
+    evidence_identifier: Optional[str] = None
+    evidence_sealed:     Optional[bool] = Field(default=None, description="false = still an unsealed draft")
+    input_sha256:        Optional[str] = Field(default=None, description="SHA-256 of the bytes analysed")
+    analyser_name:       Optional[str] = None
+    analyser_version:    Optional[str] = None
+    exhibit_link:        Optional[ExhibitLink] = Field(
+        default=None, description="How the run got its exhibit: registered (a new draft exhibit made by the "
+                                  "upload), sha256_match (the upload matched an existing exhibit), from_evidence "
+                                  "(a registered exhibit was picked). From-evidence with `upload_id` (a chunked "
+                                  "upload of this caller that registered / matched this exhibit) records the "
+                                  "upload's link (R93); the custody log still says the master was re-verified.")
+    clock_offset_seconds:        Optional[int] = None
+    clock_offset_status:         Optional[str] = None
+    exhibit_time_offset:         Optional[str] = None
+    exhibit_time_offset_seconds: Optional[int] = None
+    timeline_candidates: Optional[list[dict]] = Field(
+        default=None, description="Each with idx, event_time, time_basis, kind, event_type, description, "
+                                  "hostname, source, raw_log, recorded_time and promoted; null before G3")
+
+
 # ─── Email analyzer (U8.1) ────────────────────────────────────────────────────
 
 class HopImportStatus(BaseModel):
@@ -1155,6 +1397,16 @@ class EmailAnalysisOut(BaseModel):
     created_by:   Optional[str] = None
     created_at:   datetime
     hop_import:   Optional[HopImportStatus] = None   # null in the history list
+    # G3 (R02) run record: the exhibit analysed (evidence_id; its identifier and whether it is still an
+    # unsealed draft resolved on read), the SHA-256 of the bytes analysed, the analyser + version and
+    # how the exhibit was linked. All null on analyses made before G3 (no quarantine copy is made now:
+    # source_artifact_id stays null on new analyses).
+    input_sha256:       Optional[str] = Field(default=None, description="SHA-256 of the exhibit bytes analysed")
+    analyser_name:      Optional[str] = None
+    analyser_version:   Optional[str] = None
+    exhibit_link:       Optional[ExhibitLink] = None
+    evidence_identifier: Optional[str] = None
+    evidence_sealed:    Optional[bool] = None
 
     class Config:
         from_attributes = True
@@ -1210,6 +1462,22 @@ class BrowserHistoryUploadOut(BaseModel):
     truncated:          bool
     uploaded_by:        Optional[str] = None
     uploaded_at:        datetime
+    # G3 (R02) run record: evidence_id is the exhibit the history file IS (sha256_hash = the bytes
+    # parsed); Firefox's formhistory.sqlite is its own exhibit; the parser + version; how the exhibit
+    # was linked; the exhibit's clock offset applied to times promoted to the Timeline (snapshot) and
+    # how it compares with the exhibit now (ClockOffsetStatus). Identifiers / draft state resolved on
+    # read. Run-record fields are null on uploads made before G3.
+    form_history_evidence_id: Optional[UUID] = None
+    parser_name:        Optional[str] = None
+    parser_version:     Optional[str] = None
+    exhibit_link:       Optional[ExhibitLink] = None
+    evidence_identifier: Optional[str] = None
+    evidence_sealed:    Optional[bool] = None
+    form_history_evidence_identifier: Optional[str] = None
+    clock_offset_seconds: Optional[int] = None
+    clock_offset_status:  Optional["ClockOffsetStatus"] = None
+    exhibit_time_offset:  Optional[str] = None
+    exhibit_time_offset_seconds: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -1217,6 +1485,173 @@ class BrowserHistoryUploadOut(BaseModel):
 
 class BrowserHistoryUploadList(BaseModel):
     items: list[BrowserHistoryUploadOut]
+
+
+class BrowserHistoryFromEvidence(BaseModel):
+    """G3 — parse a registered exhibit as browser history (no re-upload)."""
+    browser: BrowserName
+    form_history_evidence_id: Optional[UUID] = Field(
+        default=None, description="Firefox only: a second exhibit, formhistory.sqlite, whose search-bar "
+                                  "terms are merged into this upload's search terms")
+
+
+# ── G1 stage 3b (R80): chunked upload sessions (evidence/uploads.py) ─────────────────────────────
+UploadPurpose = Literal["evidence", "email", "pcap", "webhistory"]
+UploadExhibitLink = Literal["collected", "registered", "sha256_match"]
+
+
+class UploadSessionCreate(BaseModel):
+    """Open a chunked upload session for one file. The file then goes up as raw
+    `application/octet-stream` chunks (PUT …/chunks/{index}); each chunk is hashed and encrypted
+    as it arrives, so the plaintext never reaches the server's disk, and nothing is stored until
+    `complete` succeeds."""
+    model_config = ConfigDict(extra="forbid")
+    purpose:  UploadPurpose = Field(description="What `complete` makes of the file: evidence = a digital "
+                                    "exhibit (as POST …/evidence/digital); email / pcap / webhistory = a draft "
+                                    "exhibit for that analyser (as its G3 upload: register, or link the one "
+                                    "active exhibit with the same SHA-256), analysed afterwards through its "
+                                    "…/from-evidence/{evidence_id} route")
+    filename: str = Field(min_length=1, max_length=255, description="The original file name (basename kept)")
+    size:     int = Field(ge=0, description="The exact size in bytes. At most the purpose's cap: evidence 10 GiB "
+                          "by default (the server's EVIDENCE_MAX_UPLOAD_BYTES), email 25 MiB, pcap 500 MiB, "
+                          "webhistory 500 MiB; email / pcap / webhistory files cannot be empty. The evidence "
+                          "volume must have room for it (507 insufficient_storage)")
+    mime_type: Optional[str] = Field(default=None, max_length=128,
+                                     description="purpose=evidence only: recorded as the exhibit's mime_type")
+    expected_hash: Optional[str] = Field(
+        default=None, max_length=64,
+        description="Optional: the MD5, SHA-1 or SHA-256 (hex; the length decides) of the whole file as the "
+                    "client sees it. `complete` compares it with the server's hash of the bytes received, "
+                    "before anything is stored: a mismatch is 422 upload_hash_mismatch and nothing is stored")
+    metadata: Optional[dict] = Field(
+        default=None,
+        description="Optional (G-fix B, L12): a preview of the body `complete` will take, without `purpose`. It "
+                    "is validated now with the same schema as `complete` (UploadCompleteEvidence / "
+                    "UploadCompleteEmail / UploadCompletePcap / UploadCompleteWebHistory), so a wrong field or "
+                    "enum value is a 422 BEFORE any byte is sent (the standard request-validation shape, "
+                    "loc [\"body\", \"metadata\", …]); it is not stored, and `complete` validates its own "
+                    "body again (authoritative). Enum values: tlp red | amber_strict | amber | green | clear; "
+                    "lawful_basis ir | consent | warrant | court_order | eio | mla | lia | other; system_state "
+                    "powered_off | live | live_critical | unknown; device_types [computer | peripheral | storage | "
+                    "mobile | network | cctv]; handling_mode collect | acquire; acquisition_scope full_image | "
+                    "logical; target_hash_scope uploaded_file | container_media; collected_as_role defr | des; "
+                    "browser (webhistory) chrome | edge | brave | firefox. Only the schema is checked here: "
+                    "the witness, entity, identifier and hash checks run at `complete`.")
+
+
+class UploadSessionOut(BaseModel):
+    """An open upload session (in this backend process only: a restart ends it, then 404
+    upload_not_found — start again)."""
+    upload_id:      UUID
+    incident_id:    UUID
+    purpose:        UploadPurpose
+    filename:       str
+    size:           int
+    chunk_size:     int = Field(description="Every chunk is exactly this long except the last, which is the "
+                                "remainder (size - index * chunk_size)")
+    chunk_count:    int
+    next_index:     int = Field(description="The only index the next PUT …/chunks/{index} accepts; "
+                                "= chunk_count when every byte has arrived")
+    received_bytes: int
+    created_at:     datetime
+    expires_at:     datetime = Field(description="The session is aborted (its staged file deleted) when no "
+                                     "chunk arrives before this time; every accepted chunk extends it")
+
+
+class UploadSessionList(BaseModel):
+    """M7 (G-fix B): the caller's own open upload sessions (at most 3, so one page: next_cursor is
+    always null)."""
+    items:       list[UploadSessionOut]
+    next_cursor: Optional[str] = None
+
+
+class UploadCompleteEvidence(EvidenceAcquisitionRecord):
+    """purpose=evidence: the same fields POST …/evidence/digital takes (as JSON; device_types a list,
+    decision_factors / device_details objects). The C3 rules are the same: a target hash with
+    target_hash_scope=uploaded_file is compared with the server's hash of the uploaded bytes (same
+    algorithm) before anything is stored — 422 hash_mismatch, audited evidence_collect_rejected,
+    nothing stored. A null field is simply not recorded."""
+    model_config = ConfigDict(extra="forbid")
+    purpose:     Literal["evidence"]
+    name:        str = Field(min_length=1, max_length=256)
+    identifier:  str = Field(min_length=1, max_length=128)
+    description: Optional[str] = Field(default=None, max_length=4096)
+    tlp:         Tlp = "amber"
+    entity_id:   Optional[UUID] = None
+
+
+class UploadCompleteEmail(BaseModel):
+    """purpose=email: as POST …/email/analyze with a file."""
+    model_config = ConfigDict(extra="forbid")
+    purpose:     Literal["email"]
+    acquired_at: Optional[datetime] = Field(default=None, description="When the message was acquired (UTC; "
+                                            "optional, unknown if omitted). Not in the future.")
+
+
+class UploadCompletePcap(BaseModel):
+    """purpose=pcap: as POST …/pcap. Anything but pcap / pcapng is 422 not_a_capture (nothing stored)."""
+    model_config = ConfigDict(extra="forbid")
+    purpose:     Literal["pcap"]
+    acquired_at: Optional[datetime] = Field(default=None, description="When the capture was acquired (UTC; "
+                                            "optional, unknown if omitted). Not in the future.")
+
+
+class UploadCompleteWebHistory(BaseModel):
+    """purpose=webhistory: as POST …/webhistory. A file that is not SQLite is 422 not_sqlite (nothing
+    stored). Firefox formhistory.sqlite: upload it as its own session with `companion_of` = the
+    places.sqlite exhibit, then parse both with …/webhistory/from-evidence/{id}
+    {browser, form_history_evidence_id}."""
+    model_config = ConfigDict(extra="forbid")
+    purpose:      Literal["webhistory"]
+    browser:      BrowserName
+    acquired_at:  Optional[datetime] = Field(default=None, description="When the file was acquired (UTC; "
+                                             "optional, unknown if omitted). Not in the future.")
+    companion_of: Optional[UUID] = Field(
+        default=None, description="Firefox only: this file is formhistory.sqlite, the companion of this "
+                                  "places.sqlite exhibit of the incident (recorded in its evidence_collect audit)")
+
+
+UploadComplete = Annotated[Union[UploadCompleteEvidence, UploadCompleteEmail, UploadCompletePcap,
+                                 UploadCompleteWebHistory], Field(discriminator="purpose")]
+
+
+class UploadCompleteOut(BaseModel):
+    """The exhibit the upload became (201: a new one) or was linked to (200: sha256_match, the
+    upload's own copy was discarded)."""
+    upload_id:     UUID
+    purpose:       UploadPurpose
+    exhibit_link:  UploadExhibitLink = Field(description="collected = a new exhibit (purpose evidence); "
+                                             "registered = a new unsealed draft exhibit; sha256_match = the one "
+                                             "active exhibit with the same SHA-256 (nothing new stored)")
+    evidence_id:   UUID
+    evidence:      EvidenceOut
+
+
+class BrowserHistoryPromote(BaseModel):
+    """G3 — put visits / downloads on the Timeline. The server copies each record from its upload
+    (the caller sends only ids); a record's upload must carry a run record (G3)."""
+    visit_ids:    list[UUID] = Field(default_factory=list, max_length=5_000)
+    download_ids: list[UUID] = Field(default_factory=list, max_length=5_000)
+    ir_phase:     Optional[Phase] = Field(default=None, description="IR phase for the timeline events created")
+
+    @model_validator(mode="after")
+    def _one_record(self):
+        if not self.visit_ids and not self.download_ids:
+            raise ValueError("send at least one visit_id or download_id")
+        return self
+
+
+class BrowserHistoryPromoteResult(BaseModel):
+    created:               int
+    created_ids:           list[UUID] = Field(default_factory=list)
+    # A download without a start time is never placed on the timeline (never at "now").
+    skipped_untimestamped: list[UUID] = Field(default_factory=list)
+    # Already on the timeline from its upload (re-promoting is a no-op).
+    already_promoted:      list[UUID] = Field(default_factory=list)
+    # Not a visit / download of this incident.
+    not_found:             list[UUID] = Field(default_factory=list)
+    # From an upload made before run records (G3): upload it again, or parse its exhibit.
+    reparse_required:      list[UUID] = Field(default_factory=list)
 
 
 class BrowserHistoryVisitOut(BaseModel):
@@ -1229,6 +1664,8 @@ class BrowserHistoryVisitOut(BaseModel):
     visit_count: Optional[int] = None
     transition:  Optional[str] = None
     browser:     Optional[str] = None   # joined in from the parent upload, for a mixed-upload view
+    # G3 — the Timeline event promoted from this visit, if any (read-only).
+    timeline_event_id: Optional[UUID] = None
 
     class Config:
         from_attributes = True
@@ -1269,6 +1706,8 @@ class BrowserHistoryDownloadOut(BaseModel):
     danger:         Optional[str] = None
     mime_type:      Optional[str] = None
     browser:        Optional[str] = None
+    # G3 — the Timeline event promoted from this download, if any (read-only).
+    timeline_event_id: Optional[UUID] = None
 
     class Config:
         from_attributes = True
@@ -1309,6 +1748,12 @@ class ExportCreate(BaseModel):
     recipient:       str         = Field(min_length=1, max_length=256)
     purpose:         str         = Field(min_length=1, max_length=4096)
     acknowledgments: Optional[str] = Field(default=None, max_length=4096)
+    # M11 (owner, 2026-10-04): unsealed drafts are left out (listed "excluded: unsealed draft") unless this is
+    # set; the choice is audited.
+    include_unsealed_drafts: bool = Field(
+        default=False, description="Include items whose chain of custody is not sealed (drafts). Default: they "
+                                   "are listed in the manifest as \"excluded: unsealed draft\" with no records "
+                                   "or bytes. Audited.")
 
 
 class ExportOut(BaseModel):
@@ -1462,6 +1907,10 @@ class PlaybookTaskCreate(BaseModel):
     due_at:      Optional[datetime] = None
 
 
+_ASSIGNEE_DOC = ("An active user who can see the incident (404 user_not_found, 422 assignee_no_access). "
+                 "Null unassigns; omit to keep.")
+
+
 class PlaybookTaskUpdate(BaseModel):
     title:       Optional[str] = Field(default=None, min_length=1, max_length=512)
     description: Optional[str] = Field(default=None, max_length=4096)
@@ -1469,7 +1918,7 @@ class PlaybookTaskUpdate(BaseModel):
     order_index: Optional[int] = None
     status:      Optional[TaskStatus] = None
     skip_reason: Optional[str] = Field(default=None, max_length=2048)
-    assignee_id: Optional[UUID] = None
+    assignee_id: Optional[UUID] = Field(default=None, description=_ASSIGNEE_DOC)
     due_at:      Optional[datetime] = None
 
 
@@ -1805,7 +2254,7 @@ class RespondActionUpdate(BaseModel):
     title:       Optional[str] = Field(default=None, min_length=1, max_length=512)
     description: Optional[str] = Field(default=None, max_length=4096)
     status:      Optional[RespondActionStatus] = None
-    assignee_id: Optional[UUID] = None
+    assignee_id: Optional[UUID] = Field(default=None, description=_ASSIGNEE_DOC)
     notes:       Optional[str] = Field(default=None, max_length=4096)
     details:     Optional[dict] = None
     order_index: Optional[int] = None
@@ -1852,7 +2301,7 @@ class DecisionUpdate(BaseModel):
     summary:       Optional[str] = Field(default=None, min_length=1, max_length=4096)
     rationale:     Optional[str] = Field(default=None, max_length=4096)
     outcome:       Optional[DecisionOutcome] = None
-    decided_by_id: Optional[UUID] = None
+    decided_by_id: Optional[UUID] = Field(default=None, description=_ASSIGNEE_DOC.replace("unassigns", "clears the decider"))
     decided_at:    Optional[datetime] = None
     tags:          Optional[list[str]] = None
 
@@ -1869,6 +2318,16 @@ TimelineOrigin = Literal["manual", "forensic_import", "system"]
 # states UTC/an offset), assumed_tz (naive, read in the import's source_tz), inferred_year (BSD
 # syslog, year from the exhibit's acquisition time). 'missing' = no time: never promoted.
 TimeBasis = Literal["explicit", "assumed_tz", "inferred_year", "missing"]
+# G4 (R35) — an import of an exhibit vs the exhibit's clock offset:
+#   applied    the exhibit's structured offset was applied, and it is still the exhibit's value
+#   changed    the exhibit's structured offset changed after this import (the import keeps the
+#              offset it was parsed with, or none); re-import from the exhibit to apply the new one
+#   text_only  the offset is recorded only as text: NOT applied (it is never parsed)
+#   none       the exhibit records no offset
+#   not_applicable  the analyser's times don't come from the device clock (Defender: Microsoft cloud times,
+#              R78), so no offset is applied whatever the exhibit records
+# null = the import isn't linked to an exhibit.
+ClockOffsetStatus = Literal["applied", "changed", "text_only", "none", "not_applicable"]
 
 
 class TimelineEventOut(BaseModel):
@@ -1889,6 +2348,12 @@ class TimelineEventOut(BaseModel):
     origin:               TimelineOrigin
     is_system:            bool            = False
     system_source:        Optional[str]   = None
+    server_generated:     bool            = Field(
+        default=False,
+        description="Read-only. True for an event the server recorded itself (is_system with a reserved "
+                    "system_source: closure, gate_override, milestone, triage, respond_action, "
+                    "respond_action_revert, decision, legal_deadline). PATCH and DELETE of such an event are "
+                    "409 system_event_immutable.")
     external_safe:        bool            = True
     # C5 provenance. forensic_import_id set = promoted from a Timeline Import run: its facts
     # (event_time, hostname, source, event_type, description, raw_log) are immutable (409
@@ -1897,9 +2362,24 @@ class TimelineEventOut(BaseModel):
     evidence_id:          Optional[UUID] = None
     evidence_identifier:  Optional[str]  = None
     forensic_import_id:   Optional[UUID] = None
+    # G4 — promoted from a Defender PDF import run instead (same immutability rules).
+    defender_import_id:   Optional[UUID] = None
+    # G3 — promoted from a PCAP analysis run (candidate index in import_event_index) or a browser
+    # history upload (the visit / download in source_record_id). Same immutability rules.
+    pcap_analysis_id:          Optional[UUID] = None
+    browser_history_upload_id: Optional[UUID] = None
+    source_record_id:          Optional[UUID] = None
+    # G-fix B (L26) — a mail relay hop imported from an email analysis with a run record. Same rules.
+    email_analysis_id:         Optional[UUID] = None
     import_event_index:   Optional[int]  = None
+    parser_name:          Optional[str]  = None
     parser_version:       Optional[str]  = None
     time_basis:           Optional[TimeBasis] = None
+    # G4 (R35) — the exhibit's clock offset corrected event_time: recorded_event_time is the time
+    # as the device recorded it, event_time = recorded_event_time − clock_offset_seconds. Both
+    # null when no offset was applied.
+    recorded_event_time:  Optional[datetime] = None
+    clock_offset_seconds: Optional[int]  = None
     created_by_id:        Optional[UUID] = None
     created_by_username:  Optional[str]  = None
     created_at:           datetime
@@ -1974,6 +2454,8 @@ DefenderCandidateDestination = Literal["ioc", "entity", "timeline_event"]
 
 
 class DefenderPdfCandidate(BaseModel):
+    # G4 — the candidate's position in the import (what promote takes); set on read.
+    idx:                  Optional[int] = None
     kind:                 str
     suggested_destination: DefenderCandidateDestination
     value:                Optional[str] = None
@@ -1988,6 +2470,11 @@ class DefenderPdfCandidate(BaseModel):
     criticality:          Optional[Criticality] = None
     raw_log:              Optional[str] = None
     low_confidence:       bool = False
+    # G4 — how event_time was worked out: explicit (the PDF states its UTC offset), assumed_tz (no
+    # offset note: read as UTC) or missing. recorded_time = the time as printed (converted to UTC)
+    # when the exhibit's clock offset corrected event_time. Both null on imports made before G4.
+    time_basis:           Optional[TimeBasis] = None
+    recorded_time:        Optional[datetime] = None
 
 
 class DefenderPdfParseResponse(BaseModel):
@@ -1999,11 +2486,23 @@ class DefenderPdfImportSummary(BaseModel):
     id:                    UUID
     filename:              str
     file_size:             int
-    sha256_hash:           str
+    sha256_hash:           str = Field(description="SHA-256 of the PDF that was parsed (the run's input)")
     candidate_count:       int
     low_confidence_count:  int
     uploaded_by:           Optional[str] = None
     uploaded_at:           datetime
+    # G4 (R03) run record: the exhibit the PDF is (from-evidence, or an upload whose SHA-256 equals
+    # exactly one active exhibit), the parser and its version (null on imports made before G4), the
+    # quarantined copy of an uploaded PDF, and the clock offset applied (see ClockOffsetStatus).
+    evidence_id:           Optional[UUID] = None
+    evidence_identifier:   Optional[str]  = None
+    source_artifact_id:    Optional[UUID] = None
+    parser_name:           Optional[str]  = None
+    parser_version:        Optional[str]  = None
+    clock_offset_seconds:  Optional[int]  = None
+    clock_offset_status:   Optional[ClockOffsetStatus] = None
+    exhibit_time_offset:   Optional[str]  = None
+    exhibit_time_offset_seconds: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -2016,6 +2515,31 @@ class DefenderPdfImportDetail(DefenderPdfImportSummary):
 
 class DefenderPdfImportList(BaseModel):
     items: list[DefenderPdfImportSummary]
+
+
+class DefenderPdfPromoteItem(BaseModel):
+    idx:         int = Field(ge=0, description="The candidate's idx in the import")
+    destination: DefenderCandidateDestination
+
+
+class DefenderPdfPromote(BaseModel):
+    """G4 — commit candidates of a stored Defender import; the server copies them."""
+    items:    list[DefenderPdfPromoteItem] = Field(min_length=1, max_length=5_000)
+    ir_phase: Optional[Phase] = Field(default=None, description="IR phase for the timeline events created")
+
+
+class DefenderPdfPromoteResult(BaseModel):
+    created:               int = Field(description="IOCs + entities + timeline events created")
+    created_iocs:          int = 0
+    created_entities:      int = 0
+    created_events:        int = 0
+    created_indices:       list[int] = Field(default_factory=list)
+    # A timeline event needs a time: candidates without one are skipped (never placed at "now").
+    skipped_untimestamped: list[int] = Field(default_factory=list)
+    # A timeline event already promoted from this import at this idx (re-promoting is a no-op).
+    already_promoted:      list[int] = Field(default_factory=list)
+    # The IOC / entity (same type + value) is already on the incident: left as it is.
+    already_exists:        list[int] = Field(default_factory=list)
 
 
 # ─── Post-Incident ────────────────────────────────────────────────────────────
@@ -2168,6 +2692,9 @@ class ParsedEventOut(BaseModel):
     suspicious_reasons:   list[str] = Field(default_factory=list)
     # C5 — how event_time was worked out; None on imports parsed before parser versioning.
     time_basis:           Optional[TimeBasis] = None
+    # G4 (R35) — the time as the source recorded it, when the exhibit's clock offset corrected
+    # event_time (event_time = recorded_time − the import's clock_offset_seconds); else None.
+    recorded_time:        Optional[str] = None
 
 
 class ForensicParseResponse(BaseModel):
@@ -2206,6 +2733,13 @@ class ForensicImportSummary(BaseModel):
     # records / matched lines) were converted. Both NULL on imports made before this was recorded.
     truncated:           Optional[bool] = None
     total_seen:          Optional[int]  = None
+    # G4 (R35) — the exhibit's clock offset applied to this import's times (seconds, device minus
+    # true UTC; null = none applied), how that compares with the exhibit now, and the exhibit's
+    # recorded offset (text and number) for display.
+    clock_offset_seconds: Optional[int] = None
+    clock_offset_status:  Optional[ClockOffsetStatus] = None
+    exhibit_time_offset:  Optional[str] = None
+    exhibit_time_offset_seconds: Optional[int] = None
     class Config: from_attributes = True
 
 
@@ -2245,6 +2779,13 @@ class ForensicImportPromoteResult(BaseModel):
     skipped_untimestamped: list[int] = Field(default_factory=list)
     # Already on the timeline from this import (re-promoting is a no-op).
     already_promoted:      list[int] = Field(default_factory=list)
+
+
+class PcapPromote(BaseModel):
+    """G3 — put timeline candidates of a stored PCAP analysis on the Timeline by `idx`. The server
+    copies them from the run (the caller sends only indices)."""
+    indices:  list[int] = Field(min_length=1, max_length=10_000)
+    ir_phase: Optional[Phase] = None
 
 
 # ─── OSINT enrichment ────────────────────────────────────────────────────────
@@ -2567,6 +3108,12 @@ class ThreatActorOut(BaseModel):
     class Config:
         from_attributes = True
 
+    @field_validator("aliases", "associated_techniques", "typical_targets", mode="before")
+    @classmethod
+    def _null_list(cls, v):
+        """L9: a stored JSON null (an old PATCH with null) reads as an empty list, not a 500."""
+        return [] if v is None else v
+
 
 class ThreatActorCreate(BaseModel):
     name:                  str              = Field(min_length=1, max_length=128)
@@ -2588,6 +3135,15 @@ class ThreatActorUpdate(BaseModel):
                                             "destructive", "ransomware", "unknown"]] = None
     associated_techniques: Optional[list[str]] = None
     typical_targets:       Optional[list[str]] = None
+
+    @field_validator("name", "motivation")
+    @classmethod
+    def _not_null(cls, v):
+        """R70: both columns are NOT NULL — an explicit null is a 422, not a 500 at commit.
+        Leave the field out to keep its value."""
+        if v is None:
+            raise ValueError("may not be null; leave the field out to keep the current value")
+        return v
 
 
 class ThreatActorList(BaseModel):
@@ -2928,6 +3484,11 @@ class LePackagePrepare(BaseModel):
     # When True, the server mints an acknowledgment_token + URL so the recipient
     # can close the loop. The URL is returned on the prepared response.
     enable_acknowledgment:   bool = False
+    # M11 (owner, 2026-10-04): unsealed drafts are left out unless the lead opts in (audited).
+    include_unsealed_drafts: bool = Field(
+        default=False, description="Include exhibits whose chain of custody is not sealed (drafts). Default: "
+                                   "they are listed in Evidence_Inventory.csv as \"excluded: unsealed draft\" "
+                                   "with no custody log or file. Audited.")
 
 
 class LePackageOut(BaseModel):

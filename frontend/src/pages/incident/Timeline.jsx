@@ -6,6 +6,7 @@ import { MITRE_TACTICS, MITRE_TECHNIQUES, tacticColor } from '../../lib/mitre.js
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 import { labelOf } from '../../lib/incidentVocab.js'
 import { matchEntity } from '../../lib/entityMatch.js'
+import { OffsetMark, fmtOffset } from '../../components/ClockOffset.jsx'
 
 // Maps 800-61 R3 phase keys to display labels.
 const IR_PHASE_LABELS = {
@@ -26,9 +27,12 @@ function triggerDownload(blob, filename) {
 }
 
 function exportCsv(events, incRef) {
+  // G4: provenance + clock-offset columns appended after the original 12 (readers by position keep working).
   const COLS = ['event_time', 'description', 'event_type', 'ir_phase',
                 'mitre_tactic_id', 'mitre_tactic_name', 'mitre_technique_id',
-                'mitre_technique_name', 'hostname', 'source', 'origin', 'raw_log']
+                'mitre_technique_name', 'hostname', 'source', 'origin', 'raw_log',
+                'evidence_identifier', 'parser_name', 'parser_version', 'time_basis',
+                'recorded_event_time', 'clock_offset_seconds']
   const esc = v => {
     if (v == null) return ''
     const s = String(v).replace(/"/g, '""')
@@ -560,7 +564,9 @@ function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClose
               paddingTop: 10,
             }}>
               <span
-                title={formatLocal(ev.event_time)}
+                title={ev.recorded_event_time
+                  ? `${formatLocal(ev.event_time)} (offset-corrected; recorded by the device ${formatLocal(ev.recorded_event_time)})`
+                  : formatLocal(ev.event_time)}
                 style={{
                   fontSize: 11,
                   fontFamily: 'var(--font-mono)',
@@ -637,7 +643,7 @@ function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClose
                   {ev.evidence_id && (
                     <span className="pill" data-testid="tl-exhibit-pill"
                           style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}
-                          title={`From exhibit ${ev.evidence_identifier || ''}${ev.parser_version ? ` · parser ${ev.parser_version}` : ''}`}>
+                          title={`From exhibit ${ev.evidence_identifier || ''}${ev.parser_version ? ` · ${ev.parser_name || 'parser'} ${ev.parser_version}` : ''}`}>
                       ⛁ {ev.evidence_identifier || 'exhibit'}
                     </span>
                   )}
@@ -648,6 +654,7 @@ function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClose
                       {TIME_BASIS_LABEL[ev.time_basis]}
                     </span>
                   )}
+                  <OffsetMark seconds={ev.clock_offset_seconds} recorded={ev.recorded_event_time} />
                   {isSystem && (
                     <span className="pill" style={{ fontSize: 10, color: 'var(--dim)' }}>
                       ⚙ system{ev.system_source && ev.system_source !== 'manual' ? ` · ${ev.system_source}` : ''}
@@ -745,12 +752,18 @@ function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClose
                     </div>
                   )}
 
-                  {ev.forensic_import_id && (
-                    <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
-                      Imported{ev.evidence_id ? <> from exhibit <span style={{ fontFamily: 'var(--font-mono)' }}>{ev.evidence_identifier}</span></> : ' from a Timeline Import'}
-                      {ev.import_event_index != null ? ` · event #${ev.import_event_index}` : ''}
-                      {ev.parser_version ? ` · parser ${ev.parser_version}` : ''}
+                  {factsLocked(ev) && (
+                    <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }} data-testid="tl-provenance">
+                      {provenanceText(ev)}
+                      {ev.import_event_index != null ? ` · ${ev.pcap_analysis_id || ev.defender_import_id ? 'candidate' : 'event'} #${ev.import_event_index}` : ''}
+                      {ev.parser_version ? ` · ${ev.parser_name || 'parser'} ${ev.parser_version}` : ''}
                       {ev.time_basis ? ` · time ${TIME_BASIS_LABEL[ev.time_basis] || 'stated by the source'}` : ''}
+                    </div>
+                  )}
+                  {ev.recorded_event_time && (
+                    <div data-testid="tl-recorded-time" style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
+                      Recorded by the device: <span style={{ fontFamily: 'var(--font-mono)' }}>{formatLocal(ev.recorded_event_time)}</span>
+                      {' '}· clock offset {fmtOffset(ev.clock_offset_seconds)} corrected to {formatLocal(ev.event_time)}
                     </div>
                   )}
 
@@ -759,6 +772,13 @@ function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClose
                     {ev.created_by_username ? ` by ${ev.created_by_username}` : ''}
                   </div>
 
+                  {ev.server_generated ? (
+                    // Recorded by the server (closure, gate override, milestone…): the API refuses
+                    // edits and deletes (409 system_event_immutable), so none are offered.
+                    <div className="field-hint" data-server-event style={{ textAlign: 'right', color: 'var(--text)' }}>
+                      Recorded by FENRIR: it can&rsquo;t be edited or deleted. Add an annotation to comment on it.
+                    </div>
+                  ) : (
                   <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
                     <button
                       type="button"
@@ -777,6 +797,7 @@ function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClose
                       Delete
                     </button>
                   </div>
+                  )}
                 </div>
               )}
             </div>
@@ -794,13 +815,42 @@ const TIME_BASIS_HINT  = {
   inferred_year: 'The source gave no year; it was inferred from the exhibit\u2019s acquisition time',
 }
 
+// ─── Imported facts (G-fix FE-M3) ─────────────────────────────────────────────
+// An event recorded from a source keeps its facts (time, host, source, type, description, raw log): the
+// server refuses to edit them (409 imported_fact_immutable). Its own `facts_locked` decides when sent;
+// else the server's rule: an import run (Timeline Import, Defender, PCAP, browser history, an email's
+// relay hops), an exhibit or a time basis.
+function factsLocked(ev) {
+  if (typeof ev?.facts_locked === 'boolean') return ev.facts_locked
+  return !!(ev && (ev.evidence_id || ev.time_basis || ev.forensic_import_id || ev.defender_import_id
+    || ev.pcap_analysis_id || ev.browser_history_upload_id || ev.email_analysis_id))
+}
+
+// Where a locked event came from, in words (the provenance line and the edit dialog).
+function provenanceText(ev) {
+  const kind = ev.pcap_analysis_id ? 'network capture analysis'
+    : ev.browser_history_upload_id ? 'browser history'
+    : ev.email_analysis_id || (ev.source === 'email' && !ev.forensic_import_id && !ev.defender_import_id && ev.evidence_id) ? 'email relay hops'
+    : null
+  const run = ev.forensic_import_id ? 'a Timeline Import' : ev.defender_import_id ? 'a Defender import'
+    : kind === 'network capture analysis' ? 'a network capture analysis' : kind === 'browser history' ? 'a browser history parse'
+    : kind === 'email relay hops' ? 'an email analysis (relay hops)' : null
+  if (ev.evidence_id) {
+    const x = <span style={{ fontFamily: 'var(--font-mono)' }}>{ev.evidence_identifier || 'an exhibit'}</span>
+    if (run || kind) return <>Imported from exhibit {x}{kind ? ` (${kind})` : ''}</>
+    return <>Recorded from exhibit {x}</>
+  }
+  if (run) return `Imported from ${run}`
+  return 'Recorded by a detection (its time basis is kept)'
+}
+
 // ─── Add event modal ──────────────────────────────────────────────────────────
 
 function EventModal({ incidentId, event, onClose, onCreated }) {
   const isEdit = !!event
-  // C5 — promoted from a Timeline Import: the facts copied from the source are locked (409 on
-  // the server); IR phase, ATT&CK and the entity link stay editable.
-  const locked = isEdit && !!event.forensic_import_id
+  // C5 / G-fix FE-M3 — recorded from a source: the facts copied from it are locked (409 on the
+  // server); IR phase, ATT&CK and the entity link stay editable.
+  const locked = isEdit && factsLocked(event)
   const [entityPick, setEntityPick]   = useState(event?.entity_id || '')
   const [eventTime, setEventTime]     = useState(() => event?.event_time || new Date().toISOString())
   // Host field = combobox over the incident's entities (C2). The event is linked to an entity only
@@ -964,7 +1014,7 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                 <div className="alert info" role="note" data-testid="tl-locked-note">
                   <span className="alert-icon">ⓘ</span>
                   <span>
-                    Imported{event.evidence_id ? <> from exhibit <strong style={{ fontFamily: 'var(--font-mono)' }}>{event.evidence_identifier}</strong></> : ' from a Timeline Import'}:
+                    {provenanceText(event)}:
                     {' '}the time, host, source, type, description and raw log are locked as imported.
                     You can set the IR phase, ATT&amp;CK and the entity link.
                   </span>
@@ -984,6 +1034,11 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                     required={!locked}
                     disabled={locked}
                   />
+                  {locked && event.recorded_event_time && (
+                    <div className="field-hint" data-testid="tl-modal-recorded">
+                      Offset-corrected ({fmtOffset(event.clock_offset_seconds)}); recorded by the device {formatLocal(event.recorded_event_time)}.
+                    </div>
+                  )}
                 </div>
                 <div className="field">
                   <label className="field-label" htmlFor="tl-event-type">Event type</label>

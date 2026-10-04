@@ -44,6 +44,13 @@ async def get_db() -> AsyncSession:
         yield session
 
 
+# The per-boot DDL takes ACCESS EXCLUSIVE locks (ALTER TABLE takes it even when there is
+# nothing to change). Behind a busy table it would wait forever, and every later query on
+# that table would queue behind it. Wait at most this long for any one lock; then the run
+# fails loudly and, being one transaction, rolls back whole (core/migrate.py, SQLSTATE 55P03).
+MIGRATE_LOCK_TIMEOUT = "5s"
+
+
 async def init_db() -> None:
     """Create tables on first boot + run idempotent in-place migrations.
 
@@ -58,6 +65,7 @@ async def init_db() -> None:
     if role and not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", role):
         raise ValueError(f"invalid DB_OWNER_ROLE {role!r}")
     async with engine.begin() as conn:
+        await conn.execute(text(f"SET LOCAL lock_timeout = '{MIGRATE_LOCK_TIMEOUT}'"))
         if role:
             # Transaction-scoped: every object created below is owned by the owner role.
             await conn.execute(text(f"SET LOCAL ROLE {role}"))
@@ -92,6 +100,21 @@ def _add_check_if_missing(table: str, name: str, expr: str) -> str:
         IF NOT EXISTS (SELECT 1 FROM pg_constraint
                        WHERE conrelid = '{table}'::regclass AND conname = '{name}') THEN
             ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({expr});
+        END IF;
+    END $$
+    """
+
+
+def _widen_to_bigint(table: str, column: str) -> str:
+    """int4 → BIGINT, only while the column is still `integer`, so a re-run takes no lock (the type
+    change rewrites the table under ACCESS EXCLUSIVE). Constants only (no user input)."""
+    return f"""
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = current_schema() AND table_name = '{table}'
+                     AND column_name = '{column}' AND data_type = 'integer') THEN
+            ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT;
         END IF;
     END $$
     """
@@ -604,4 +627,188 @@ _INPLACE_MIGRATIONS: list[str] = [
     # stay NULL (report data hashes those on the fly); no backfill.
     "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS report_sha256 VARCHAR(64)",
     "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS report_mime VARCHAR(16)",
+
+    # F4 (R12): le_packages.signature_kind's database DEFAULT said 'ed25519' (added above, before
+    # the label was found wrong), but the LE manifest is HMAC-SHA-256. The API always sets the value
+    # (DE-fix-1 M4); this aligns the DEFAULT for any other writer. Only the DEFAULT changes: stored
+    # rows keep the label they were written with (court records; docs/reports.md §3). Guarded on the
+    # catalog so a re-run is a no-op and takes no lock; a fresh database (column from create_all,
+    # no DEFAULT) gets it too.
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'le_packages' AND column_name = 'signature_kind'
+              AND column_default IS DISTINCT FROM '''hmac-sha256''::character varying'
+        ) THEN
+            ALTER TABLE le_packages ALTER COLUMN signature_kind SET DEFAULT 'hmac-sha256';
+        END IF;
+    END $$
+    """,
+
+    # G4 — run records for Defender and Velociraptor (R03); the exhibit's clock offset applied (R35).
+    # All columns are additive and nullable, with NO backfill: rows made before G4 keep NULL (= not
+    # recorded). Unlike C5's forensic_imports backfill, old Defender imports are not linked to an
+    # exhibit by hash: a link writes a custody-log row, which a migration can't.
+    #  - evidence.system_time_offset_seconds: the structured clock offset (device clock minus true
+    #    UTC, seconds; CHECK within +/-100 years). The free-text system_time_offset stays as it is.
+    #  - forensic_imports / defender_pdf_imports.clock_offset_seconds: the offset applied at parse
+    #    time (a snapshot; changing the exhibit later never rewrites an import or its facts).
+    #  - defender_pdf_imports: evidence_id (FK SET NULL + partial index), parser_name, parser_version.
+    #  - timeline_events: defender_import_id (FK RESTRICT, as forensic_import_id; partial UNIQUE with
+    #    import_event_index so re-promoting is a no-op), recorded_event_time + clock_offset_seconds
+    #    (CHECK: both or neither), and CHECK that an event names at most one import run.
+    #  - collection_packages: container_sha256 + container_size (the container as received) and
+    #    evidence_id (FK SET NULL + partial index).
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS system_time_offset_seconds BIGINT",
+    _add_check_if_missing("evidence", "ck_evidence_system_time_offset_seconds",
+                          "system_time_offset_seconds IS NULL "
+                          "OR system_time_offset_seconds BETWEEN -3155760000 AND 3155760000"),
+    "ALTER TABLE forensic_imports ADD COLUMN IF NOT EXISTS clock_offset_seconds BIGINT",
+    "ALTER TABLE defender_pdf_imports ADD COLUMN IF NOT EXISTS evidence_id UUID "
+    "REFERENCES evidence(id) ON DELETE SET NULL",
+    "ALTER TABLE defender_pdf_imports ADD COLUMN IF NOT EXISTS parser_name VARCHAR(64)",
+    "ALTER TABLE defender_pdf_imports ADD COLUMN IF NOT EXISTS parser_version VARCHAR(32)",
+    "ALTER TABLE defender_pdf_imports ADD COLUMN IF NOT EXISTS clock_offset_seconds BIGINT",
+    "CREATE INDEX IF NOT EXISTS ix_defender_pdf_imports_evidence_id ON defender_pdf_imports(evidence_id) "
+    "WHERE evidence_id IS NOT NULL",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS defender_import_id UUID "
+    "REFERENCES defender_pdf_imports(id) ON DELETE RESTRICT",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS recorded_event_time TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS clock_offset_seconds BIGINT",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_defender_import_event "
+    "ON timeline_events(defender_import_id, import_event_index) WHERE defender_import_id IS NOT NULL",
+    _add_check_if_missing("timeline_events", "ck_timeline_events_clock_offset",
+                          "(recorded_event_time IS NULL) = (clock_offset_seconds IS NULL)"),
+    _add_check_if_missing("timeline_events", "ck_timeline_events_one_import_run",
+                          "forensic_import_id IS NULL OR defender_import_id IS NULL"),
+    "ALTER TABLE collection_packages ADD COLUMN IF NOT EXISTS container_sha256 VARCHAR(64)",
+    "ALTER TABLE collection_packages ADD COLUMN IF NOT EXISTS container_size BIGINT",
+    "ALTER TABLE collection_packages ADD COLUMN IF NOT EXISTS evidence_id UUID "
+    "REFERENCES evidence(id) ON DELETE SET NULL",
+    "CREATE INDEX IF NOT EXISTS ix_collection_packages_evidence_id ON collection_packages(evidence_id) "
+    "WHERE evidence_id IS NOT NULL",
+
+    # G3 — register-first Email, Browser history and PCAP (R02). Additive and nullable, NO backfill:
+    # analyses made before G3 keep NULL (= no run record; they were analysed before registration).
+    #  - email_analysis: input_sha256, analyser_name / _version, exhibit_link (registered |
+    #    sha256_match | from_evidence; CHECK) + a partial index on the existing evidence_id.
+    #  - pcap_analyses: evidence_id (FK SET NULL + partial index), the same run-record columns, the
+    #    clock offset applied (snapshot) and the stored timeline candidates (JSON).
+    #  - browser_history_uploads: form_history_evidence_id (FK SET NULL), parser_name / _version,
+    #    exhibit_link, clock_offset_seconds (+ partial indexes on both exhibit FKs).
+    #  - timeline_events: pcap_analysis_id / browser_history_upload_id (FK RESTRICT, as the other run
+    #    FKs) + source_record_id; partial UNIQUE (pcap run, candidate idx) and (upload, record) so
+    #    re-promoting is a no-op; a NEW CHECK that an event names at most one run of the four (the G4
+    #    two-run CHECK is left as it is) and one that each new run FK carries its key.
+    "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS input_sha256 VARCHAR(64)",
+    "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS analyser_name VARCHAR(64)",
+    "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS analyser_version VARCHAR(32)",
+    "ALTER TABLE email_analysis ADD COLUMN IF NOT EXISTS exhibit_link VARCHAR(16)",
+    _add_check_if_missing("email_analysis", "ck_email_analysis_exhibit_link",
+                          "exhibit_link IS NULL OR exhibit_link IN ('registered', 'sha256_match', 'from_evidence')"),
+    "CREATE INDEX IF NOT EXISTS ix_email_analysis_evidence_id ON email_analysis(evidence_id) "
+    "WHERE evidence_id IS NOT NULL",
+    "ALTER TABLE pcap_analyses ADD COLUMN IF NOT EXISTS evidence_id UUID REFERENCES evidence(id) ON DELETE SET NULL",
+    "ALTER TABLE pcap_analyses ADD COLUMN IF NOT EXISTS input_sha256 VARCHAR(64)",
+    "ALTER TABLE pcap_analyses ADD COLUMN IF NOT EXISTS analyser_name VARCHAR(64)",
+    "ALTER TABLE pcap_analyses ADD COLUMN IF NOT EXISTS analyser_version VARCHAR(32)",
+    "ALTER TABLE pcap_analyses ADD COLUMN IF NOT EXISTS exhibit_link VARCHAR(16)",
+    "ALTER TABLE pcap_analyses ADD COLUMN IF NOT EXISTS clock_offset_seconds BIGINT",
+    "ALTER TABLE pcap_analyses ADD COLUMN IF NOT EXISTS timeline_candidates JSON",
+    _add_check_if_missing("pcap_analyses", "ck_pcap_analyses_exhibit_link",
+                          "exhibit_link IS NULL OR exhibit_link IN ('registered', 'sha256_match', 'from_evidence')"),
+    "CREATE INDEX IF NOT EXISTS ix_pcap_analyses_evidence_id ON pcap_analyses(evidence_id) "
+    "WHERE evidence_id IS NOT NULL",
+    "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS form_history_evidence_id UUID "
+    "REFERENCES evidence(id) ON DELETE SET NULL",
+    "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS parser_name VARCHAR(64)",
+    "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS parser_version VARCHAR(32)",
+    "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS exhibit_link VARCHAR(16)",
+    "ALTER TABLE browser_history_uploads ADD COLUMN IF NOT EXISTS clock_offset_seconds BIGINT",
+    _add_check_if_missing("browser_history_uploads", "ck_browser_history_uploads_exhibit_link",
+                          "exhibit_link IS NULL OR exhibit_link IN ('registered', 'sha256_match', 'from_evidence')"),
+    "CREATE INDEX IF NOT EXISTS ix_browser_history_uploads_evidence_id ON browser_history_uploads(evidence_id) "
+    "WHERE evidence_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_browser_history_uploads_form_history_evidence_id "
+    "ON browser_history_uploads(form_history_evidence_id) WHERE form_history_evidence_id IS NOT NULL",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS pcap_analysis_id UUID "
+    "REFERENCES pcap_analyses(id) ON DELETE RESTRICT",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS browser_history_upload_id UUID "
+    "REFERENCES browser_history_uploads(id) ON DELETE RESTRICT",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS source_record_id UUID",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_pcap_event "
+    "ON timeline_events(pcap_analysis_id, import_event_index) WHERE pcap_analysis_id IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_webhistory_record "
+    "ON timeline_events(browser_history_upload_id, source_record_id) WHERE browser_history_upload_id IS NOT NULL",
+    _add_check_if_missing("timeline_events", "ck_timeline_events_one_run_g3",
+                          "num_nonnulls(forensic_import_id, defender_import_id, pcap_analysis_id, "
+                          "browser_history_upload_id) <= 1"),
+    _add_check_if_missing("timeline_events", "ck_timeline_events_g3_run_key",
+                          "(pcap_analysis_id IS NULL OR import_event_index IS NOT NULL) "
+                          "AND (browser_history_upload_id IS NULL OR source_record_id IS NOT NULL)"),
+
+    # G1 stage 3a (R81) — byte sizes of stored files, and of the bundles that embed them, become
+    # BIGINT: int4 stops at 2 GiB and G2 lifts the 1 GiB upload cap. One-shot, guarded on the
+    # current type. Each is a table rewrite under ACCESS EXCLUSIVE, but the tables are tiny
+    # (2026-10-04: evidence 71 rows / 344 kB, entity_files 16 / 120 kB, custody_exports 44 /
+    # 184 kB, le_packages 4 / 176 kB), well inside the 5 s lock_timeout.
+    _widen_to_bigint("evidence", "file_size_bytes"),
+    _widen_to_bigint("entity_files", "file_size"),
+    _widen_to_bigint("custody_exports", "file_size"),
+    _widen_to_bigint("le_packages", "total_bytes"),
+
+    # G5 — working copies with their own hashes (R08), legal hold set / released through its own
+    # endpoint (R09). Additive and nullable, NO backfill: rows made before G5 keep NULL, which the API
+    # reads as "export" (export_id set) or "legacy record" (a "Record copy" row whose sha256 is a
+    # re-hash of the master, so it never counts as a verified copy). Nothing is rewritten.
+    #  - evidence: the current hold (since, by, reason); history stays in the custody log.
+    #  - evidence_copies: kind (download | lab_copy; CHECK), per-exhibit copy_seq (partial UNIQUE)
+    #    + copy_identifier "<exhibit>-WC-n", status (CHECK), the copy's sha1 / md5 (sha256 exists),
+    #    the one-time download link (SHA-256 of the token + expiry), transfer times, bytes sent, end
+    #    reason, destination note, the lab copy's tool, and altered_at (an examination found the copy
+    #    changed).
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS legal_hold_since TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS legal_hold_by_id UUID REFERENCES users(id)",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS legal_hold_reason TEXT",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS kind VARCHAR(16)",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS copy_seq INTEGER",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS copy_identifier VARCHAR(160)",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS status VARCHAR(20)",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS sha1 VARCHAR(40)",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS md5 VARCHAR(32)",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS token_hash VARCHAR(64)",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS token_expires_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS download_started_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS bytes_sent BIGINT",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS end_reason VARCHAR(32)",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS destination_note TEXT",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS copy_tool VARCHAR(256)",
+    "ALTER TABLE evidence_copies ADD COLUMN IF NOT EXISTS altered_at TIMESTAMP WITH TIME ZONE",
+    _add_check_if_missing("evidence_copies", "ck_evidence_copies_kind",
+                          "kind IS NULL OR kind IN ('download', 'lab_copy')"),
+    _add_check_if_missing("evidence_copies", "ck_evidence_copies_status",
+                          "status IS NULL OR status IN ('issued', 'downloading', 'complete', 'aborted', "
+                          "'failed_integrity', 'verified', 'mismatch')"),
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_copies_copy_seq ON evidence_copies(evidence_id, copy_seq) "
+    "WHERE copy_seq IS NOT NULL",
+
+    # G-fix B (L26) — a mail relay hop imported from an email analysis with a run record (G3) names that
+    # run, so its provenance (analyser, version, input SHA-256) fills the LE Timeline.csv like the other
+    # runs. Additive and nullable, NO backfill (hops imported before keep NULL; their analysis still
+    # records them in headers.hops[].timeline_event_id). FK RESTRICT like the other run FKs (there is no
+    # email-analysis delete route); a partial index for the FK; and a NEW one-run CHECK over the five run
+    # FKs (the G3 four-run CHECK is left as it is). Safe on the live table: every existing row has the
+    # new column NULL and already satisfies the four-run CHECK, so validating it (1 056 rows / 18 MB on
+    # 2026-10-04) takes milliseconds under the 5 s lock_timeout.
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS email_analysis_id UUID "
+    "REFERENCES email_analysis(id) ON DELETE RESTRICT",
+    "CREATE INDEX IF NOT EXISTS ix_timeline_events_email_analysis_id ON timeline_events(email_analysis_id) "
+    "WHERE email_analysis_id IS NOT NULL",
+    _add_check_if_missing("timeline_events", "ck_timeline_events_one_run_gfixb",
+                          "num_nonnulls(forensic_import_id, defender_import_id, pcap_analysis_id, "
+                          "browser_history_upload_id, email_analysis_id) <= 1"),
 ]

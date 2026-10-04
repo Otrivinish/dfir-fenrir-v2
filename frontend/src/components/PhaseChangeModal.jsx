@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { PHASE } from '../lib/incidentVocab.js'
+import { PHASE, labelOf } from '../lib/incidentVocab.js'
 import { GateItems, useGate } from './GateItems.jsx'
 
 // Confirmation modal for phase changes from the status-band stepper.
@@ -9,12 +9,17 @@ import { GateItems, useGate } from './GateItems.jsx'
 // `onConfirm(targetPhase, { phase_reason?, override_gate? })` returns a promise; the
 // modal shows loading + surfaces errors inline. `canOverride` is the override_gate
 // capability from GET …/access (the incident lead); without it no Override is offered.
+// A false / benign positive leaving Detection & Analysis can later close without Gate 2, so
+// the API needs triage_reason for that move (M2: 422 triage_reason_required): `triageState`
+// is the incident's triage_state, and the modal then asks for it.
 const REASON_MIN = 10
+const CLOSABLE_ANY_PHASE = ['false_positive', 'benign_positive']
 
-export default function PhaseChangeModal({ incidentId, currentPhase, targetPhase, canOverride = false, onConfirm, onClose }) {
+export default function PhaseChangeModal({ incidentId, currentPhase, targetPhase, triageState, canOverride = false, onConfirm, onClose }) {
   const [busy, setBusy]         = useState(false)
   const [error, setError]       = useState(null)
   const [reason, setReason]     = useState('')
+  const [triageReason, setTriageReason] = useState('')
   const [override, setOverride] = useState(false)
   const gated = targetPhase === 'post_incident'
   const { gate, setGate, loading, error: gateError } = useGate(incidentId, 'post_incident', gated)
@@ -39,13 +44,19 @@ export default function PhaseChangeModal({ incidentId, currentPhase, targetPhase
   const overriding = unmet && canOverride && override
   const needReason = goingBack || overriding
   const n          = reason.trim().length
+  const needTriageReason = currentPhase === 'detection_and_analysis' && targetPhase !== currentPhase
+                           && CLOSABLE_ANY_PHASE.includes(triageState)
+  const tn         = triageReason.trim().length
+  const triageLabel = labelOf('triage_state', triageState)
   const canSubmit  = !busy && !(gated && loading) && !(unmet && !overriding) && (!needReason || n >= REASON_MIN)
+                     && (!needTriageReason || tn >= REASON_MIN)
 
   const submit = async () => {
     setError(null); setBusy(true)
     const extra = {}
     if (needReason) extra.phase_reason = reason.trim()
     if (overriding) extra.override_gate = true
+    if (needTriageReason) extra.triage_reason = triageReason.trim()
     try {
       await onConfirm(targetPhase, extra)
     } catch (e) {
@@ -54,6 +65,9 @@ export default function PhaseChangeModal({ incidentId, currentPhase, targetPhase
         setGate(g => ({ gate: 'post_incident', label: g?.label || 'Gate 1', carried_forward: g?.carried_forward || [],
                         met: false, exempt: false, unmet: e.data.unmet }))
         setError('The gate is not met: see the list above.')
+      } else if (e.code === 'triage_reason_required') {
+        setError(`Say why this incident is a ${triageLabel || 'false or benign positive'}: at least ${REASON_MIN} characters. `
+                 + 'It leaves Detection & Analysis and can then be closed without Gate 2.')
       } else {
         setError(e.message || 'Could not change phase.')
       }
@@ -126,6 +140,21 @@ export default function PhaseChangeModal({ incidentId, currentPhase, targetPhase
                           value={reason} onChange={e => setReason(e.target.value)} disabled={busy} />
                 <span className="field-hint">
                   Goes into the audit log.{n < REASON_MIN ? ` At least ${REASON_MIN} characters (${n} so far).` : ''}
+                </span>
+              </div>
+            )}
+            {needTriageReason && (
+              <div className="field">
+                <label className="field-label" htmlFor="phase-triage-reason">
+                  Reason for the {triageLabel} triage
+                </label>
+                <textarea id="phase-triage-reason" className="input" rows={3} maxLength={2000} required
+                          aria-describedby="phase-triage-reason-hint"
+                          placeholder="What was checked, by whom, and why it is not malicious…"
+                          value={triageReason} onChange={e => setTriageReason(e.target.value)} disabled={busy} />
+                <span id="phase-triage-reason-hint" className="field-hint">
+                  A {triageLabel} that leaves Detection & Analysis can be closed without Gate 2, so the reason goes
+                  into the audit log and onto the Timeline.{tn < REASON_MIN ? ` At least ${REASON_MIN} characters (${tn} so far).` : ''}
                 </span>
               </div>
             )}

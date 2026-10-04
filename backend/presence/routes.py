@@ -2,13 +2,13 @@
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.deps import current_user
 from auth.service import SESSION_COOKIE
-from core.database import get_db
+from core.database import SessionLocal, get_db
 from core.redis_client import get_redis
 from core.security import hash_token
 from incidents.access import get_accessible_incident
@@ -52,19 +52,25 @@ async def list_viewers(
 async def presence_ws(
     incident_id: uuid.UUID,
     websocket: WebSocket,
-    db: AsyncSession = Depends(get_db),
 ):
-    user = await _ws_auth(websocket, db)
+    # R62: a short-lived session for the auth and access checks only, closed before the receive
+    # loop. A socket lives for hours; a session held that long pins a pool connection and an open
+    # transaction whose locks block migrations.
+    allowed = False
+    async with SessionLocal() as db:
+        user = await _ws_auth(websocket, db)
+        if user:
+            # Incident-scope the socket — a valid session isn't enough to watch presence
+            # of an incident the user can't access.
+            try:
+                await get_accessible_incident(db=db, incident_id=incident_id, user=user)
+                allowed = True
+            except HTTPException:
+                pass
     if not user:
         await websocket.close(code=4001)
         return
-
-    # Incident-scope the socket — a valid session isn't enough to watch presence
-    # of an incident the user can't access.
-    from fastapi import HTTPException
-    try:
-        await get_accessible_incident(db=db, incident_id=incident_id, user=user)
-    except HTTPException:
+    if not allowed:
         await websocket.close(code=4003)
         return
 

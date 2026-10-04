@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { useAuth } from '../../../hooks/useAuth.jsx'
 import { api } from '../../../api/client.js'
 import { formatLocal, relative } from '../../../lib/datetime.js'
+import { DraftBadge } from '../../../components/ExhibitPicker.jsx'
 
 const STATUS_LABEL = {
   ready:    'Ready',
@@ -42,21 +43,26 @@ export default function Export() {
   const [error, setError]     = useState(null)
   const [wizard, setWizard]   = useState(null)   // null | { stage, ... }
 
+  // The running load's controller: a newer load, an incident change or unmount aborts it.
+  const loadAbort = useRef(null)
   const load = useCallback(async () => {
+    loadAbort.current?.abort()
+    const { signal } = (loadAbort.current = new AbortController())
     setError(null)
     try {
-      const res = await api.listExports(inc.id, { limit: 200 })
-      setItems(res.items)
+      const all = await api.listAllPages(api.listExports, inc.id, {}, 200, { signal })   // every page
+      if (!signal.aborted) setItems(all)
     } catch (e) {
+      if (signal.aborted) return
       // Non-admins get 403 here — that's expected; show a friendlier message.
       if (e.status === 403) setError(null)
       else setError(e.message || 'Could not load exports')
     } finally {
-      setLoading(false)
+      if (!signal.aborted) setLoading(false)
     }
   }, [inc.id])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load(); return () => loadAbort.current?.abort() }, [load])
 
   if (!isAdmin) {
     return (
@@ -175,18 +181,22 @@ function ExportWizard({ incidentId, onClose, onCreated }) {
   const [recipient, setRecipient]             = useState('')
   const [purpose, setPurpose]                 = useState('')
   const [acknowledgments, setAcknowledgments] = useState('')
+  const [includeDrafts, setIncludeDrafts]     = useState(false)   // M11: unsealed drafts left out unless set
 
   const [busy, setBusy]   = useState(false)
   const [result, setResult] = useState(null)          // { export, key, download_url, bundle_sha256 }
 
+  const [reloadKey, setReloadKey] = useState(0)
   useEffect(() => {
-    let cancelled = false
-    api.listEvidence(incidentId, { limit: 200 })
-      .then(res => { if (!cancelled) setEvidenceItems(res.items) })
-      .catch(e => { if (!cancelled) setError(e.message || 'Could not load evidence') })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
-  }, [incidentId])
+    const ctl = new AbortController()
+    // Every page, so any exhibit of the incident can be picked.
+    api.listAllPages(api.listEvidence, incidentId, {}, 200, { signal: ctl.signal })
+      .then(all => { if (!ctl.signal.aborted) setEvidenceItems(all) })
+      .catch(e => { if (!ctl.signal.aborted) setError(e.message || 'Could not load evidence') })
+      .finally(() => { if (!ctl.signal.aborted) setLoading(false) })
+    return () => ctl.abort()
+  }, [incidentId, reloadKey])
+  const pickedDrafts = evidenceItems.filter(i => picked.has(i.id) && !i.coc_sealed)
 
   useEffect(() => {
     const onKey = (e) => {
@@ -213,12 +223,21 @@ function ExportWizard({ incidentId, onClose, onCreated }) {
         recipient:       recipient.trim(),
         purpose:         purpose.trim(),
         acknowledgments: acknowledgments.trim() || null,
+        include_unsealed_drafts: includeDrafts,
       })
-      setResult(res)
+      const included = new Set((res.export?.item_ids || []).map(String))
+      setResult({ ...res, excludedDrafts: includeDrafts ? [] : pickedDrafts.filter(i => !included.has(String(i.id))) })
       setStage('result')
       onCreated()
     } catch (e) {
-      setError(e.message || 'Could not create export')
+      // R3-3: an item failed its integrity check while it was bundled — nothing was exported, it is now
+      // frozen. Re-read the items (it can't be picked any more) and the exports list (a revoked row).
+      if (e.code === 'evidence_integrity_failed' || e.code === 'evidence_not_exportable') {
+        setError(`Nothing was exported. ${e.message} The item list has been refreshed: frozen or disposed items can't be picked.`)
+        setPicked(new Set()); setReloadKey(k => k + 1); onCreated()
+      } else {
+        setError(e.message || 'Could not create export')
+      }
     } finally {
       setBusy(false)
     }
@@ -302,6 +321,22 @@ function ExportWizard({ incidentId, onClose, onCreated }) {
                     rows={2} maxLength={4096}
                     placeholder="Any chain-of-custody acknowledgments recipient must agree to"
                   />
+                </div>
+                <div className="field" data-testid="ex-drafts">
+                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={includeDrafts} onChange={e => setIncludeDrafts(e.target.checked)}
+                           style={{ marginTop: 3 }} data-testid="ex-include-drafts" />
+                    <span>
+                      Include unsealed drafts
+                      <div className="field-hint">
+                        {pickedDrafts.length
+                          ? `${pickedDrafts.length} picked item${pickedDrafts.length === 1 ? ' is an unsealed draft' : 's are unsealed drafts'} (${pickedDrafts.map(i => i.identifier).join(', ')}). `
+                          : 'None of the picked items is an unsealed draft. '}
+                        Off (default): a draft is listed in the manifest as “excluded: unsealed draft”, with no records or file.
+                        {' '}On: drafts go in like sealed items; the choice is recorded in the audit log.
+                      </div>
+                    </span>
+                  </label>
                 </div>
                 <div className="alert info" role="status">
                   <span className="alert-icon">i</span>
@@ -403,6 +438,11 @@ function ItemPicker({ items, picked, onToggle, onSetAll }) {
                 <td>
                   <div style={{ fontWeight: 600 }}>{i.name}</div>
                   <div style={{ color: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{i.identifier}</div>
+                  {!i.coc_sealed && (
+                    <div style={{ marginTop: 2 }}>
+                      <DraftBadge title="Unsealed draft: left out of the bundle unless you include unsealed drafts (next step)" />
+                    </div>
+                  )}
                 </td>
                 <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
                   {i.sha256 ? `${i.sha256.slice(0, 12)}…` : '—'}
@@ -437,6 +477,10 @@ function ResultPanel({ result, onClose }) {
         <dl className="kv">
           <dt>Recipient</dt><dd>{result.export.recipient}</dd>
           <dt>Items</dt><dd>{result.export.item_ids?.length || 0}</dd>
+          {result.excludedDrafts?.length > 0 && (
+            <><dt>Left out</dt>
+              <dd data-testid="ex-drafts-excluded">{result.excludedDrafts.map(i => i.identifier).join(', ')} — unsealed draft{result.excludedDrafts.length === 1 ? '' : 's'}, listed in the manifest as “excluded: unsealed draft”</dd></>
+          )}
           <dt>Bundle size</dt><dd>{fmtBytes(result.export.file_size)}</dd>
           <dt>Expires</dt><dd style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{formatLocal(result.export.expires_at)}</dd>
           <dt>Bundle SHA-256</dt>
@@ -518,19 +562,42 @@ function ResultPanel({ result, onClose }) {
 function DecryptionInstructions({ bundleSha }) {
   const [copied, setCopied] = useState(false)
   const recipe = `# Python 3 — requires: pip install cryptography
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-import hashlib, sys
+# Streams: works for a bundle of any size (one-shot AESGCM.decrypt stops at 2 GiB).
+import hashlib, os, sys
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-bundle = open(sys.argv[1], "rb").read()
-# (Optional) Verify integrity against the bundle SHA-256 provided by sender:
-#   expected = "${bundleSha || '<bundle-sha-256-hex>'}"
-#   assert hashlib.sha256(bundle).hexdigest() == expected, "bundle hash mismatch"
-
-nonce, ct = bundle[:12], bundle[12:]
-key = bytes.fromhex(sys.argv[2])
-plain = AESGCM(key).decrypt(nonce, ct, None)
-open(sys.argv[1] + ".zip", "wb").write(plain)
-# Output: <bundle>.zip — standard ZIP containing files/, coc/, audit/, manifest.json, README.txt`
+src, key = sys.argv[1], bytes.fromhex(sys.argv[2])
+expected = "${bundleSha || '<bundle-sha-256-hex>'}"   # bundle SHA-256 from the sender
+size, part = os.path.getsize(src), src + ".zip.part"
+if size < 28:                     # 12-byte nonce + 16-byte tag at the least
+    raise SystemExit("not an export bundle: shorter than 28 bytes")
+h = hashlib.sha256()
+with open(src, "rb") as f, open(part, "wb") as out:
+    nonce = f.read(12)
+    f.seek(size - 16)
+    tag = f.read(16)
+    f.seek(12)
+    h.update(nonce)
+    dec = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+    left = size - 28
+    try:
+        while left > 0:
+            block = f.read(min(left, 1 << 20))
+            if not block:
+                raise IOError("the bundle ended early (truncated?)")
+            left -= len(block)
+            h.update(block)
+            out.write(dec.update(block))
+        h.update(tag)
+        if h.hexdigest() != expected:
+            raise ValueError("bundle SHA-256 mismatch: this is not the bundle the sender built")
+        dec.finalize()            # raises InvalidTag unless the whole bundle is intact
+    except Exception:
+        out.close()
+        os.remove(part)           # never keep output from a bundle that failed
+        raise
+os.replace(part, src + ".zip")
+# Output: <bundle>.zip — standard ZIP (ZIP64 for items over 4 GiB) containing files/, coc/, audit/, manifest.json, README.txt`
 
   const oneliner = `python3 decrypt.py bundle.enc <key-hex>`
 
@@ -540,6 +607,7 @@ open(sys.argv[1] + ".zip", "wb").write(plain)
       <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 'var(--space-2)' }}>
         Send this recipe with the key + URL so the recipient can open the bundle.
         AES-256-GCM, wire format <code style={{ fontFamily: 'var(--font-mono)' }}>[12-byte nonce][ciphertext + 16-byte GCM tag]</code>.
+        The recipe streams, so it handles bundles of any size.
       </div>
       <pre style={{
         fontFamily: 'var(--font-mono)', fontSize: 11, padding: 'var(--space-3)',

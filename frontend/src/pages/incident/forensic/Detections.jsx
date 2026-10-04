@@ -210,7 +210,7 @@ function YaraRules() {
 
 // ─── Tab 2: Scan Results ──────────────────────────────────────────────────────
 
-function MatchCard({ match, incidentId, onAction }) {
+function MatchCard({ match, incidentId, isClosed, onAction }) {
   const [expanded, setExpanded] = useState(false)
   const [busy,     setBusy]     = useState('')
 
@@ -236,6 +236,7 @@ function MatchCard({ match, incidentId, onAction }) {
         <button className="btn ghost det-action-btn" onClick={() => setExpanded(e => !e)}>
           {expanded ? '▲' : '▼'} strings
         </button>
+        {!isClosed && <>
         <button className="btn ghost det-action-btn" onClick={() => promote('timeline')}
                 disabled={!!busy} style={{ color: 'var(--accent)' }}>
           {busy === 'timeline' ? '…' : '→ Timeline'}
@@ -244,6 +245,7 @@ function MatchCard({ match, incidentId, onAction }) {
                 disabled={!!busy} style={{ color: 'var(--high)' }}>
           {busy === 'ioc' ? '…' : '→ IOC (SHA256)'}
         </button>
+        </>}
       </div>
       {expanded && match.matched_strings?.length > 0 && (
         <pre className="det-match-strings">
@@ -257,7 +259,10 @@ function MatchCard({ match, incidentId, onAction }) {
   )
 }
 
-function ScanResults({ inc }) {
+function ScanResults({ inc, viewer }) {
+  // Closed incident: a scan, clearing matches and promoting one are 409 incident_closed (R66).
+  // G-fix FE-L12: a viewer gets the same read-only view (the API refuses them).
+  const isClosed = inc?.status === 'closed' || !!viewer
   const [matches,  setMatches]  = useState([])
   const [loading,  setLoading]  = useState(true)
   const [scanning, setScanning] = useState(false)
@@ -306,6 +311,11 @@ function ScanResults({ inc }) {
             </span>
           )}
         </div>
+        {isClosed ? (
+          <span className="det-stat-muted" data-yara-closed>
+            {inc?.status === 'closed' ? 'Closed incident: matches are read-only.' : 'Read-only: viewers can’t scan or promote matches.'}
+          </span>
+        ) : (
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
           {matches.length > 0 && (
             <button className="btn ghost" onClick={clearAll} style={{ color: 'var(--muted)', fontSize: 12 }}>
@@ -316,6 +326,7 @@ function ScanResults({ inc }) {
             {scanning ? 'Scanning…' : '▶ Run YARA Scan'}
           </button>
         </div>
+        )}
       </div>
 
       {lastScan?.errors?.length > 0 && (
@@ -332,7 +343,7 @@ function ScanResults({ inc }) {
       ) : (
         <div className="det-match-list">
           {matches.map(m => (
-            <MatchCard key={m.id} match={m} incidentId={inc.id} onAction={handleAction} />
+            <MatchCard key={m.id} match={m} incidentId={inc.id} isClosed={isClosed} onAction={handleAction} />
           ))}
         </div>
       )}
@@ -446,7 +457,7 @@ function DetectionQueries({ inc }) {
 // ─── Page root ────────────────────────────────────────────────────────────────
 
 export default function Detections() {
-  const { inc } = useOutletContext()
+  const { inc, viewer } = useOutletContext()
   const [tab, setTab] = useState(0)
 
   return (
@@ -460,7 +471,7 @@ export default function Detections() {
       </div>
       <div className="det-content">
         {tab === 0 && <YaraRules />}
-        {tab === 1 && <ScanResults inc={inc} />}
+        {tab === 1 && <ScanResults inc={inc} viewer={viewer} />}
         {tab === 2 && <DetectionQueries inc={inc} />}
       </div>
     </div>

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../../api/client.js'
 import { useOutletContext } from 'react-router-dom'
 import { formatLocalShort } from '../../../lib/datetime.js'
-import HandoffWizard from './HandoffWizard.jsx'
+import HandoffWizard, { UnsealedDraftsOption, prepareLePackageChecked } from './HandoffWizard.jsx'
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -180,6 +180,33 @@ function IssuedModal({ issued, onClose }) {
             <strong>Audit rows:</strong> {issued.audit_row_count?.toLocaleString() || 0}
           </div>
 
+          {issued.checks?.draftsExcluded?.length > 0 && (
+            <div className="alert info" role="status" data-testid="le-drafts-excluded">
+              <span className="alert-icon">i</span>
+              <span>
+                Left out as unsealed drafts ({issued.checks.draftsExcluded.length}): {issued.checks.draftsExcluded.join(', ')}.
+                {' '}Evidence_Inventory.csv lists them as <code style={{ fontFamily: 'var(--font-mono)' }}>excluded: unsealed draft</code>.
+                {' '}Seal them in Evidence › Items and build again to include them.
+              </span>
+            </div>
+          )}
+          {issued.checks?.draftsIncluded && (
+            <div className="field-hint" data-testid="le-drafts-included">
+              Unsealed drafts were included (recorded on the package&rsquo;s audit anchor).
+            </div>
+          )}
+          {issued.checks?.integrityFailed?.length > 0 && (
+            <div className="alert error" role="alert" data-testid="le-integrity-failed">
+              <span className="alert-icon">!</span>
+              <span>
+                Failed their integrity check while the package was built ({issued.checks.integrityFailed.length}): {issued.checks.integrityFailed.join(', ')}.
+                {' '}The package lists each as <code style={{ fontFamily: 'var(--font-mono)' }}>integrity_failed:&lt;reason&gt;</code> or
+                {' '}<code style={{ fontFamily: 'var(--font-mono)' }}>HASH_MISMATCH_AT_EXPORT</code> (no file), and each
+                {' '}is now frozen (verify failed) pending admin review. Do not hand over the package without explaining this.
+              </span>
+            </div>
+          )}
+
           {issued.acknowledgment_url && (
             <div style={{
               padding: 'var(--space-3)', background: 'var(--accent-soft)',
@@ -224,6 +251,7 @@ function GenerateModal({ inc, onClose, onIssued }) {
     retention_until: '',
     legal_hold_only: false,
     include_artifacts: false,
+    include_unsealed_drafts: false,
     recipient: '',
   })
   const [submitting, setSubmitting] = useState(false)
@@ -241,11 +269,12 @@ function GenerateModal({ inc, onClose, onIssued }) {
         legal_basis:          form.legal_basis,
         legal_hold_only:      form.legal_hold_only,
         include_artifacts:    form.include_artifacts,
+        include_unsealed_drafts: form.include_unsealed_drafts,
       }
       if (form.retention_until) payload.retention_until = new Date(form.retention_until).toISOString()
       if (form.recipient.trim()) payload.recipient = form.recipient.trim()
 
-      const issued = await api.prepareLePackage(inc.id, payload)
+      const issued = await prepareLePackageChecked(inc.id, payload)
       onIssued(issued)
     } catch (e) {
       setError(e.message || 'Generation failed')
@@ -390,6 +419,9 @@ function GenerateModal({ inc, onClose, onIssued }) {
                 Include quarantine artifacts (wrapped in <code style={{ fontFamily: 'var(--font-mono)' }}>infected</code>-password ZIP)
               </span>
             </label>
+            <div style={{ marginTop: 6 }}>
+              <UnsealedDraftsOption checked={form.include_unsealed_drafts} onChange={v => set('include_unsealed_drafts', v)} />
+            </div>
           </fieldset>
         </div>
 
@@ -600,11 +632,11 @@ function ManualAckModal({ inc, lp, onClose, onAcked }) {
   // Pull the incident's evidence list so the admin can link the scanned receipt
   // they (presumably) already uploaded under Evidence → Items.
   useEffect(() => {
-    let cancelled = false
-    api.listEvidence(inc.id, { limit: 200 })
-      .then(r => { if (!cancelled) setEvidence(r.items || []) })
+    const ctl = new AbortController()
+    api.listAllPages(api.listEvidence, inc.id, {}, 200, { signal: ctl.signal })   // every page
+      .then(all => { if (!ctl.signal.aborted) setEvidence(all) })
       .catch(() => {})
-    return () => { cancelled = true }
+    return () => ctl.abort()
   }, [inc.id])
 
   function set(k, v) { setForm(f => ({ ...f, [k]: v })) }

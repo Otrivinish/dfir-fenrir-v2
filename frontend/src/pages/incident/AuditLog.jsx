@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { formatLocal } from '../../lib/datetime.js'
@@ -32,20 +32,46 @@ export default function AuditLog() {
   const [error, setError]       = useState(null)
   const [actionFilter, setActionFilter] = useState('')
   const [userFilter, setUserFilter]     = useState('')
+  // Older pages load on request, not all at once: every page a lead reads is itself audited.
+  const [nextCursor, setNextCursor]     = useState(null)
+  const [loadingMore, setLoadingMore]   = useState(false)
+  const loadSeq = useRef(0)   // a page that answers after a newer load (or another incident) is dropped
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     setError(null)
     try {
       const data = await api.incidentAuditLog(inc.id, { limit: 500 })
+      if (seq !== loadSeq.current) return
       setEntries(data.items || [])
+      setNextCursor(data.next_cursor || null)
     } catch (e) {
-      setError(e.message || 'Could not load audit log')
+      if (seq === loadSeq.current) setError(e.message || 'Could not load audit log')
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [inc.id])
 
   useEffect(() => { load() }, [load])
+
+  const loadMore = async () => {
+    const seq = loadSeq.current
+    setLoadingMore(true); setError(null)
+    try {
+      const data = await api.incidentAuditLog(inc.id, { limit: 500, cursor: nextCursor })
+      if (seq !== loadSeq.current) return
+      // Keyed by id: a row pushed onto this page by newer entries is kept once.
+      setEntries(prev => {
+        const seen = new Set(prev.map(e => e.id))
+        return [...prev, ...(data.items || []).filter(e => !seen.has(e.id))]
+      })
+      setNextCursor(data.next_cursor || null)
+    } catch (e) {
+      if (seq === loadSeq.current) setError(e.message || 'Could not load older entries')
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   const filtered = useMemo(() => {
     return entries.filter(e => {
@@ -92,8 +118,9 @@ export default function AuditLog() {
               <option key={u} value={u}>{u}</option>
             ))}
           </select>
-          <span style={{ color: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-            {filtered.length} of {entries.length}
+          <span style={{ color: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
+                title={nextCursor ? 'Older entries are not loaded yet — see the end of the list' : undefined}>
+            {filtered.length} of {entries.length}{nextCursor ? '+' : ''}
           </span>
         </div>
       </div>
@@ -206,6 +233,17 @@ export default function AuditLog() {
             </li>
           ))}
         </ul>
+      )}
+
+      {!loading && nextCursor && (
+        <div data-audit-more style={{ marginTop: 'var(--space-3)', textAlign: 'center', color: 'var(--muted)', fontSize: 12 }}>
+          <div style={{ marginBottom: 'var(--space-2)' }}>
+            Showing the newest {entries.length} entries; older ones are not loaded yet. The filters apply to the loaded entries.
+          </div>
+          <button className="btn ghost" type="button" onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? 'Loading…' : 'Load older entries'}
+          </button>
+        </div>
       )}
     </section>
   )

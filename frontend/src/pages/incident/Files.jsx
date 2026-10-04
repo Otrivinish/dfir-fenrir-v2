@@ -59,7 +59,7 @@ export default function Files() {
   // After a write: re-read the list and the rail's counts.
   const reload = useCallback(() => { bumpRail?.(); return load() }, [bumpRail, load])
   useEffect(() => {
-    api.listEntities(inc.id, { limit: 200 }).then(r => setEntities(r.items || [])).catch(() => {})
+    api.listAllEntities(inc.id).then(setEntities).catch(() => {})   // every page
   }, [inc.id])
 
   const onPickFiles = async (e) => {

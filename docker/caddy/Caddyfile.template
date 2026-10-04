@@ -14,6 +14,19 @@
 	skip_install_trust
 	# Clients that connect by IP send no SNI — serve them the site's certificate.
 	default_sni {$DOMAIN:localhost}
+	# Caddy's own log (stderr, JSON as before). A one-time link carries its secret in the query string
+	# (…/working-copies/{id}/download?token=…; owner decision 2026-10-04): an error logged with the
+	# request (e.g. the backend cutting a download short) would print it, so the `token` query
+	# parameter is deleted from request>uri here too (the site's access log below does the same).
+	log default {
+		output stderr
+		format filter {
+			wrap json
+			request>uri query {
+				delete token
+			}
+		}
+	}
 	servers {
 		# HTTP/3 needs UDP 443, which is not published — don't advertise it.
 		protocols h1 h2
@@ -131,10 +144,16 @@
 	}
 
 	# Access log → stdout (rotated by the Docker json-file driver), not next to the
-	# TLS/ACME keys in /data.
+	# TLS/ACME keys in /data. JSON, with the `token` query parameter deleted from the
+	# logged URI (one-time working-copy links; see the global `log default`).
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			request>uri query {
+				delete token
+			}
+		}
 	}
 }
 

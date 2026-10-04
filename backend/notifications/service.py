@@ -224,6 +224,32 @@ async def notify_le_package_built(
     await commit_and_push(db)
 
 
+async def notify_stored_file_unreadable(
+    db: AsyncSession,
+    incident_id: uuid.UUID | None,
+    incident_ref: str | None,
+    what: str,
+    reason: str,
+):
+    """Tell every active admin that a stored encrypted file could not be read (G1 stage 3a: a
+    missing file, an I/O error, or a wrong or missing EVIDENCE_KEK). In-app only, so Dark
+    Operation allows it; the incident ref and the reason class only, no file name. Commits,
+    then pushes."""
+    admins = (await db.execute(
+        select(User).where(User.is_active == True, User.role == "admin")  # noqa: E712
+    )).scalars().all()
+    for admin in admins:
+        await _create_and_push(
+            db,
+            admin.id,
+            type="stored_file_unreadable",
+            title=f"{what} could not be read" + (f" on {incident_ref}" if incident_ref else ""),
+            body=f"Reason: {reason}. Nothing was frozen. Check the storage volume and EVIDENCE_KEK.",
+            incident_id=incident_id,
+        )
+    await commit_and_push(db)
+
+
 async def notify_incident_created(
     db: AsyncSession,
     creator_id: uuid.UUID,

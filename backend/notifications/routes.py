@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.deps import current_user
 from auth.service import SESSION_COOKIE
-from core.database import get_db
+from core.database import SessionLocal, get_db
 from core.redis_client import get_redis
 from core.security import hash_token
 from models import Notification, User
@@ -114,12 +114,14 @@ async def _ws_auth(websocket: WebSocket, db: AsyncSession) -> User | None:
 @router.websocket("/notifications/ws")
 async def notifications_ws(
     websocket: WebSocket,
-    db: AsyncSession = Depends(get_db),
 ):
     """Server push only (session cookie; 4001 without one). Each frame is
     {"type": "notification", "notification": <item as in GET /api/notifications>}, sent to
     every open socket of the user once the transaction that created it has committed."""
-    user = await _ws_auth(websocket, db)
+    # R62: the DB session is used for the auth check only and closed before the receive loop
+    # (a session held for the socket's lifetime pins a pool connection and an open transaction).
+    async with SessionLocal() as db:
+        user = await _ws_auth(websocket, db)
     if not user:
         await websocket.close(code=4001)
         return

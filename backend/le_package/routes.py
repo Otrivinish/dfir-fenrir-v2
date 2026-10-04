@@ -20,7 +20,6 @@ import asyncio
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -29,9 +28,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from core.config import settings
 from core.database import get_db
-from core.errors import ApiErrorBody
+from core.errors import ApiError, ApiErrorBody
+from evidence.crypto import EvidenceCryptoError, EvidenceIntegrityError
+from evidence.streaming import require_free_space
+from evidence.working_copies import freeze_for_integrity
 from incidents.access import LeadAccess, require_incident_lead
-from le_package.builder import build_le_package
+from le_package.builder import build_le_package, estimate_package_bytes
 from models import AuditLog, CustodyExport, Evidence, LePackage
 from notifications.service import notify_le_package_built
 from schemas import (LePackageAckRequest, LePackageAckResponse,
@@ -99,7 +101,18 @@ def _row_to_out(lp: LePackage, cust: CustodyExport,
 
 @router.post("/{incident_id}/le-package", response_model=LePackagePrepared,
              summary="Build a law-enforcement package",
-             responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}})
+             responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"},
+                        409: {"model": ApiErrorBody,
+                              "description": "evidence_integrity_failed (an exhibit's stored file verified, then "
+                                             "failed its integrity check while it was written into the package: "
+                                             "it changed during the build; nothing was built)"},
+                        503: {"model": ApiErrorBody,
+                              "description": "evidence_read_error (an exhibit's stored file verified, then could "
+                                             "not be read while it was written into the package: nothing was "
+                                             "built; audited, admins notified)"},
+                        507: {"model": ApiErrorBody,
+                              "description": "insufficient_storage (the evidence volume has no room for the "
+                                             "package)"}})
 async def prepare_le_package(
     incident_id: uuid.UUID,
     req:         LePackagePrepare,
@@ -116,29 +129,66 @@ async def prepare_le_package(
     The bundle KEK is returned exactly once. The download URL is the standard
     one-time `/api/exports/{token}` link (single use, 24-hour expiry). When
     acknowledgment is enabled, a single-use ack URL is also returned.
+
+    M11 (owner, 2026-10-04): exhibits whose chain of custody is not sealed (unsealed drafts) are left
+    out by default — listed in Evidence_Inventory.csv as "excluded: unsealed draft", with no custody
+    log or file. `include_unsealed_drafts: true` includes them (audited on the anchor row). The
+    inventory gains `coc_sealed`, `coc_sealed_at_utc`, `lawful_basis` and `package_inclusion`.
+
+    G2: the package is streamed into a staging file with bounded memory, whatever the
+    exhibit sizes, and published only when complete. Each exhibit is decrypted and
+    authenticated whole before it is written: one that is missing or unreadable is listed as
+    not included, as before. R3-2: one that fails an integrity check (tampered or corrupt) is
+    listed as `integrity_failed:<reason>`, and one whose SHA-256 differs from the recorded one
+    as `HASH_MISMATCH_AT_EXPORT`; the package is still built, and each such exhibit is frozen
+    (verify_failed, audited evidence_verify_failed, phase le_package). One that fails while it is
+    being written (it changed during the build) discards the whole package (409
+    evidence_integrity_failed / 503 evidence_read_error, nothing recorded). The evidence
+    volume must have room for the package's stored files plus a 1 GiB reserve (507
+    insufficient_storage, checked first). A multi-GiB package takes minutes: keep the
+    request open (the password is only in this response).
     """
     user, inc = lead
 
-    # 1. Build the encrypted bundle (in-memory). Does not commit DB writes.
-    build = await build_le_package(
-        db=db,
-        inc=inc,
-        user=user,
-        case_reference=req.case_reference,
-        requesting_authority=req.requesting_authority,
-        legal_basis=req.legal_basis,
-        retention_until=req.retention_until,
-        legal_hold_only=req.legal_hold_only,
-        include_artifacts=req.include_artifacts,
-        quarantine_path=settings.quarantine_path,
-    )
+    # 1. Build the encrypted bundle, streamed into /evidence/.staging. Does not commit DB writes.
+    size_estimate = await estimate_package_bytes(db, inc.id, legal_hold_only=req.legal_hold_only,
+                                                 include_artifacts=req.include_artifacts,
+                                                 include_unsealed_drafts=req.include_unsealed_drafts)
+    require_free_space(size_estimate, "this LE package")
+    try:
+        build = await build_le_package(
+            db=db,
+            inc=inc,
+            user=user,
+            case_reference=req.case_reference,
+            requesting_authority=req.requesting_authority,
+            legal_basis=req.legal_basis,
+            retention_until=req.retention_until,
+            legal_hold_only=req.legal_hold_only,
+            include_artifacts=req.include_artifacts,
+            quarantine_path=settings.quarantine_path,
+            size_estimate=size_estimate,
+            include_unsealed_drafts=req.include_unsealed_drafts,
+        )
+    except EvidenceIntegrityError as e:
+        raise ApiError(status.HTTP_409_CONFLICT, "evidence_integrity_failed",
+                       "An exhibit's stored file changed while it was being written into the package: it failed "
+                       f"its integrity check ({e.reason or 'integrity'}). Nothing was built. Run Verify on the "
+                       "incident's exhibits, then build the package again.") from e
+    except EvidenceCryptoError as e:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "evidence_read_error",
+                       "An exhibit's stored file stopped being readable while it was being written into the "
+                       "package (storage error). Nothing was built; the attempt was audited and admins were "
+                       "notified.") from e
 
-    # 2. Persist the password-protected ZIP to /evidence/exports/{id}.zip.
+    # 2. Move the finished password-protected ZIP to /evidence/exports/{id}.zip.
     export_id = uuid.uuid4()
     rel_path  = f"exports/{export_id}.zip"
-    target    = Path(settings.evidence_path) / rel_path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    await asyncio.to_thread(target.write_bytes, build.encrypted_bundle)   # not on the event loop
+    try:
+        await asyncio.to_thread(build.staged.commit, rel_path)               # not on the event loop
+    except BaseException:
+        await asyncio.to_thread(build.staged.discard)
+        raise
 
     # 3. Create the CustodyExport row (owns the download token + lifecycle).
     token      = secrets.token_urlsafe(32)
@@ -158,7 +208,7 @@ async def prepare_le_package(
         token=token,
         status="ready",
         file_path=rel_path,
-        file_size=len(build.encrypted_bundle),
+        file_size=build.bundle_size,
         bundle_sha256=build.bundle_sha256,
         key_hint=key_hint,
         item_ids=[],            # LE package is incident-wide, not evidence-scoped
@@ -198,6 +248,10 @@ async def prepare_le_package(
             "custody_export_id":    str(export_id),
             "expires_at":           expires_at.isoformat(),
             "key_hint":             key_hint,
+            "include_unsealed_drafts": req.include_unsealed_drafts,
+            "unsealed_drafts_excluded": build.excluded_drafts,
+            "integrity_failures":   [{"evidence_id": str(f["evidence_id"]), "identifier": f["identifier"],
+                                      "integrity": f["integrity"]} for f in build.integrity_failures],
         },
     )
 
@@ -246,6 +300,13 @@ async def prepare_le_package(
     )
     db.add(lp)
     await db.flush()
+    # R3-2 / R95: an exhibit found tampered (or with another SHA-256) while the package was built is frozen
+    # through the verify-freeze path, like Verify and the export do.
+    for f in build.integrity_failures:
+        await freeze_for_integrity(db, f["evidence_id"], user=user, ip=None, incident_id=inc.id,
+                                   reason=f["reason"], recomputed=f["sha256_recomputed"], phase="le_package",
+                                   extra={"le_package_id": str(lp.id), "custody_export_id": str(export_id),
+                                          "integrity": f["integrity"]})
     if user.role != "admin":
         # Delegated (IC / Deputy) build: every active admin hears about it.
         await notify_le_package_built(      # commits, then pushes

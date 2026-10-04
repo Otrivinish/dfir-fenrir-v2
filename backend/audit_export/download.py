@@ -12,15 +12,18 @@ Failure modes (all return 410 Gone — don't leak which case applied):
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
 from audit_export.bundle import is_expired, open_bundle_for_download
 from core.database import get_db
+from evidence.exports import iter_bundle
 from models import AuditExport
 
 
@@ -70,6 +73,9 @@ async def download_audit_export(
     # Atomically claim the token BEFORE streaming — closes the TOCTOU race where
     # two concurrent requests both pass the status check above and both serve the
     # one-time bundle. Exactly one UPDATE flips status→consumed; the loser 410s.
+    # L8: the claim, the file open and the success audit row commit together, so a
+    # token is consumed only when the response can actually be produced (the row
+    # stays locked until then, and a concurrent claimer waits, then sees "consumed").
     client_ip = request.client.host if request.client else None
     claimed = await db.execute(
         update(AuditExport)
@@ -79,15 +85,15 @@ async def download_audit_export(
         )
         .values(status="consumed", consumed_at=datetime.now(timezone.utc), consumed_ip=client_ip)
     )
-    await db.commit()
     if claimed.rowcount == 0:
+        await db.rollback()
         raise HTTPException(
             status.HTTP_410_GONE,
             "This export is no longer available (expired, consumed, or unknown).",
         )
 
     try:
-        body, suggested = open_bundle_for_download(exp)
+        bundle, size, suggested = await asyncio.to_thread(open_bundle_for_download, exp)
     except FileNotFoundError:
         # Bundle file purged (or never written) — record + 410.
         exp.status = "purged"
@@ -105,25 +111,33 @@ async def download_audit_export(
         await db.commit()
         raise HTTPException(status.HTTP_410_GONE, "Bundle file is no longer available.")
 
-    await write_audit(
-        db, "audit_export_download",
-        username="token:anonymous",
-        resource_type="audit_export", resource_id=str(exp.id),
-        outcome="success",
-        details={
-            "incident_id":   str(exp.incident_id) if exp.incident_id else None,
-            "bundle_sha256": exp.bundle_sha256,
-            "row_count":     exp.row_count,
-        },
-        ip_address=request.client.host if request.client else None,
-    )
-    await db.commit()
+    try:
+        await write_audit(
+            db, "audit_export_download",
+            username="token:anonymous",
+            resource_type="audit_export", resource_id=str(exp.id),
+            outcome="success",
+            details={
+                "incident_id":   str(exp.incident_id) if exp.incident_id else None,
+                "bundle_sha256": exp.bundle_sha256,
+                "row_count":     exp.row_count,
+            },
+            ip_address=client_ip,
+        )
+        await db.commit()
+    except BaseException:
+        # L8: no leaked file handle, and the claim rolls back with the failed transaction
+        # (the session closes without a commit), so the token stays usable.
+        bundle.close()
+        raise
 
-    return Response(
-        content=body,
+    # Streamed from disk in chunks (reads in a worker thread), never held whole in memory.
+    return StreamingResponse(
+        iter_bundle(bundle),
         media_type="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="{suggested}"',
+            "Content-Length":      str(size),
             "X-Bundle-SHA256":     exp.bundle_sha256 or "",
             "X-Pubkey-Fpr":        exp.pubkey_fpr   or "",
             "Cache-Control":       "no-store",

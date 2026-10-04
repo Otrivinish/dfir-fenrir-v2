@@ -25,9 +25,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_admin, require_analyst
 from core.config import settings
+from evidence.streaming import require_free_space
 from core.database import get_db
+from core.errors import ApiError, ApiErrorBody
 from incidents.access import get_accessible_incident
-from models import CollectionPackage, User
+from forensic.routes import upload_match
+from models import CollectionPackage, Evidence, User
 
 from collectors.builder import (
     CollectorBuildError,
@@ -55,8 +58,21 @@ class GenerateRequest(BaseModel):
     platform: str = Field(default="windows", max_length=16)
 
 
-def _pkg_out(pkg: CollectionPackage) -> dict:
-    """Serialiser. Never exposes the one-time token (shown once at generation)."""
+# G4 (R03) — the tool named in a collection's run record (its version is velociraptor_version).
+COLLECTOR_NAME = "Velociraptor offline collector"
+
+
+async def _identifiers(db: AsyncSession, pkgs) -> dict:
+    ids = {p.evidence_id for p in pkgs if p.evidence_id}
+    if not ids:
+        return {}
+    return dict((await db.execute(select(Evidence.id, Evidence.identifier).where(Evidence.id.in_(ids)))).all())
+
+
+def _pkg_out(pkg: CollectionPackage, idents: dict | None = None) -> dict:
+    """Serialiser. Never exposes the one-time token (shown once at generation). G4 run record of
+    the ingest: the collector, the received container's SHA-256 + size, the decrypted ZIP's
+    SHA-256 (output_sha256) and the exhibit the container matched (evidence_id / identifier)."""
     return {
         "id":                  str(pkg.id),
         "incident_id":         str(pkg.incident_id),
@@ -79,6 +95,12 @@ def _pkg_out(pkg: CollectionPackage) -> dict:
         "consumed_at":         pkg.consumed_at.isoformat() if pkg.consumed_at else None,
         "ingested_at":         pkg.ingested_at.isoformat() if pkg.ingested_at else None,
         "result_artifact_id":  str(pkg.result_artifact_id) if pkg.result_artifact_id else None,
+        "collector_name":      COLLECTOR_NAME,
+        "container_sha256":    pkg.container_sha256,
+        "container_size":      pkg.container_size,
+        "output_sha256":       pkg.output_sha256,
+        "evidence_id":         str(pkg.evidence_id) if pkg.evidence_id else None,
+        "evidence_identifier": (idents or {}).get(pkg.evidence_id),
     }
 
 
@@ -221,7 +243,9 @@ async def list_collections(
 ):
     """List all collection packages generated for this incident, newest first.
     Runs a lazy retention sweep on each call. Requires access to the incident.
-    Returns `{items: [...], cap: {...}}`; never exposes the one-time tokens."""
+    Returns `{items: [...], cap: {...}}`; never exposes the one-time tokens. Each ingested package
+    carries its run record (G4): collector, container SHA-256 + size as received, decrypted
+    output SHA-256, linked exhibit."""
     await get_accessible_incident(db, incident_id, user)
     await sweep(db)          # lazy GC on every list
     await db.commit()
@@ -230,8 +254,9 @@ async def list_collections(
         .where(CollectionPackage.incident_id == incident_id)
         .order_by(CollectionPackage.created_at.desc())
     )).scalars().all()
+    idents = await _identifiers(db, rows)
     return {
-        "items": [_pkg_out(r) for r in rows],
+        "items": [_pkg_out(r, idents) for r in rows],
         "cap":   {"max_active_per_incident": settings.collection_max_active_per_incident},
     }
 
@@ -258,12 +283,13 @@ async def get_collection(
     )).scalar_one_or_none()
     if not pkg:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Collection package not found")
-    return _pkg_out(pkg)
+    return _pkg_out(pkg, await _identifiers(db, [pkg]))
 
 
 # ─── Delete (reclaims the ZIP; row kept for audit) ───────────────────────────
 
 @router.delete("/{incident_id}/collections/{cid}", status_code=status.HTTP_204_NO_CONTENT,
+               responses={409: {"model": ApiErrorBody, "description": "incident_closed"}},
                summary="Delete a collection package")
 async def delete_collection(
     incident_id: uuid.UUID,
@@ -274,8 +300,11 @@ async def delete_collection(
 ):
     """Delete a collection package: reclaims its ZIP from disk and marks the row
     `deleted` (the row is retained for audit). Requires the analyst role and
-    access to the incident. Returns 204; 404 if not found."""
-    await get_accessible_incident(db, incident_id, user)
+    access to the incident; 409 incident_closed on a closed incident (the retention sweep
+    still reclaims expired packages). Returns 204; 404 if not found."""
+    inc = await get_accessible_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
     pkg = (await db.execute(
         select(CollectionPackage).where(
             CollectionPackage.id == cid,
@@ -311,7 +340,8 @@ async def delete_collection(
 # ─── Ingest (U1.2 — upload the collector's output, register as Artifact) ─────
 
 @router.post("/{incident_id}/collections/{cid}/ingest", status_code=status.HTTP_201_CREATED,
-             summary="Ingest collection output")
+             summary="Ingest collection output",
+             responses={507: {"model": ApiErrorBody, "description": "insufficient_storage (the quarantine volume, with its 1 GiB reserve, or the upload scratch space is full; nothing stored)"}})
 async def ingest_collection(
     incident_id: uuid.UUID,
     cid:     uuid.UUID,
@@ -323,17 +353,25 @@ async def ingest_collection(
     """Upload the collector's output file for a generated package and register it
     as a first-class quarantine Artifact for downstream analysis. Requires the
     analyst role and an open incident; rejects already-ingested or deleted
-    packages and oversize uploads. Returns the updated package plus the created
-    artifact summary."""
+    packages and oversize uploads. G4 run record: the container is hashed exactly
+    as received (SHA-256 + size, streamed, off the event loop) before it is
+    decrypted; the package stores that hash, the decrypted ZIP's SHA-256 and, when
+    the container's SHA-256 equals exactly one `active` exhibit of this incident,
+    the exhibit (`evidence_id`) — the ingest is then written to that exhibit's
+    custody log (`evidence_examine`, method `upload_sha256_match`), and Logs &
+    triage imports of the collection carry the exhibit and apply its clock
+    offset. Returns the updated package plus the created artifact summary."""
     inc = await get_accessible_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
 
+    # L28: the package row stays locked until this ingest commits, so a second ingest of the same package
+    # waits and then sees "ingested" (409) instead of racing it into a 500.
     pkg = (await db.execute(
         select(CollectionPackage).where(
             CollectionPackage.id == cid,
             CollectionPackage.incident_id == incident_id,
-        )
+        ).with_for_update().execution_options(populate_existing=True)
     )).scalar_one_or_none()
     if not pkg:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Collection package not found")
@@ -349,19 +387,47 @@ async def ingest_collection(
             f"Collection output exceeds {settings.collection_output_max_bytes} bytes",
         )
 
+    # L2: the container (and, once decrypted, its output) goes to quarantine: 507 before anything is written.
+    require_free_space(2 * (file.size or 0), "this collection output", root=settings.quarantine_path)
     # Stream to quarantine + register as a first-class Artifact (existing
     # analysis tools + U1.3 timeline import operate on it). X.509 decrypt of an
     # encrypted container would happen inside this call once keys are bundled.
-    artifact = await register_collection_output(
+    artifact, container_sha256, container_size = await register_collection_output(
         db, incident_id, pkg.name, file, user, pkg.enc_private_key
     )
+    exhibit, link_skipped = await upload_match(db, incident_id, container_sha256)     # L30 / L22
 
     pkg.status            = "ingested"
     pkg.ingested_at       = datetime.now(timezone.utc)
     pkg.ingested_by_id    = user.id
     pkg.output_sha256     = artifact.sha256_hash
     pkg.result_artifact_id = artifact.id
+    pkg.container_sha256  = container_sha256
+    pkg.container_size    = container_size
+    pkg.evidence_id       = exhibit.id if exhibit is not None else None
 
+    ip = request.client.host if request.client else None
+    if exhibit is not None:
+        # The received container IS this exhibit (same SHA-256): record its decryption + ingest.
+        await write_audit(
+            db, "evidence_examine",
+            user_id=user.id, username=user.username,
+            resource_type="evidence", resource_id=str(exhibit.id), outcome="success",
+            details={
+                "incident_id":       str(incident_id),
+                "tool":              "FENRIR collection ingest",
+                "collector":         COLLECTOR_NAME,
+                "collector_version": pkg.velociraptor_version,
+                "method":            "upload_sha256_match",
+                "examined_on":       "uploaded copy whose SHA-256 equals the exhibit's",
+                "sha256_verified":   container_sha256,
+                "result":            "collection_ingest",
+                "collection_package_id": str(pkg.id),
+                "output_sha256":     artifact.sha256_hash,
+                "artifact_id":       str(artifact.id),
+            },
+            ip_address=ip,
+        )
     await write_audit(
         db, "collection_ingest",
         user_id=user.id, username=user.username,
@@ -373,14 +439,21 @@ async def ingest_collection(
             "output_sha256": artifact.sha256_hash,
             "output_size":   artifact.file_size,
             "filename":      artifact.original_filename,
+            "collector":     COLLECTOR_NAME,
+            "collector_version": pkg.velociraptor_version,
+            "container_sha256": container_sha256,
+            "container_size": container_size,
+            "evidence_id":   str(exhibit.id) if exhibit is not None else None,
+            "evidence_link": "sha256_match" if exhibit is not None else None,
+            "evidence_link_skipped": link_skipped,
         },
-        ip_address=request.client.host if request.client else None,
+        ip_address=ip,
     )
     await db.commit()
     await db.refresh(pkg)
 
     return {
-        **_pkg_out(pkg),
+        **_pkg_out(pkg, {exhibit.id: exhibit.identifier} if exhibit is not None else {}),
         "artifact": {
             "id":                str(artifact.id),
             "original_filename": artifact.original_filename,

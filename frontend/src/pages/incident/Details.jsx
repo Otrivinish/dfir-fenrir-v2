@@ -378,7 +378,7 @@ function ResolutionSection({ incidentId, isClosed }) {
   useEffect(() => {
     Promise.allSettled([
       api.getLessonsLearned(incidentId),
-      api.listEntities(incidentId),
+      api.listAllEntities(incidentId),   // every page (the default page is 50)
     ]).then(([l, e]) => {
       const rec = l.status === 'fulfilled' ? l.value : {}
       setLl(rec)
@@ -387,7 +387,7 @@ function ResolutionSection({ incidentId, isClosed }) {
         root_cause_description: rec.root_cause_description ?? '',
         report_security_recommendations: rec.report_security_recommendations ?? '',
       })
-      setEntities(e.status === 'fulfilled' ? (e.value.items ?? []) : [])
+      setEntities(e.status === 'fulfilled' ? e.value : [])
     })
   }, [incidentId])
 
