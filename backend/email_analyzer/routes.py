@@ -1,8 +1,16 @@
 """U8.1 — Email analyzer routes (offline phishing triage).
 
 Parse + score an email, then route its content into existing subsystems:
-  attachments → quarantine Artifact · URLs/IPs/hashes → IOC · hops → Timeline ·
-  raw message → Evidence. Mounted under /api/incidents.
+  attachments → quarantine Artifact · URLs/IPs/hashes → IOC · hops → Timeline.
+Mounted under /api/incidents.
+
+G3 (R02) register-first: the message analysed IS an exhibit. An upload (or pasted source) is
+registered as an unsealed draft exhibit first — or linked to the one active exhibit with the same
+SHA-256 — and that exhibit is analysed; `from-evidence/{evidence_id}` analyses a registered exhibit
+(hash re-verified). No quarantine copy is made; attachment extraction re-reads the exhibit. Each
+analysis carries its run record (exhibit, input SHA-256, analyser + version) and is written to the
+exhibit's custody log (`evidence_examine`). Analyses made before G3 keep their quarantine copy and
+the legacy "Register as exhibit" (mint-evidence).
 """
 from __future__ import annotations
 
@@ -13,7 +21,7 @@ import logging
 import re
 import uuid
 import zipfile
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -30,11 +38,16 @@ from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
 from email_analyzer.domain_check import check_dkim, check_spf_dmarc, evaluate_source_ip, fetch_domain_auth
-from email_analyzer.parser import (attachment_bytes, is_msg, msg_to_eml_bytes, parse_email,
-                                   repair_wrapped_export)
+from email_analyzer.parser import (PARSER_NAME, PARSER_VERSION, attachment_bytes, is_msg, msg_to_eml_bytes,
+                                   parse_email, repair_wrapped_export)
 from email_analyzer.scoring import score as score_email
 from evidence.crypto import awrite_encrypted
-from evidence.hashing import ahashes_of
+from evidence.hashing import ahashes_of, asha256_of
+from evidence.streaming import require_free_space
+from evidence.register import (EXAMINED_MASTER, EXAMINED_MATCH, EXAMINED_UPLOAD, UPLOAD_ID_DOC, ExhibitInput,
+                               examine_audit, exhibit_brief, link_error_extra, read_exhibit_for_analysis,
+                               recheck_exhibit, register_or_link_upload, upload_link_for)
+from evidence.routes import _check_acquired_at
 from incidents.access import get_accessible_incident
 from models import Artifact, EmailAnalysis, Evidence, IOC, User, utcnow
 from schemas import (DomainCheckOut, EmailAnalysisList, EmailAnalysisOut, EmailBulkAnalyzeOut,
@@ -221,8 +234,13 @@ async def _audit_lookups_suppressed(db: AsyncSession, inc, user: User, request: 
 async def _incident(db, incident_id, user, *, writable=True):
     inc = await get_accessible_incident(db, incident_id, user)
     if writable and inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        # R66: every Email Analyzer write changes investigative facts (analyses, IOCs, timeline,
+        # quarantine, exhibits), so a closed incident refuses them.
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
     return inc
+
+
+_CLOSED_409 = {409: {"model": ApiErrorBody, "description": "incident_closed"}}
 
 
 async def _get_analysis(db, incident_id, aid, *, for_update=False) -> EmailAnalysis:
@@ -271,10 +289,92 @@ async def _analysis_out(db: AsyncSession, analysis: EmailAnalysis) -> EmailAnaly
     so a client can tell "all on the Timeline" from "some events deleted"."""
     hops = [h for h in (analysis.headers or {}).get("hops") or [] if _hop_time(h)]
     live = await _live_hop_events(db, analysis.incident_id, hops)
-    out = EmailAnalysisOut.model_validate(analysis)
+    out = _with_exhibit(EmailAnalysisOut.model_validate(analysis), await exhibit_brief(db, [analysis.evidence_id]))
     out.hop_import = HopImportStatus(importable=len(hops),
                                      already_imported=sum(_event_id(h) in live for h in hops))
     return out
+
+
+def _with_exhibit(out: EmailAnalysisOut, brief: dict) -> EmailAnalysisOut:
+    """G3 — the exhibit's identifier and whether it is still an unsealed draft."""
+    if out.evidence_id in brief:
+        out.evidence_identifier, out.evidence_sealed = brief[out.evidence_id]
+    return out
+
+
+def _prepare(data: bytes, src_name: str) -> tuple[bytes, bool]:
+    """The exhibit's bytes → the RFC-822 bytes the analyser reads (the exhibit itself is never
+    changed): a JSON-string export is unwrapped, an Outlook .msg converted. ValueError when a .msg
+    can't be read. CPU-bound: call via asyncio.to_thread."""
+    data = repair_wrapped_export(data)
+    if is_msg(data) or (src_name or "").lower().endswith(".msg"):
+        try:
+            return msg_to_eml_bytes(data), True
+        except Exception as e:
+            raise ValueError(f"Could not parse .msg file: {e}") from e
+    return data, False
+
+
+def _parse_exhibit(data: bytes, src_name: str) -> tuple[dict, bool]:
+    """(parsed, from_msg). CPU-bound over up to 25 MB: call via asyncio.to_thread (never on the loop)."""
+    eml, from_msg = _prepare(data, src_name)
+    return parse_email(eml), from_msg
+
+
+def _examine_base(incident_id, **params) -> dict:
+    return {"incident_id": str(incident_id), "tool": PARSER_NAME, "version": PARSER_VERSION,
+            "params": params}
+
+
+async def _parse_or_fail(db, x: ExhibitInput, src_name: str, base: dict, user, ip) -> tuple[dict, bool]:
+    """Parse the exhibit; on failure record the failed examination in its custody log and return
+    422 parse_failed naming the exhibit (an upload stays registered even when its analysis fails)."""
+    try:
+        return await asyncio.to_thread(_parse_exhibit, x.data, src_name)
+    except Exception as exc:  # noqa: BLE001 -- hostile input: any parser error is a parse failure
+        msg = str(exc) if isinstance(exc, ValueError) else f"Could not parse the message: {type(exc).__name__}"
+        await examine_audit(db, user=user, ip=ip, evidence_id=x.evidence.id, outcome="failure",
+                            details={**base, "result": "parse_failed", "error": msg[:500]})
+        await db.commit()
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "parse_failed",
+                       f"{msg}. The input is registered as exhibit {x.evidence.identifier}; nothing was analysed.",
+                       extra=link_error_extra(x)) from exc
+
+
+def _new_analysis(incident_id, x: ExhibitInput, parsed: dict, verdict: dict, auth_verified, user,
+                  batch_id=None, upload_link: Optional[str] = None) -> EmailAnalysis:
+    return EmailAnalysis(
+        incident_id=incident_id, source_artifact_id=None, batch_id=batch_id,
+        evidence_id=x.evidence.id, input_sha256=x.sha256,
+        analyser_name=PARSER_NAME, analyser_version=PARSER_VERSION, exhibit_link=upload_link or x.link,
+        subject=parsed.get("subject"), from_display=parsed.get("from_display"),
+        from_addr=parsed.get("from_addr"), reply_to=parsed.get("reply_to"),
+        return_path=parsed.get("return_path"), message_id=parsed.get("message_id"),
+        date_hdr=parsed.get("date_hdr"),
+        verdict=verdict["verdict"], score=verdict["score"], findings=verdict["findings"],
+        headers={
+            "hops": parsed.get("hops"), "auth": parsed.get("auth"),
+            "notable": parsed.get("notable_headers"),
+            "origin_ip": parsed.get("origin_ip"), "x_originating_ip": parsed.get("x_originating_ip"),
+        },
+        raw_headers=parsed.get("raw_headers"), auth_verified=auth_verified,
+        body_text=parsed.get("body_text"), body_html=parsed.get("body_html"),
+        urls=parsed.get("urls"), attachments=parsed.get("attachments"),
+        created_by_id=user.id, created_by=user.username,
+    )
+
+
+def _examined_on(link: str) -> str:
+    return {"registered": EXAMINED_UPLOAD, "sha256_match": EXAMINED_MATCH}.get(link, EXAMINED_MASTER)
+
+
+async def _audit_examined(db, x: ExhibitInput, analysis: EmailAnalysis, base: dict, from_msg: bool, user, ip) -> None:
+    await examine_audit(db, user=user, ip=ip, evidence_id=x.evidence.id, details={
+        **base, "result": "email_analysis", "email_analysis_id": str(analysis.id),
+        "method": {"registered": "upload_registered", "sha256_match": "upload_sha256_match"}.get(x.link, "from_evidence"),
+        "examined_on": _examined_on(x.link), "sha256_verified": x.sha256,
+        "verdict": analysis.verdict, "score": analysis.score, "from_msg": from_msg,
+    })
 
 
 def _store_quarantine(incident_id: uuid.UUID, filename: str, data: bytes) -> tuple[uuid.UUID, str]:
@@ -296,144 +396,224 @@ def _read_quarantine(incident_id: uuid.UUID, stored_filename: str) -> bytes:
     return p.read_bytes()
 
 
+_ANALYZE_RESPONSES = {
+    **_CLOSED_409,
+    413: {"description": "the message is larger than 25 MB"},
+    422: {"model": ApiErrorBody,
+          "description": "parse_failed (the input stays registered as a draft exhibit: `evidence_id` + "
+                         "`evidence_identifier` in the body), or acquired_in_future"},
+    507: {"model": ApiErrorBody, "description": "insufficient_storage (the evidence volume or the upload scratch space is full; nothing stored)"},
+}
+
+
+async def _verify_auth_single(db, inc, parsed: dict, user, request) -> Optional[dict]:
+    if _dark_operation_on(inc):
+        domain = _auth_check_domain(parsed)
+        auth_verified = _lookup_skipped(domain) if domain else None
+        if auth_verified:
+            await _audit_lookups_suppressed(db, inc, user, request, 1)
+        return auth_verified
+    return await _auto_verify_auth(parsed)
+
+
+async def _analyse_one(db, inc, x: ExhibitInput, src_name: str, user, request,
+                       chunked: tuple = (None, None)) -> EmailAnalysis:
+    """Analyse one exhibit (already registered / linked / re-verified): parse in a thread, the live
+    SPF/DMARC/DKIM cross-check (skipped + audited under Dark Operation), score, store the analysis
+    with its run record and write the examination to the exhibit's custody log. `chunked` = (upload_id,
+    its link) of the chunked upload the exhibit came from (R93; from-evidence only)."""
+    upload_id, upload_link = chunked
+    ip = request.client.host if request.client else None
+    base = _examine_base(inc.id, source=src_name)
+    parsed, from_msg = await _parse_or_fail(db, x, src_name, base, user, ip)
+    auth_verified = await _verify_auth_single(db, inc, parsed, user, request)
+    verdict = score_email(parsed, auth_verified)
+    if x.link == "from_evidence":
+        # the decrypt + parse + DNS took a while: a transfer / dispose / freeze meanwhile wins
+        await recheck_exhibit(db, incident_id=inc.id, evidence_id=x.evidence.id, user=user, ip=ip, base=base)
+    analysis = _new_analysis(inc.id, x, parsed, verdict, auth_verified, user, upload_link=upload_link)
+    db.add(analysis)
+    await db.flush()
+    await _audit_examined(db, x, analysis, base, from_msg, user, ip)
+    await write_audit(
+        db, "email_analyze", user_id=user.id, username=user.username,
+        resource_type="email_analysis", resource_id=str(analysis.id), outcome="success",
+        details={"incident_id": str(inc.id), "verdict": verdict["verdict"],
+                 "score": verdict["score"], "from": parsed.get("from_addr"), "from_msg": from_msg,
+                 "urls": len(parsed.get("urls") or []), "attachments": len(parsed.get("attachments") or []),
+                 "evidence_id": str(x.evidence.id), "evidence_identifier": x.evidence.identifier,
+                 "exhibit_link": analysis.exhibit_link, "input_sha256": x.sha256,
+                 "analyser": PARSER_NAME, "analyser_version": PARSER_VERSION,
+                 **({"upload_id": str(upload_id)} if upload_id else {})},
+        ip_address=ip,
+    )
+    await db.commit()
+    return analysis
+
+
 @router.post("/{incident_id}/email/analyze", response_model=EmailAnalysisOut,
-             status_code=status.HTTP_201_CREATED,
-             summary="Analyze an email for phishing")
+             status_code=status.HTTP_201_CREATED, responses=_ANALYZE_RESPONSES,
+             summary="Register an email as a draft exhibit and analyze it for phishing")
 async def analyze_email(
     incident_id: uuid.UUID,
     request: Request,
     raw:  Optional[str]        = Form(default=None),
-    file: Optional[UploadFile] = File(default=None),
+    file: Optional[UploadFile] = File(default=None, deprecated=True,
+                                      description="Deprecated (R80: the multipart body is held in the server's memory-only scratch space): "
+                                                  "upload a file through the upload session API (purpose=email)"),
+    acquired_at: Optional[datetime] = Form(default=None, description="When the message was acquired "
+                                           "(UTC; optional, unknown if omitted). Not in the future."),
     user: User = Depends(require_analyst),
     db:   AsyncSession = Depends(get_db),
 ) -> EmailAnalysisOut:
-    """Parse and score an email for phishing offline, persisting the result.
+    """Register-first phishing triage (G3). The input — an uploaded .eml/.msg (capped at 25 MB) or
+    pasted raw source (form field `raw`) — is FIRST registered as an exhibit, then that exhibit is
+    analysed. The `file` part is deprecated (G1 stage 3b, R80: a multipart file is held whole in the
+    server's memory-only scratch space first): upload a message with the upload session API (POST
+    …/uploads purpose=email, PUT the chunks, POST …/complete), then POST
+    …/email/from-evidence/{evidence_id}. Pasted source (`raw`) stays here.
 
-    Accepts either pasted raw header text (form field) or an uploaded .eml/.msg file
-    (capped at 25 MB); Outlook .msg is converted to RFC-822 first. Extracts headers,
-    hops, auth results, URLs, and attachments, computes a verdict and score, and stores
-    the raw message as a quarantine artifact. Under Dark Operation the automatic live
-    SPF/DMARC/DKIM lookup is skipped (`auth_verified.skipped`) and audited. Requires the
-    analyst role and an open incident. Returns the created email analysis.
+    - a new **unsealed draft exhibit** (identifier `EMAIL-…`, the caller as collector and custodian,
+      `acquired_at` as supplied or unknown, lawful basis pending), hashed (SHA-256 / SHA-1 / MD5),
+      encrypted at rest and audited `evidence_collect` (method email_upload / email_paste) — complete
+      and seal it later in Evidence; or
+    - when its SHA-256 equals exactly one active exhibit of the incident, that exhibit (no second copy).
+
+    No quarantine copy is made. Outlook .msg is converted to RFC-822 in memory (the exhibit keeps the
+    original bytes). The analysis extracts headers, hops, auth results, URLs and attachments and scores
+    them; under Dark Operation the automatic live SPF/DMARC/DKIM lookup is skipped
+    (`auth_verified.skipped`) and audited. The run record (`evidence_id`, `input_sha256`,
+    `analyser_name` / `analyser_version`, `exhibit_link`) is on the analysis and the examination is
+    in the exhibit's custody log (`evidence_examine`). A message that can't be parsed stays registered:
+    422 parse_failed with `evidence_id`. Requires the analyst role and an open incident (409
+    incident_closed). Returns the created analysis.
     """
     inc = await _incident(db, incident_id, user)
-
+    acquired_at = _check_acquired_at(acquired_at)
     if file is not None:
-        data = await file.read()
-        src_name = file.filename or "message.eml"
+        data = await _read_capped(file, MAX_EMAIL_BYTES)
+        src_name = Path(file.filename or "message.eml").name or "message.eml"
+        method = "email_upload"
     elif raw and raw.strip():
         data = raw.encode("utf-8", "replace")
         src_name = "pasted.eml"
+        method = "email_paste"
     else:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide raw header text or an .eml file")
     if not data:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Empty input")
-    data = repair_wrapped_export(data)
     if len(data) > MAX_EMAIL_BYTES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             f"Message exceeds {MAX_EMAIL_BYTES} bytes")
+    ip = request.client.host if request.client else None
+    x = await register_or_link_upload(
+        db, incident_id=incident_id, user=user, data=data, filename=src_name,
+        mime_type="application/vnd.ms-outlook" if is_msg(data) else "message/rfc822",
+        prefix="EMAIL", name=("Email message (pasted source)" if method == "email_paste"
+                              else f"Email message: {src_name}"),
+        method=method, analyser_label="Email analyser", acquired_at=acquired_at, ip=ip)
+    await db.commit()                     # registered first: the exhibit stands even if the analysis fails
+    return await _analysis_out(db, await _analyse_one(db, inc, x, src_name, user, request))
 
-    # Outlook .msg → RFC-822 (phase d.1). Everything downstream operates on the .eml.
-    from_msg = False
-    if is_msg(data) or (src_name or "").lower().endswith(".msg"):
-        try:
-            data = msg_to_eml_bytes(data)
-        except Exception as e:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
-                                f"Could not parse .msg file: {e}")
-        from_msg = True
-        if src_name.lower().endswith(".msg"):
-            src_name = src_name[:-4] + ".eml"
 
-    parsed = parse_email(data)
-    if _dark_operation_on(inc):
-        domain = _auth_check_domain(parsed)
-        auth_verified = _lookup_skipped(domain) if domain else None
-    else:
-        auth_verified = await _auto_verify_auth(parsed)
-    verdict = score_email(parsed, auth_verified)
-
-    # Persist the raw message as a quarantine Artifact (re-readable for extraction / evidence).
-    art_id, stored = _store_quarantine(incident_id, src_name, data)
-    db.add(Artifact(
-        id=art_id, incident_id=incident_id,
-        original_filename=src_name, stored_filename=stored,
-        file_size=len(data), mime_type="message/rfc822",
-        md5_hash=hashlib.md5(data).hexdigest(),
-        sha256_hash=hashlib.sha256(data).hexdigest(),
-        sha512_hash=hashlib.sha512(data).hexdigest(),
-        description=f"Source email: {parsed.get('subject') or '(no subject)'}",
-        analysis_status="pending", analysis_results={},
-        uploaded_by_id=user.id, uploaded_by=user.username,
-    ))
-
-    analysis = EmailAnalysis(
-        incident_id=incident_id, source_artifact_id=art_id,
-        subject=parsed.get("subject"), from_display=parsed.get("from_display"),
-        from_addr=parsed.get("from_addr"), reply_to=parsed.get("reply_to"),
-        return_path=parsed.get("return_path"), message_id=parsed.get("message_id"),
-        date_hdr=parsed.get("date_hdr"),
-        verdict=verdict["verdict"], score=verdict["score"], findings=verdict["findings"],
-        headers={
-            "hops": parsed.get("hops"), "auth": parsed.get("auth"),
-            "notable": parsed.get("notable_headers"),
-            "origin_ip": parsed.get("origin_ip"), "x_originating_ip": parsed.get("x_originating_ip"),
-        },
-        raw_headers=parsed.get("raw_headers"), auth_verified=auth_verified,
-        body_text=parsed.get("body_text"), body_html=parsed.get("body_html"),
-        urls=parsed.get("urls"), attachments=parsed.get("attachments"),
-        created_by_id=user.id, created_by=user.username,
-    )
-    db.add(analysis)
-    await db.flush()
-
-    if auth_verified and auth_verified.get("skipped"):
-        await _audit_lookups_suppressed(db, inc, user, request, 1)
-    await write_audit(
-        db, "email_analyze", user_id=user.id, username=user.username,
-        resource_type="email_analysis", resource_id=str(analysis.id), outcome="success",
-        details={"incident_id": str(incident_id), "verdict": verdict["verdict"],
-                 "score": verdict["score"], "from": parsed.get("from_addr"), "from_msg": from_msg,
-                 "urls": len(parsed.get("urls") or []), "attachments": len(parsed.get("attachments") or [])},
-        ip_address=request.client.host if request.client else None,
-    )
-    await db.commit()
-    return await _analysis_out(db, analysis)
+@router.post("/{incident_id}/email/from-evidence/{evidence_id}", response_model=EmailAnalysisOut,
+             status_code=status.HTTP_201_CREATED,
+             summary="Analyze a registered exhibit (hash re-verified) as an email",
+             responses={
+                 404: {"model": ApiErrorBody, "description": "evidence_not_found"},
+                 409: {"model": ApiErrorBody, "description": "incident_closed, evidence_not_active, "
+                       "evidence_not_in_internal_custody, transfer_pending, evidence_storage_missing or "
+                       "evidence_hash_mismatch (the item is frozen: verify_failed)"},
+                 413: {"model": ApiErrorBody, "description": "exhibit_too_large_for_analyser (over the 25 MB "
+                       "email limit; checked before anything is decrypted)"},
+                 422: {"model": ApiErrorBody, "description": "evidence_not_digital, evidence_is_archive, "
+                       "parse_failed or upload_link_not_found (upload_id)"},
+                 503: {"model": ApiErrorBody, "description": "evidence_read_error (stored copy unreadable; not frozen)"},
+             })
+async def analyze_email_from_evidence(
+    incident_id: uuid.UUID,
+    evidence_id: uuid.UUID,
+    request: Request,
+    upload_id: Optional[uuid.UUID] = Query(default=None, description=UPLOAD_ID_DOC),
+    user: User = Depends(require_analyst),
+    db:   AsyncSession = Depends(get_db),
+) -> EmailAnalysisOut:
+    """Analyse an exhibit already registered in Evidence (an .eml or Outlook .msg, up to 25 MB)
+    instead of re-uploading it — the C5/G4 rules: the exhibit must be an active digital file of this
+    incident, held by an internal custodian, with no custody transfer pending (409 otherwise; checked
+    again under a row lock before anything is stored). Its encrypted master is decrypted into memory
+    and re-hashed off the event loop; a SHA-256 mismatch (or a failed AES-GCM tag) freezes it
+    (`verify_failed`, audited `evidence_verify_failed`) → 409 evidence_hash_mismatch; an unreadable
+    copy is 503 evidence_read_error (not frozen). The analysis is recorded in the exhibit's custody
+    log (`evidence_examine`, tool = the analyser + version). Dark Operation and scoring as the upload.
+    After a chunked upload, pass its `upload_id` so the run record keeps the upload's exhibit link
+    (R93). The read transaction ends before the parse and the DNS cross-check (L24).
+    Requires the analyst role and an open incident. Returns the analysis (201) with its run record.
+    """
+    inc = await _incident(db, incident_id, user)
+    upload_link = await upload_link_for(db, upload_id=upload_id, incident_id=incident_id, evidence_id=evidence_id,
+                                        purpose="email", user=user)
+    ip = request.client.host if request.client else None
+    base = _examine_base(incident_id)
+    x = await read_exhibit_for_analysis(db, incident_id=incident_id, evidence_id=evidence_id, user=user, ip=ip,
+                                        max_bytes=MAX_EMAIL_BYTES, limit_label="25 MB email",
+                                        phase="email_analysis", base=base)
+    src_name = Path(x.evidence.original_filename or "message.eml").name or "message.eml"
+    if x.data[:4] == b"PK\x03\x04":
+        await examine_audit(db, user=user, ip=ip, evidence_id=evidence_id, outcome="failure",
+                            details={**base, "result": "evidence_is_archive", "error": "a ZIP archive"})
+        await db.commit()
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "evidence_is_archive",
+                       "The exhibit is a ZIP archive, not a message. Analyse each .eml/.msg it holds: "
+                       "upload them (each becomes its own exhibit).")
+    await db.commit()                     # L24: end the read transaction before the parse + DNS cross-check
+    return await _analysis_out(db, await _analyse_one(db, inc, x, src_name, user, request,
+                                                      chunked=(upload_id, upload_link)))
 
 
 @router.post("/{incident_id}/email/analyze-bulk", response_model=EmailBulkAnalyzeOut,
-             status_code=status.HTTP_201_CREATED,
-             summary="Bulk-analyze multiple emails")
+             status_code=status.HTTP_201_CREATED, responses=_CLOSED_409,
+             summary="Register and bulk-analyze multiple emails")
 async def analyze_email_bulk(
     incident_id: uuid.UUID,
     request: Request,
     files: list[UploadFile] = File(...),
+    acquired_at: Optional[datetime] = Form(default=None, description="When the messages were acquired "
+                                           "(UTC; optional). Not in the future."),
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> EmailBulkAnalyzeOut:
-    """Analyze many emails in one batch: either multiple .eml/.msg uploads, or
-    a single .zip containing them.
+    """Analyze many emails in one batch: either multiple .eml/.msg uploads, or a single .zip
+    containing them. (R80: like every multipart upload the batch is held whole in the server's
+    memory-only scratch space before this route sees it, never on a disk; single messages can use the
+    upload session API instead.)
 
-    Each message runs through the same offline parse+score pipeline as a
-    single analyze, tagged with a shared batch_id so the history view can be
-    filtered to this run. Live SPF/DMARC/DKIM validation is looked up once per
-    distinct sender domain in the batch (phishing runs typically reuse one
-    spoofed domain across many messages) and run concurrently with a capped
-    timeout, so one slow or unreachable domain can't stall the whole batch.
-    Nothing is silently dropped -- oversized/invalid members are reported back
-    as `skipped`/`errors`. Requires the analyst role and an open incident.
-    Under Dark Operation the live lookups are skipped and audited.
+    Register-first (G3): every message is FIRST registered as its own unsealed draft exhibit (or
+    linked to the one active exhibit with the same SHA-256), then analysed — one exhibit per message,
+    no quarantine copies. A .zip is a container only: its members are registered (each exhibit's
+    `evidence_collect` audit records the archive name and SHA-256); the archive itself is not stored.
+    Each message runs through the same offline parse+score pipeline as a single analyze, tagged with
+    a shared batch_id so the history view can be filtered to this run. Live SPF/DMARC/DKIM validation
+    is looked up once per distinct sender domain in the batch, concurrently with a capped timeout.
+    Nothing is silently dropped -- oversized/invalid members are reported back as `skipped`/`errors`
+    (a message that fails to parse stays registered; its error names the exhibit). Requires the
+    analyst role and an open incident. Under Dark Operation the live lookups are skipped and audited.
     """
     inc = await _incident(db, incident_id, user)
+    acquired_at = _check_acquired_at(acquired_at)
     if len(files) > MAX_BULK_FILES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             f"Batch exceeds {MAX_BULK_FILES} files")
 
     items: list[tuple[str, bytes]] = []
     skipped: list[str] = []
+    container: dict = {}
     if len(files) == 1 and (files[0].filename or "").lower().endswith(".zip"):
         zdata = await _read_capped(files[0], MAX_BULK_TOTAL_BYTES)
-        items, skipped = _extract_zip_members(zdata)
+        container = {"container": Path(files[0].filename or "batch.zip").name,
+                     "container_sha256": await asha256_of(zdata)}
+        items, skipped = await asyncio.to_thread(_extract_zip_members, zdata)
+        del zdata
     else:
         total = 0
         for f in files:
@@ -459,30 +639,42 @@ async def analyze_email_bulk(
     if not items:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No valid .eml/.msg files in the upload")
 
+    ip = request.client.host if request.client else None
     batch_id = uuid.uuid4()
-    parsed_items: list[tuple[str, dict, bytes, bool]] = []
-    errors: list[str] = []
+    # Register first: every message becomes (or links to) an exhibit before anything is analysed. Each
+    # registration commits on its own (review H1): its evidence_collect audit row takes the audit-chain
+    # lock, which must not be held while the next message is hashed and encrypted.
+    registered: list[tuple[str, ExhibitInput]] = []
     for name, data in items:
-        data = repair_wrapped_export(data)
-        from_msg = False
-        if is_msg(data) or name.lower().endswith(".msg"):
-            try:
-                data = msg_to_eml_bytes(data)
-                from_msg = True
-                if name.lower().endswith(".msg"):
-                    name = name[:-4] + ".eml"
-            except Exception as e:
-                errors.append(f"{name}: could not parse .msg file ({e})")
-                continue
+        src_name = Path(name.replace("\\", "/")).name or "message.eml"
+        extra = {**container, "member": name, "batch_id": str(batch_id)} if container else {"batch_id": str(batch_id)}
+        x = await register_or_link_upload(
+            db, incident_id=incident_id, user=user, data=data, filename=src_name,
+            mime_type="application/vnd.ms-outlook" if is_msg(data) else "message/rfc822",
+            prefix="EMAIL", name=f"Email message: {src_name}", method="email_upload",
+            analyser_label="Email analyser (bulk)", acquired_at=acquired_at, ip=ip, extra=extra)
+        await db.commit()
+        registered.append((src_name, x))
+    del items
+
+    parsed_items: list[tuple[str, dict, ExhibitInput, bool, dict]] = []
+    errors: list[str] = []
+    for src_name, x in registered:
+        base = _examine_base(incident_id, source=src_name, batch_id=str(batch_id))
         try:
-            parsed = parse_email(data)
-        except Exception as e:
-            errors.append(f"{name}: parse failed ({e})")
+            parsed, from_msg = await asyncio.to_thread(_parse_exhibit, x.data, src_name)
+        except Exception as e:  # noqa: BLE001 -- hostile input
+            msg = str(e) if isinstance(e, ValueError) else f"parse failed ({type(e).__name__})"
+            await examine_audit(db, user=user, ip=ip, evidence_id=x.evidence.id, outcome="failure",
+                                details={**base, "result": "parse_failed", "error": msg[:500]})
+            errors.append(f"{src_name}: {msg} (registered as {x.evidence.identifier})")
             continue
-        parsed_items.append((name, parsed, data, from_msg))
+        parsed_items.append((src_name, parsed, x, from_msg, base))
+    if errors:
+        await db.commit()       # H1: release the audit-chain lock (parse-failure rows) before the DNS phase
 
     # One live-DNS fetch per distinct claimed domain across the whole batch.
-    domains = {d for d in (_auth_check_domain(p) for _, p, _, _ in parsed_items) if d}
+    domains = {d for d in (_auth_check_domain(p) for _, p, _, _, _ in parsed_items) if d}
     sem = asyncio.Semaphore(_AUTH_CONCURRENCY)
 
     async def _fetch(domain: str) -> tuple[str, dict]:
@@ -500,47 +692,19 @@ async def analyze_email_bulk(
         domain_cache = dict(await asyncio.gather(*(_fetch(d) for d in domains))) if domains else {}
 
     created: list[EmailAnalysis] = []
-    for name, parsed, data, from_msg in parsed_items:
+    for src_name, parsed, x, from_msg, base in parsed_items:
         domain = _auth_check_domain(parsed)
-        base = domain_cache.get(domain) if domain else None
+        cached = domain_cache.get(domain) if domain else None
         auth_verified = None
-        if base is not None:
-            auth_verified = base if base.get("error") else {
-                **base, "ip_in_spf": evaluate_source_ip(base["spf"], parsed.get("origin_ip")),
+        if cached is not None:
+            auth_verified = cached if cached.get("error") else {
+                **cached, "ip_in_spf": evaluate_source_ip(cached["spf"], parsed.get("origin_ip")),
             }
         verdict = score_email(parsed, auth_verified)
-
-        art_id, stored = _store_quarantine(incident_id, name, data)
-        db.add(Artifact(
-            id=art_id, incident_id=incident_id,
-            original_filename=name, stored_filename=stored,
-            file_size=len(data), mime_type="message/rfc822",
-            md5_hash=hashlib.md5(data).hexdigest(),
-            sha256_hash=hashlib.sha256(data).hexdigest(),
-            sha512_hash=hashlib.sha512(data).hexdigest(),
-            description=f"Source email: {parsed.get('subject') or '(no subject)'}",
-            analysis_status="pending", analysis_results={},
-            uploaded_by_id=user.id, uploaded_by=user.username,
-        ))
-        analysis = EmailAnalysis(
-            incident_id=incident_id, source_artifact_id=art_id, batch_id=batch_id,
-            subject=parsed.get("subject"), from_display=parsed.get("from_display"),
-            from_addr=parsed.get("from_addr"), reply_to=parsed.get("reply_to"),
-            return_path=parsed.get("return_path"), message_id=parsed.get("message_id"),
-            date_hdr=parsed.get("date_hdr"),
-            verdict=verdict["verdict"], score=verdict["score"], findings=verdict["findings"],
-            headers={
-                "hops": parsed.get("hops"), "auth": parsed.get("auth"),
-                "notable": parsed.get("notable_headers"),
-                "origin_ip": parsed.get("origin_ip"), "x_originating_ip": parsed.get("x_originating_ip"),
-            },
-            raw_headers=parsed.get("raw_headers"), auth_verified=auth_verified,
-            body_text=parsed.get("body_text"), body_html=parsed.get("body_html"),
-            urls=parsed.get("urls"), attachments=parsed.get("attachments"),
-            created_by_id=user.id, created_by=user.username,
-        )
+        analysis = _new_analysis(incident_id, x, parsed, verdict, auth_verified, user, batch_id=batch_id)
         db.add(analysis)
         await db.flush()
+        await _audit_examined(db, x, analysis, base, from_msg, user, ip)
         created.append(analysis)
 
     if dark and domains:
@@ -550,8 +714,11 @@ async def analyze_email_bulk(
         resource_type="email_analysis", resource_id=str(batch_id), outcome="success",
         details={"incident_id": str(incident_id), "batch_id": str(batch_id),
                  "analyzed": len(created), "skipped": len(skipped), "errors": len(errors),
-                 "from_msg_count": sum(1 for *_, fm in parsed_items if fm)},
-        ip_address=request.client.host if request.client else None,
+                 "from_msg_count": sum(1 for *_, fm, _b in parsed_items if fm),
+                 "exhibits_registered": sum(1 for _, x in registered if x.link == "registered"),
+                 "exhibits_linked": sum(1 for _, x in registered if x.link == "sha256_match"),
+                 "analyser": PARSER_NAME, "analyser_version": PARSER_VERSION, **container},
+        ip_address=ip,
     )
     await db.commit()
 
@@ -572,14 +739,15 @@ async def list_email_analyses(
     """List all email analyses for an incident, newest first.
 
     Requires access to the incident. Returns each analysis with its verdict, score,
-    headers, URLs, and attachments.
+    headers, URLs, and attachments, plus its run record (G3: exhibit, input SHA-256, analyser).
     """
     await _incident(db, incident_id, user, writable=False)
     rows = (await db.execute(
         select(EmailAnalysis).where(EmailAnalysis.incident_id == incident_id)
         .order_by(EmailAnalysis.created_at.desc())
     )).scalars().all()
-    return EmailAnalysisList(items=[EmailAnalysisOut.model_validate(r) for r in rows])
+    brief = await exhibit_brief(db, [r.evidence_id for r in rows])
+    return EmailAnalysisList(items=[_with_exhibit(EmailAnalysisOut.model_validate(r), brief) for r in rows])
 
 
 # ─── Domain auth check (manual mode) ─────────────────────────────────────────
@@ -651,7 +819,7 @@ async def get_email_analysis(
 
 
 @router.post("/{incident_id}/email/{aid}/promote-iocs", response_model=EmailAnalysisOut,
-             summary="Promote email indicators to IOCs")
+             summary="Promote email indicators to IOCs", responses=_CLOSED_409)
 async def promote_iocs(
     incident_id: uuid.UUID, aid: uuid.UUID, req: PromoteIocsRequest, request: Request,
     user: User = Depends(require_analyst), db: AsyncSession = Depends(get_db),
@@ -659,8 +827,9 @@ async def promote_iocs(
     """Promote selected indicators from an email analysis into incident IOCs.
 
     Takes a list of typed indicators (ip, domain, url, hash_*, email, registry_key,
-    file_path, other); unknown types and existing duplicates are skipped. Requires the
-    analyst role and an open incident. Returns the email analysis.
+    file_path, other); unknown types and existing duplicates are skipped. IOCs from an analysis with a
+    run record (G3) record its exhibit (`evidence_id`). Requires the analyst role and an open
+    incident. Returns the email analysis.
     """
     await _incident(db, incident_id, user)
     analysis = await _get_analysis(db, incident_id, aid)
@@ -677,7 +846,9 @@ async def promote_iocs(
             continue
         db.add(IOC(incident_id=incident_id, type=item.type, value=item.value,
                    notes=item.notes or f"From email analysis {aid}", source="email-analysis",
-                   tags=["email"], added_by_id=user.id))
+                   tags=["email"], added_by_id=user.id,
+                   # G3 — found in the exhibit this run analysed (none for a pre-G3 analysis)
+                   evidence_id=analysis.evidence_id if analysis.input_sha256 else None))
         created += 1
     await write_audit(db, "email_promote_iocs", user_id=user.id, username=user.username,
                       resource_type="email_analysis", resource_id=str(aid), outcome="success",
@@ -688,17 +859,25 @@ async def promote_iocs(
 
 
 @router.post("/{incident_id}/email/{aid}/attachments/{idx}/extract", response_model=EmailAnalysisOut,
-             summary="Extract an email attachment to quarantine")
+             summary="Extract an email attachment to quarantine",
+             responses={**_CLOSED_409,
+                        409: {"model": ApiErrorBody, "description": "incident_closed, or (G3, the analysed "
+                              "exhibit) evidence_not_active, evidence_not_in_internal_custody, transfer_pending "
+                              "or evidence_hash_mismatch (frozen)"},
+                        503: {"model": ApiErrorBody, "description": "evidence_read_error"}})
 async def extract_attachment(
     incident_id: uuid.UUID, aid: uuid.UUID, idx: int, request: Request,
     user: User = Depends(require_analyst), db: AsyncSession = Depends(get_db),
 ) -> EmailAnalysisOut:
     """Extract one attachment (by index) from the analyzed email into a quarantine artifact.
 
-    Reads the source message from quarantine, writes the attachment as a new artifact with
-    detected MIME type and hashes, and auto-creates dedup SHA-256/MD5 IOCs. Fails if the
-    index is out of range, the attachment was already extracted, or the source message is
-    gone. Requires the analyst role and an open incident. Returns the email analysis.
+    The message is read from the exhibit the analysis ran on (G3: decrypted and re-hashed first, the
+    same rules as from-evidence — a mismatch freezes the exhibit, 409; the extraction is written to
+    its custody log as `evidence_examine`), or, for an analysis made before G3, from its quarantine
+    copy. Writes the attachment as a new artifact with detected MIME type and hashes, and
+    auto-creates dedup SHA-256/MD5 IOCs (recording the exhibit when there is one). Fails if the index
+    is out of range, the attachment was already extracted, or the source message is gone. Requires
+    the analyst role and an open incident. Returns the email analysis.
     """
     await _incident(db, incident_id, user)
     analysis = await _get_analysis(db, incident_id, aid)
@@ -707,22 +886,40 @@ async def extract_attachment(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment index out of range")
     if atts[idx].get("artifact_id"):
         raise HTTPException(status.HTTP_409_CONFLICT, "Attachment already extracted")
-    if not analysis.source_artifact_id:
-        raise HTTPException(status.HTTP_410_GONE, "Source message unavailable")
+    ip = request.client.host if request.client else None
+    run = bool(analysis.input_sha256 and analysis.evidence_id)
+    x = None
+    if run:
+        # G3 — no quarantine copy: re-read (and re-verify) the exhibit this analysis ran on.
+        base = _examine_base(incident_id, attachment_index=idx, email_analysis_id=str(aid))
+        x = await read_exhibit_for_analysis(db, incident_id=incident_id, evidence_id=analysis.evidence_id,
+                                            user=user, ip=ip, max_bytes=MAX_EMAIL_BYTES,
+                                            limit_label="25 MB email", phase="email_attachment_extract", base=base)
+        src_name = x.evidence.original_filename or "message.eml"
+        raw, _from_msg = await asyncio.to_thread(_prepare, x.data, src_name)
+    else:
+        if not analysis.source_artifact_id:
+            raise HTTPException(status.HTTP_410_GONE, "Source message unavailable")
+        src = (await db.execute(select(Artifact).where(Artifact.id == analysis.source_artifact_id))).scalar_one_or_none()
+        if not src:
+            raise HTTPException(status.HTTP_410_GONE, "Source message artifact missing")
+        raw = await asyncio.to_thread(_read_quarantine, incident_id, src.stored_filename)
+    try:
+        filename, _declared, data = await asyncio.to_thread(attachment_bytes, raw, idx)
+    except IndexError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found in the message")
+    del raw
+    if run:
+        await recheck_exhibit(db, incident_id=incident_id, evidence_id=analysis.evidence_id, user=user,
+                              ip=ip, base=base)
 
-    src = (await db.execute(select(Artifact).where(Artifact.id == analysis.source_artifact_id))).scalar_one_or_none()
-    if not src:
-        raise HTTPException(status.HTTP_410_GONE, "Source message artifact missing")
-    raw = _read_quarantine(incident_id, src.stored_filename)
-    filename, _declared, data = attachment_bytes(raw, idx)
-
-    art_id, stored = _store_quarantine(incident_id, filename, data)
-    sha256 = hashlib.sha256(data).hexdigest()
-    md5 = hashlib.md5(data).hexdigest()
+    art_id, stored = await asyncio.to_thread(_store_quarantine, incident_id, filename, data)
+    md5, sha256, sha512 = await asyncio.to_thread(
+        lambda b: (hashlib.md5(b).hexdigest(), hashlib.sha256(b).hexdigest(), hashlib.sha512(b).hexdigest()), data)
     db.add(Artifact(
         id=art_id, incident_id=incident_id, original_filename=filename, stored_filename=stored,
         file_size=len(data), mime_type=magic.from_buffer(data[:2048], mime=True),
-        md5_hash=md5, sha256_hash=sha256, sha512_hash=hashlib.sha512(data).hexdigest(),
+        md5_hash=md5, sha256_hash=sha256, sha512_hash=sha512,
         description=f"Email attachment from analysis {aid}",
         analysis_status="pending", analysis_results={},
         uploaded_by_id=user.id, uploaded_by=user.username,
@@ -734,21 +931,29 @@ async def extract_attachment(
         if not exists:
             db.add(IOC(incident_id=incident_id, type=t, value=value,
                        notes=f"Auto-extracted from email attachment: {filename}",
-                       source="email-analysis", tags=["email", "attachment"], added_by_id=user.id))
+                       source="email-analysis", tags=["email", "attachment"], added_by_id=user.id,
+                       evidence_id=analysis.evidence_id if run else None))
 
     atts[idx] = {**atts[idx], "artifact_id": str(art_id)}
     analysis.attachments = atts
+    if run:
+        await db.flush()
+        await examine_audit(db, user=user, ip=ip, evidence_id=analysis.evidence_id, details={
+            **base, "result": "email_attachment_extracted", "examined_on": EXAMINED_MASTER,
+            "sha256_verified": x.sha256, "artifact_id": str(art_id), "filename": filename,
+            "attachment_sha256": sha256})
     await write_audit(db, "email_extract_attachment", user_id=user.id, username=user.username,
                       resource_type="email_analysis", resource_id=str(aid), outcome="success",
                       details={"incident_id": str(incident_id), "artifact_id": str(art_id),
-                               "filename": filename, "sha256": sha256},
-                      ip_address=request.client.host if request.client else None)
+                               "filename": filename, "sha256": sha256,
+                               "evidence_id": str(analysis.evidence_id) if run else None},
+                      ip_address=ip)
     await db.commit()
     return await _analysis_out(db, analysis)
 
 
 @router.post("/{incident_id}/email/{aid}/import-hops", response_model=EmailAnalysisOut,
-             summary="Import mail relay hops to the timeline")
+             summary="Import mail relay hops to the timeline", responses=_CLOSED_409)
 async def import_hops(
     incident_id: uuid.UUID, aid: uuid.UUID, request: Request,
     user: User = Depends(require_analyst), db: AsyncSession = Depends(get_db),
@@ -758,9 +963,12 @@ async def import_hops(
     Each parsed hop with a valid timestamp becomes a Detection & Analysis phase event
     sourced from "email"; hops without a usable timestamp are skipped. Idempotent: each
     imported hop records its `timeline_event_id`, and hops whose event still exists are
-    skipped, so a repeat call adds only hops whose event was deleted. Requires the
-    analyst role and an open incident. Returns the email analysis; its `hop_import`
-    counts importable hops and those already on the Timeline.
+    skipped, so a repeat call adds only hops whose event was deleted. For an analysis with a
+    run record (G3) each event records the exhibit, the analysis (`email_analysis_id`, its run) and a
+    `time_basis` (explicit; assumed_tz for a zone-less date, read as UTC), so its facts are immutable;
+    no clock offset is applied (relay
+    times come from the mail servers). Requires the analyst role and an open incident. Returns the
+    email analysis; its `hop_import` counts importable hops and those already on the Timeline.
     """
     from models import TimelineEvent
     await _incident(db, incident_id, user)
@@ -771,6 +979,7 @@ async def import_hops(
     headers = analysis.headers or {}
     hops = [dict(h) for h in headers.get("hops") or []]
     live = await _live_hop_events(db, incident_id, hops)
+    run = bool(analysis.input_sha256 and analysis.evidence_id)
     n = 0
     already = 0
     for h in hops:
@@ -786,11 +995,20 @@ async def import_hops(
         ev_id = uuid.uuid4()
         # raw_log keeps the parsed hop exactly as before (without the new marker)
         raw = {k: v for k, v in h.items() if k != "timeline_event_id"}
+        prov = {}
+        if run:
+            # G3 — a run-record analysis: the event carries its exhibit and how its time was worked
+            # out, so its facts are immutable like other imports. Received-header times are written
+            # by the mail servers, so the exhibit's device clock offset does not apply.
+            prov = {"evidence_id": analysis.evidence_id, "email_analysis_id": analysis.id,      # L26: the run
+                    "time_basis": "explicit" if et.tzinfo is not None else "assumed_tz"}
+            if et.tzinfo is None:
+                et = et.replace(tzinfo=timezone.utc)
         db.add(TimelineEvent(
             id=ev_id, incident_id=incident_id, event_time=et, source="email",
             event_type="Mail relay hop", hostname=h.get("by"),
             description=desc, raw_log=str(raw)[:4000], ir_phase="detection_and_analysis",
-            origin="forensic_import", external_safe=False, created_by_id=user.id,
+            origin="forensic_import", external_safe=False, created_by_id=user.id, **prov,
         ))
         h["timeline_event_id"] = str(ev_id)
         n += 1
@@ -800,7 +1018,8 @@ async def import_hops(
     await write_audit(db, "email_import_hops", user_id=user.id, username=user.username,
                       resource_type="email_analysis", resource_id=str(aid), outcome="success",
                       details={"incident_id": str(incident_id), "events": n,
-                               "already_imported": already},
+                               "already_imported": already,
+                               "evidence_id": str(analysis.evidence_id) if run else None},
                       ip_address=request.client.host if request.client else None)
     await db.commit()
     return await _analysis_out(db, analysis)
@@ -808,14 +1027,18 @@ async def import_hops(
 
 @router.post("/{incident_id}/email/{aid}/mint-evidence", response_model=EmailAnalysisOut,
              operation_id="mint_email_evidence",
-             summary="Mint the email as chain-of-custody evidence",
+             summary="Register a pre-G3 analysis's email as an exhibit (legacy)",
              responses={409: {"model": ApiErrorBody,
-                              "description": "artifact_hash_mismatch (or already minted)"}})
+                              "description": "artifact_hash_mismatch (or already minted), or "
+                                             "incident_closed"},
+                        507: {"model": ApiErrorBody, "description": "insufficient_storage (the evidence volume is full; nothing stored)"}})
 async def mint_evidence(
     incident_id: uuid.UUID, aid: uuid.UUID, request: Request,
     user: User = Depends(require_analyst), db: AsyncSession = Depends(get_db),
 ) -> EmailAnalysisOut:
-    """Mint the analyzed email's raw message as an encrypted chain-of-custody evidence item.
+    """Register the analyzed email's raw message as an encrypted chain-of-custody exhibit — for an
+    analysis made BEFORE G3 only (it analysed a quarantine copy first). A G3 analysis already is
+    of an exhibit (`evidence_id` set): 409.
 
     Reads the source message from quarantine and re-hashes it: if its SHA-256 no longer
     matches the hash recorded at upload, nothing is minted (409 `artifact_hash_mismatch`,
@@ -850,16 +1073,16 @@ async def mint_evidence(
                        "The stored message no longer matches the SHA-256 recorded when it was "
                        "uploaded; it was not minted as evidence.")
 
+    require_free_space(len(raw), "this exhibit")                           # L2
     ev_id = uuid.uuid4()
     rel = f"emails/{ev_id}.eml.enc"
-    await awrite_encrypted(raw, rel)
-    nonce = (Path(settings.evidence_path) / (rel + ".nonce")).read_text().strip()
+    stored = await awrite_encrypted(raw, rel)
     short = str(aid)[:8]
     ev = Evidence(
         id=ev_id, incident_id=incident_id, kind="digital_file", status="active",
         name=f"Email: {(analysis.subject or '(no subject)')[:200]}",
         identifier=f"EMAIL-{short}",
-        original_filename="message.eml", storage_path=rel, nonce_hex=nonce,
+        original_filename="message.eml", storage_path=rel, nonce_hex=stored.nonce_hex,
         file_size_bytes=len(raw), mime_type="message/rfc822",
         sha256=sha256, sha1=sha1, md5=md5,
         current_custodian_id=user.id, collected_by_id=user.id, collected_at=utcnow(),

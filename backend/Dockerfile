@@ -68,11 +68,14 @@ WORKDIR /app
 # trixie's own client is 17, whose dumps emit `SET transaction_timeout`, which a
 # 16 server rejects, so scripts/restore.sh (ON_ERROR_STOP=1) could not restore
 # any manual backup. The repo key was fingerprint-verified in the fetch stage.
+# `apt-get upgrade`: the base digest is pinned and upstream image rebuilds lag
+# Debian security fixes (OpenSSL, PCRE2), so a --no-cache rebuild takes them.
 COPY --from=fetch /tmp/apt.postgresql.org.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
 RUN . /etc/os-release \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
          > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
+    && apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
          libmagic1 \
          postgresql-client-16 \
     && rm -rf /var/lib/apt/lists/*

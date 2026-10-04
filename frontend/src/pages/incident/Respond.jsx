@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { formatLocalShort } from '../../lib/datetime.js'
@@ -74,23 +74,33 @@ export default function Respond() {
 
   // The board needs only actions + decisions; the Target picker loads entities / IOCs itself
   // when the action modal opens (ActionModal), so neither slows nor fails the board.
+  // Each load gets a sequence number; only the newest one may set state, so an
+  // older multi-page load that finishes late can't overwrite a newer view.
+  const loadSeq = useRef(0)
+  // The running load's controller: a newer load, an incident change or unmount aborts it.
+  const loadAbort = useRef(null)
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
+    loadAbort.current?.abort()
+    const { signal } = (loadAbort.current = new AbortController())
     setError(null)
     try {
+      // Every page (the default page is 100), so the board shows every action and decision.
       const [aResult, dResult] = await Promise.all([
-        api.listRespondActions(inc.id),
-        api.listDecisions(inc.id),
+        api.listAllPages(api.listRespondActions, inc.id, {}, 200, { signal }),
+        api.listAllPages(api.listDecisions, inc.id, {}, 200, { signal }),
       ])
-      setActions(aResult.items   ?? aResult)
-      setDecisions(dResult.items ?? dResult)
+      if (seq !== loadSeq.current) return
+      setActions(aResult)
+      setDecisions(dResult)
     } catch (e) {
-      setError(e.message || 'Could not load respond data')
+      if (seq === loadSeq.current && !signal.aborted) setError(e.message || 'Could not load respond data')
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }, [inc.id])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load(); return () => loadAbort.current?.abort() }, [load])
 
   // /users/assignable is open to every authenticated user (active users only).
   useEffect(() => {

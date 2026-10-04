@@ -22,6 +22,15 @@ function fmtTs(iso) {
   return formatLocal(iso)
 }
 
+// G4 — an event whose time the exhibit's clock offset corrected: say so, with the time as recorded
+// (escaped HTML text; '' when no offset was applied).
+function offsetText(e) {
+  if (!e.recorded_event_time || e.clock_offset_seconds == null) return ''
+  const s = e.clock_offset_seconds
+  const off = s === 0 ? '0 s' : `${s > 0 ? '+' : '\u2212'}${Math.abs(s)} s`
+  return esc(`offset-corrected (${off}); recorded ${fmtTs(e.recorded_event_time)}`)
+}
+
 const SEV_HEX = { critical: '#ef4444', high: '#f97316', medium: '#f59e0b', low: '#22c55e' }
 const TLP_HEX = { red: '#ef4444', amber: '#f59e0b', 'amber+strict': '#f97316', green: '#22c55e', clear: '#94a3b8' }
 const PHASE_LABEL = {
@@ -471,6 +480,7 @@ function _proTimelineAppendix(evs) {
             ${ev.hostname   ? `<span class="atl-host">${esc(ev.hostname)}</span>` : ''}
           </div>
           <div class="atl-desc">${esc(ev.description || '')}</div>
+          ${offsetText(ev) ? `<div class="atl-meta">${offsetText(ev)}</div>` : ''}
           ${mitreLabel ? `<div class="atl-mitre" style="color:${color};border-color:${color}55;background:${color}1a">${esc(mitreLabel)}</div>` : ''}
           ${ev.source  ? `<div class="atl-meta">source: ${esc(ev.source)}</div>` : ''}
         </div>
@@ -847,7 +857,7 @@ function generateProReport(data, opts = {}) {
     ? `<div class="table-wrap"><table>
         <thead><tr><th>Timestamp</th><th>Hostname</th><th>Event Type</th><th>Description</th><th>MITRE Technique</th></tr></thead>
         <tbody>${evs.map(e => `<tr>
-          <td class="mono small">${esc(fmtTs(e.event_time))}</td>
+          <td class="mono small">${esc(fmtTs(e.event_time))}${offsetText(e) ? `<div class="small">${offsetText(e)}</div>` : ''}</td>
           <td class="mono">${esc(e.hostname || '—')}</td>
           <td><span class="tag">${esc(e.event_type || '—')}</span></td>
           <td>${esc(e.description || '')}</td>

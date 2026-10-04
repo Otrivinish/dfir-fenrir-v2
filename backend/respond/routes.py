@@ -22,8 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
-from core.errors import ApiError
-from incidents.access import get_accessible_incident
+from core.errors import ApiError, ApiErrorBody
+from incidents.access import get_accessible_incident, require_incident_person
 from models import IOC, Decision, Entity, Incident, RespondAction, TimelineEvent, User
 from respond.containment import check_target_type
 from schemas import (
@@ -41,7 +41,13 @@ from schemas import (
 
 router = APIRouter()
 
+# F2 — person-reference errors (incidents.access.require_incident_person).
+_PERSON_ERRORS = {404: {"model": ApiErrorBody, "description": "user_not_found (unknown assignee_id / decided_by_id)"},
+                  422: {"model": ApiErrorBody, "description": "assignee_no_access (that user is deactivated or "
+                                                              "can't see the incident)"}}
 
+
+# L11, accepted: a row deleted between two page reads makes an offset cursor skip one row; the war room pages by keyset.
 def _encode_cursor(offset: int) -> str:
     return base64.urlsafe_b64encode(json.dumps({"o": offset}).encode()).decode().rstrip("=")
 
@@ -133,7 +139,8 @@ async def list_respond_actions(
     Any authenticated user with access to the incident may read. Optionally
     filter by `category`, by linked `entity_id` or by linked `ioc_id`;
     paginated via `limit` and opaque `cursor`. Returns `{items, next_cursor}`
-    ordered by category, then order index, then created time.
+    ordered by category, then order index, then created time (then id, so pages
+    never split or repeat rows that tie).
     """
     await _get_incident(db, incident_id, user)
     offset = _decode_cursor(cursor)
@@ -141,7 +148,7 @@ async def list_respond_actions(
     stmt = (
         select(RespondAction)
         .where(RespondAction.incident_id == incident_id)
-        .order_by(RespondAction.category, RespondAction.order_index, RespondAction.created_at)
+        .order_by(RespondAction.category, RespondAction.order_index, RespondAction.created_at, RespondAction.id)
     )
     if category:
         stmt = stmt.where(RespondAction.category == category)
@@ -164,7 +171,8 @@ async def list_respond_actions(
 @router.post("/{incident_id}/respond/actions",
              response_model=RespondActionOut,
              status_code=status.HTTP_201_CREATED,
-             summary="Create a response action")
+             summary="Create a response action",
+             responses=_PERSON_ERRORS)
 async def create_respond_action(
     incident_id: uuid.UUID,
     req: RespondActionCreate,
@@ -186,10 +194,15 @@ async def create_respond_action(
     `block_ip`) sets the linked entity's / IOC's containment state, and only
     links of a matching type are accepted (422 `target_type_mismatch`, e.g.
     `isolate_host` on a hash IOC); a free-text target is not checked.
+
+    `assignee_id` must be an active user who can see the incident (404
+    `user_not_found`, 422 `assignee_no_access`).
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    if req.assignee_id is not None:
+        await require_incident_person(db, incident_id, req.assignee_id)
 
     entity = await _linked(db, incident_id, Entity, req.entity_id, "entity") if req.entity_id else None
     ioc    = await _linked(db, incident_id, IOC, req.ioc_id, "ioc") if req.ioc_id else None
@@ -237,7 +250,7 @@ async def create_respond_action(
 # ─── Actions — update ────────────────────────────────────────────────────────
 
 @router.patch("/{incident_id}/respond/actions/{action_id}", response_model=RespondActionOut,
-              summary="Update a response action")
+              summary="Update a response action", responses=_PERSON_ERRORS)
 async def update_respond_action(
     incident_id: uuid.UUID,
     action_id:   uuid.UUID,
@@ -258,6 +271,9 @@ async def update_respond_action(
     empty `details.target` is filled from the linked entity or IOC. When the
     template or a link changes, the resulting template / target-type pair is
     checked as on create (422 `target_type_mismatch`).
+
+    A new `assignee_id` is checked as on create (404 `user_not_found`, 422
+    `assignee_no_access`); an explicit `"assignee_id": null` unassigns.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -297,8 +313,11 @@ async def update_respond_action(
         action.details = req.details;          changed["details"] = True
     if req.order_index is not None and req.order_index != action.order_index:
         action.order_index = req.order_index;  changed["order_index"] = req.order_index
-    if req.assignee_id is not None and req.assignee_id != action.assignee_id:
-        action.assignee_id = req.assignee_id;  changed["assignee_id"] = str(req.assignee_id)
+    if "assignee_id" in sent and req.assignee_id != action.assignee_id:
+        if req.assignee_id is not None:        # clearing needs no check
+            await require_incident_person(db, incident_id, req.assignee_id)
+        action.assignee_id = req.assignee_id
+        changed["assignee_id"] = str(req.assignee_id) if req.assignee_id else None
     for key in ("entity_id", "ioc_id", "template_id"):
         new = getattr(req, key)
         if key in sent and new != getattr(action, key):
@@ -494,7 +513,8 @@ async def list_decisions(
 @router.post("/{incident_id}/respond/decisions",
              response_model=DecisionOut,
              status_code=status.HTTP_201_CREATED,
-             summary="Log a decision")
+             summary="Log a decision",
+             responses=_PERSON_ERRORS)
 async def create_decision(
     incident_id: uuid.UUID,
     req: DecisionCreate,
@@ -506,12 +526,15 @@ async def create_decision(
 
     Requires the analyst role; the incident must not be closed (409 otherwise).
     Captures summary, rationale, outcome, decider and optional tags. The
-    decision is audited and a system timeline event is emitted. Returns the
-    created decision.
+    decider (`decided_by_id`) must be an active user who can see the incident (404
+    `user_not_found`, 422 `assignee_no_access`). The decision is audited and a
+    system timeline event is emitted. Returns the created decision.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    if req.decided_by_id is not None:
+        await require_incident_person(db, incident_id, req.decided_by_id, "the decider")
 
     dec = Decision(
         id=uuid.uuid4(),
@@ -557,7 +580,7 @@ async def create_decision(
 # ─── Decisions — update ──────────────────────────────────────────────────────
 
 @router.patch("/{incident_id}/respond/decisions/{decision_id}", response_model=DecisionOut,
-              summary="Update a decision")
+              summary="Update a decision", responses=_PERSON_ERRORS)
 async def update_decision(
     incident_id: uuid.UUID,
     decision_id: uuid.UUID,
@@ -570,7 +593,9 @@ async def update_decision(
 
     Requires the analyst role; the incident must not be closed (409 otherwise).
     Returns 404 if the decision is not found. Only provided fields are changed
-    and audited. Returns the updated decision.
+    and audited. A new `decided_by_id` is checked as on create (404
+    `user_not_found`, 422 `assignee_no_access`); an explicit `"decided_by_id": null`
+    clears the decider. Returns the updated decision.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -592,8 +617,11 @@ async def update_decision(
         dec.rationale = req.rationale;         changed["rationale"] = True
     if req.outcome       is not None and req.outcome != dec.outcome:
         dec.outcome = req.outcome;             changed["outcome"] = req.outcome
-    if req.decided_by_id is not None and req.decided_by_id != dec.decided_by_id:
-        dec.decided_by_id = req.decided_by_id; changed["decided_by_id"] = str(req.decided_by_id)
+    if "decided_by_id" in req.model_fields_set and req.decided_by_id != dec.decided_by_id:
+        if req.decided_by_id is not None:      # clearing needs no check
+            await require_incident_person(db, incident_id, req.decided_by_id, "the decider")
+        dec.decided_by_id = req.decided_by_id
+        changed["decided_by_id"] = str(req.decided_by_id) if req.decided_by_id else None
     if req.decided_at    is not None and req.decided_at != dec.decided_at:
         dec.decided_at = req.decided_at;       changed["decided_at"] = True
     if req.tags          is not None:

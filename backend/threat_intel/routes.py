@@ -30,6 +30,7 @@ router = APIRouter()
 
 # ─── Cursor helpers ──────────────────────────────────────────────────────────
 
+# L11, accepted: a row deleted between two page reads makes an offset cursor skip one row; the war room pages by keyset.
 def _enc(offset: int) -> str:
     return base64.urlsafe_b64encode(json.dumps({"o": offset}).encode()).decode().rstrip("=")
 

@@ -63,3 +63,14 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 
 .table-scroll { overflow-x: auto; max-width: 100%; }
+
+/* ── Chunked upload progress (G1 stage 3b, components/UploadProgress.jsx) ── */
+.upload-progress { display: grid; gap: var(--space-1); margin-top: var(--space-2); font-size: 12px; color: var(--muted); }
+.upload-progress-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; min-width: 0; }
+.upload-progress-num { font-family: var(--font-mono); color: var(--text); margin-left: auto; white-space: nowrap; }
+.upload-progress .btn { white-space: nowrap; }
+.upload-progress-bar {
+  height: 6px; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.upload-progress-fill { height: 100%; background: var(--accent); transition: width 160ms ease; }

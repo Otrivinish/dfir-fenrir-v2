@@ -17,6 +17,11 @@ from urllib.parse import parse_qs, urlsplit
 import magic
 import nh3
 
+# G3 (R02) run record: the analyser named in every analysis and custody-log examination. Bump the
+# version when what parse_email / scoring derive from the same bytes changes.
+PARSER_NAME = "FENRIR email analyser"
+PARSER_VERSION = "1.0.0"
+
 URL_RE  = re.compile(r'https?://[^\s<>"\'\)\]}]+', re.I)
 HREF_RE = re.compile(r'<a\b[^>]*?href\s*=\s*["\']?(https?://[^"\'>\s]+)["\']?[^>]*>(.*?)</a>', re.I | re.S)
 IP_RE   = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')

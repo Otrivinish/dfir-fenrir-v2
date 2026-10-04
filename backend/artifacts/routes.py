@@ -40,6 +40,7 @@ from auth.deps import current_user, require_analyst
 from core.worker_client import WORKER_URL, worker_client, worker_headers
 from core.config import settings
 from core.database import get_db
+from core.errors import ApiError, ApiErrorBody
 from incidents.access import get_accessible_incident
 from models import Artifact, Incident, IOC, User
 
@@ -98,6 +99,15 @@ async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) ->
     return await get_accessible_incident(db, incident_id, user)
 
 
+def _ensure_open(inc: Incident) -> None:
+    """409 incident_closed: a closed incident's record is frozen (re-open it first)."""
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
+
+
+_CLOSED_409 = {409: {"model": ApiErrorBody, "description": "incident_closed"}}
+
+
 async def _get_artifact(
     db: AsyncSession, incident_id: uuid.UUID, artifact_id: uuid.UUID
 ) -> Artifact:
@@ -135,7 +145,7 @@ async def list_artifacts(
 # ─── Upload ──────────────────────────────────────────────────────────────────
 
 @router.post("/{incident_id}/artifacts", status_code=status.HTTP_201_CREATED,
-             summary="Upload an artifact")
+             summary="Upload an artifact", responses=_CLOSED_409)
 async def upload_artifact(
     incident_id: uuid.UUID,
     request:     Request,
@@ -146,11 +156,10 @@ async def upload_artifact(
 ):
     """Upload a file into the incident's quarantine: computes MD5/SHA256/SHA512,
     detects MIME via magic, stores it, and auto-creates SHA256 + MD5 IOC records.
-    Requires the analyst role and an open incident; rejects oversize uploads.
+    Requires the analyst role and an open incident (409 incident_closed); rejects
+    oversize uploads.
     Returns the created artifact metadata."""
-    inc = await _get_incident(db, incident_id, user)
-    if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    _ensure_open(await _get_incident(db, incident_id, user))
 
     cl = request.headers.get("content-length")
     if cl and int(cl) > settings.artifact_max_upload_bytes:
@@ -252,7 +261,8 @@ async def get_artifact(
 
 # ─── Update description ───────────────────────────────────────────────────────
 
-@router.patch("/{incident_id}/artifacts/{artifact_id}", summary="Update an artifact description")
+@router.patch("/{incident_id}/artifacts/{artifact_id}", summary="Update an artifact description",
+              responses=_CLOSED_409)
 async def update_artifact(
     incident_id: uuid.UUID,
     artifact_id: uuid.UUID,
@@ -261,11 +271,9 @@ async def update_artifact(
     db:   AsyncSession = Depends(get_db),
 ):
     """Update the free-text description of an artifact. Requires the analyst role
-    and an open incident. Returns the updated artifact record; 404 if not
-    found."""
-    inc = await _get_incident(db, incident_id, user)
-    if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    and an open incident (409 incident_closed). Returns the updated artifact record;
+    404 if not found."""
+    _ensure_open(await _get_incident(db, incident_id, user))
     artifact = await _get_artifact(db, incident_id, artifact_id)
     artifact.description = description
     await write_audit(db, user_id=user.id, action="artifact_update", details={
@@ -279,7 +287,7 @@ async def update_artifact(
 # ─── Delete ──────────────────────────────────────────────────────────────────
 
 @router.delete("/{incident_id}/artifacts/{artifact_id}", status_code=status.HTTP_204_NO_CONTENT,
-               summary="Delete an artifact")
+               summary="Delete an artifact", responses=_CLOSED_409)
 async def delete_artifact(
     incident_id: uuid.UUID,
     artifact_id: uuid.UUID,
@@ -287,11 +295,9 @@ async def delete_artifact(
     db:   AsyncSession = Depends(get_db),
 ):
     """Delete an artifact: removes the file from the quarantine volume and the
-    database record. Requires the analyst role and an open incident. Returns
-    204; 404 if not found."""
-    inc = await _get_incident(db, incident_id, user)
-    if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    database record. Requires the analyst role and an open incident (409
+    incident_closed). Returns 204; 404 if not found."""
+    _ensure_open(await _get_incident(db, incident_id, user))
     artifact = await _get_artifact(db, incident_id, artifact_id)
 
     # Remove file from quarantine volume.
@@ -357,7 +363,7 @@ async def download_artifact(
 # ─── Analysis proxy ───────────────────────────────────────────────────────────
 
 @router.post("/{incident_id}/artifacts/{artifact_id}/analyze/{tool}",
-             summary="Analyze an artifact")
+             summary="Analyze an artifact", responses=_CLOSED_409)
 async def analyze_artifact(
     incident_id: uuid.UUID,
     artifact_id: uuid.UUID,
@@ -371,13 +377,14 @@ async def analyze_artifact(
     worker and persist the result under that tool name. `tool` must be one of
     file-type, hashes, entropy, strings, ioc-extract, pe, office, pdf, exif,
     hexdump, yara; hexdump honours the `offset`/`length` query params. Requires
-    the analyst role. Returns the worker's result JSON."""
+    the analyst role and an open incident (the result is stored on the artifact:
+    409 incident_closed otherwise). Returns the worker's result JSON."""
     if tool not in _VALID_TOOLS:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             f"Unknown tool '{tool}'. Valid: {sorted(_VALID_TOOLS)}",
         )
-    await _get_incident(db, incident_id, user)
+    _ensure_open(await _get_incident(db, incident_id, user))
     artifact = await _get_artifact(db, incident_id, artifact_id)
 
     fpath = _quarantine_path(incident_id, artifact.stored_filename)

@@ -12,7 +12,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, select, tuple_
+from sqlalchemy import Text, and_, cast, func, select, tuple_
 from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -91,6 +91,7 @@ class LookupResponse(BaseModel):
 
 # ─── Cursor helpers ───────────────────────────────────────────────────────────
 
+# L11, accepted: a row deleted between two page reads makes an offset cursor skip one row; the war room pages by keyset.
 def _enc(offset: int) -> str:
     return base64.urlsafe_b64encode(_json.dumps({"o": offset}).encode()).decode().rstrip("=")
 
@@ -177,7 +178,7 @@ async def global_ioc_correlations(
     limit:  int           = Query(default=50, ge=1, le=200),
     cursor: Optional[str] = Query(default=None),
     tag:    Optional[str] = Query(default=None,
-                                  description="Filter to (type, value) pairs where ANY underlying row has this tag (canonical lowercase-dashed)"),
+                                  description="Filter to (type, value) pairs where ANY underlying row has this tag (canonical lowercase-dashed); a value with no usable characters is 422 invalid_tag"),
 ) -> SharedIocList:
     """IOC values observed in 2+ incidents the caller can access, by count desc."""
     offset = _dec(cursor)
@@ -198,15 +199,15 @@ async def global_ioc_correlations(
         .offset(offset).limit(limit + 1)
     )
     if tag:
-        from core.tags import normalize_tag
-        canonical = normalize_tag(tag)
-        if canonical:
-            # Cross-incident IOC search by tag — match against the JSON-cast text
-            # so any row of this (type, value) carrying the tag pulls it into the
-            # correlation set.
-            pairs_stmt = pairs_stmt.where(
-                func.cast(IOC.tags, type_=None).ilike(f'%"{canonical}"%')
-            )
+        from core.tags import canonical_tag_or_422
+        # Cross-incident IOC search by tag: any row of this (type, value) carrying
+        # the tag pulls the pair into the set (a group condition, so the count and
+        # the 2+ rule still cover every accessible incident with the pair). Whole-tag,
+        # case-folded match on the `json` text (see incidents list_incidents). A value that
+        # normalises to nothing is 422 invalid_tag.
+        pairs_stmt = pairs_stmt.having(
+            func.bool_or(cast(IOC.tags, Text).ilike(f'%"{canonical_tag_or_422(tag)}"%'))
+        )
     pairs = (await db.execute(pairs_stmt)).all()
 
     has_more = len(pairs) > limit

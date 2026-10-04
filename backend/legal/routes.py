@@ -285,6 +285,12 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
+def _z(dt: Optional[datetime]) -> Optional[str]:
+    """API output (F4 / R42): UTC ISO 8601 with a Z suffix, sub-second precision kept; a naive
+    value is UTC. Audit details keep `_iso` (their recorded form)."""
+    return _as_utc(dt).isoformat().replace("+00:00", "Z") if dt else None
+
+
 def _row_copy(d: RegulatoryDeadline) -> dict:
     """Every stored column of a deadline, for the audit record of a delete."""
     return {c.name: (str(v) if isinstance(v, uuid.UUID) else _iso(v) if isinstance(v, datetime) else v)
@@ -320,10 +326,10 @@ def _to_out(d: RegulatoryDeadline) -> dict:
         "obligation":         d.obligation,
         "recipient":          d.recipient,
         "deadline_hours":     d.deadline_hours,
-        "breach_detected_at": d.breach_detected_at.isoformat(),
-        "deadline_at":        d.deadline_at.isoformat(),
+        "breach_detected_at": _z(d.breach_detected_at),
+        "deadline_at":        _z(d.deadline_at),
         "status":             d.status,
-        "completed_at":       d.completed_at.isoformat() if d.completed_at else None,
+        "completed_at":       _z(d.completed_at),
         "completion_notes":   d.completion_notes,
         "is_mandatory":       d.is_mandatory,
         # Template flags: an internal planning target rather than a statutory deadline
@@ -333,7 +339,7 @@ def _to_out(d: RegulatoryDeadline) -> dict:
         "notes":              d.notes,
         "hours_remaining":    round(hours_left, 2),
         "is_overdue":         is_overdue,
-        "created_at":         d.created_at.isoformat(),
+        "created_at":         _z(d.created_at),
     }
 
 

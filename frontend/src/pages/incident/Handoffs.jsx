@@ -491,11 +491,12 @@ function HandoffModal({ incidentId, currentUser, onClose, onCreated }) {
   const [saving,  setSaving]  = useState(false)
   const [err,     setErr]     = useState('')
 
+  // Only people who can see this incident: the API refuses anyone else (422 assignee_no_access).
   useEffect(() => {
-    api.listAssignableUsers()
+    api.listAssignableUsers(incidentId)
       .then(u => setUsers(u.filter(x => x.id !== currentUser?.id)))
       .catch(() => {})
-  }, [currentUser])
+  }, [incidentId, currentUser])
 
   const fv = key => e => setForm(p => ({ ...p, [key]: e.target.value }))
   const fn = key => e => setForm(p => ({ ...p, [key]: +e.target.value }))
@@ -552,7 +553,7 @@ function HandoffModal({ incidentId, currentUser, onClose, onCreated }) {
             <div className="field">
               <label className="field-label" htmlFor="hm-incoming">Incoming analyst *</label>
               <select id="hm-incoming" className="select" value={form.incoming_user_id}
-                      onChange={fv('incoming_user_id')} required>
+                      onChange={fv('incoming_user_id')} required aria-describedby="hm-incoming-hint">
                 <option value="">— select —</option>
                 {users.map(u => (
                   <option key={u.id} value={u.id}>
@@ -560,6 +561,9 @@ function HandoffModal({ incidentId, currentUser, onClose, onCreated }) {
                   </option>
                 ))}
               </select>
+              <span id="hm-incoming-hint" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, display: 'block' }}>
+                Only people who can see this incident are listed.
+              </span>
             </div>
 
             {/* ── Status summary ── */}

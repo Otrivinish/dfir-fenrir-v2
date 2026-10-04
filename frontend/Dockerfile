@@ -14,6 +14,11 @@ RUN npm run build
 # NO security headers — the edge Caddy owns TLS, CSP, HSTS, etc.
 # nginx 1.30 = current stable line (1.27 reached end-of-life 2025-06).
 FROM nginxinc/nginx-unprivileged:1.30-alpine@sha256:ed04ec1ff34502c339ee5c3ae3f855442398edc1d05591e2b98981dcbbd20b1e
+# The base digest is pinned and upstream rebuilds lag Alpine security fixes (PCRE2),
+# so take them at build time; then back to the image's unprivileged uid.
+USER 0
+RUN apk upgrade --no-cache
+USER 101
 COPY --chown=101:101 --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 3000

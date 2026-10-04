@@ -37,6 +37,19 @@ def normalize_tag(raw: str) -> str | None:
     return s[:MAX_TAG_LENGTH]
 
 
+def canonical_tag_or_422(raw: str) -> str:
+    """A `?tag=` filter value → its canonical form; 422 code invalid_tag when it normalises to
+    nothing (e.g. "!!!"), instead of silently dropping the filter and listing everything."""
+    canonical = normalize_tag(raw)
+    if not canonical:
+        from fastapi import status
+        from core.errors import ApiError
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_tag",
+                       f"Tag filter {raw!r} has no usable characters (tags are lowercase letters, digits "
+                       "and - . / :).")
+    return canonical
+
+
 def normalize_tags(raw: Iterable[str] | None) -> list[str]:
     """List of tags → deduped, normalised, capped at MAX_TAGS_PER_ROW.
     Preserves first-seen order so the UI can rely on a stable sort.

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, notifyUnauthorized } from '../api/client.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 
@@ -13,7 +13,11 @@ const MENTION_TOKEN_RE = /(@[a-zA-Z0-9_.-]+)/g
 const MENTION_TRIGGER_RE = /(?:^|\s)@([a-zA-Z0-9_.-]*)$/
 const MENTION_MAX_RESULTS = 6
 
-export default function WarRoomDrawer({ incidentId }) {
+// Inside an incident (`incidentId` given) the drawer is locked to that incident's room: no
+// picker, so a message can't land in another incident by mistake. Without `incidentId`
+// (a global drawer) the picker of open incidents is shown.
+export default function WarRoomDrawer({ incidentId, incidentRef }) {
+  const locked = !!incidentId
   const storageKey = incidentId ? `fenrir.warroom.${incidentId}.open` : null
   const { user: me } = useAuth()
   const meUsername = me?.username?.toLowerCase() || ''
@@ -91,12 +95,15 @@ export default function WarRoomDrawer({ incidentId }) {
     setOpen(o => !o)
   }
 
-  // Incident picker — list of active incidents
+  // Incident picker — list of active incidents (global drawer only)
   const [incidents, setIncidents] = useState([])
-  const [selectedId, setSelectedId] = useState(incidentId || null)
+  const [pickedId, setPickedId] = useState(null)
+  const selectedId = locked ? incidentId : pickedId
 
   // Chat state
   const [messages, setMessages] = useState([])
+  const [olderCursor, setOlderCursor] = useState(null)   // next_cursor: the next OLDER page; null = none
+  const [loadingOlder, setLoadingOlder] = useState(false)
   const [onlineCount, setOnlineCount] = useState(0)
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
@@ -107,6 +114,11 @@ export default function WarRoomDrawer({ incidentId }) {
   const [mentionIdx, setMentionIdx] = useState(0)
 
   const messagesEndRef = useRef(null)
+  const messagesBoxRef = useRef(null)
+  // Set while older messages are prepended: the scroll position is restored instead of
+  // jumping to the newest message.
+  const keepScrollRef = useRef(null)
+  const selectedIdRef = useRef(null)
   const wsRef = useRef(null)
   const inputRef = useRef(null)
 
@@ -136,12 +148,13 @@ export default function WarRoomDrawer({ incidentId }) {
     try { localStorage.setItem(storageKey, open ? '1' : '0') } catch {}
   }, [open, storageKey])
 
-  // Load active incidents for the picker
+  // Load active incidents for the picker (not needed when locked to one incident)
   useEffect(() => {
+    if (locked) return
     api.listIncidents({ status: 'open', limit: 30 })
       .then(d => setIncidents(d.items || []))
       .catch(() => {})
-  }, [])
+  }, [locked])
 
   // Load user list for @mention autocomplete + message highlighting
   useEffect(() => {
@@ -152,12 +165,17 @@ export default function WarRoomDrawer({ incidentId }) {
 
   // When selected incident changes, sync online count from REST then connect WS
   useEffect(() => {
+    selectedIdRef.current = selectedId
     if (!selectedId) return
 
-    // Load messages
+    // Load the newest page; "Load older" pages back from its next_cursor.
+    let cancelled = false
+    setOlderCursor(null)
     api.listWarRoomMessages(selectedId)
       .then(d => {
+        if (cancelled) return
         setMessages(d.items || [])
+        setOlderCursor(d.next_cursor || null)
         setOnlineCount(d.online || 0)
       })
       .catch(() => {})
@@ -186,20 +204,47 @@ export default function WarRoomDrawer({ incidentId }) {
     ws.onclose = (e) => { if (e.code === 4001) notifyUnauthorized() }
 
     return () => {
+      cancelled = true
       ws.close()
       wsRef.current = null
     }
   }, [selectedId])
 
-  // Auto-scroll to bottom when messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  // Prepend the next older page (R68). Live WebSocket messages keep appending at the end.
+  const loadOlder = useCallback(async () => {
+    if (!selectedId || !olderCursor || loadingOlder) return
+    const forId = selectedId
+    setLoadingOlder(true)
+    try {
+      const d = await api.listWarRoomMessages(forId, { cursor: olderCursor })
+      if (selectedIdRef.current !== forId) return
+      const box = messagesBoxRef.current
+      keepScrollRef.current = box ? { height: box.scrollHeight, top: box.scrollTop } : null
+      // Keyed by id, so a message already shown is never listed twice.
+      setMessages(prev => {
+        const seen = new Set(prev.map(m => m.id))
+        return [...(d.items || []).filter(m => !seen.has(m.id)), ...prev]
+      })
+      setOlderCursor(d.next_cursor || null)
+    } catch {
+      // The button stays; the next click retries.
+    } finally {
+      setLoadingOlder(false)
+    }
+  }, [selectedId, olderCursor, loadingOlder])
+
+  // After older messages are prepended, keep the view on the message the reader was looking at.
+  useLayoutEffect(() => {
+    const keep = keepScrollRef.current
+    const box = messagesBoxRef.current
+    if (keep && box) box.scrollTop = box.scrollHeight - keep.height + keep.top
   }, [messages])
 
-  // Sync selectedId when prop changes (navigating between incidents)
+  // Auto-scroll to bottom when messages arrive (not when older ones are prepended)
   useEffect(() => {
-    if (incidentId) setSelectedId(incidentId)
-  }, [incidentId])
+    if (keepScrollRef.current) { keepScrollRef.current = null; return }
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
 
   const send = useCallback(async () => {
     const body = input.trim()
@@ -325,7 +370,15 @@ export default function WarRoomDrawer({ incidentId }) {
           >×</button>
         </div>
 
-        {/* Incident picker */}
+        {/* Incident picker (global drawer) — or the one room it is locked to */}
+        {locked ? (
+          <div className="warroom-incident-list" data-warroom-locked>
+            <span className="warroom-incident-locked">
+              {incidentRef && <span className="warroom-incident-locked-ref">{incidentRef}</span>}
+              This incident's room
+            </span>
+          </div>
+        ) : (
         <div className="warroom-incident-list" role="list" aria-label="Active incidents">
           {incidents.length === 0 && (
             <span className="warroom-no-incidents">No open incidents</span>
@@ -336,7 +389,7 @@ export default function WarRoomDrawer({ incidentId }) {
               type="button"
               role="listitem"
               className={`warroom-incident-item ${inc.id === selectedId ? 'active' : ''}`}
-              onClick={() => setSelectedId(inc.id)}
+              onClick={() => setPickedId(inc.id)}
               title={inc.title}
             >
               <span className={`warroom-sev warroom-sev--${inc.severity}`} aria-hidden="true" />
@@ -345,9 +398,21 @@ export default function WarRoomDrawer({ incidentId }) {
             </button>
           ))}
         </div>
+        )}
 
         {/* Message feed */}
-        <div className="warroom-messages" aria-live="polite" aria-label="Chat messages">
+        <div className="warroom-messages" ref={messagesBoxRef} aria-live="polite" aria-label="Chat messages">
+          {olderCursor && (
+            <button
+              type="button"
+              className="btn ghost warroom-load-older"
+              onClick={loadOlder}
+              disabled={loadingOlder}
+              data-warroom-load-older
+            >
+              {loadingOlder ? 'Loading…' : 'Load older messages'}
+            </button>
+          )}
           {messages.length === 0 && (
             <div className="warroom-stub">
               <div className="panel-empty-mark" aria-hidden="true">◍</div>

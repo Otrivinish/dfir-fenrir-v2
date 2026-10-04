@@ -86,6 +86,37 @@ async def user_can_see_incident(db: AsyncSession, user: User, incident_id: uuid.
     return await _team_visible(db, incident_id, user.id)
 
 
+async def require_incident_person(db: AsyncSession, incident_id: uuid.UUID, user_id: uuid.UUID,
+                                  what: str = "the assignee") -> User:
+    """F2 — a person written onto an incident record (assignee, decider, witness, handoff
+    recipient) must exist (404 user_not_found), be active and able to see the incident
+    (422 assignee_no_access, as E3's assignments). Checked before anything is written, so an
+    unknown id never reaches the users FK. `what` names the field in the message."""
+    person = await db.get(User, user_id)
+    if person is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "user_not_found",
+                       f"Unknown user for {what}: no account has this id.")
+    if not person.is_active:
+        # L4: no username here — don't disclose who a deactivated account belonged to.
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "assignee_no_access",
+                       f"The selected account is deactivated: choose an active user as {what}.")
+    if not await user_can_see_incident(db, person, incident_id):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "assignee_no_access",
+                       f"{person.username} can't see this incident (not in any of its teams), so can't be "
+                       f"{what}. Add one of their teams to the incident, or choose someone else.")
+    return person
+
+
+def can_see_incident_filter(incident_id: uuid.UUID):
+    """WHERE expression over User: admin, or allowed by the incident's team rule (no team, or
+    a member of one). Pair with User.is_active for the people who can see the incident."""
+    no_teams = ~exists(select(incident_teams.c.team_id).where(incident_teams.c.incident_id == incident_id))
+    in_team = exists(select(incident_teams.c.team_id)
+                     .join(user_team, user_team.c.team_id == incident_teams.c.team_id)
+                     .where(incident_teams.c.incident_id == incident_id, user_team.c.user_id == User.id))
+    return or_(User.role == "admin", no_teams, in_team)
+
+
 def accessible_filter(user: User):
     """SQLAlchemy WHERE expression limiting a query to incidents the user may see.
 

@@ -2,7 +2,7 @@
 import uuid
 from datetime import date, datetime, timezone
 
-from sqlalchemy import (Boolean, Column, Date, DateTime, Float, ForeignKey,
+from sqlalchemy import (BigInteger, Boolean, Column, Date, DateTime, Float, ForeignKey,
                         Integer, JSON, Numeric, SmallInteger, String, Table, Text,
                         UniqueConstraint)
 from sqlalchemy.dialects.postgresql import UUID
@@ -218,6 +218,17 @@ class EmailAnalysis(Base):
     body_html = Column(Text, nullable=True)                         # SANITIZED html body only -- never raw attacker HTML
     urls      = Column(JSON, nullable=False, default=list)          # [{url,defanged,host,display_text,promoted_ioc_id?}]
     attachments = Column(JSON, nullable=False, default=list)        # [{filename,declared_type,true_type,size,md5,sha256,entropy,flags,artifact_id?}]
+
+    # G3 (R02) run record: the analysis is OF its exhibit (evidence_id) — registered as an unsealed
+    # draft by the upload (exhibit_link 'registered'), an upload whose SHA-256 equals exactly one
+    # active exhibit ('sha256_match'), or a picked exhibit re-verified ('from_evidence') — with the
+    # SHA-256 of the bytes analysed and the analyser + version. No quarantine copy (source_artifact_id
+    # NULL). All NULL on analyses before G3: those were analysed first and, at most, registered later
+    # from their quarantine copy ("Register as exhibit", the legacy mint).
+    input_sha256     = Column(String(64))
+    analyser_name    = Column(String(64))
+    analyser_version = Column(String(32))
+    exhibit_link     = Column(String(16))     # registered | sha256_match | from_evidence (CHECK)
 
     created_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_by    = Column(String(64))
@@ -495,7 +506,7 @@ class EntityFile(Base):
                             ForeignKey("incidents.id", ondelete="CASCADE"),
                             nullable=False, index=True)
     original_name  = Column(String(512), nullable=False)
-    file_size      = Column(Integer,     nullable=False)
+    file_size      = Column(BigInteger,  nullable=False)
     content_type   = Column(String(128))
     file_path      = Column(String(1024), nullable=False)   # relative under logs_path
     nonce_hex      = Column(String(24),  nullable=False)
@@ -539,13 +550,14 @@ class Evidence(Base):
     # — digital_file fields —
     original_filename = Column(String(512))
     storage_path      = Column(String(1024))   # path under evidence_path, encrypted at rest
-    file_size_bytes   = Column(Integer)
+    file_size_bytes   = Column(BigInteger)
     mime_type         = Column(String(128))
     sha256            = Column(String(64),  index=True)
     sha1              = Column(String(40))
     md5               = Column(String(32))
-    # AES-256-GCM crypto envelope (nonce + tag). Tag is appended to ciphertext
-    # by AESGCM.encrypt(); we store the nonce here (96-bit, hex-encoded).
+    # AES-256-GCM crypto envelope. Its length names the stored format (evidence/crypto.py):
+    # 24 hex = v0 whole-file nonce (tag appended to the ciphertext); 14 hex = the FENRGCM v2
+    # nonce prefix (G1 stage 3a), checked against the file's header on every read.
     nonce_hex         = Column(String(24))
 
     # — physical_item fields —
@@ -560,7 +572,7 @@ class Evidence(Base):
     # — common —
     entity_id            = Column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="SET NULL"), nullable=True, index=True)
     current_custodian_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
-    # ── External custodian (ISO/IEC 27037 §9.3 — chain accountability covers
+    # ── External custodian (ISO/IEC 27037 §6.1 — chain accountability covers
     # real-world parties without platform accounts: external counsel, courier,
     # police officer pre-formal-handoff, vendor IR team). Mutually exclusive
     # with current_custodian_id — exactly one is populated at any time.
@@ -585,8 +597,13 @@ class Evidence(Base):
     # Marks evidence flagged for legal hold. Disposal of a held item requires a
     # second approver (GS-10); the LE-package builder can filter to held items.
     legal_hold           = Column(Boolean, nullable=False, default=False, index=True)
+    # G5 (R09) — the current hold: since when, set by whom, why (all NULL when not held; cleared on
+    # release). Set / released only through PUT …/legal-hold; the history is in the custody log.
+    legal_hold_since     = Column(DateTime(timezone=True))
+    legal_hold_by_id     = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    legal_hold_reason    = Column(Text)
 
-    # ── Wizard A — Acquisition (ISO/IEC 27037 §9.2 + GDPR Art. 5.1(c)) ────────
+    # ── Wizard A — Acquisition (ISO/IEC 27037 §5.4.4 + GDPR Art. 5.1(c)) ──────
     # All nullable so legacy rows survive. Populated when the guided wizard is
     # used; the legacy direct-add flow leaves them blank.
     lawful_basis              = Column(String(32))     # ir | consent | warrant | court_order | eio | mla | lia | other
@@ -621,6 +638,11 @@ class Evidence(Base):
     acquisition_scope         = Column(String(16))           # full_image | logical (§7.1.3.1.1)
     logical_acquisition_rationale = Column(Text)             # required when acquisition_scope='logical'
     system_time_offset        = Column(String(128))          # device clock vs reliable source + offset (§6.6)
+    # G4 (R35) — the same offset as a number: device clock minus true UTC, in seconds (positive =
+    # the device clock ran ahead). Optional and never parsed from the text above. Imports from the
+    # exhibit subtract it from the device's times (the recorded time is kept). CHECK in
+    # core/database.py.
+    system_time_offset_seconds = Column(BigInteger)
     screen_state              = Column(Text)                 # on-screen programs/docs for powered-on devices (§6.6)
     changes_made              = Column(Text)                 # inevitable change + justification (§6.1 item 5)
     device_details            = Column(JSON, default=dict)   # branch-specific capture (network/mobile/cctv) — see coc-collection-wizard-slice.md
@@ -664,8 +686,12 @@ class Evidence(Base):
 # ─── EvidenceCopy — working-copy ledger (ISO/IEC 27037 §7.1.3.1.1, Slice C) ───
 # The master forensic copy IS the Evidence blob (never modified — examination only
 # hashes it). Each EvidenceCopy row is a tracked, master-verified derivation handed
-# out for analysis: auto-minted per item on export, or recorded out-of-band. C-ledger
+# out for analysis: auto-minted on export for each item whose bytes the bundle carries
+# (F4: never for a physical or file-less item), or recorded out-of-band. C-ledger
 # model — no second blob is stored; the bytes ride the export bundle.
+# G5: an analyst download is issued as a working copy (kind=download) whose hashes are of the
+# bytes actually sent; a lab copy made outside FENRIR (kind=lab_copy) records the hashes its tool
+# reported for the copy, compared with the master's recorded hashes.
 
 class EvidenceCopy(Base):
     __tablename__ = "evidence_copies"
@@ -685,6 +711,28 @@ class EvidenceCopy(Base):
                            ForeignKey("custody_exports.id", ondelete="SET NULL"),
                            nullable=True, index=True)
     discarded_at  = Column(DateTime(timezone=True))          # working copies are disposable
+
+    # ── G5 (R08) — the copy's own record. NULL on rows made before G5: an export row (export_id
+    # set) or a "Record copy" row whose sha256 is a re-hash of the master, not of the copy. ──
+    kind          = Column(String(16))       # download | lab_copy (export rows keep NULL; CHECK in core/database.py)
+    copy_seq      = Column(Integer)          # n in "<exhibit identifier>-WC-n", per exhibit (partial UNIQUE)
+    copy_identifier = Column(String(160))
+    # download: issued → downloading → complete | aborted | failed_integrity;
+    # lab_copy: verified | mismatch (the tool-reported hash vs the master's recorded hash). CHECK.
+    status        = Column(String(20))
+    sha1          = Column(String(40))       # the copy's own hashes: of the bytes sent (download) or
+    md5           = Column(String(32))       # as the copying tool reported them (lab_copy)
+    # download: a one-time link for its issuer (created_by_id) only. SHA-256 of the token, never the token.
+    token_hash        = Column(String(64))
+    token_expires_at  = Column(DateTime(timezone=True))
+    download_started_at = Column(DateTime(timezone=True))
+    completed_at      = Column(DateTime(timezone=True))   # the transfer ended (any outcome)
+    bytes_sent        = Column(BigInteger)
+    end_reason        = Column(String(32))   # aborted / failed: client_disconnected | read_error | integrity | hash_mismatch
+    destination_note  = Column(Text)         # where the copy went (workstation, lab media, case folder)
+    copy_tool         = Column(String(256))  # lab_copy: the tool + version that made the copy
+    # An examination found the copy no longer matches its recorded hash: it can't be examined again.
+    altered_at        = Column(DateTime(timezone=True))
 
 
 # ─── ValidatedTool — registry of validated forensic tools/methods (GS-1) ─────
@@ -744,7 +792,7 @@ class CustodyExport(Base):
 
     # On-disk bundle metadata
     file_path       = Column(String(1024))    # relative under evidence_path
-    file_size       = Column(Integer)
+    file_size       = Column(BigInteger)
     bundle_sha256   = Column(String(64))      # sha256 of the encrypted bundle bytes
     # First 8 + last 8 chars of the key, for the recipient to sanity-check
     # they pasted the correct key. NOT the full key — that's never stored.
@@ -813,7 +861,7 @@ class LePackage(Base):
 
     # Inventory summary.
     file_count            = Column(Integer)
-    total_bytes           = Column(Integer)
+    total_bytes           = Column(BigInteger)
     evidence_count        = Column(Integer)
     audit_row_count       = Column(Integer)
 
@@ -1228,6 +1276,23 @@ class TimelineEvent(Base):
     forensic_import_id = Column(UUID(as_uuid=True), ForeignKey("forensic_imports.id", ondelete="RESTRICT"), nullable=True)
     import_event_index = Column(Integer)
     time_basis         = Column(String(16))
+    # G4 (R03) — promoted from a Defender PDF import run (server-side promote, index = the candidate's
+    # position). RESTRICT like forensic_import_id; at most one of the two is set (CHECK).
+    defender_import_id = Column(UUID(as_uuid=True), ForeignKey("defender_pdf_imports.id", ondelete="RESTRICT"), nullable=True)
+    # G3 (R02) — promoted from a PCAP analysis run (candidate index in import_event_index) or a browser
+    # history upload (the visit / download row in source_record_id). RESTRICT like the others; at most
+    # one run per event (CHECK); partial UNIQUE indexes make re-promoting a no-op.
+    pcap_analysis_id          = Column(UUID(as_uuid=True), ForeignKey("pcap_analyses.id", ondelete="RESTRICT"), nullable=True)
+    browser_history_upload_id = Column(UUID(as_uuid=True), ForeignKey("browser_history_uploads.id", ondelete="RESTRICT"), nullable=True)
+    source_record_id          = Column(UUID(as_uuid=True))
+    # G-fix B (L26) — a mail relay hop imported from an email analysis that has a run record (G3).
+    # RESTRICT like the other runs; at most one run per event (CHECK ck_timeline_events_one_run_gfixb).
+    email_analysis_id         = Column(UUID(as_uuid=True), ForeignKey("email_analysis.id", ondelete="RESTRICT"), nullable=True)
+    # G4 (R35) — set together (CHECK) when the exhibit's clock offset corrected this event's time:
+    # recorded_event_time = the time as the device recorded it (never overwritten), event_time =
+    # recorded_event_time − clock_offset_seconds. NULL = no offset applied.
+    recorded_event_time  = Column(DateTime(timezone=True))
+    clock_offset_seconds = Column(BigInteger)
 
     # System timeline events — auto-generated by the platform or manually marked as a system note.
     # system_source: respond_action | legal_deadline | decision | manual
@@ -1262,6 +1327,18 @@ class PCAPAnalysis(Base):
     uploaded_by    = Column(String(64))       # denormalised username
     result_json    = Column(JSON, nullable=False, default=dict)
     created_at     = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+    # G3 (R02) run record: the capture is kept as its exhibit (encrypted at rest, hashed) — registered as
+    # a draft by the upload, a unique SHA-256 match, or a picked exhibit (exhibit_link as EmailAnalysis)
+    # — with the SHA-256 analysed, the analyser + version the worker reported, the exhibit's clock offset
+    # applied to the timeline candidates (snapshot) and those candidates (promote copies them). All NULL
+    # on analyses before G3 (the raw capture was not kept).
+    evidence_id          = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
+    input_sha256         = Column(String(64))
+    analyser_name        = Column(String(64))
+    analyser_version     = Column(String(32))
+    exhibit_link         = Column(String(16))
+    clock_offset_seconds = Column(BigInteger)
+    timeline_candidates  = Column(JSON)
 
 
 # ─── Quarantine artifacts ─────────────────────────────────────────────────────
@@ -1336,6 +1413,17 @@ class BrowserHistoryUpload(Base):
     search_term_count  = Column(Integer, nullable=False, default=0)
     download_count     = Column(Integer, nullable=False, default=0)
     truncated          = Column(Boolean, nullable=False, default=False)  # hit the defensive row cap
+
+    # G3 (R02) run record: evidence_id is the exhibit the history file IS (registered as a draft by the
+    # upload, a unique SHA-256 match, or picked; exhibit_link as EmailAnalysis), sha256_hash the bytes
+    # parsed, plus Firefox's formhistory.sqlite exhibit, the parser + version and the exhibit's clock
+    # offset (snapshot; applied to times promoted to the Timeline). New uploads keep no quarantine copy.
+    # All NULL on uploads before G3.
+    form_history_evidence_id = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
+    parser_name          = Column(String(64))
+    parser_version       = Column(String(32))
+    exhibit_link         = Column(String(16))
+    clock_offset_seconds = Column(BigInteger)
 
     uploaded_by_id      = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     uploaded_by         = Column(String(64))
@@ -1460,7 +1548,13 @@ class CollectionPackage(Base):
     # Ingest linkage — populated by U1.2 (verify + register output as Artifact).
     ingested_at        = Column(DateTime(timezone=True))
     ingested_by_id     = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    output_sha256      = Column(String(64))
+    output_sha256      = Column(String(64))            # the decrypted collection ZIP
+    # G4 (R03) — run record of the ingest: SHA-256 + size of the container exactly as received
+    # (hashed while streaming, before decryption) and the exhibit whose SHA-256 it uniquely
+    # matched at ingest (an active exhibit of the incident; NULL = none / ambiguous).
+    container_sha256   = Column(String(64))
+    container_size     = Column(BigInteger)
+    evidence_id        = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
     result_artifact_id = Column(UUID(as_uuid=True),
                                 ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
 
@@ -1490,6 +1584,9 @@ class ForensicImport(Base):
     evidence_id       = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
     parser_version    = Column(String(32))
     source_tz         = Column(String(64))
+    # G4 (R35) — the exhibit's clock offset (seconds, device minus true UTC) applied to this import's
+    # times when it was parsed: a snapshot, so a later change to the exhibit never rewrites it.
+    clock_offset_seconds = Column(BigInteger)
 
     detected_format   = Column(String(32))                  # evtx / json / syslog / ...
     event_count       = Column(Integer, nullable=False, default=0)
@@ -1521,6 +1618,13 @@ class DefenderPdfImport(Base):
     file_size           = Column(Integer, nullable=False)
     sha256_hash         = Column(String(64), nullable=False)
     source_artifact_id  = Column(UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
+    # G4 (R03) run record: the exhibit the PDF is (from-evidence with the hash re-verified, or an
+    # upload whose SHA-256 equals exactly one active exhibit), the parser and its version, and the
+    # exhibit's clock offset applied to the candidates' times (snapshot). NULL on imports before G4.
+    evidence_id         = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
+    parser_name         = Column(String(64))
+    parser_version      = Column(String(32))
+    clock_offset_seconds = Column(BigInteger)
 
     candidate_count       = Column(Integer, nullable=False, default=0)
     low_confidence_count  = Column(Integer, nullable=False, default=0)

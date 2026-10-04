@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from auth.deps import require_admin
 from models import User
 from core.config import settings
+from core.errors import ApiError, ApiErrorBody
 
 router = APIRouter(prefix="/api/admin/backups", tags=["admin"])
 
@@ -99,6 +100,8 @@ def _safe_reason(e: Exception) -> str:
         return "Could not write backup file (permissions)."
     if "pg_dump failed" in msg or "connect" in msg or "connection" in msg:
         return "Database dump failed (pg_dump error)."
+    if "backup_age_recipient" in msg:
+        return "No age recipient configured (BACKUP_AGE_RECIPIENT): no unencrypted dump was written."
     return "Backup failed (see server logs)."
 
 
@@ -115,6 +118,9 @@ async def _run_backup(started: Optional[datetime] = None) -> None:
     _last_run = {"state": "running", "started_at": _iso(started),
                  "finished_at": None, "filename": None, "error": None}
     try:
+        recipient = settings.backup_age_recipient
+        if not recipient:          # R106: never an unencrypted dump (run_backup refuses up front too)
+            raise RuntimeError("BACKUP_AGE_RECIPIENT is not set: refusing to write an unencrypted dump")
         host, user, pw, db = _pg_creds()
         ts       = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
         out_path = Path(settings.backup_path) / f"fenrir_backup_{ts}.sql.gz"
@@ -138,25 +144,21 @@ async def _run_backup(started: Optional[datetime] = None) -> None:
         if proc.returncode != 0:
             raise RuntimeError(f"pg_dump failed: {stderr.decode()[:500]}")
 
-        # Compress — and encrypt when a recipient is configured — OFF the event loop
-        # (single uvicorn worker), then write atomically via a .tmp that the listing
-        # regex never matches. A configured recipient fails CLOSED: no plaintext.
+        # Compress and encrypt OFF the event loop (single uvicorn worker), then write
+        # atomically via a .tmp that the listing regex never matches. Fails CLOSED: a
+        # failed age run → no file.
         data = await asyncio.to_thread(gzip.compress, stdout)
-        recipient = settings.backup_age_recipient
-        if recipient:
-            age = await asyncio.create_subprocess_exec(
-                "age", "-r", recipient,
-                env={"PATH": env["PATH"]},
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            data, age_err = await age.communicate(data)
-            if age.returncode != 0:
-                raise RuntimeError(f"age encryption failed: {age_err.decode()[:300]}")
-            out_path = out_path.with_name(out_path.name + ".age")
-        else:
-            logger.warning("BACKUP_AGE_RECIPIENT not set — manual backup written UNENCRYPTED")
+        age = await asyncio.create_subprocess_exec(
+            "age", "-r", recipient,
+            env={"PATH": env["PATH"]},
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        data, age_err = await age.communicate(data)
+        if age.returncode != 0:
+            raise RuntimeError(f"age encryption failed: {age_err.decode()[:300]}")
+        out_path = out_path.with_name(out_path.name + ".age")
         tmp_path = out_path.with_name(out_path.name + ".tmp")
         try:
             await asyncio.to_thread(tmp_path.write_bytes, data)
@@ -198,13 +200,27 @@ async def list_backups(_: User = Depends(require_admin)):
 
 
 @router.post("/run", response_model=BackupRunResponse, status_code=status.HTTP_202_ACCEPTED,
-             summary="Trigger a database backup")
+             summary="Trigger a database backup",
+             responses={409: {"description": "A backup is already running"},
+                        503: {"model": ApiErrorBody,
+                              "description": "backup_encryption_not_configured (no BACKUP_AGE_RECIPIENT: the "
+                                             "server never writes an unencrypted dump; nothing was started)"}})
 async def run_backup(background_tasks: BackgroundTasks, _: User = Depends(require_admin)):
     """Trigger a pg_dump backup that runs in the background (returns 202
-    immediately). Single-flight: returns 409 if a backup is already running.
+    immediately). The dump is gzip-compressed and age-encrypted to the server's
+    BACKUP_AGE_RECIPIENT (public key): without one, nothing is started (503
+    backup_encryption_not_configured; R106, as the backup sidecar's backup.sh) —
+    a database dump holds every incident's data and is never written in plaintext.
+    Single-flight: returns 409 if a backup is already running.
     Backups older than 14 days are pruned after a successful dump. Admin access
     required. Returns an accepted status message."""
     global _running, _last_run
+    if not settings.backup_age_recipient:
+        logger.error("manual backup refused: BACKUP_AGE_RECIPIENT is not set (no unencrypted dumps)")
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "backup_encryption_not_configured",
+                       "No age recipient is configured (BACKUP_AGE_RECIPIENT), so the backup was not started: "
+                       "the server never writes an unencrypted database dump. Set the age public key in .env "
+                       "(the same one the backup sidecar uses) and restart the backend.")
     if _running:
         raise HTTPException(status.HTTP_409_CONFLICT, "A backup is already running")
     _running = True   # claim synchronously to close the double-submit race

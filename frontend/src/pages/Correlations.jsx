@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client.js'
 import { SEVERITY, PHASE } from '../lib/incidentVocab.js'
@@ -175,20 +175,29 @@ function SharedIocsTab() {
   const [nextCursor, setNext]     = useState(null)
   const [loadingMore, setMore]    = useState(false)
   const [tagFilter, setTagFilter] = useState('')
+  const [ready, setReady]         = useState(false)   // the first query has answered
+  // The tag box queries on every keystroke: only the newest query may set state, so a slower
+  // answer for an earlier value (e.g. its invalid_tag error) can't land after a newer one.
+  const loadSeq = useRef(0)
 
   const load = useCallback(async (cursor = null) => {
+    const seq = cursor ? loadSeq.current : ++loadSeq.current
     const params = {}
     if (cursor)    params.cursor = cursor
     if (tagFilter) params.tag    = tagFilter
     try {
       const res = await api.listCorrelatedIocs(params)
+      if (seq !== loadSeq.current) return
+      setError(null)   // a successful query clears the previous one's error (e.g. invalid_tag)
       setItems(prev => cursor ? [...prev, ...res.items] : res.items)
       setNext(res.next_cursor)
     } catch (e) {
-      setError(e.message || 'Could not load correlated IOCs')
+      if (seq !== loadSeq.current) return
+      setError(e.code === 'invalid_tag'
+        ? `"${tagFilter}" is not a usable tag: tags use lowercase letters, digits and - . / :`
+        : (e.message || 'Could not load correlated IOCs'))
     } finally {
-      setLoading(false)
-      setMore(false)
+      if (seq === loadSeq.current) { setLoading(false); setMore(false); setReady(true) }
     }
   }, [tagFilter])
 
@@ -200,19 +209,9 @@ function SharedIocsTab() {
     load(nextCursor)
   }
 
-  if (loading) return <div className="panel-empty"><div>Loading…</div></div>
-  if (error)   return (
-    <div className="alert error" role="alert">
-      <span className="alert-icon">!</span><span>{error}</span>
-    </div>
-  )
-  if (items.length === 0) return (
-    <div className="panel-empty">
-      <div className="panel-empty-mark" aria-hidden="true">◌</div>
-      <div>No shared IOCs detected.</div>
-      <div style={{ color: 'var(--dim)', fontSize: 12 }}>IOC values seen in 2+ incidents will appear here.</div>
-    </div>
-  )
+  // After the first answer the tag box stays on screen (also while loading, empty or in error),
+  // so typing never loses focus and an invalid tag can be corrected in place.
+  if (!ready) return <div className="panel-empty"><div>Loading…</div></div>
 
   return (
     <>
@@ -221,8 +220,10 @@ function SharedIocsTab() {
         flexWrap: 'wrap', marginBottom: 'var(--space-3)',
       }}>
         <span style={{ color: 'var(--muted)', fontSize: 13, flex: '1 1 auto' }}>
-          {items.length} IOC value{items.length !== 1 ? 's' : ''} observed across multiple incidents.
-          Sorted by number of incidents, highest first.
+          {loading ? 'Loading…' : !error && items.length > 0 && <>
+            {items.length} IOC value{items.length !== 1 ? 's' : ''} observed across multiple incidents.
+            Sorted by number of incidents, highest first.
+          </>}
         </span>
         <input
           type="search"
@@ -241,6 +242,17 @@ function SharedIocsTab() {
           <button type="button" className="chip" onClick={() => setTagFilter('')}>× clear</button>
         )}
       </div>
+      {error ? (
+        <div className="alert error" role="alert" data-corr-error>
+          <span className="alert-icon">!</span><span>{error}</span>
+        </div>
+      ) : items.length === 0 ? (
+        <div className="panel-empty">
+          <div className="panel-empty-mark" aria-hidden="true">◌</div>
+          <div>{tagFilter ? `No shared IOCs tagged "${tagFilter}".` : 'No shared IOCs detected.'}</div>
+          <div style={{ color: 'var(--dim)', fontSize: 12 }}>IOC values seen in 2+ incidents will appear here.</div>
+        </div>
+      ) : <>
       <table className="settings-table">
         <thead>
           <tr>
@@ -266,6 +278,7 @@ function SharedIocsTab() {
           </button>
         </div>
       )}
+      </>}
     </>
   )
 }

@@ -4,6 +4,8 @@ import { TLP } from '../../../lib/incidentVocab.js'
 import { formatLocal } from '../../../lib/datetime.js'
 import { hashAlgorithm } from '../../../lib/evidenceProvenance.js'
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
+import { fmtOffset, parseOffsetSeconds } from '../../../components/ClockOffset.jsx'
+import UploadProgress, { useChunkedUpload, useRetainedUpload } from '../../../components/UploadProgress.jsx'
 
 // Collection wizard — ISO/IEC 27037 §7 (branch-aware).
 //
@@ -25,6 +27,14 @@ import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 //
 // Implements docs/coc-collection-wizard-slice.md (Slice A). The file name stays
 // AcquisitionWizard.jsx by design; only the user-facing labels say "Collection".
+//
+// G3 — `existing` = "Complete & seal" an unsealed item already registered (e.g. a draft exhibit an
+// Email / PCAP / Browser history upload created, or a Quick add): the same steps, prefilled from the
+// item; the stored file is kept (no upload); Save calls PATCH …/acquisition-record, then /seal.
+// G-fix FE-H1: photos already stored on the item are never re-sent (a PATCH of the photo list can't
+// remove them and must name each by id); a caption is added only when the item has no stored photo.
+// G-fix FE-M2: a refused complete (identifier taken, 507, a 422 input error) keeps the uploaded file on
+// the server: fix the field and Collect again — nothing is re-sent.
 
 const LAWFUL_BASIS = [
   { value: 'ir',           label: 'Incident response (LIA — legitimate interest)' },
@@ -164,76 +174,102 @@ function SealCheck({ ok, label }) {
   )
 }
 
+// G-fix (R101): the photo-list merge refusals (nothing was changed), in words.
+function photoErrorText(e) {
+  if (e?.data?.code === 'unknown_photo_id' || e?.code === 'unknown_photo_id')
+    return 'a photo on the item changed meanwhile (unknown photo id), so nothing was changed. Close this, reopen the item and try again.'
+  if (e?.data?.code === 'photo_remove_not_supported' || e?.code === 'photo_remove_not_supported')
+    return 'an uploaded photo can’t be removed, so nothing was changed. Reopen the item and try again.'
+  return e?.message || 'the photo list could not be saved.'
+}
+
 export default function AcquisitionWizard({
-  incidentId, entities = [], users = [], onClose, onSaved,
+  incidentId, entities = [], users = [], onClose, onSaved, existing = null,
 }) {
+  // G3 — completing an existing unsealed item: every field starts from what it already records.
+  const completing = !!existing
+  const ex = existing || {}
+  const tri = (v) => (v === true ? 'true' : v === false ? 'false' : '')
+  const exPhotos = ex.photos || []
+  const storedPhotos = exPhotos.filter(p => p && p.id)     // uploaded (encrypted) photos: never re-sent
+  const { note: exDecisionNote, ...exDecisionFactors } = ex.decision_factors || {}
   // ── Shared identity ───────────────────────────────────────────────────
-  const [kind, setKind]             = useState('digital_file')
-  const [name, setName]             = useState('')
-  const [identifier, setIdentifier] = useState('')
-  const [tlp, setTlp]               = useState('amber')
-  const [description, setDescription] = useState('')
-  const [entityId, setEntityId]     = useState('')
-  const [collectedLocation, setCollectedLocation] = useState('')
-  const [collectedAsRole, setCollectedAsRole]     = useState('')   // GS-12 — '' | defr | des
+  const [kind, setKind]             = useState(ex.kind || 'digital_file')
+  const [name, setName]             = useState(ex.name || '')
+  const [identifier, setIdentifier] = useState(ex.identifier || '')
+  const [tlp, setTlp]               = useState(ex.tlp || 'amber')
+  const [description, setDescription] = useState(ex.description || '')
+  const [entityId, setEntityId]     = useState(ex.entity_id || '')
+  const [collectedLocation, setCollectedLocation] = useState(ex.collected_location || '')
+  const [collectedAsRole, setCollectedAsRole]     = useState(ex.collected_as_role || '')   // GS-12 — '' | defr | des
 
   // ── Type step ─────────────────────────────────────────────────────────
-  const [deviceTypes, setDeviceTypes] = useState([])
+  const [deviceTypes, setDeviceTypes] = useState(ex.device_types || [])
 
   // ── Identify step ─────────────────────────────────────────────────────
-  const [lawfulBasis, setLawfulBasis]         = useState('')
-  const [lawfulBasisNote, setLawfulBasisNote] = useState('')
+  const [lawfulBasis, setLawfulBasis]         = useState(ex.lawful_basis || '')
+  const [lawfulBasisNote, setLawfulBasisNote] = useState(ex.lawful_basis_note || '')
   const [photoCaption, setPhotoCaption]       = useState('')
+  const [photoTakenAt, setPhotoTakenAt]       = useState('')   // FE-L9: else the seizure time, else unknown
 
   // ── Decide step ───────────────────────────────────────────────────────
-  const [systemState, setSystemState]             = useState('')
-  const [liveJustification, setLiveJustification]  = useState('')
-  const [handlingMode, setHandlingMode]            = useState('acquire')
-  const [decisionFactors, setDecisionFactors]      = useState({})
-  const [decisionNote, setDecisionNote]            = useState('')
+  const [systemState, setSystemState]             = useState(ex.system_state || '')
+  const [liveJustification, setLiveJustification]  = useState(ex.live_justification || '')
+  const [handlingMode, setHandlingMode]            = useState(ex.handling_mode || 'acquire')
+  const [decisionFactors, setDecisionFactors]      = useState(exDecisionFactors)
+  const [decisionNote, setDecisionNote]            = useState(exDecisionNote || '')
 
   // ── Branch step (device_details) ──────────────────────────────────────
-  const [dd, setDd] = useState({})
+  const [dd, setDd] = useState(ex.device_details || {})
   const setDetail = (k, v) => setDd(prev => ({ ...prev, [k]: v }))
 
   // ── Acquire step (digital) ────────────────────────────────────────────
-  const [writeBlockerUsed, setWriteBlockerUsed]   = useState('')
-  const [writeBlockerSerial, setWriteBlockerSerial] = useState('')
-  const [networkIsolated, setNetworkIsolated]     = useState('')
-  const [acquisitionTool, setAcquisitionTool]               = useState('')
-  const [acquisitionToolVersion, setAcquisitionToolVersion] = useState('')
-  const [acquisitionToolSha256, setAcquisitionToolSha256]   = useState('')
-  const [acquisitionParams, setAcquisitionParams]           = useState('')
-  const [acquisitionHashSource, setAcquisitionHashSource]   = useState('')
-  const [acquisitionHashTarget, setAcquisitionHashTarget]   = useState('')
+  const [writeBlockerUsed, setWriteBlockerUsed]   = useState(tri(ex.write_blocker_used))
+  const [writeBlockerSerial, setWriteBlockerSerial] = useState(ex.write_blocker_serial || '')
+  const [networkIsolated, setNetworkIsolated]     = useState(tri(ex.network_isolated))
+  const [acquisitionTool, setAcquisitionTool]               = useState(ex.acquisition_tool || '')
+  const [acquisitionToolVersion, setAcquisitionToolVersion] = useState(ex.acquisition_tool_version || '')
+  const [acquisitionToolSha256, setAcquisitionToolSha256]   = useState(ex.acquisition_tool_sha256 || '')
+  const [acquisitionParams, setAcquisitionParams]           = useState(ex.acquisition_params || '')
+  const [acquisitionHashSource, setAcquisitionHashSource]   = useState(ex.acquisition_hash_source || '')
+  const [acquisitionHashTarget, setAcquisitionHashTarget]   = useState(ex.acquisition_hash_target || '')
   // C3 — what the target hash covers: the uploaded file (compared, mismatch refused) or
   // an E01/AFF4 container's media (recorded as advisory, not compared).
-  const [targetHashScope, setTargetHashScope]     = useState('uploaded_file')
-  const [acquiredAt, setAcquiredAt]               = useState('')   // UTC ISO …Z or ''
-  const [acquisitionScope, setAcquisitionScope]   = useState('')   // '' | full_image | logical
-  const [logicalRationale, setLogicalRationale]   = useState('')
-  const [systemTimeOffset, setSystemTimeOffset]   = useState('')
-  const [screenState, setScreenState]             = useState('')
-  const [changesMade, setChangesMade]             = useState('')
+  const [targetHashScope, setTargetHashScope]     = useState(ex.upload_hash_check === 'container_media' ? 'container_media' : 'uploaded_file')
+  const [acquiredAt, setAcquiredAt]               = useState(ex.acquired_at || '')   // UTC ISO …Z or ''
+  const [acquisitionScope, setAcquisitionScope]   = useState(ex.acquisition_scope || '')   // '' | full_image | logical
+  const [logicalRationale, setLogicalRationale]   = useState(ex.logical_acquisition_rationale || '')
+  const [systemTimeOffset, setSystemTimeOffset]   = useState(ex.system_time_offset || '')
+  // G4 (R35) — the same offset as a signed number of seconds (device clock minus true UTC); '' = not recorded.
+  const [timeOffsetSeconds, setTimeOffsetSeconds] = useState(
+    ex.system_time_offset_seconds === null || ex.system_time_offset_seconds === undefined ? '' : String(ex.system_time_offset_seconds))
+  const [screenState, setScreenState]             = useState(ex.screen_state || '')
+  const [changesMade, setChangesMade]             = useState(ex.changes_made || '')
   // ISO/IEC 27041 — tool/method validation (Slice B)
-  const [toolValidated, setToolValidated]         = useState('')   // '' | true | false
-  const [toolValidationRef, setToolValidationRef] = useState('')
-  const [toolValidationDate, setToolValidationDate] = useState('')
+  const [toolValidated, setToolValidated]         = useState(tri(ex.acquisition_tool_validated))   // '' | true | false
+  const [toolValidationRef, setToolValidationRef] = useState(ex.acquisition_tool_validation_ref || '')
+  const [toolValidationDate, setToolValidationDate] = useState(ex.acquisition_tool_validation_date || '')
   // GS-1 — validated-tools registry (ISO/IEC 27041)
   const [validatedTools, setValidatedTools]       = useState([])
   const [file, setFile]   = useState(null)
 
   // ── Witness step ──────────────────────────────────────────────────────
-  const [witnessUserId, setWitnessUserId] = useState('')
-  const [witnessName, setWitnessName]     = useState('')
+  const [witnessUserId, setWitnessUserId] = useState(ex.witness_user_id || '')
+  const [witnessName, setWitnessName]     = useState(ex.witness_name || '')
 
   // ── Step machinery ────────────────────────────────────────────────────
   const [step, setStep] = useState('type')
   const [busy, setBusy] = useState(false)
+  const up = useChunkedUpload()   // G1 stage 3b: progress + cancel of the chunked upload
+  const kept = useRetainedUpload() // FE-M2: an upload the server kept after a refused complete
   const [error, setError] = useState(null)
   const [sealResult, setSealResult] = useState(null)
 
   const isLive = systemState === 'live' || systemState === 'live_critical'
+  // An in-situ photo caption is required for a physical item with no photo yet (ISO 27037 §6.2.1).
+  const captionRequired = kind === 'physical_item' && !(completing && exPhotos.length)
+  // FE-L9: a caption-only photo is dated by its own time, else the seizure time; never "now".
+  const photoTime = photoTakenAt || acquiredAt || null
   const has = (t) => deviceTypes.includes(t)
 
   // C3 — source and target are compared only when both use the same algorithm.
@@ -296,19 +332,19 @@ export default function AcquisitionWizard({
       if ((lawfulBasis === 'other' || lawfulBasis === 'lia') && !lawfulBasisNote.trim()) {
         setError('This lawful basis requires a justification note.'); return false
       }
-      if (kind === 'physical_item' && !photoCaption.trim()) {
-        setError('Physical evidence requires at least one in-situ photo caption (ISO 27037 §9.1.4).'); return false
+      if (captionRequired && !photoCaption.trim()) {
+        setError('Physical evidence requires at least one in-situ photo caption (ISO 27037 §6.2.1).'); return false
       }
     }
     if (s === 'decide') {
       if (isLive && !liveJustification.trim()) {
-        setError('Live / mission-critical acquisition requires justification (ISO 27037 §9.2.1 / §7.1.3.1.1).'); return false
+        setError('Live / mission-critical acquisition requires justification (ISO 27037 §5.4.4 / §7.1.3.1.1).'); return false
       }
     }
     if (s === 'acquire') {
-      if (kind === 'digital_file' && !file) { setError('Please choose a file to acquire.'); return false }
+      if (kind === 'digital_file' && !file && !completing) { setError('Please choose a file to acquire.'); return false }
       if (!acquisitionTool.trim() || !acquisitionToolVersion.trim()) {
-        setError('Acquisition tool name + version are required for reproducibility (ISO 27037 §9.2.4).'); return false
+        setError('Acquisition tool name + version are required for reproducibility (ISO 27037 §5.4.4).'); return false
       }
       if (acquisitionScope === 'logical' && !logicalRationale.trim()) {
         setError('Logical acquisition requires a rationale of what was taken and why (§7.1.3.1.1).'); return false
@@ -318,6 +354,9 @@ export default function AcquisitionWizard({
       }
       if (hashesComparable && !hashesMatch) {
         setError('Source and target hashes do not match — acquisition integrity broken. Re-acquire before continuing.'); return false
+      }
+      if (parseOffsetSeconds(timeOffsetSeconds) === undefined) {
+        setError('Clock offset must be a whole number of seconds, e.g. +120 or -30 (at most 100 years either way).'); return false
       }
     }
     return true
@@ -338,12 +377,12 @@ export default function AcquisitionWizard({
     { ok: !!lawfulBasis,           label: 'Lawful basis recorded' },
     { ok: deviceTypes.length > 0,  label: 'Device type tagged' },
     ...(kind === 'digital_file' ? [
-      { ok: !!file,                                              label: 'File acquired (SHA-256 computed)' },
+      { ok: completing ? !!ex.sha256 : !!file,                   label: completing ? 'File stored (SHA-256 recorded)' : 'File acquired (SHA-256 computed)' },
       { ok: !!(acquisitionTool.trim() && acquisitionToolVersion.trim()), label: 'Acquisition tool + version' },
       ...(isLive ? [{ ok: !!liveJustification.trim(), label: 'Live justification' }] : []),
       ...(acquisitionScope === 'logical' ? [{ ok: !!logicalRationale.trim(), label: 'Logical-acquisition rationale' }] : []),
     ] : [
-      { ok: !!photoCaption.trim(),  label: 'In-situ photo caption' },
+      { ok: !!photoCaption.trim() || (completing && exPhotos.length > 0), label: 'In-situ photo caption' },
     ]),
   ]
   const sealReady = sealChecks.every(c => c.ok)
@@ -374,6 +413,7 @@ export default function AcquisitionWizard({
         acquisition_scope: acquisitionScope || null,
         logical_acquisition_rationale: logicalRationale.trim() || null,
         system_time_offset: systemTimeOffset.trim() || null,
+        system_time_offset_seconds: parseOffsetSeconds(timeOffsetSeconds) ?? null,
         screen_state: screenState.trim() || null,
         changes_made: changesMade.trim() || null,
         device_details,
@@ -385,8 +425,34 @@ export default function AcquisitionWizard({
       }
 
       let created
-      if (kind === 'digital_file') {
-        created = await api.collectDigital(incidentId, {
+      if (completing) {
+        // G3 — record the acquisition on the existing item (only the stored file is never sent).
+        const digital = kind === 'digital_file' ? {
+          acquisition_hash_source: acquisitionHashSource.trim() || null,
+          acquisition_hash_target: acquisitionHashTarget.trim() || null,
+          ...(acquisitionHashTarget.trim() ? { target_hash_scope: targetHashScope } : {}),
+          write_blocker_used: writeBlockerUsed === '' ? null : writeBlockerUsed === 'true',
+          write_blocker_serial: writeBlockerSerial.trim() || null,
+          system_state: systemState || null,
+          live_justification: liveJustification.trim() || null,
+          network_isolated: networkIsolated === '' ? null : networkIsolated === 'true',
+        } : {}
+        created = await api.updateAcquisitionRecord(incidentId, ex.id, {
+          ...wizardCommon, ...digital, collected_location: collectedLocation.trim() || null,
+        })
+        // FE-H1: only when the item has no stored photo (then its list holds reference-only entries,
+        // which a PATCH replaces as sent). Stored photos stay as they are; add more from the item's detail.
+        if (kind === 'physical_item' && photoCaption.trim() && !storedPhotos.length) {
+          try {
+            created = await api.updateEvidence(incidentId, ex.id, {
+              photos: [...exPhotos, { url: '', caption: photoCaption.trim(), taken_at: photoTime }],
+            })
+          } catch (pe) {
+            throw new Error(`The acquisition record was saved, but the photo caption was not: ${photoErrorText(pe)}`)
+          }
+        }
+      } else if (kind === 'digital_file') {
+        const fields = {
           name: name.trim(),
           identifier: identifier.trim(),
           description: description.trim() || null,
@@ -405,7 +471,13 @@ export default function AcquisitionWizard({
             live_justification: liveJustification.trim() || null,
             network_isolated: networkIsolated === '' ? null : networkIsolated === 'true',
           },
-        })
+        }
+        const opts = up.start(file.size)
+        created = kept.held
+          ? (await kept.held.retry(api.digitalCompleteBody(fields), opts)).evidence    // FE-M2: no re-upload
+          : await api.collectDigital(incidentId, fields, { ...opts, retainOnError: true })
+        kept.drop({ cancel: false })
+        up.done()
       } else {
         created = await api.collectPhysical(incidentId, {
           name: name.trim(),
@@ -418,7 +490,7 @@ export default function AcquisitionWizard({
           photos: photoCaption.trim() ? [{
             url: '',
             caption: photoCaption.trim(),
-            taken_at: new Date().toISOString(),
+            taken_at: photoTime,
           }] : [],
           ...wizardCommon,
         })
@@ -432,16 +504,23 @@ export default function AcquisitionWizard({
       }
       setStep('confirm')
     } catch (e) {
+      // FE-M2: the server kept the upload (a refused field or no room): fix it and Collect again.
+      if (e.retained) kept.keep(e, file)
+      else if (kept.held) kept.drop({ cancel: false })
+      const still = e.retained ? ' The file stays uploaded on the server: Collect again to finish without re-sending it.' : ''
       // C3 — a refused hash stores nothing; the fix is on the Acquisition step.
       const code = e.data?.code
-      setError((code === 'hash_mismatch' || code === 'invalid_hash_format')
+      setError(((code === 'hash_mismatch' || code === 'invalid_hash_format')
         ? `${e.message} Go Back to the Acquisition step to correct it.`
         : code === 'acquired_in_future'
           ? (kind === 'digital_file'
             ? 'The acquisition time is in the future. Go Back to the Acquisition step and correct it, or clear it if unknown.'
             : 'The seizure time is in the future. Go Back to the Identification step and correct it, or clear it if unknown.')
-          : (e.message || 'Could not collect evidence.'))
+          : code === 'identifier_exists'
+            ? `The identifier “${identifier.trim()}” is already used on this incident. Go Back to the Identification step and change it.`
+            : (e.message || 'Could not collect evidence.')) + still)
     } finally {
+      up.done()
       setBusy(false)
     }
   }
@@ -460,7 +539,7 @@ export default function AcquisitionWizard({
     <div className="modal-backdrop">
       <div className="modal" role="dialog" aria-labelledby="aw-title" style={{ width: 'min(640px, 96vw)' }}>
         <div className="modal-head">
-          <h2 id="aw-title">Collection wizard — ISO/IEC 27037 §7</h2>
+          <h2 id="aw-title">{completing ? `Complete & seal — ${ex.identifier}` : 'Collection wizard — ISO/IEC 27037 §7'}</h2>
           <button type="button" className="modal-close" onClick={onClose} disabled={busy} aria-label="Close">×</button>
         </div>
 
@@ -493,7 +572,7 @@ export default function AcquisitionWizard({
 
               <div className="field">
                 <label className="field-label" htmlFor="aw-kind">Record as</label>
-                <select id="aw-kind" className="select" value={kind} onChange={e => setKind(e.target.value)}>
+                <select id="aw-kind" className="select" value={kind} onChange={e => setKind(e.target.value)} disabled={completing}>
                   <option value="digital_file">Digital file (acquired image/copy, AES-256 at rest)</option>
                   <option value="physical_item">Physical item (seized device, referenced)</option>
                 </select>
@@ -505,17 +584,17 @@ export default function AcquisitionWizard({
           {step === 'identify' && (
             <div className="form">
               <StepHeader n={stepIdx} total={totalSteps} title="Identification & lawful basis"
-                          subtitle="ISO 27037 §9.1 · GDPR Art. 5.1(c)" />
+                          subtitle="ISO 27037 §5.4.2 · GDPR Art. 5.1(c)" />
 
               <div className="form-row">
                 <div className="field">
                   <label className="field-label" htmlFor="aw-name">Name</label>
                   <input id="aw-name" className="input" value={name} onChange={e => setName(e.target.value)}
-                         autoFocus maxLength={256} placeholder="e.g. WIN-FS01 memory dump" />
+                         autoFocus maxLength={256} placeholder="e.g. WIN-FS01 memory dump" disabled={completing} />
                 </div>
                 <div className="field">
                   <label className="field-label" htmlFor="aw-tlp">TLP</label>
-                  <select id="aw-tlp" className="select" value={tlp} onChange={e => setTlp(e.target.value)}>
+                  <select id="aw-tlp" className="select" value={tlp} onChange={e => setTlp(e.target.value)} disabled={completing}>
                     {TLP.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
                 </div>
@@ -524,7 +603,8 @@ export default function AcquisitionWizard({
               <div className="field">
                 <label className="field-label" htmlFor="aw-id">Identifier (case tag / item #)</label>
                 <input id="aw-id" className="input" value={identifier} onChange={e => setIdentifier(e.target.value)}
-                       maxLength={128} placeholder="e.g. EV-2026-042-01" style={{ fontFamily: 'var(--font-mono)' }} />
+                       maxLength={128} placeholder="e.g. EV-2026-042-01" style={{ fontFamily: 'var(--font-mono)' }} disabled={completing} />
+                {completing && <div className="field-hint">The identifier is fixed; name, TLP and description are edited from the item&rsquo;s detail.</div>}
               </div>
 
               <div className="field">
@@ -548,7 +628,7 @@ export default function AcquisitionWizard({
               <div className="field">
                 <label className="field-label" htmlFor="aw-desc">Description (source, scope)</label>
                 <textarea id="aw-desc" className="input" value={description}
-                          onChange={e => setDescription(e.target.value)} rows={2} maxLength={4096} />
+                          onChange={e => setDescription(e.target.value)} rows={2} maxLength={4096} disabled={completing} />
               </div>
 
               <div className="field">
@@ -569,7 +649,7 @@ export default function AcquisitionWizard({
                 <div className="field-hint">DEFR collects/acquires on scene; DES applies specialist techniques. Records the responder's authorised capacity.</div>
               </div>
 
-              {entities.length > 0 && (
+              {entities.length > 0 && !completing && (
                 <div className="field">
                   <label className="field-label" htmlFor="aw-entity">Asset / entity (optional)</label>
                   <select id="aw-entity" className="select" value={entityId} onChange={e => setEntityId(e.target.value)}>
@@ -583,13 +663,34 @@ export default function AcquisitionWizard({
                 </div>
               )}
 
-              {kind === 'physical_item' && (
+              {kind === 'physical_item' && completing && storedPhotos.length > 0 && (
+                <div className="field" data-testid="aw-photos-kept">
+                  <span className="field-label">In-situ photos (ISO 27037 §6.2.1)</span>
+                  <div className="field-hint">
+                    The item already has {exPhotos.length} photo{exPhotos.length === 1 ? '' : 's'}
+                    {exPhotos.some(p => p.caption) ? ` (${exPhotos.filter(p => p.caption).map(p => p.caption).join('; ')})` : ''}.
+                    {' '}They are kept as stored. Add more under <b>Photographs</b> in the item&rsquo;s detail.
+                  </div>
+                </div>
+              )}
+              {kind === 'physical_item' && !(completing && storedPhotos.length > 0) && (
                 <div className="field">
-                  <label className="field-label" htmlFor="aw-photo">In-situ photo caption * (ISO 27037 §9.1.4)</label>
+                  <label className="field-label" htmlFor="aw-photo">In-situ photo caption{captionRequired ? ' *' : ' (optional)'} (ISO 27037 §6.2.1)</label>
                   <input id="aw-photo" className="input" value={photoCaption}
                          onChange={e => setPhotoCaption(e.target.value)} maxLength={256}
                          placeholder="e.g. Laptop in situ on desk, lid open, screen photographed (IMG_3421)" />
-                  <div className="field-hint">Caption alone documents that a photo was taken — file attachment UI in a later slice.</div>
+                  <div className="field-hint">
+                    {completing && exPhotos.length > 0
+                      ? `The item already has ${exPhotos.length} photo caption${exPhotos.length === 1 ? '' : 's'}; a new caption is added to them.`
+                      : 'Caption alone documents that a photo was taken; attach the image under Photographs in the item’s detail.'}
+                  </div>
+                </div>
+              )}
+              {kind === 'physical_item' && photoCaption.trim() && !(completing && storedPhotos.length > 0) && (
+                <div className="field">
+                  <label className="field-label" htmlFor="aw-photo-at">Photo taken at (optional)</label>
+                  <LocalDateTimePicker id="aw-photo-at" value={photoTakenAt} onChange={setPhotoTakenAt} clearable />
+                  <div className="field-hint">Blank: the seizure time below, or unknown if that is blank too. Never the time you save this.</div>
                 </div>
               )}
 
@@ -765,13 +866,30 @@ export default function AcquisitionWizard({
           {step === 'acquire' && (
             <div className="form">
               <StepHeader n={stepIdx} total={totalSteps} title="Acquisition"
-                          subtitle="ISO 27037 §9.2.4 / §7.1.3.1.1 · NIST SP 800-86 §3.2.4" />
+                          subtitle="ISO 27037 §5.4.4 / §7.1.3.1.1 · NIST SP 800-86 §3.1.2" />
 
+              {completing ? (
+                <div className="field" data-testid="aw-stored-file">
+                  <span className="field-label">Stored file</span>
+                  <div style={{ fontSize: 13 }}>
+                    <span style={{ fontFamily: 'var(--font-mono)' }}>{ex.original_filename || '—'}</span>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', wordBreak: 'break-all' }}>SHA-256 {ex.sha256}</div>
+                  </div>
+                  <div className="field-hint">Registered and hashed when it was uploaded; it is never replaced. A target hash below is compared with it.</div>
+                </div>
+              ) : (
               <div className="field">
                 <label className="field-label" htmlFor="aw-file">File *</label>
-                <input id="aw-file" className="input" type="file" onChange={e => setFile(e.target.files?.[0] || null)} />
+                <input id="aw-file" className="input" type="file"
+                       onChange={e => { if (kept.held) kept.drop(); setFile(e.target.files?.[0] || null) }} />
                 <div className="field-hint">Hashed (SHA-256 + SHA-1 + MD5) and AES-256-GCM encrypted at rest on upload.</div>
+                {kept.held && (
+                  <div className="field-hint" data-testid="aw-upload-held-file">
+                    {kept.held.filename} is already uploaded (held by the server): choosing another file discards it.
+                  </div>
+                )}
               </div>
+              )}
 
               {acquiredAtField}
 
@@ -955,6 +1073,24 @@ export default function AcquisitionWizard({
                          placeholder="e.g. agent written to %TEMP%; documented (§6.1)" />
                 </div>
               </div>
+
+              <div className="form-row">
+                <div className="field">
+                  <label className="field-label" htmlFor="aw-tofs">Clock offset in seconds (optional)</label>
+                  <input id="aw-tofs" className="input" inputMode="numeric" value={timeOffsetSeconds}
+                         onChange={e => setTimeOffsetSeconds(e.target.value)} maxLength={12}
+                         placeholder="e.g. +3 or -120"
+                         aria-invalid={parseOffsetSeconds(timeOffsetSeconds) === undefined || undefined}
+                         aria-describedby="aw-tofs-hint"
+                         style={parseOffsetSeconds(timeOffsetSeconds) === undefined ? { borderColor: 'var(--crit)' } : undefined} />
+                  <div id="aw-tofs-hint" className="field-hint" data-testid="aw-tofs-hint">
+                    {parseOffsetSeconds(timeOffsetSeconds) === undefined
+                      ? <span style={{ color: 'var(--crit)' }}>A whole number of seconds, e.g. +120 or -30.</span>
+                      : <>Device clock minus true time, after its timezone: <strong>+120</strong> = the device was 2 minutes ahead.
+                          {' '}Imports from this exhibit subtract it from the device&rsquo;s times and keep the recorded time. The note above is kept as written and never interpreted.</>}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
@@ -1018,6 +1154,9 @@ export default function AcquisitionWizard({
                       <li><strong>Lawful basis:</strong> {LAWFUL_BASIS.find(l => l.value === lawfulBasis)?.label || '—'}</li>
                       {kind === 'digital_file' && <li><strong>Tool:</strong> {acquisitionTool} v{acquisitionToolVersion} ({acquisitionScope || 'scope n/s'})</li>}
                       <li><strong>{kind === 'digital_file' ? 'Acquired' : 'Seized'}:</strong> {acquiredAt ? formatLocal(acquiredAt) : 'not recorded'}</li>
+                      {parseOffsetSeconds(timeOffsetSeconds) != null && (
+                        <li><strong>Clock offset:</strong> {fmtOffset(parseOffsetSeconds(timeOffsetSeconds))} (applied to imports from this exhibit)</li>
+                      )}
                       {kind === 'digital_file' && tgtAlgo && (
                         <li><strong>Target hash:</strong> {tgtAlgo} · {targetHashScope === 'container_media' ? "container's media (advisory)" : 'compared with the upload'}</li>
                       )}
@@ -1027,21 +1166,38 @@ export default function AcquisitionWizard({
                     </ul>
                   </div>
                   <button type="button" className="btn primary" onClick={commit} disabled={busy} style={{ marginTop: 'var(--space-3)' }}>
-                    {busy ? 'Collecting & sealing…' : (sealReady ? 'Collect & seal' : 'Collect (seal later)')}
+                    {completing
+                      ? (busy ? 'Saving & sealing…' : (sealReady ? 'Save & seal' : 'Save (seal later)'))
+                      : (busy ? 'Collecting & sealing…' : (sealReady ? 'Collect & seal' : 'Collect (seal later)'))}
                   </button>
+                  <UploadProgress progress={up.progress} onCancel={up.cancel} testid="aw-upload-progress"
+                                  limit={up.limit} incidentId={incidentId} />
+                  {kept.held && !busy && (
+                    <div className="alert info" role="status" data-testid="aw-upload-held" style={{ marginTop: 'var(--space-3)' }}>
+                      <span className="alert-icon">i</span>
+                      <span>
+                        <b>{kept.held.filename}</b> is uploaded and held by the server, not yet stored as evidence. Correct the
+                        {' '}field above, then <b>Collect</b> again: the file is not sent again. It is discarded if you close this
+                        {' '}wizard, or after 30 minutes without activity.{' '}
+                        <button type="button" className="btn ghost" onClick={() => kept.drop()} data-testid="aw-upload-discard">
+                          Discard upload
+                        </button>
+                      </span>
+                    </div>
+                  )}
                 </>
               )}
 
               {sealResult?.kind === 'sealed' && (
                 <div className="alert info" role="status">
                   <span className="alert-icon">✓</span>
-                  <span>Evidence row created and sealed. ISO 27037 + GDPR fields locked; further changes write amend-after-seal audit entries.</span>
+                  <span>{completing ? 'Acquisition record saved and sealed.' : 'Evidence row created and sealed.'} ISO 27037 + GDPR fields locked; further changes write amend-after-seal audit entries.</span>
                 </div>
               )}
               {sealResult?.kind === 'unsealed' && (
                 <div className="alert error" role="alert">
                   <span className="alert-icon">!</span>
-                  <span>Evidence row created but seal failed: {sealResult.message}. You can return later to seal the row.</span>
+                  <span>{completing ? 'Acquisition record saved' : 'Evidence row created'} but seal failed: {sealResult.message}. You can return later to seal the row.</span>
                 </div>
               )}
               {sealResult && (

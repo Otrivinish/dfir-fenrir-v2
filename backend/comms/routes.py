@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
+from core.errors import ApiError, ApiErrorBody
 from incidents.access import get_accessible_incident
 from models import Comment, Incident, OOBLog, User
 from notifications.service import notify_comment
@@ -58,6 +59,7 @@ def _generate_passphrase() -> str:
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+# L11, accepted: a row deleted between two page reads makes an offset cursor skip one row; the war room pages by keyset.
 def _encode_cursor(offset: int) -> str:
     return base64.urlsafe_b64encode(json.dumps({"o": offset}).encode()).decode().rstrip("=")
 
@@ -274,7 +276,8 @@ async def get_passphrase(
 
 
 @router.post("/{incident_id}/oob/passphrase/regenerate", response_model=PassphraseOut,
-             summary="Regenerate the OOB verification passphrase")
+             summary="Regenerate the OOB verification passphrase",
+             responses={409: {"model": ApiErrorBody, "description": "incident_closed"}})
 async def regenerate_passphrase(
     incident_id: uuid.UUID,
     request: Request,
@@ -283,9 +286,12 @@ async def regenerate_passphrase(
 ) -> PassphraseOut:
     """Generate a fresh out-of-band verification passphrase for the incident,
     replacing the existing one. Requires the analyst role. The regeneration is
-    audited. Returns the new passphrase.
+    audited. 409 incident_closed on a closed incident (R73: its record is frozen;
+    re-open it first). Returns the new passphrase.
     """
     inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
     inc.oob_passphrase = _generate_passphrase()
     await write_audit(
         db, "oob_passphrase_regenerate",
@@ -298,7 +304,8 @@ async def regenerate_passphrase(
     return PassphraseOut(passphrase=inc.oob_passphrase)
 
 
-@router.patch("/{incident_id}/oob/dark-operation", summary="Toggle dark operation mode")
+@router.patch("/{incident_id}/oob/dark-operation", summary="Toggle dark operation mode",
+              responses={409: {"model": ApiErrorBody, "description": "incident_closed"}})
 async def toggle_dark_operation(
     incident_id: uuid.UUID,
     req: DarkOperationUpdate,
@@ -307,10 +314,13 @@ async def toggle_dark_operation(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Enable or disable dark-operation mode on the incident via `enabled`.
-    Requires the analyst role. State changes are audited. Returns the current
+    Requires the analyst role. State changes are audited. 409 incident_closed on a
+    closed incident (R73; re-open it first). Returns the current
     `{"dark_operation": bool}`.
     """
     inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
     if inc.dark_operation != req.enabled:
         inc.dark_operation = req.enabled
         await write_audit(
@@ -366,7 +376,9 @@ async def create_oob_log(
 ) -> OOBLogOut:
     """Record an out-of-band communication (channel, direction, stakeholder,
     summary, and verification details) on the incident. Requires the analyst
-    role. The entry is audited and returned with the recording user's username.
+    role. Allowed on a closed incident too (post-closure communications, e.g. a
+    regulator follow-up, are still recorded). The entry is audited and returned
+    with the recording user's username.
     """
     await _get_incident(db, incident_id, user)
 
@@ -401,6 +413,7 @@ async def create_oob_log(
 
 
 @router.delete("/{incident_id}/oob/log/{log_id}",
+               responses={409: {"model": ApiErrorBody, "description": "incident_closed"}},
                summary="Delete an out-of-band log entry")
 async def delete_oob_log(
     incident_id: uuid.UUID,
@@ -410,10 +423,13 @@ async def delete_oob_log(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Delete an out-of-band communication log entry from the incident.
-    Requires the analyst role. The deletion is audited. Returns
-    `{"status": "ok"}`.
+    Requires the analyst role; 409 incident_closed on a closed incident (adding
+    an entry stays allowed: communications after closure are still recorded).
+    The deletion is audited. Returns `{"status": "ok"}`.
     """
-    await _get_incident(db, incident_id, user)
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     entry = (await db.execute(
         select(OOBLog).where(OOBLog.id == log_id, OOBLog.incident_id == incident_id)

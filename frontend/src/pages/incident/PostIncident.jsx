@@ -19,6 +19,7 @@ function ClosureChecklist({ inc }) {
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState(null)
   const [busy,    setBusy]    = useState({})
+  const [rowError, setRowError] = useState({})   // item id → why its last note / assignee save failed
   const [adding,    setAdding]    = useState(false)
   const [newLabel,  setNewLabel]  = useState('')
   const [creating,  setCreating]  = useState(false)
@@ -55,11 +56,13 @@ function ClosureChecklist({ inc }) {
 
   async function patchMeta(item, payload) {
     setBusy(b => ({ ...b, [item.id]: true }))
+    setRowError(r => { const n = { ...r }; delete n[item.id]; return n })
     try {
       const updated = await api.patchChecklistMeta(inc.id, item.id, payload)
       setItems(prev => prev.map(i => i.id === updated.id ? updated : i))
-    } catch {
-      // leave state as-is on error
+    } catch (e) {
+      // Say why (e.g. 422 assignee_no_access: that person can't see this incident); the row keeps its value.
+      setRowError(r => ({ ...r, [item.id]: e.message || 'Could not save' }))
     } finally {
       setBusy(b => { const n = { ...b }; delete n[item.id]; return n })
     }
@@ -164,6 +167,7 @@ function ClosureChecklist({ inc }) {
             item={item}
             users={users}
             busyToggle={!!busy[item.id]}
+            error={rowError[item.id]}
             isClosed={isClosed}
             onToggle={() => toggle(item)}
             onMeta={(payload) => patchMeta(item, payload)}
@@ -175,7 +179,7 @@ function ClosureChecklist({ inc }) {
   )
 }
 
-function ChecklistRow({ item, users, busyToggle, isClosed, onToggle, onMeta, onDelete }) {
+function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onMeta, onDelete }) {
   const [expanded,    setExpanded]    = useState(false)
   const [notesDraft,  setNotesDraft]  = useState(item.notes || '')
   const [editingNote, setEditingNote] = useState(false)
@@ -315,6 +319,11 @@ function ChecklistRow({ item, users, busyToggle, isClosed, onToggle, onMeta, onD
               </option>
             ))}
           </select>
+        </div>
+      )}
+      {error && (
+        <div className="team-picker-error" role="alert" style={{ marginTop: 'var(--space-2)', marginLeft: 32 }}>
+          <span className="team-picker-error-mark" aria-hidden="true">!</span><span>{error}</span>
         </div>
       )}
     </li>

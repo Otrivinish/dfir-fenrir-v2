@@ -183,8 +183,10 @@ function AddWalletIocModal({ incidentId, wallet, onClose, onCreated }) {
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export default function Ransomware() {
-  const { inc } = useOutletContext()
+  const { inc, viewer } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  // G-fix FE-L12: viewers get the closed-incident view of the write controls (the API refuses them).
+  const ro = isClosed || !!viewer
 
   const [text, setText] = useState('')
   const [wallets, setWallets] = useState([])
@@ -269,7 +271,7 @@ export default function Ransomware() {
                             className="btn ghost"
                             style={{ fontSize: 12, padding: '2px 8px' }}
                             onClick={() => setIocTarget(w)}
-                            disabled={isClosed}
+                            disabled={ro}
                           >
                             + IOC
                           </button>

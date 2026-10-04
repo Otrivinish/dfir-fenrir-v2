@@ -8,7 +8,10 @@ WORKDIR /app
 # - libimage-exiftool-perl: metadata extraction for all file types
 # - libmagic1: MIME detection (python-magic)
 # - libyara-dev: YARA rule engine headers for yara-python
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# `apt-get upgrade`: the base digest is pinned and upstream image rebuilds lag
+# Debian security fixes (PCRE2), so a --no-cache rebuild takes them.
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
     binutils \
     libimage-exiftool-perl \
     libmagic1 \

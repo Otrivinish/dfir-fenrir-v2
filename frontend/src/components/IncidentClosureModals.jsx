@@ -8,6 +8,9 @@ import { GateItems, useGate } from './GateItems.jsx'
 // Close shows Gate 2 from the API; when it is unmet, closing needs Override (the
 // sign-off statement is the justification), offered only with the override_gate
 // capability from GET …/access (`canOverride`: the incident lead).
+// Re-open: the API decides whether Gate 1 applies (re-opening into Post-Incident an
+// incident closed in another phase); a 409 gate_unmet lists the items here, and the
+// lead may then Override with the reason as the justification.
 const REASON_MIN = 10
 const REOPEN_PHASES = PHASE.filter(p => p.value !== 'preparation')
 
@@ -138,20 +141,36 @@ export function CloseIncidentModal({ inc, canOverride = false, onConfirm, onClos
   )
 }
 
-export function ReopenIncidentModal({ onConfirm, onClose }) {
-  const [reason, setReason] = useState('')
-  const [phase, setPhase]   = useState('')
-  const [busy, setBusy]     = useState(false)
-  const [error, setError]   = useState(null)
+export function ReopenIncidentModal({ incidentId, canOverride = false, onConfirm, onClose }) {
+  const [reason, setReason]     = useState('')
+  const [phase, setPhase]       = useState('')
+  const [busy, setBusy]         = useState(false)
+  const [error, setError]       = useState(null)
+  const [gate, setGate]         = useState(null)    // from a 409 gate_unmet reply
+  const [override, setOverride] = useState(false)
   useEscape(busy, onClose)
+
+  const unmet      = !!gate && phase === 'post_incident'
+  const overriding = unmet && canOverride && override
+
+  const choosePhase = (value) => {
+    setPhase(value)
+    if (value !== 'post_incident') { setGate(null); setOverride(false); setError(null) }
+  }
 
   const submit = async (e) => {
     e.preventDefault()
     setError(null); setBusy(true)
     try {
-      await onConfirm(reason.trim(), phase)
+      await onConfirm(reason.trim(), phase, overriding)
     } catch (err) {
-      setError(err.message || 'Could not re-open the incident.')
+      if (err.code === 'gate_unmet' && Array.isArray(err.data?.unmet)) {
+        setGate({ gate: 'post_incident', label: 'Gate 1', carried_forward: [], met: false, exempt: false,
+                  unmet: err.data.unmet })
+        setError('Gate 1 is not met: see the list above.')
+      } else {
+        setError(err.message || 'Could not re-open the incident.')
+      }
       setBusy(false)
     }
     // success path: parent unmounts the modal
@@ -170,11 +189,31 @@ export function ReopenIncidentModal({ onConfirm, onClose }) {
               <div className="field">
                 <label className="field-label" htmlFor="reopen-phase">Re-open in phase</label>
                 <select id="reopen-phase" className="select" required value={phase}
-                        onChange={e => setPhase(e.target.value)}>
+                        onChange={e => choosePhase(e.target.value)}>
                   <option value="" disabled>Choose a phase…</option>
                   {REOPEN_PHASES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                 </select>
               </div>
+              {unmet && <GateItems incidentId={incidentId} gate={gate} onNavigate={onClose} />}
+              {unmet && !canOverride && (
+                <span className="field-hint" data-override-unavailable style={{ color: 'var(--muted)' }}>
+                  Only this incident's lead (Incident Commander or Deputy) or an admin can override the gate.
+                  You can re-open it in an earlier phase instead.
+                </span>
+              )}
+              {unmet && canOverride && (
+                <div className="field">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', cursor: 'pointer', fontSize: 13 }}>
+                    <input id="reopen-override" type="checkbox" checked={override} disabled={busy}
+                           aria-describedby="reopen-override-hint"
+                           onChange={e => setOverride(e.target.checked)} />
+                    Override: re-open in Post-Incident anyway
+                  </label>
+                  <span id="reopen-override-hint" className="field-hint" style={{ color: 'var(--muted)' }}>
+                    Your reason is the justification. The override and the missing items go into the audit log and onto the Timeline.
+                  </span>
+                </div>
+              )}
               <ReasonField id="reopen-reason" label="Reason" value={reason} onChange={setReason}
                            placeholder="What changed: new evidence, recurrence, a missed step…"
                            hint="Goes into the audit log and the Timeline. The closer and close time are cleared." />
@@ -184,8 +223,8 @@ export function ReopenIncidentModal({ onConfirm, onClose }) {
           <div className="modal-foot">
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
             <button type="submit" className="btn primary"
-                    disabled={busy || !phase || reason.trim().length < REASON_MIN}>
-              {busy ? 'Re-opening…' : 'Re-open incident'}
+                    disabled={busy || !phase || (unmet && !overriding) || reason.trim().length < REASON_MIN}>
+              {busy ? 'Re-opening…' : overriding ? 'Override and re-open' : 'Re-open incident'}
             </button>
           </div>
         </form>

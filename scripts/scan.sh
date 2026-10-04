@@ -62,19 +62,27 @@ for img in "${IMAGES[@]}"; do
       -o json > "$OUT/grype-$name.json" 2>"$TMP/g.err"
   if [ ! -s "$OUT/grype-$name.json" ]; then echo "  FAIL  grype did not run:"; tail -3 "$TMP/g.err" | sed 's/^/        /'; FAILS=$((FAILS+1))
   else
-    # Policy: fail only on High/Critical that HAVE a fix and are not excepted in .grype.yaml.
-    python3 - "$OUT/grype-$name.json" > "$TMP/g.txt" <<'PY2'
-import json, sys, collections
+    # Policy: fail only on High/Critical that HAVE a fix and are not excepted in .grype.yaml,
+    # and on an image-scoped exception ("[image <name:tag>]" reason) applied to another image.
+    python3 - "$OUT/grype-$name.json" "$img" > "$TMP/g.txt" <<'PY2'
+import json, re, sys, collections
 d = json.load(open(sys.argv[1]))
+image = sys.argv[2].split("@")[0]
+SCOPE = re.compile(r"\[image ([^\]]+)\]")
+stray = sorted({(s[1], m["vulnerability"]["id"], m["artifact"]["name"])
+                for m in d.get("ignoredMatches", []) for r in m.get("appliedIgnoreRules", [])
+                if (s := SCOPE.match(r.get("reason") or "")) and s[1] != image})
 sev = collections.Counter(m["vulnerability"]["severity"] for m in d["matches"])
 bad = sorted({(m["vulnerability"]["severity"], m["vulnerability"]["id"], m["artifact"]["name"], m["artifact"]["version"],
                ",".join(m["vulnerability"]["fix"].get("versions", [])))
               for m in d["matches"] if m["vulnerability"]["severity"] in ("High", "Critical")
               and m["vulnerability"]["fix"]["state"] == "fixed"})
 print(f"{sum(sev.values())} findings ({', '.join(f'{k} {v}' for k, v in sorted(sev.items()))}); "
-      f"{len(d.get('ignoredMatches', []))} excepted; {len(bad)} fixable High/Critical")
+      f"{len(d.get('ignoredMatches', []))} excepted; {len(bad)} fixable High/Critical"
+      + (f"; {len(stray)} excepted by another image's exception" if stray else ""))
 for b in bad: print(f"        {b[0]:8} {b[1]:20} {b[2]} {b[3]} → fix {b[4]}")
-sys.exit(1 if bad else 0)
+for st in stray: print(f"        scoped to {st[0]}, not {image}: {st[1]} {st[2]}")
+sys.exit(1 if bad or stray else 0)
 PY2
     if [ $? -eq 0 ]; then echo "  OK    grype: $(head -1 "$TMP/g.txt")"
     else echo "  FAIL  grype: $(head -1 "$TMP/g.txt")"; tail -n +2 "$TMP/g.txt" | head -15; FAILS=$((FAILS+1)); fi

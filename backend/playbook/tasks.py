@@ -23,12 +23,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_admin, require_analyst
 from core.database import get_db
-from incidents.access import get_accessible_incident
+from core.errors import ApiErrorBody
+from incidents.access import get_accessible_incident, require_incident_person
 from models import Incident, PlaybookTask, PlaybookTemplate, User, utcnow
 from schemas import (PlaybookInstantiateRequest, PlaybookTaskCreate,
                      PlaybookTaskOut, PlaybookTaskUpdate)
 
 router = APIRouter()
+
+# F2 — person-reference errors on assignee_id (incidents.access.require_incident_person).
+_PERSON_ERRORS = {404: {"model": ApiErrorBody, "description": "user_not_found (unknown assignee_id)"},
+                  422: {"model": ApiErrorBody, "description": "assignee_no_access (assignee deactivated or "
+                                                              "can't see the incident)"}}
 
 
 async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) -> Incident:
@@ -73,6 +79,7 @@ async def list_tasks(
     response_model=PlaybookTaskOut,
     status_code=status.HTTP_201_CREATED,
     summary="Add a custom playbook task",
+    responses=_PERSON_ERRORS,
 )
 async def create_task(
     incident_id: uuid.UUID,
@@ -85,12 +92,15 @@ async def create_task(
 
     Requires the analyst role; the incident must not be closed (409 otherwise).
     Captures title, description, 800-61 phase, order index, optional assignee
-    and due date; the task starts `open`. The creation is audited and the new
-    task is returned.
+    and due date; the task starts `open`. The assignee must be an active user who
+    can see the incident (404 user_not_found, 422 assignee_no_access). The creation
+    is audited and the new task is returned.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    if req.assignee_id is not None:
+        await require_incident_person(db, incident_id, req.assignee_id)
 
     task = PlaybookTask(
         id=uuid.uuid4(),
@@ -126,6 +136,7 @@ async def create_task(
     "/{incident_id}/playbook/tasks/{task_id}",
     response_model=PlaybookTaskOut,
     summary="Update a playbook task",
+    responses=_PERSON_ERRORS,
 )
 async def update_task(
     incident_id: uuid.UUID,
@@ -140,7 +151,9 @@ async def update_task(
     Requires the analyst role; returns 404 if the task is missing and 409 if
     the incident is closed. Only provided fields are changed and audited.
     Setting status to `done` stamps completion time and completer; any other
-    status clears them. Returns the updated task.
+    status clears them. A new `assignee_id` must be an active user who can see the
+    incident (404 user_not_found, 422 assignee_no_access); an explicit
+    `"assignee_id": null` unassigns. Returns the updated task.
     """
     inc  = await _get_incident(db, incident_id, user)
     task = await _get_task(db, incident_id, task_id)
@@ -156,8 +169,11 @@ async def update_task(
         task.phase       = req.phase; changed["phase"] = req.phase
     if req.order_index is not None and req.order_index != task.order_index:
         task.order_index = req.order_index; changed["order_index"] = req.order_index
-    if req.assignee_id is not None and req.assignee_id != task.assignee_id:
-        task.assignee_id = req.assignee_id; changed["assignee_id"] = str(req.assignee_id)
+    if "assignee_id" in req.model_fields_set and req.assignee_id != task.assignee_id:
+        if req.assignee_id is not None:      # clearing needs no check
+            await require_incident_person(db, incident_id, req.assignee_id)
+        task.assignee_id = req.assignee_id
+        changed["assignee_id"] = str(req.assignee_id) if req.assignee_id else None
     if req.due_at      is not None and req.due_at      != task.due_at:
         task.due_at = req.due_at; changed["due_at"] = req.due_at.isoformat() if req.due_at else None
     if req.skip_reason is not None and req.skip_reason != (task.skip_reason or ""):

@@ -71,6 +71,7 @@ _LEAD_ROLES = "the Incident Commander or Deputy Incident Commander role"
              status_code=status.HTTP_201_CREATED,
              summary="Assign a responder",
              responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"},
+                        404: {"model": ApiErrorBody, "description": "user_not_found, or the role"},
                         422: {"model": ApiErrorBody, "description": "assignee_no_access"}})
 async def create_assignment(
     incident_id: uuid.UUID,
@@ -100,7 +101,7 @@ async def create_assignment(
         select(User).where(User.id == req.user_id)
     )).scalar_one_or_none()
     if not target_user:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+        raise ApiError(status.HTTP_404_NOT_FOUND, "user_not_found", "User not found")
 
     # Resolve operational role
     role = (await db.execute(
@@ -116,10 +117,14 @@ async def create_assignment(
         raise ApiError(status.HTTP_403_FORBIDDEN, "not_incident_lead",
                        f"Only this incident's lead or an admin can assign {_LEAD_ROLES}; while the "
                        "incident has no lead, its creator or today's on-call analyst can too.")
+    if not target_user.is_active:
+        # L4: no username — don't disclose who a deactivated account belonged to.
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "assignee_no_access",
+                       "The selected account is deactivated: choose an active user.")
     if not await user_can_see_incident(db, target_user, inc.id):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "assignee_no_access",
-                       f"{target_user.username} can't see this incident (deactivated, or not in any of "
-                       "its teams). An assignment doesn't grant access: add a team first.")
+                       f"{target_user.username} can't see this incident (not in any of its teams). "
+                       "An assignment doesn't grant access: add a team first.")
 
     row = IncidentAssignment(
         id=uuid.uuid4(),

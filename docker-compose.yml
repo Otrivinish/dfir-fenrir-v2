@@ -108,8 +108,9 @@ volumes:
     driver: local
   caddy-config:
     driver: local
-  # Backend /tmp: disk-backed scratch for upload spools (up to 2 GiB) and collector
-  # builds — a RAM tmpfs of that size would count against the backend's memory limit.
+  # Backend /tmp: disk-backed scratch for collector builds (and other temporary files) — a RAM
+  # tmpfs of that size would count against the backend's memory limit. Multipart upload spools
+  # no longer land here: they go to the RAM-only parser tmpfs (R80, G-fix A).
   backend-scratch:
     driver: local
 
@@ -198,9 +199,12 @@ services:
     image: dfir-fenrir-v2-backend:local   # also run by audit-monitor — one build, no drift
     container_name: fenrir-v2-backend
     restart: unless-stopped
-    # Measured 2026-09-30: a max-size (1 GiB) evidence collect→seal→export cycle peaks at
-    # ~4 GiB anonymous memory (whole-file AES-GCM + export ZIP in RAM). 6g = headroom so
-    # that workflow can never OOM-kill the single uvicorn worker.
+    # 6g was sized on 2026-09-30, when a 1 GiB collect→seal→export cycle peaked at ~4 GiB
+    # (whole-file AES-GCM + export ZIP in RAM). Since G1/G2 (2026-10-04) stored files are
+    # encrypted, decrypted, exported and downloaded in bounded chunks (a 2 GiB export raised RSS
+    # by ≤ ~24 MiB). What still takes RAM: the parser tmpfs below (≤ 1 GiB, which is also the
+    # multipart upload spool, R80), photos (read whole, ≤ 512 MiB) and analyser inputs (≤ 500 MiB).
+    # 6g stays as headroom for the single uvicorn worker; lowering it is a separate, measured change.
     # memswap_limit == mem_limit: decrypted evidence never pages to (unencrypted) host swap.
     mem_limit: 6g
     memswap_limit: 6g

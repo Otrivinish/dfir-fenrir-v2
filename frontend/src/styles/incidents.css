@@ -471,6 +471,11 @@ button.phase-step.clickable:focus-visible {
   color: var(--dim);
   user-select: none;
 }
+/* Why the stepper is static right now (e.g. unsaved Details edits). */
+.phase-steps-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
 
 /* Respond board — 4 equal columns that always fit; 2×2 when the board itself
    is narrow (container query, so it follows the sidebar/subnav, not just the

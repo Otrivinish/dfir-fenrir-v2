@@ -1,23 +1,31 @@
 """LE-package builder.
 
 Single entry point: `build_le_package`. Reads the source-of-truth tables for
-an incident in a read-only fashion, assembles an in-memory ZIP that follows
-the LE-package layout (see README in this module's `readme.py`), then
-encrypts the whole ZIP with AES-256-GCM under a fresh ephemeral KEK.
+an incident (plain READ COMMITTED queries in the caller's session; the builder
+itself writes nothing to the DB), streams a ZIP that follows the LE-package
+layout (see README in this module's `readme.py`) straight into the one entry of
+an AES-256 password-protected outer ZIP (WinZip AE-2) under a fresh one-time
+password.
 
-Returns the encrypted bundle bytes plus the metadata the route layer needs to
-persist `CustodyExport` + `LePackage` rows and emit the audit anchor row.
+G2 (R04): nothing is assembled in memory. The outer ZIP is written to a staging
+file (evidence/streaming.StagedOutput, /evidence/.staging/*.partial), each
+exhibit is decrypted chunk by chunk into its own entry, and the plaintext never
+touches a disk. The route moves the staged bundle into place
+(`BuildResult.staged.commit`) or discards it; a failed build discards it here.
 
-This module does **not** write to DB or disk and does **not** commit. The
-route layer owns those side effects.
+Returns the staged bundle plus the metadata the route layer needs to persist
+`CustodyExport` + `LePackage` rows and emit the audit anchor row. This module
+does **not** write to the DB and does **not** commit.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import csv
 import hashlib
 import io
+import itertools
 import json
 import secrets
 import time
@@ -32,17 +40,18 @@ import pyzipper
 # AE-2) rather than raw AES-256-GCM — see `bundle_password` / `_hmac_key`
 # below. pyzipper is already imported at top of file for the inner evidence
 # ZIP, so no new dependency.
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import verify_row_hash
-from evidence.crypto import aread_decrypted
+from evidence.crypto import EvidenceIntegrityError, iter_decrypted
+from evidence.streaming import StagedOutput
 from evidence.timestamping import timestamp_sha256
 from le_package.manifest import Manifest, hmac_manifest
 from le_package.readme import render_readme
 from le_package.sop import CHAIN_OF_CUSTODY_SOP
-from models import (Artifact, AuditLog, Comment, CustodyExport, Evidence,
-                    ForensicImport, IOC, Incident, IncidentStakeholder, LessonsLearned,
+from models import (Artifact, AuditLog, BrowserHistoryUpload, Comment, CustodyExport, DefenderPdfImport,
+                    EmailAnalysis, Evidence, ForensicImport, IOC, Incident, IncidentStakeholder, LessonsLearned,
                     OOBLog, PCAPAnalysis, TimelineEvent, User, YaraMatch,
                     ClosureChecklistItem)
 
@@ -51,11 +60,13 @@ PLATFORM_VERSION = "v2.0.0"
 
 
 def _iso_z(dt: datetime | None) -> str | None:
+    """UTC ISO 8601 with a Z suffix; sub-second precision is kept where present (L5, CLAUDE.md:
+    don't truncate). A naive value is UTC."""
     if dt is None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _csv_bytes(header: list[str], rows: list[list[Any]]) -> bytes:
@@ -110,6 +121,51 @@ def _add_file(zf: zipfile.ZipFile, manifest: Manifest, path: str, data: bytes, m
     return manifest.add(path=path, data=data, mime=mime, source=source)
 
 
+class IntegrityFailed:
+    """R3-2: the first pass of _stream_evidence_file found the stored exhibit tampered or corrupt (an
+    EvidenceIntegrityError, not a file that can't be read). `reason` = the crypto layer's check."""
+    __slots__ = ("reason",)
+
+    def __init__(self, reason: str | None):
+        self.reason = reason or "integrity"
+
+
+def _stream_evidence_file(zf: zipfile.ZipFile, manifest: Manifest, ev: Evidence, path: str, mime: str,
+                          source: str) -> dict | IntegrityFailed | None:
+    """Blocking (G2): decrypt an exhibit chunk by chunk into its own entry, hashing it on the way, and record
+    it in the manifest. Two bounded-memory passes: the first decrypts the whole stored file and writes
+    nothing, so a file that fails an integrity check (anywhere in it) returns IntegrityFailed (R3-2: the
+    caller records integrity_failed:<reason> and the route freezes the exhibit) and one that is missing or
+    can't be read returns None (recorded as absent) — one bad exhibit never blocks the package. The
+    second pass writes the entry; a failure there means the file changed during the build, and it raises
+    (F-12): the entry is half written, so the whole package is abandoned (build_le_package discards it)."""
+    try:
+        for _part in iter_decrypted(ev.storage_path, ev.nonce_hex, ev.file_size_bytes):
+            pass
+    except EvidenceIntegrityError as e:
+        return IntegrityFailed(e.reason)
+    except Exception:
+        return None
+    stream = iter_decrypted(ev.storage_path, ev.nonce_hex, ev.file_size_bytes)
+    first = next(stream)
+    sha256, sha512, size = hashlib.sha256(), hashlib.sha512(), 0
+    zinfo = getattr(zf, "zipinfo_cls", zipfile.ZipInfo)(path, date_time=time.localtime(time.time())[:6])
+    zinfo.compress_type = zf.compression
+    zinfo.external_attr = 0o600 << 16
+    zinfo.file_size = ev.file_size_bytes or len(first)      # sizes the ZIP64 decision
+    with contextlib.closing(stream), zf.open(zinfo, "w") as dest:
+        for part in itertools.chain((first,), stream):
+            with memoryview(part) as view:
+                for i in range(0, len(view), _ZIP_CHUNK):     # a v0 file arrives whole: write it in slices
+                    piece = view[i:i + _ZIP_CHUNK]
+                    sha256.update(piece)
+                    sha512.update(piece)
+                    dest.write(piece)
+            size += len(part)
+    return manifest.add_hashed(path=path, size=size, sha256=sha256.hexdigest(), sha512=sha512.hexdigest(),
+                               mime=mime, source=source)
+
+
 def _artifacts_zip(inc_dir: Path, files: list[tuple[str, str]]) -> bytes:
     """The quarantined files [(stored_filename, arcname)] in an `infected`-password AES ZIP;
     files missing from disk are skipped."""
@@ -126,24 +182,92 @@ def _artifacts_zip(inc_dir: Path, files: list[tuple[str, str]]) -> bytes:
     return inner.getvalue()
 
 
-def _seal(inner: io.BytesIO, bundle_password: str) -> tuple[bytes, str]:
-    """Wrap the plaintext inner ZIP in the outer AES-256 password ZIP (WinZip AE-2) and hash it.
-    Reads the inner buffer through a zero-copy view and frees it once sealed."""
-    outer = io.BytesIO()
-    with pyzipper.AESZipFile(
-        outer, "w",
-        compression=pyzipper.ZIP_DEFLATED,
-        encryption=pyzipper.WZ_AES,
-    ) as oz:
+# ── The outer envelope (G2: streamed into a staging file) ──
+# The outer entry is opened before its size is known. Force ZIP64 when the package could pass 4 GiB:
+# the stored files (exhibits, quarantined artifacts) plus a 1 GiB allowance for the records.
+_RECORDS_ALLOWANCE = 1024 ** 3
+
+
+def _open_bundle(bundle_password: str, size_estimate: int) -> tuple[StagedOutput, Any, Any]:
+    """Blocking: the staged outer AES-256 ZIP (WinZip AE-2) with its one entry, le_package.zip, open for
+    streaming writes (same entry metadata as before). Returns (staged output, outer ZIP, entry)."""
+    out = StagedOutput()
+    try:
+        oz = pyzipper.AESZipFile(out.file, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES)
         oz.setpassword(bundle_password.encode("utf-8"))
-        with inner.getbuffer() as plaintext_zip:
-            _zip_add_chunked(oz, "le_package.zip", plaintext_zip)
-    inner.close()
-    bundle = outer.getvalue()
-    return bundle, hashlib.sha256(bundle).hexdigest()
+        zinfo = getattr(oz, "zipinfo_cls", zipfile.ZipInfo)("le_package.zip",
+                                                             date_time=time.localtime(time.time())[:6])
+        zinfo.compress_type = oz.compression
+        zinfo.external_attr = 0o600 << 16
+        zip64 = (size_estimate + _RECORDS_ALLOWANCE) * 1.05 > zipfile.ZIP64_LIMIT
+        entry = oz.open(zinfo, "w", force_zip64=zip64)
+    except BaseException:
+        out.discard()
+        raise
+    return out, oz, entry
+
+
+def _close_bundle(out: StagedOutput, oz, entry) -> tuple[int, str]:
+    """Blocking: finish the entry and the outer ZIP, fsync, then hash the staged bundle by reading it back
+    (the ZIP writer seeks back to rewrite the local header, so it can't be hashed on the way).
+    Returns (size, SHA-256)."""
+    entry.close()
+    oz.close()
+    size = out.finish()
+    h = hashlib.sha256()
+    with open(out.path, "rb") as f:
+        while block := f.read(1024 * 1024):
+            h.update(block)
+    return size, h.hexdigest()
+
+
+def _abandon_bundle(out: StagedOutput, oz, entry) -> None:
+    """Blocking: a failed build — close what is open (best effort) and delete the staged file."""
+    for close in (entry.close, oz.close):
+        try:
+            close()
+        except Exception:
+            pass
+    out.discard()
+
+
+async def estimate_package_bytes(db: AsyncSession, inc_id: uuid.UUID, *, legal_hold_only: bool,
+                                 include_artifacts: bool, include_unsealed_drafts: bool = False) -> int:
+    """The stored bytes a package of this incident would embed: its exhibits' plaintext (with the
+    legal-hold filter; M11: sealed ones only unless drafts are included) and, when included, its
+    quarantined artifacts. For the free-space check and the ZIP64 decision; the records (timeline,
+    audit, ...) come on top."""
+    q = select(func.coalesce(func.sum(Evidence.file_size_bytes), 0)).where(
+        Evidence.incident_id == inc_id, Evidence.kind == "digital_file",
+        Evidence.storage_path.isnot(None), Evidence.nonce_hex.isnot(None))
+    if legal_hold_only:
+        q = q.where(Evidence.legal_hold.is_(True))
+    if not include_unsealed_drafts:
+        q = q.where(Evidence.coc_sealed.is_(True))
+    total = int((await db.execute(q)).scalar() or 0)
+    if include_artifacts:
+        total += int((await db.execute(select(func.coalesce(func.sum(Artifact.file_size), 0))
+                                       .where(Artifact.incident_id == inc_id))).scalar() or 0)
+    return total
 
 
 # ── Section builders ───────────────────────────────────────────────────────
+
+
+_FETCH_PARTITION = 1_000
+
+
+async def _fetch_all(db: AsyncSession, stmt, *, scalars: bool = False) -> list:
+    """Every row of `stmt`, read through a server-side cursor in partitions so the event loop runs
+    between them: one execute().all() turns tens of thousands of rows into ORM objects in a single
+    stall of over a second."""
+    result = await db.stream(stmt.execution_options(yield_per=_FETCH_PARTITION))
+    if scalars:
+        result = result.scalars()
+    rows: list = []
+    async for part in result.partitions():
+        rows.extend(part)
+    return rows
 
 
 async def _section_incident(db: AsyncSession, inc: Incident, manifest: Manifest, zf: zipfile.ZipFile) -> None:
@@ -161,7 +285,10 @@ async def _section_incident(db: AsyncSession, inc: Incident, manifest: Manifest,
         "dark_operation": inc.dark_operation,
         "reporter":       inc.reporter,
         "occurred_at":    _iso_z(inc.occurred_at),
+        "detected_at":    _iso_z(inc.detected_at),
         "contained_at":   _iso_z(inc.contained_at),
+        "eradicated_at":  _iso_z(inc.eradicated_at),
+        "recovered_at":   _iso_z(inc.recovered_at),
         "created_at":     _iso_z(inc.created_at),
         "updated_at":     _iso_z(inc.updated_at),
         "closed_at":      _iso_z(inc.closed_at),
@@ -211,22 +338,52 @@ async def _section_incident(db: AsyncSession, inc: Incident, manifest: Manifest,
 async def _section_timeline(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
     # C5 provenance, appended after the original columns (readers that go by position keep
     # working): the exhibit an imported event came from (its identifier), the SHA-256 of the bytes
-    # it was parsed from (the exhibit's, else the uploaded file's), the parser version, and how its
-    # time was worked out (explicit | assumed_tz | inferred_year; empty = analyst-entered / legacy).
-    events = (await db.execute(
+    # it was parsed from (G-fix B L25: the run's input, else the exhibit's), the parser version, and how
+    # its time was worked out (explicit | assumed_tz | inferred_year; empty = analyst-entered / legacy).
+    # G4, appended after those: the parser's name and the import run (Timeline Import or Defender
+    # import id), the time as the device recorded it and the clock offset that corrected it (both
+    # empty when no offset was applied). Defender-promoted rows fill the C5 columns from their run.
+    # G3: PCAP- and browser-history-promoted rows fill the same columns from their run (no new
+    # columns: parser_name / parser_version = the analyser, import_run_id = the analysis / upload).
+    # G-fix B: L26 — email relay hops with a run (email_analysis_id) fill them from their analysis.
+    # L25 — source_sha256 is the SHA-256 of the bytes the run PARSED (the run's input hash, else the
+    # exhibit's): for Logs & triage of a Velociraptor collection that is the decrypted collection ZIP, not
+    # the container exhibit. The exhibit's own SHA-256, when it differs (the container), goes in a new
+    # last column, container_sha256 (empty otherwise).
+    events = await _fetch_all(db,
         select(TimelineEvent, Evidence.identifier, Evidence.sha256,
-               ForensicImport.parser_version, ForensicImport.sha256_hash)
+               ForensicImport.parser_version, ForensicImport.sha256_hash,
+               func.coalesce(DefenderPdfImport.parser_name, PCAPAnalysis.analyser_name,
+                             BrowserHistoryUpload.parser_name, EmailAnalysis.analyser_name),
+               func.coalesce(DefenderPdfImport.parser_version, PCAPAnalysis.analyser_version,
+                             BrowserHistoryUpload.parser_version, EmailAnalysis.analyser_version),
+               func.coalesce(DefenderPdfImport.sha256_hash, PCAPAnalysis.input_sha256,
+                             BrowserHistoryUpload.sha256_hash, EmailAnalysis.input_sha256))
         .outerjoin(Evidence, Evidence.id == TimelineEvent.evidence_id)
         .outerjoin(ForensicImport, ForensicImport.id == TimelineEvent.forensic_import_id)
+        .outerjoin(DefenderPdfImport, DefenderPdfImport.id == TimelineEvent.defender_import_id)
+        .outerjoin(PCAPAnalysis, PCAPAnalysis.id == TimelineEvent.pcap_analysis_id)
+        .outerjoin(BrowserHistoryUpload, BrowserHistoryUpload.id == TimelineEvent.browser_history_upload_id)
+        .outerjoin(EmailAnalysis, EmailAnalysis.id == TimelineEvent.email_analysis_id)
         .where(TimelineEvent.incident_id == inc_id)
         .order_by(TimelineEvent.event_time.asc(), TimelineEvent.id.asc())
-    )).all()
+    )
+    await asyncio.to_thread(_timeline_files, zf, manifest, events)
 
+
+def _timeline_files(zf: zipfile.ZipFile, manifest: Manifest, events: list) -> None:
+    """Blocking (rows, CSV/JSON encoding, deflate, hashes): run via asyncio.to_thread."""
     header = ["event_time_utc", "hostname", "source", "event_type", "description",
               "ir_phase", "mitre_tactic_id", "mitre_tactic_name",
               "mitre_technique_id", "mitre_technique_name", "origin",
               "is_system", "external_safe", "raw_log",
-              "source_exhibit", "source_sha256", "parser_version", "time_basis"]
+              "source_exhibit", "source_sha256", "parser_version", "time_basis",
+              "parser_name", "import_run_id", "recorded_time_utc", "clock_offset_seconds",
+              "container_sha256"]
+
+    def _parsed_sha(ev_sha, imp_sha, run_sha):
+        return imp_sha or run_sha or ev_sha or ""
+
     rows = [[
         _iso_z(e.event_time), e.hostname or "", e.source or "", e.event_type or "",
         e.description or "", e.ir_phase or "",
@@ -234,26 +391,34 @@ async def _section_timeline(db: AsyncSession, inc_id: uuid.UUID, manifest: Manif
         e.mitre_technique_id or "", e.mitre_technique_name or "",
         e.origin, e.is_system, e.external_safe,
         (e.raw_log or "")[:4000],
-        ev_ident or "", ev_sha or imp_sha or "", parser_version or "", e.time_basis or "",
-    ] for e, ev_ident, ev_sha, parser_version, imp_sha in events]
-    data = _csv_bytes(header, rows)
-    zf.writestr("02_Timeline/Timeline.csv", data)
-    manifest.add(path="02_Timeline/Timeline.csv", data=data,
-                 mime="text/csv", source="timeline_events table")
+        ev_ident or "", _parsed_sha(ev_sha, imp_sha, def_sha), parser_version or def_version or "",
+        e.time_basis or "",
+        def_name or ("FENRIR timeline parser" if e.forensic_import_id and parser_version else ""),
+        str(e.forensic_import_id or e.defender_import_id or e.pcap_analysis_id or e.browser_history_upload_id
+            or e.email_analysis_id or ""),
+        _iso_z(e.recorded_event_time) if e.recorded_event_time else "",
+        "" if e.clock_offset_seconds is None else e.clock_offset_seconds,
+        ev_sha if ev_sha and ev_sha != _parsed_sha(ev_sha, imp_sha, def_sha) else "",
+    ] for e, ev_ident, ev_sha, parser_version, imp_sha, def_name, def_version, def_sha in events]
+    _add_file(zf, manifest, "02_Timeline/Timeline.csv", _csv_bytes(header, rows),
+              "text/csv", "timeline_events table")
 
     json_rows = [{h: r[i] for i, h in enumerate(header)} for r in rows]
-    data = _json_bytes({"event_count": len(json_rows), "events": json_rows})
-    zf.writestr("02_Timeline/Timeline.json", data)
-    manifest.add(path="02_Timeline/Timeline.json", data=data,
-                 mime="application/json", source="timeline_events table")
+    _add_file(zf, manifest, "02_Timeline/Timeline.json",
+              _json_bytes({"event_count": len(json_rows), "events": json_rows}),
+              "application/json", "timeline_events table")
 
 
 async def _section_iocs(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
-    iocs = (await db.execute(
+    iocs = await _fetch_all(db,
         select(IOC).where(IOC.incident_id == inc_id)
-        .order_by(IOC.added_at.asc(), IOC.id.asc())
-    )).scalars().all()
+        .order_by(IOC.added_at.asc(), IOC.id.asc()),
+        scalars=True)
+    await asyncio.to_thread(_ioc_files, zf, manifest, iocs)
 
+
+def _ioc_files(zf: zipfile.ZipFile, manifest: Manifest, iocs: list) -> None:
+    """Blocking (rows, CSV/JSON encoding, deflate, hashes): run via asyncio.to_thread."""
     header = ["type", "value", "malicious", "confidence", "source", "tags",
               "notes", "added_by_id", "added_at_utc"]
     rows = [[
@@ -262,25 +427,31 @@ async def _section_iocs(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest,
         str(i.added_by_id) if i.added_by_id else "",
         _iso_z(i.added_at),
     ] for i in iocs]
-    data = _csv_bytes(header, rows)
-    zf.writestr("03_IOCs/IOCs.csv", data)
-    manifest.add(path="03_IOCs/IOCs.csv", data=data, mime="text/csv", source="iocs table")
+    _add_file(zf, manifest, "03_IOCs/IOCs.csv", _csv_bytes(header, rows), "text/csv", "iocs table")
 
     json_rows = [{h: r[i] for i, h in enumerate(header)} for r in rows]
-    data = _json_bytes({"ioc_count": len(json_rows), "iocs": json_rows})
-    zf.writestr("03_IOCs/IOCs.json", data)
-    manifest.add(path="03_IOCs/IOCs.json", data=data, mime="application/json", source="iocs table")
+    _add_file(zf, manifest, "03_IOCs/IOCs.json", _json_bytes({"ioc_count": len(json_rows), "iocs": json_rows}),
+              "application/json", "iocs table")
+
+
+EXCLUDED_DRAFT = "excluded: unsealed draft"
 
 
 async def _section_evidence(
     db: AsyncSession, inc_id: uuid.UUID,
-    *, legal_hold_only: bool,
+    *, legal_hold_only: bool, include_unsealed_drafts: bool = False,
     manifest: Manifest, zf: zipfile.ZipFile,
-) -> int:
+) -> tuple[int, list[dict], int]:
+    """Returns (exhibits included, integrity failures to freeze, unsealed drafts excluded). M11 (owner,
+    2026-10-04): an exhibit whose chain of custody is not sealed is listed in the inventory as "excluded:
+    unsealed draft" with no custody log and no file, unless the lead opted in."""
     q = select(Evidence).where(Evidence.incident_id == inc_id)
     if legal_hold_only:
         q = q.where(Evidence.legal_hold.is_(True))
-    items = (await db.execute(q.order_by(Evidence.collected_at.asc(), Evidence.id.asc()))).scalars().all()
+    listed = (await db.execute(q.order_by(Evidence.collected_at.asc(), Evidence.id.asc()))).scalars().all()
+    excluded = {e.id for e in listed if not e.coc_sealed and not include_unsealed_drafts}
+    items = [e for e in listed if e.id not in excluded]
+    failures: list[dict] = []
 
     header = ["id", "kind", "identifier", "name", "description", "tlp", "status",
               "original_filename", "file_size_bytes", "mime_type",
@@ -288,7 +459,13 @@ async def _section_evidence(
               "make", "model", "serial", "physical_location", "condition",
               "collected_by_id", "collected_at_utc", "collected_location",
               "current_custodian_id", "disposed_at_utc",
-              "final_hash_at_disposition", "legal_hold"]
+              "final_hash_at_disposition", "legal_hold",
+              # F4 (R12), appended so readers that go by position keep working: when the image
+              # was taken / item seized (operator-stated; empty = not recorded) and how the
+              # imaging tool's target hash compared with the uploaded bytes.
+              "acquired_at_utc", "upload_hash_check",
+              # M11, appended: the sealed state, the lawful basis, and whether the item is in this package.
+              "coc_sealed", "coc_sealed_at_utc", "lawful_basis", "package_inclusion"]
     rows = [[
         str(e.id), e.kind, e.identifier, e.name, e.description or "",
         e.tlp, e.status,
@@ -301,7 +478,10 @@ async def _section_evidence(
         _iso_z(e.disposed_at),
         e.final_hash_at_disposition or "",
         e.legal_hold,
-    ] for e in items]
+        _iso_z(e.acquired_at), e.upload_hash_check or "",
+        bool(e.coc_sealed), _iso_z(e.coc_sealed_at), e.lawful_basis or "",
+        EXCLUDED_DRAFT if e.id in excluded else "included",
+    ] for e in listed]
     data = _csv_bytes(header, rows)
     zf.writestr("04_Evidence/Evidence_Inventory.csv", data)
     manifest.add(path="04_Evidence/Evidence_Inventory.csv", data=data,
@@ -333,27 +513,32 @@ async def _section_evidence(
         manifest.add(path=path, data=cust_bytes, mime="text/csv",
                      source=f"audit_logs (resource_type=evidence, resource_id={ev.id})")
 
-    # Embed decrypted file bytes for digital_file items.
+    # Embed decrypted file bytes for digital_file items, streamed (G2: bounded memory per exhibit).
     for ev in items:
         if ev.kind != "digital_file" or not ev.storage_path or not ev.nonce_hex:
             continue
-        try:
-            plaintext = await aread_decrypted(ev.storage_path, ev.nonce_hex)
-        except Exception:
-            # Source file missing or KEK can't decrypt — record the absence in meta below.
-            plaintext = None
-
         fname_safe = _safe_filename(ev.original_filename or f"evidence_{ev.id}.bin", max_len=80)
         in_zip = f"04_Evidence/Files/{ev.id}__{fname_safe}"
 
-        if plaintext is not None:
-            entry = await asyncio.to_thread(
-                _add_file, zf, manifest, in_zip, plaintext,
-                ev.mime_type or "application/octet-stream", f"evidence.storage_path={ev.storage_path}")
-            plaintext = None      # don't hold this file while the next one is decrypted
+        entry = await asyncio.to_thread(
+            _stream_evidence_file, zf, manifest, ev, in_zip,
+            ev.mime_type or "application/octet-stream", f"evidence.storage_path={ev.storage_path}")
+        if isinstance(entry, IntegrityFailed):
+            # R3-2: the stored file failed an integrity check (tampered or corrupt) before a byte was
+            # written: no file in the package, recorded below; the route freezes the exhibit.
+            sha256_now = None
+            integrity_note = f"integrity_failed:{entry.reason}"
+            failures.append({"evidence_id": ev.id, "identifier": ev.identifier, "reason": entry.reason,
+                             "integrity": integrity_note, "sha256_recomputed": None})
+        elif entry is not None:
             sha256_now = entry["sha256"]
             integrity_note = "hash_at_export_matches_recorded" if sha256_now == ev.sha256 else "HASH_MISMATCH_AT_EXPORT"
+            if integrity_note == "HASH_MISMATCH_AT_EXPORT":
+                failures.append({"evidence_id": ev.id, "identifier": ev.identifier, "reason": "hash_mismatch",
+                                 "integrity": integrity_note, "sha256_recomputed": sha256_now})
         else:
+            # Source file missing or unreadable (wrong KEK, storage error): it failed before a byte was
+            # written; not an integrity failure (not frozen; the read was audited and admins notified).
             sha256_now = None
             integrity_note = "source_file_missing_or_undecryptable"
 
@@ -372,6 +557,11 @@ async def _section_evidence(
             "collected_at_utc":      _iso_z(ev.collected_at),
             "collected_by_id":       str(ev.collected_by_id) if ev.collected_by_id else None,
             "collected_location":    ev.collected_location,
+            "acquired_at_utc":       _iso_z(ev.acquired_at),
+            "upload_hash_check":     ev.upload_hash_check,
+            "coc_sealed":            bool(ev.coc_sealed),
+            "coc_sealed_at_utc":     _iso_z(ev.coc_sealed_at),
+            "lawful_basis":          ev.lawful_basis,
         }
         meta_bytes = _json_bytes(meta)
         meta_path = f"04_Evidence/Files/{ev.id}__{fname_safe}.meta.json"
@@ -379,7 +569,7 @@ async def _section_evidence(
         manifest.add(path=meta_path, data=meta_bytes, mime="application/json",
                      source="evidence table + computed at export")
 
-    return len(items)
+    return len(items), failures, len(excluded)
 
 
 async def _section_artifacts(
@@ -423,10 +613,19 @@ async def _section_forensic(db: AsyncSession, inc_id: uuid.UUID, manifest: Manif
         .order_by(PCAPAnalysis.created_at.asc())
     )).scalars().all()
     if pcaps:
+        idents = dict((await db.execute(
+            select(Evidence.id, Evidence.identifier)
+            .where(Evidence.id.in_({p.evidence_id for p in pcaps if p.evidence_id})))).all())
         rows = [{
             "id": str(p.id), "filename": p.filename, "file_size": p.file_size,
             "uploaded_by": p.uploaded_by, "created_at_utc": _iso_z(p.created_at),
             "result": p.result_json,
+            # G3 run record, appended (null on analyses made before G3)
+            "evidence_id": str(p.evidence_id) if p.evidence_id else None,
+            "evidence_identifier": idents.get(p.evidence_id),
+            "input_sha256": p.input_sha256, "analyser_name": p.analyser_name,
+            "analyser_version": p.analyser_version, "exhibit_link": p.exhibit_link,
+            "clock_offset_seconds": p.clock_offset_seconds,
         } for p in pcaps]
         data = _json_bytes(rows)
         zf.writestr("06_Forensic/PCAP_Analyses.json", data)
@@ -498,15 +697,20 @@ async def _section_audit(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest
     Returns (row_count, verifier_text_bytes). The verifier text is also
     written to the bundle.
     """
-    rows = (await db.execute(
+    rows = await _fetch_all(db,
         select(AuditLog)
         .where(AuditLog.request_path.like(f"/api/incidents/{inc_id}%"))
-        .order_by(AuditLog.timestamp.asc(), AuditLog.id.asc())
-    )).scalars().all()
+        .order_by(AuditLog.timestamp.asc(), AuditLog.id.asc()),
+        scalars=True)
     # Also include any audit rows that reference resources owned by this incident
     # (evidence rows logged before LE-package generate). We intersect by resource_id
     # collisions later if needed; for v1 scope keep request_path filter.
+    return await asyncio.to_thread(_audit_files, zf, manifest, rows)
 
+
+def _audit_files(zf: zipfile.ZipFile, manifest: Manifest, rows: list) -> tuple[int, bytes]:
+    """Blocking (rows, CSV/JSON encoding, per-row hash-chain check, deflate, hashes): run via
+    asyncio.to_thread. Returns (row_count, verifier_text_bytes)."""
     header = ["timestamp_utc", "user_id", "username", "role_at_time", "action",
               "outcome", "resource_type", "resource_id", "resource_label",
               "request_method", "request_path", "request_id", "ip_address",
@@ -523,17 +727,13 @@ async def _section_audit(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest
         r.hash_version or "v1",
         r.row_hash, r.prev_hash,
     ] for r in rows]
-    csv_data = _csv_bytes(header, csv_rows)
-    zf.writestr("08_Audit/Audit_Trail.csv", csv_data)
-    manifest.add(path="08_Audit/Audit_Trail.csv", data=csv_data,
-                 mime="text/csv", source="audit_logs (request_path LIKE /api/incidents/{id}%)")
+    _add_file(zf, manifest, "08_Audit/Audit_Trail.csv", _csv_bytes(header, csv_rows),
+              "text/csv", "audit_logs (request_path LIKE /api/incidents/{id}%)")
 
     # JSON form (preserves full row + hashes)
     json_rows = [{h: cr[i] for i, h in enumerate(header)} for cr in csv_rows]
-    json_data = _json_bytes({"row_count": len(json_rows), "rows": json_rows})
-    zf.writestr("08_Audit/Audit_Trail.json", json_data)
-    manifest.add(path="08_Audit/Audit_Trail.json", data=json_data,
-                 mime="application/json", source="audit_logs")
+    _add_file(zf, manifest, "08_Audit/Audit_Trail.json",
+              _json_bytes({"row_count": len(json_rows), "rows": json_rows}), "application/json", "audit_logs")
 
     # Run the verifier and write a human-readable report.
     verifier_lines = [
@@ -587,9 +787,22 @@ def _section_legal(manifest: Manifest, zf: zipfile.ZipFile, *, tlp: str) -> None
         "platform":               f"DFIR-FENRIR {PLATFORM_VERSION}",
         "package_builder":        "backend/le_package/builder.py",
         "hash_algorithms":        ["sha256", "sha512"],
-        "manifest_signature":     "HMAC-SHA-256 over MANIFEST.json under the ephemeral bundle KEK",
-        "bundle_encryption":      "AES-256-GCM, 12-byte nonce prefix + ciphertext + 16-byte tag",
-        "evidence_at_rest":       "AES-256-GCM with per-file 96-bit nonces under EVIDENCE_KEK",
+        "manifest_signature":     "HMAC-SHA-256 over MANIFEST.json (INTEGRITY.sig); key = SHA-256 of the "
+                                  "bundle password. A shared-secret MAC, not a public-key signature",
+        "bundle_encryption":      "Outer envelope: AES-256 password-protected ZIP (WinZip AE-2: AES-256 in CTR "
+                                  "mode, key derived from the password with PBKDF2-HMAC-SHA1 (1,000 iterations), "
+                                  "10-byte HMAC-SHA1 authentication code per entry), holding le_package.zip; one-time 24-character "
+                                  "password shown once at generation. The inner le_package.zip itself is not "
+                                  "encrypted; 05_Artifacts/Files.zip (when present) is an AE-2 ZIP with the "
+                                  "password 'infected'",
+        "evidence_at_rest":       ("FENRGCM v2 (items stored since 2026-10-04): AES-256-GCM in 1 MiB chunks under "
+                                   "a random 256-bit data key per file; the data key is wrapped with AES-KW (RFC "
+                                   "3394) under K_wrap = HKDF-SHA256(EVIDENCE_KEK, info \"FENRGCM/v2/key-wrap\") "
+                                   "and kept in the file header; chunk nonce = 56-bit random per-file prefix || "
+                                   "32-bit chunk index || final-chunk flag; the header's fixed bytes are the "
+                                   "associated data of every chunk. Legacy v0 (items stored before): one "
+                                   "AES-256-GCM message per file under EVIDENCE_KEK with a random 96-bit nonce. "
+                                   "Spec: docs/streaming-aes-gcm-format.md"),
         "audit_chain":            "SHA-256 chain (row_hash = sha256(prev_hash || canonical_json(payload)))",
         "audit_chain_version":    "v2",
         "time_source":            "container clock (NTP-disciplined host); recorded UTC",
@@ -605,11 +818,12 @@ def _section_legal(manifest: Manifest, zf: zipfile.ZipFile, *, tlp: str) -> None
 
 
 class BuildResult:
-    """Return value of `build_le_package`. Plain object, no DB state."""
-    __slots__ = ("encrypted_bundle", "bundle_sha256", "manifest_sha256",
+    """Return value of `build_le_package`. Plain object, no DB state. `staged` = the finished bundle in
+    /evidence/.staging/ (StagedOutput): the caller commits it into place or discards it."""
+    __slots__ = ("staged", "bundle_size", "bundle_sha256", "manifest_sha256",
                  "hmac_sha256", "bundle_password", "file_count", "total_bytes",
                  "evidence_count", "audit_row_count", "manifest_json_bytes",
-                 "generated_at_iso")
+                 "generated_at_iso", "integrity_failures", "excluded_drafts")
 
     def __init__(self, **kw: Any) -> None:
         for k in self.__slots__:
@@ -628,8 +842,13 @@ async def build_le_package(
     legal_hold_only:    bool,
     include_artifacts:  bool,
     quarantine_path:    str,
+    size_estimate:      int | None = None,
+    include_unsealed_drafts: bool = False,
 ) -> BuildResult:
-    """Build the encrypted bundle in memory. Does not touch DB write state.
+    """Build the encrypted bundle, streamed into a staging file (G2). Does not touch DB write state.
+    `size_estimate` = estimate_package_bytes() when the caller already has it. A stored exhibit that
+    fails part-way (F-12) raises its EvidenceIntegrityError / EvidenceCryptoError after the staged
+    bundle is discarded.
 
     Integrity model:
       • In-bundle proof:  per-file SHA-256 (INTEGRITY.sha256) + manifest SHA-256
@@ -645,15 +864,41 @@ async def build_le_package(
                           response. Receivers can re-query the platform via
                           authenticated API to obtain it.
 
-    The audit anchor is intentionally NOT embedded in the bundle. Doing so
-    would require the audit row's payload (which contains the manifest hash)
-    to be written before the manifest hash is known — a circular dependency.
+    The audit anchor is NOT in the bundle (and MANIFEST.json has no anchor key):
+    the audit row's payload contains the manifest hash, so it can only be written
+    after the manifest exists — a circular dependency. README/SOP say so.
     """
-    audit_anchor = None   # see docstring — anchored externally, not in-bundle
-    generated_at_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    generated_at_iso = _iso_z(datetime.now(timezone.utc))
+    # Single secret: a 24-char URL-safe base64 password. The pyzipper outer envelope consumes the
+    # password directly (WinZip AE-2 derives the AES-256 key via PBKDF2); the HMAC key is derived
+    # deterministically as SHA-256(password) so a recipient who can open the ZIP can also recompute
+    # the manifest HMAC. Drawn first: the envelope is written while the package is built.
+    bundle_password = secrets.token_urlsafe(18)
+    if size_estimate is None:
+        size_estimate = await estimate_package_bytes(db, inc.id, legal_hold_only=legal_hold_only,
+                                                     include_artifacts=include_artifacts,
+                                                     include_unsealed_drafts=include_unsealed_drafts)
+    staged, oz, entry = await asyncio.to_thread(_open_bundle, bundle_password, size_estimate)
+    try:
+        return await _build_into(entry, staged, oz, db=db, inc=inc, user=user, case_reference=case_reference,
+                                 requesting_authority=requesting_authority, legal_basis=legal_basis,
+                                 retention_until=retention_until, legal_hold_only=legal_hold_only,
+                                 include_artifacts=include_artifacts, quarantine_path=quarantine_path,
+                                 bundle_password=bundle_password, generated_at_iso=generated_at_iso,
+                                 include_unsealed_drafts=include_unsealed_drafts)
+    except BaseException:
+        await asyncio.to_thread(_abandon_bundle, staged, oz, entry)
+        raise
 
-    inner = io.BytesIO()
-    with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as zf:
+
+async def _build_into(entry, staged: StagedOutput, oz, *, db: AsyncSession, inc: Incident, user: User,
+                      case_reference: str, requesting_authority: str, legal_basis: str,
+                      retention_until: datetime | None, legal_hold_only: bool, include_artifacts: bool,
+                      quarantine_path: str, bundle_password: str, generated_at_iso: str,
+                      include_unsealed_drafts: bool = False) -> BuildResult:
+    """The package itself, written as a ZIP into the outer envelope's entry (an unseekable stream: the
+    inner entries use data descriptors, ZIP64 where one needs it)."""
+    with zipfile.ZipFile(entry, "w", zipfile.ZIP_DEFLATED) as zf:
         manifest = Manifest(
             incident_id=str(inc.id), incident_ref=inc.ref,
             case_reference=case_reference, platform_version=PLATFORM_VERSION,
@@ -668,6 +913,7 @@ async def build_le_package(
             "build_options": {
                 "legal_hold_only":   legal_hold_only,
                 "include_artifacts": include_artifacts,
+                "include_unsealed_drafts": include_unsealed_drafts,
             },
             "incident": {
                 "id":  str(inc.id),
@@ -687,8 +933,8 @@ async def build_le_package(
         await _section_incident(db, inc, manifest, zf)
         await _section_timeline(db, inc.id, manifest, zf)
         await _section_iocs(db, inc.id, manifest, zf)
-        evidence_count = await _section_evidence(
-            db, inc.id, legal_hold_only=legal_hold_only,
+        evidence_count, integrity_failures, excluded_drafts = await _section_evidence(
+            db, inc.id, legal_hold_only=legal_hold_only, include_unsealed_drafts=include_unsealed_drafts,
             manifest=manifest, zf=zf,
         )
         if include_artifacts:
@@ -702,10 +948,10 @@ async def build_le_package(
         _section_legal(manifest, zf, tlp=inc.tlp)
 
         # Manifest, integrity, README — written LAST so all sections are accounted for.
-        manifest_json = _json_bytes(manifest.to_json(audit_anchor=audit_anchor))
+        manifest_json = _json_bytes(manifest.to_json())
         manifest_sha256 = hashlib.sha256(manifest_json).hexdigest()
         zf.writestr("MANIFEST.json", manifest_json)
-        zf.writestr("MANIFEST.txt",  manifest.to_text(audit_anchor=audit_anchor).encode("utf-8"))
+        zf.writestr("MANIFEST.txt",  manifest.to_text().encode("utf-8"))
         zf.writestr("INTEGRITY.sha256", manifest.to_integrity_sha256().encode("utf-8"))
 
         # GS-4 — RFC 3161 trusted timestamp over sha256(MANIFEST.json), best-effort.
@@ -722,13 +968,7 @@ async def build_le_package(
         # the manifest_sha256 + hmac (the latter computed below) + anchor; the
         # bundle SHA-256 is also exposed in the X-Bundle-SHA256 download
         # header and in the LePackage row.
-        # → Compute HMAC now.
-        # Single secret: a 24-char URL-safe base64 password. The pyzipper
-        # outer envelope consumes the password directly (WinZip AE-2 derives
-        # the AES-256 key via PBKDF2); the HMAC key is derived deterministically
-        # as SHA-256(password) so a recipient who can open the ZIP can also
-        # recompute the manifest HMAC.
-        bundle_password = secrets.token_urlsafe(18)
+        # → Compute HMAC now (key = SHA-256 of the bundle password, drawn in build_le_package).
         hmac_key   = hashlib.sha256(bundle_password.encode("utf-8")).digest()
         hmac_hex   = hmac_manifest(manifest_json, hmac_key)
         zf.writestr("INTEGRITY.sig", hmac_hex.encode("ascii"))
@@ -743,7 +983,10 @@ async def build_le_package(
             incident_id=str(inc.id),
             severity=inc.severity, tlp=inc.tlp, phase=inc.phase, status=inc.status,
             occurred_at_utc=_iso_z(inc.occurred_at),
+            detected_at_utc=_iso_z(inc.detected_at),
             contained_at_utc=_iso_z(inc.contained_at),
+            eradicated_at_utc=_iso_z(inc.eradicated_at),
+            recovered_at_utc=_iso_z(inc.recovered_at),
             generated_at_utc=generated_at_iso,
             generator_username=user.username,
             generator_role=user.role,
@@ -754,6 +997,8 @@ async def build_le_package(
             hmac_sha256=hmac_hex,
             audit_anchor_row_id="(written post-build; see LePackage.audit_anchor_row_id in platform API)",
             audit_anchor_row_hash="(written post-build; see LePackage.audit_anchor_row_hash in platform API)",
+            trusted_timestamp=({"time": manifest_tst.get("time"), "tsa": manifest_tst.get("tsa")}
+                               if manifest_tst else None),
             legal_hold_only=legal_hold_only,
             include_artifacts=include_artifacts,
             file_count=manifest.file_count,
@@ -766,10 +1011,11 @@ async def build_le_package(
     # Outer envelope — AES-256 password-protected ZIP (WinZip AE-2 via pyzipper).
     # Operators open with any standard archive tool — macOS Finder, 7-Zip,
     # WinRAR, `unzip -P` — no Python or `cryptography` library required.
-    bundle, bundle_sha256 = await asyncio.to_thread(_seal, inner, bundle_password)
+    bundle_size, bundle_sha256 = await asyncio.to_thread(_close_bundle, staged, oz, entry)
 
     return BuildResult(
-        encrypted_bundle=bundle,
+        staged=staged,
+        bundle_size=bundle_size,
         bundle_sha256=bundle_sha256,
         manifest_sha256=manifest_sha256,
         hmac_sha256=hmac_hex,
@@ -780,4 +1026,6 @@ async def build_le_package(
         audit_row_count=audit_row_count,
         manifest_json_bytes=manifest_json,
         generated_at_iso=generated_at_iso,
+        integrity_failures=integrity_failures,
+        excluded_drafts=excluded_drafts,
     )

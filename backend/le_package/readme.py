@@ -4,7 +4,7 @@ Pure f-string templating — no Jinja dependency. The receiver reads this first.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -24,7 +24,10 @@ def render_readme(
     phase:                str,
     status:               str,
     occurred_at_utc:      Optional[str],
+    detected_at_utc:      Optional[str],
     contained_at_utc:     Optional[str],
+    eradicated_at_utc:    Optional[str],
+    recovered_at_utc:     Optional[str],
     # Generation
     generated_at_utc:     str,
     generator_username:   str,
@@ -36,6 +39,7 @@ def render_readme(
     hmac_sha256:          str,
     audit_anchor_row_id:  str,
     audit_anchor_row_hash: str,
+    trusted_timestamp:    Optional[dict],   # {time, tsa} when MANIFEST.tst was written, else None
     # Build options (truth in advertising — record what was filtered)
     legal_hold_only:      bool,
     include_artifacts:    bool,
@@ -54,11 +58,27 @@ def render_readme(
         "other":        "Other (see CASE_INFO.json)",
     }.get(legal_basis, legal_basis)
 
-    retention_line = (
-        f"**Retention until:**      {retention_until.replace(microsecond=0).isoformat()}Z"
-        if retention_until else
-        "**Retention until:**      indefinite (no expiry recorded)"
-    )
+    if retention_until is not None:
+        ru = retention_until if retention_until.tzinfo else retention_until.replace(tzinfo=timezone.utc)
+        retention_line = (f"**Retention until:**      "
+                          f"{ru.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')}")
+    else:
+        retention_line = "**Retention until:**      indefinite (no expiry recorded)"
+
+    if trusted_timestamp:
+        tst_line = (f"- **Trusted timestamp:**  `MANIFEST.tst`: RFC 3161 token over SHA-256(MANIFEST.json) from "
+                    f"{trusted_timestamp.get('tsa') or 'the configured TSA'}, time {trusted_timestamp.get('time') or 'see token'}")
+        tst_layout = "    MANIFEST.tst                        RFC 3161 time-stamp token over SHA-256(MANIFEST.json) (DER)\n"
+        tst_verify = """
+5. Verify the trusted timestamp independently of this platform's clock:
+
+       openssl ts -verify -data MANIFEST.json -in MANIFEST.tst -CAfile <TSA CA certificate>
+"""
+    else:
+        tst_line = ("- **Trusted timestamp:**  none: no `MANIFEST.tst` (no time-stamping authority was configured, "
+                    "or it did not answer at generation); times come from the platform clock only")
+        tst_layout = ""
+        tst_verify = ""
 
     filter_notes = []
     if legal_hold_only:
@@ -85,7 +105,10 @@ def render_readme(
 - **Phase at export:** {phase}       (NIST SP 800-61 R3)
 - **Status:**          {status}
 - **Occurred at (UTC):**   {occurred_at_utc or "—"}
+- **Detected at (UTC):**   {detected_at_utc or "—"}
 - **Contained at (UTC):**  {contained_at_utc or "—"}
+- **Eradicated at (UTC):** {eradicated_at_utc or "—"}
+- **Recovered at (UTC):**  {recovered_at_utc or "—"}
 
 ## Generation
 
@@ -98,11 +121,12 @@ def render_readme(
 - **Audit anchor row:**   {audit_anchor_row_id}
 - **Audit anchor hash:**  {audit_anchor_row_hash}
 - **Time source:**        container clock (NTP-disciplined host); recorded UTC
+{tst_line}
 
 ## What this package contains
 
-- **Files in bundle:**    {file_count:,}
-- **Bundle size:**        {total_bytes:,} bytes (encrypted)
+- **Files in manifest:**  {file_count:,}
+- **Content size:**       {total_bytes:,} bytes (the files listed in MANIFEST.json, uncompressed, before encryption)
 - **Evidence items:**     {evidence_count:,}
 - **Audit rows:**         {audit_row_count:,}
 
@@ -117,16 +141,16 @@ def render_readme(
     MANIFEST.json                       Machine-readable file manifest (SHA-256, SHA-512, size, MIME, source)
     MANIFEST.txt                        Human-readable equivalent of MANIFEST.json
     INTEGRITY.sha256                    `sha256sum --check INTEGRITY.sha256` compatible
-    INTEGRITY.sig                       HMAC-SHA-256 of MANIFEST.json under bundle KEK (hex)
-
-    01_Incident/                        Incident metadata (JSON + HTML narrative)
+    INTEGRITY.sig                       HMAC-SHA-256 of MANIFEST.json, key = SHA-256(bundle password) (hex)
+{tst_layout}
+    01_Incident/                        Incident summary, closure checklist, lessons learned (JSON)
     02_Timeline/                        Chronological event log (CSV + JSON)
     03_IOCs/                            Indicators of Compromise (CSV + JSON)
     04_Evidence/                        Evidence inventory, per-item custody logs, decrypted files
     05_Artifacts/                       Quarantine + suspected malware (only present if opt-in was set)
-    06_Forensic/                        PCAP, YARA, detections
+    06_Forensic/                        PCAP analyses (JSON), YARA matches (CSV)
     07_Communications/                  Comments, OOB log, stakeholders
-    08_Audit/                           Full tamper-evident audit trail + chain-verifier output
+    08_Audit/                           This incident's audit-log rows (hash-chained) + per-row verifier output
     09_Legal/                           Chain-of-custody SOP + tool provenance + TLP handling
 
 ## How to open this package
@@ -143,25 +167,40 @@ match the `key_hint` in the transfer message before using it.
 
 After unzipping the outer envelope you will find `le_package.zip` — the
 inner evidence archive containing the directory structure documented below.
-That inner archive is itself a password-protected ZIP (password: `infected`,
-the standard malware-analyst convention, set so antivirus cannot
-auto-execute its contents during extraction).
+The inner archive is **not** itself encrypted: the outer envelope protects
+it. Only `05_Artifacts/Files.zip` (present when artifacts were included) is
+password-protected, with the password `infected` (the standard
+malware-analyst convention, so antivirus cannot auto-execute its contents
+during extraction).
 
 ## How this package was extracted
 
-This package was produced by DFIR-FENRIR's LE-package builder under a single
-read-only database transaction. Files in `04_Evidence/Files/` were decrypted
-from their at-rest AES-256-GCM ciphertext using ephemeral KEKs derived from
-the platform's master KEK, then placed into the inner evidence ZIP. The
-inner ZIP and the platform-side audit anchor are protected by the outer
-AES-256 ZIP whose password was shown once at generation.
+DFIR-FENRIR's LE-package builder read this incident's records with ordinary
+database queries in one session (PostgreSQL READ COMMITTED: not a single
+snapshot and not a read-only transaction, so a record changed while the
+package was being built can appear in one file and not in another; the
+generation time above bounds when the reads happened). Files in
+`04_Evidence/Files/` were decrypted from their at-rest AES-256-GCM
+ciphertext — a file stored since 2026-10-04 under its own random data key,
+which the platform unwraps (AES-KW) with a key derived from its master
+evidence key (KEK) by HKDF-SHA256; an older file directly under the KEK —
+and placed into the inner evidence ZIP, which the outer AES-256 ZIP protects
+under the password shown once at generation. No key used at rest is in this
+package. Each file was authenticated in full before it was written; one that
+failed is listed in its `.meta.json` as not included (`integrity_failed:` =
+tampered or corrupt, and the platform froze it). Exhibits whose chain of
+custody was not sealed are left out unless the sender included them
+(`CASE_INFO.json` build_options; `Evidence_Inventory.csv` package_inclusion).
 
-SHA-256 of every file was computed in-memory immediately before write and
-recorded in `MANIFEST.json`. The manifest itself was hashed and the resulting
-fingerprint was written to a `le_package_generate` row of the platform's
-hash-chained audit log — that row's `row_hash` is the **Audit anchor hash**
-above. Tampering with any file in the package will fail SHA-256 verification;
-tampering with the audit chain is detectable independently.
+The SHA-256 of every file was computed in memory over the exact bytes
+written and recorded in `MANIFEST.json`. After the package was sealed, the
+platform wrote a `le_package_generate` row to its hash-chained audit log
+carrying the Manifest SHA-256, the bundle SHA-256 and the HMAC above.
+Because that row is written after the build, it is **not** in this
+package's `08_Audit/` and `MANIFEST.json` carries no anchor: its id and
+`row_hash` are kept on the platform's record of this package (the
+**Audit anchor** lines above point there) and can be obtained from the
+sender. Tampering with any file in the package fails SHA-256 verification.
 
 ## How to verify integrity
 
@@ -175,14 +214,17 @@ tampering with the audit chain is detectable independently.
 
        sha256sum MANIFEST.json
 
-   It must match the **Manifest SHA-256** above (which is anchored in the
-   audit chain at the row referenced by **Audit anchor row** above).
+   It must match the **Manifest SHA-256** above (the platform also recorded
+   it in its `le_package_generate` audit row after the build; see above).
 
-3. Confirm the audit chain (an audit row in `08_Audit/Audit_Trail.csv` has
-   `action = le_package_generate` and `row_hash` equal to the anchor above;
-   the chain verifier output below confirms the rest of the chain is intact):
+3. Check the included audit rows:
 
-       cat 08_Audit/Hash_Chain_Verification.txt   # last line: VERIFIED ✓
+       cat 08_Audit/Hash_Chain_Verification.txt   # last line: RESULT: VERIFIED ✓
+
+   The verifier recomputes each included row's `row_hash` from that row's
+   content and its stored `prev_hash`. The rows are this incident's subset
+   of the platform-wide chain, so the links between them are not checked
+   here, and this package's own `le_package_generate` row is not among them.
 
 4. Verify the HMAC sender-of-record signature. The HMAC key is derived
    deterministically from the bundle password — so anyone who can open
@@ -197,7 +239,7 @@ tampering with the audit chain is detectable independently.
 
    The output must equal the contents of `INTEGRITY.sig` (and the
    **HMAC-SHA-256 sig** value above).
-
+{tst_verify}
 ## Chain-of-custody declaration
 
 This package was generated under controlled conditions and aligns with:

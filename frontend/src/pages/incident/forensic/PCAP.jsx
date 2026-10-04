@@ -2,6 +2,13 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal, formatLocalShort } from '../../../lib/datetime.js'
+import ExhibitPicker, { DraftBadge } from '../../../components/ExhibitPicker.jsx'
+import RunRecord from '../../../components/RunRecord.jsx'
+import { ClockOffsetNotice, OffsetMark } from '../../../components/ClockOffset.jsx'
+import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
+import UploadProgress, { useChunkedUpload } from '../../../components/UploadProgress.jsx'
+
+const MAX_PCAP_BYTES = 500 * 1024 * 1024
 
 function fmtBytes(n) {
   if (!n) return '0 B'
@@ -260,6 +267,11 @@ function SavedPanel({ incidentId, onLoad, onDelete }) {
               {fmtBytes(r.file_size)} · {r.uploaded_by} · {formatLocalShort(r.created_at)}
             </div>
           </div>
+          {r.evidence_identifier && (
+            <span className="pill" style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }} data-testid="pcap-saved-exhibit"
+                  title="The exhibit this analysis ran on">⛁ {r.evidence_identifier}</span>
+          )}
+          {r.evidence_identifier && r.evidence_sealed === false && <DraftBadge />}
           <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px' }} onClick={() => onLoad(r.id)}>Load</button>
           <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px', color: 'var(--crit)' }} onClick={() => onDelete(r.id, r.filename)}>✕</button>
         </div>
@@ -300,15 +312,105 @@ const RESULT_TABS = [
   { id: 'http',          label: (r) => `HTTP${r?.http_requests?.length ? ` (${r.http_requests.length})` : ''}` },
   { id: 'tls',           label: (r) => `TLS${r?.tls_info?.length ? ` (${r.tls_info.length})` : ''}` },
   { id: 'talkers',       label: () => 'Top Talkers' },
+  // G3 — candidates the server copies onto the Timeline (pcap times, UTC, exhibit clock offset applied)
+  { id: 'timeline',      label: (r) => `Timeline${r?.timeline_candidates?.length ? ` (${r.timeline_candidates.length})` : ''}` },
 ]
 
+// G3 — the stored timeline candidates of a run: pick, then the server copies them (idx only goes up).
+function TimelinePanel({ result, incidentId, isClosed, onPromoted }) {
+  const cands = result.timeline_candidates
+  const [picked, setPicked] = useState(new Set())
+  const [busy, setBusy]     = useState(false)
+  const [msg, setMsg]       = useState(null)
+  useEffect(() => { setPicked(new Set()); setMsg(null) }, [result.result_id])
+  if (cands === null || cands === undefined) {
+    return (
+      <div className="alert warn" role="status" data-testid="pcap-timeline-legacy">
+        <span className="alert-icon">!</span>
+        <span>This analysis was made before captures were kept as exhibits: it has no timeline candidates. Upload the capture again — it is registered as an exhibit and analysed with them.</span>
+      </div>
+    )
+  }
+  const selectable = cands.filter(c => c.time_basis !== 'missing' && !c.promoted)
+  const toggle = (i) => setPicked(prev => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n })
+  const allOn = selectable.length > 0 && selectable.every(c => picked.has(c.idx))
+  const promote = async () => {
+    setBusy(true); setMsg(null)
+    try {
+      const r = await api.promotePcap(incidentId, result.result_id, { indices: [...picked] })
+      setMsg({ ok: true, text: `Added ${r.created} event${r.created === 1 ? '' : 's'} to the Timeline.`
+        + (r.already_promoted.length ? ` ${r.already_promoted.length} already there.` : '')
+        + (r.skipped_untimestamped.length ? ` ${r.skipped_untimestamped.length} without a time not added.` : '') })
+      setPicked(new Set())
+      onPromoted?.()
+    } catch (e) {
+      setMsg({ ok: false, text: e.message || 'Could not add to the Timeline.' })
+    } finally { setBusy(false) }
+  }
+  return (
+    <div data-testid="pcap-timeline">
+      <div className="panel-toolbar" style={{ marginBottom: 'var(--space-2)' }}>
+        <span style={{ color: 'var(--muted)', fontSize: 12 }}>
+          Capture times are UTC from the pcap; the exhibit&rsquo;s clock offset, if recorded, is applied. Events are internal-only until you mark them otherwise.
+        </span>
+        <button type="button" className="btn primary" data-testid="pcap-promote" onClick={promote}
+                disabled={busy || isClosed || picked.size === 0}
+                title={isClosed ? 'Closed incidents are read-only' : 'FENRIR copies the chosen candidates onto the Timeline'}>
+          {busy ? 'Adding…' : `Add ${picked.size} to Timeline`}
+        </button>
+      </div>
+      {msg && (
+        <div className={`alert ${msg.ok ? 'info' : 'error'}`} role="alert" data-testid="pcap-promote-result" style={{ marginBottom: 'var(--space-2)' }}>
+          <span className="alert-icon">{msg.ok ? '✓' : '!'}</span><span>{msg.text}</span>
+        </div>
+      )}
+      <div className="table-scroll">
+        <table className="settings-table compact">
+          <thead>
+            <tr>
+              <th style={{ width: 32 }}><input type="checkbox" aria-label="Select all candidates" checked={allOn}
+                                               onChange={() => setPicked(allOn ? new Set() : new Set(selectable.map(c => c.idx)))} /></th>
+              <th style={{ width: 190 }}>Time</th>
+              <th style={{ width: 170 }}>Event</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cands.map(c => (
+              <tr key={c.idx} data-testid="pcap-candidate">
+                <td>
+                  {c.promoted
+                    ? <span title="Already on the Timeline" style={{ color: 'var(--ok)' }}>✓</span>
+                    : <input type="checkbox" aria-label="Select candidate" checked={picked.has(c.idx)}
+                             disabled={c.time_basis === 'missing'} onChange={() => toggle(c.idx)} />}
+                </td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'nowrap' }}
+                    title={c.event_time ? formatLocal(c.event_time) : 'No time: never placed on the Timeline'}>
+                  {c.event_time ? formatLocal(c.event_time) : '—'}
+                  {c.recorded_time && <> <OffsetMark seconds={result.clock_offset_seconds} recorded={c.recorded_time} size={9} /></>}
+                </td>
+                <td style={{ fontSize: 12 }}>{c.event_type}</td>
+                <td style={{ fontSize: 12, fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere' }}>{c.description}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 export default function PCAP() {
-  const { inc } = useOutletContext()
+  const { inc, viewer } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  // G-fix FE-L12: viewers get the closed-incident view of the write controls (the API refuses them).
+  const ro = isClosed || !!viewer
+  const RO_TITLE = isClosed ? 'Closed incidents are read-only' : 'Read-only: viewers can’t change the incident'
 
   const [file, setFile]         = useState(null)
   const [dragging, setDragging] = useState(false)
   const [loading, setLoading]   = useState(false)
+  const up = useChunkedUpload()   // G1 stage 3b: progress + cancel of the chunked upload
   const [result, setResult]     = useState(null)
   const [error, setError]       = useState(null)
   const [activeTab, setActiveTab] = useState('suspicious')
@@ -320,6 +422,11 @@ export default function PCAP() {
   const [dnsReconLoading, setDnsReconLoading] = useState(false)
   const [dnsReconError, setDnsReconError]     = useState(null)
   const fileRef = useRef()
+  // G3 — Upload (kept as a draft exhibit first) | From a registered exhibit
+  const [mode, setMode]             = useState('upload')
+  const [exhibitId, setExhibitId]   = useState('')
+  const [acquiredAt, setAcquiredAt] = useState('')
+  const [exhibitsKey, setExhibitsKey] = useState(0)
 
   const loadResult = async (id) => {
     setLoading(true)
@@ -365,15 +472,39 @@ export default function PCAP() {
     setError(null)
     setResult(null)
     try {
-      const data = await api.uploadPcap(inc.id, f)
+      const data = await api.uploadPcap(inc.id, f, { acquiredAt: acquiredAt || null, ...up.start(f.size) })
       setResult(data)
+      setActiveTab(data.suspicious?.length > 0 ? 'suspicious' : 'conversations')
+      setSavedKey(k => k + 1); setExhibitsKey(k => k + 1); setAcquiredAt('')
+    } catch (e) {
+      setError(e.message || 'Analysis failed')
+      if (e.data?.evidence_id) setExhibitsKey(k => k + 1)   // registered, but not analysed: pick it later
+    } finally {
+      up.done()
+      setLoading(false)
+    }
+  }
+
+  // G3 — analyse a registered exhibit (re-hashed first; a mismatch freezes it)
+  const analyzeExhibit = async () => {
+    if (!exhibitId) return
+    setLoading(true); setError(null); setResult(null)
+    try {
+      const data = await api.analyzePcapFromEvidence(inc.id, exhibitId)
+      setResult(data); setFile({ name: data.filename })
       setActiveTab(data.suspicious?.length > 0 ? 'suspicious' : 'conversations')
       setSavedKey(k => k + 1)
     } catch (e) {
-      setError(e.message || 'Analysis failed')
+      setError(e.message || 'Could not analyse the exhibit')
+      if (e.status === 409) setExhibitsKey(k => k + 1)
     } finally {
       setLoading(false)
     }
+  }
+
+  const reloadResult = async () => {
+    if (!result?.result_id) return
+    try { setResult(await api.getPcap(inc.id, result.result_id)) } catch { /* keep the shown result */ }
   }
 
   const deleteSaved = async (id, filename) => {
@@ -390,7 +521,7 @@ export default function PCAP() {
   const onDrop = (e) => {
     e.preventDefault(); setDragging(false)
     const f = e.dataTransfer.files[0]
-    if (f && !isClosed) analyze(f)
+    if (f && !ro) analyze(f)
   }
 
   const SEV_COLOR = { high: 'var(--crit)', medium: 'var(--med)', low: 'var(--low)' }
@@ -400,7 +531,7 @@ export default function PCAP() {
       <div className="panel-toolbar">
         <h2 className="panel-h">PCAP Analysis</h2>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-          {result && !isClosed && (
+          {result && !ro && (
             <button type="button" className="btn ghost" style={{ fontSize: 12 }}
               onClick={() => { setResult(null); setFile(null); setTimeout(() => fileRef.current?.click(), 0) }}>
               Analyze Another
@@ -418,6 +549,7 @@ export default function PCAP() {
           <span className="alert-icon">!</span><span>{error}</span>
         </div>
       )}
+      <UploadProgress limit={up.limit} incidentId={inc.id} testid="pcap-upload-progress" />
 
       {showSaved && (
         <div style={{ marginBottom: 'var(--space-4)', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 'var(--space-3)' }}>
@@ -431,29 +563,68 @@ export default function PCAP() {
         type="file"
         accept=".pcap,.pcapng,.cap"
         style={{ display: 'none' }}
-        onChange={e => e.target.files[0] && !isClosed && analyze(e.target.files[0])}
+        onChange={e => e.target.files[0] && !ro && analyze(e.target.files[0])}
       />
 
-      {!result && !loading && (
+      {!result && !loading && !ro && (
+        <div role="radiogroup" aria-label="Capture source" data-testid="pcap-mode"
+             style={{ display: 'flex', gap: 'var(--space-4)', flexWrap: 'wrap', fontSize: 13, marginBottom: 'var(--space-2)' }}>
+          {[['upload', 'Upload a capture'], ['exhibit', 'From a registered exhibit']].map(([v, label]) => (
+            <label key={v} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', cursor: 'pointer' }}>
+              <input type="radio" name="pcap-mode" value={v} checked={mode === v}
+                     onChange={() => { setMode(v); setError(null) }} />
+              {label}
+            </label>
+          ))}
+        </div>
+      )}
+
+      {!result && !loading && !ro && mode === 'exhibit' && (
+        <div className="form-row" style={{ alignItems: 'flex-end', marginBottom: 'var(--space-3)' }}>
+          <ExhibitPicker incidentId={inc.id} id="pcap-exhibit" value={exhibitId} onChange={(v) => setExhibitId(v)}
+                         maxBytes={MAX_PCAP_BYTES} maxLabel="500 MiB" reloadKey={exhibitsKey} />
+          <div className="field" style={{ justifyContent: 'flex-end' }}>
+            <button type="button" className="btn primary" onClick={analyzeExhibit} disabled={!exhibitId}
+                    title="Re-hash the exhibit, then analyse it in the air-gapped worker (recorded in its custody log)">
+              Analyze exhibit
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!result && !loading && !ro && mode === 'upload' && (
+        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap', marginBottom: 'var(--space-2)' }}>
+          <div style={{ width: 260, maxWidth: '100%' }}>
+            <LocalDateTimePicker id="pcap-acquired" value={acquiredAt} onChange={setAcquiredAt} clearable hint={false}
+                                 placeholder="Acquired at (optional)" />
+          </div>
+          <span className="field-hint" data-testid="pcap-register-hint" style={{ margin: 0 }}>
+            Registers first: the capture is kept in Evidence as an <strong>unsealed draft exhibit</strong> (hashed, encrypted, custody-logged) — or
+            analysed as the exhibit with the same SHA-256 — then analysed. Complete and seal it in Evidence › Items.
+          </span>
+        </div>
+      )}
+
+      {!result && !loading && (ro || mode === 'upload') && (
         <div
-          onDragOver={e => { e.preventDefault(); if (!isClosed) setDragging(true) }}
+          onDragOver={e => { e.preventDefault(); if (!ro) setDragging(true) }}
           onDragLeave={() => setDragging(false)}
           onDrop={onDrop}
-          onClick={() => !isClosed && fileRef.current?.click()}
+          onClick={() => !ro && fileRef.current?.click()}
           style={{
             border: `2px dashed ${dragging ? 'var(--accent)' : 'var(--border)'}`,
             borderRadius: 'var(--radius-lg)',
             padding: '48px var(--space-4)',
             textAlign: 'center',
-            cursor: isClosed ? 'default' : 'pointer',
+            cursor: ro ? 'default' : 'pointer',
             background: dragging ? 'color-mix(in srgb, var(--accent) 5%, transparent)' : 'var(--surface)',
           }}
         >
           <div style={{ fontSize: 40, marginBottom: 'var(--space-3)', opacity: 0.6 }}>≋</div>
           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>
-            {isClosed ? 'No PCAP analyses — incident is closed' : 'Drop a PCAP file here'}
+            {ro ? (isClosed ? 'No PCAP analyses — incident is closed' : 'No PCAP analysis open — pick a saved one') : 'Drop a PCAP file here'}
           </div>
-          {!isClosed && (
+          {!ro && (
             <div style={{ fontSize: 13, color: 'var(--muted)' }}>
               Supports .pcap, .pcapng, .cap — analyzed in the air-gapped worker
             </div>
@@ -463,8 +634,15 @@ export default function PCAP() {
 
       {loading && (
         <div style={{ textAlign: 'center', padding: '48px var(--space-4)', background: 'var(--surface)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}>
-          <div style={{ fontSize: 13, color: 'var(--muted)' }}>Analyzing {file?.name}…</div>
-          <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 6 }}>Extracting conversations, DNS, HTTP, TLS</div>
+          {up.progress && up.progress.sent < up.progress.total ? (
+            <div style={{ maxWidth: 520, margin: '0 auto', textAlign: 'left' }}>
+              <div style={{ fontSize: 13, color: 'var(--muted)' }}>Uploading {file?.name}…</div>
+              <UploadProgress progress={up.progress} onCancel={up.cancel} testid="pcap-upload-progress" />
+            </div>
+          ) : (<>
+            <div style={{ fontSize: 13, color: 'var(--muted)' }}>Analyzing {file?.name}…</div>
+            <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 6 }}>Extracting conversations, DNS, HTTP, TLS</div>
+          </>)}
         </div>
       )}
 
@@ -479,13 +657,21 @@ export default function PCAP() {
                 {result.saved_at && <span title={formatLocal(result.saved_at)}> · {formatLocalShort(result.saved_at)}</span>}
               </div>
             </div>
-            {result.result_id && !isClosed && (
+            {result.result_id && !ro && (
               <button type="button" className="btn primary" style={{ fontSize: 12 }}
                 onClick={() => setShowImport(true)}>
                 Import IOCs to Incident
               </button>
             )}
           </div>
+
+          {/* Run record (G3) */}
+          <RunRecord testid="pcap-run-record" filename={result.filename || file?.name}
+                     evidenceIdentifier={result.evidence_identifier} evidenceSealed={result.evidence_sealed}
+                     inputSha256={result.input_sha256} analyserName={result.analyser_name}
+                     analyserVersion={result.analyser_version} exhibitLink={result.exhibit_link}
+                     at={result.saved_at} clockOffsetSeconds={result.clock_offset_seconds} />
+          {result.analyser_version && <ClockOffsetNotice imp={result} />}
 
           {/* Worker errors */}
           {result.errors?.map((e, i) => (
@@ -630,7 +816,7 @@ export default function PCAP() {
               data={dnsRecon}
               loading={dnsReconLoading}
               error={dnsReconError}
-              isClosed={isClosed}
+              isClosed={ro}
               onPromoted={() => {}}
             />
           )}
@@ -700,6 +886,10 @@ export default function PCAP() {
           )}
 
           {/* ── Top Talkers ── */}
+          {activeTab === 'timeline' && (
+            <TimelinePanel result={result} incidentId={inc.id} isClosed={ro} onPromoted={reloadResult} />
+          )}
+
           {activeTab === 'talkers' && (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-4)' }}>
               <div>

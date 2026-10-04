@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
-from incidents.access import get_accessible_incident
+from core.errors import ApiErrorBody
+from incidents.access import get_accessible_incident, require_incident_person
 from models import (
     Entity, Incident, IncidentHandoff, IOC, PlaybookTask,
     RespondAction, TimelineEvent, User,
@@ -109,7 +110,11 @@ async def list_handoffs(
 
 @router.post("/{incident_id}/handoffs", response_model=IncidentHandoffOut,
              status_code=status.HTTP_201_CREATED,
-             summary="Create a shift-change handoff")
+             summary="Create a shift-change handoff",
+             responses={404: {"model": ApiErrorBody, "description": "user_not_found (unknown incoming_user_id)"},
+                        422: {"model": ApiErrorBody,
+                              "description": "assignee_no_access (recipient deactivated or can't see the "
+                                             "incident); handing off to yourself"}})
 async def create_handoff(
     incident_id: uuid.UUID,
     req: IncidentHandoffCreate,
@@ -117,8 +122,9 @@ async def create_handoff(
     db: AsyncSession = Depends(get_db),
 ) -> IncidentHandoffOut:
     """Create a shift-change handoff from the current analyst to an incoming
-    user. Requires the analyst role; you cannot hand off to yourself, and the
-    incoming user must be active. Rejected if the incident is closed. Captures a
+    user. Requires the analyst role; you cannot hand off to yourself (422), and the
+    incoming user must exist (404 user_not_found), be active and able to see the
+    incident (422 assignee_no_access). Rejected if the incident is closed. Captures a
     snapshot of incident state counters, audits and notifies the recipient, and
     returns the new handoff in `pending` status.
     """
@@ -129,11 +135,7 @@ async def create_handoff(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             "Cannot hand off to yourself")
 
-    incoming = (await db.execute(
-        select(User).where(User.id == req.incoming_user_id, User.is_active == True)  # noqa: E712
-    )).scalar_one_or_none()
-    if not incoming:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Incoming user not found or inactive")
+    incoming = await require_incident_person(db, incident_id, req.incoming_user_id, "the handoff recipient")
 
     snapshot = await _build_snapshot(db, incident_id, inc)
 

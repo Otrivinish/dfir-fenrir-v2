@@ -205,11 +205,11 @@ export default function OOB() {
       <section>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-3)' }}>
           <div className="panel-h" style={{ margin: 0 }}>OOB Communications Log</div>
-          {!isClosed && (
-            <button className="btn" type="button" onClick={() => setFormOpen(o => !o)}>
-              {formOpen ? 'Cancel' : '+ Log communication'}
-            </button>
-          )}
+          {/* Also on a closed incident: the API records post-closure communications (e.g. a
+              regulator follow-up); deleting an entry is refused there (409 incident_closed). */}
+          <button className="btn" type="button" onClick={() => setFormOpen(o => !o)} data-oob-log-add>
+            {formOpen ? 'Cancel' : '+ Log communication'}
+          </button>
         </div>
 
         {formOpen && (

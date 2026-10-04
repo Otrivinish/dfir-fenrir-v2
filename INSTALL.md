@@ -91,7 +91,7 @@ docker compose up -d --build
 |---|---|---|
 | OS | Linux x86-64 | Ubuntu 22.04/24.04 or Debian 12 assumed below; any systemd distro with Docker works |
 | vCPU | 4 | First image build is the heaviest moment |
-| RAM | 8 GB | 12 GB+ if you handle evidence near the 1 GiB upload cap (the backend needs ~4 GiB for that) |
+| RAM | 8 GB | 12 GB+ for heavy use: the containers' memory ceilings add up to ~11.5 GiB. Evidence files stream, so their size (up to the 10 GiB cap) does not drive memory |
 | Disk | 60 GB | Evidence, quarantine, Postgres data and backups all live in Docker volumes |
 | Network | Outbound HTTPS during build | Pulls base images + Python/npm deps. **Runtime** needs no internet for the core workflow |
 

@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     rate_limit_anon_burst:   int = 30      # bucket capacity
     rate_limit_auth_per_min: int = 600     # auth:  10/sec sustained
     rate_limit_auth_burst:   int = 120     # bucket capacity
+    # G1 stage 3b: the chunk PUTs of upload sessions have their own bucket per credential, so a
+    # 1 GiB upload (128 × 8 MiB chunks) never starves, or is starved by, the general one.
+    # Burst = 3 concurrent full-size uploads (the per-user session limit); refill 20 chunks/s.
+    rate_limit_upload_chunk_per_min: int = 1200
+    rate_limit_upload_chunk_burst:   int = 384
 
     # Bootstrap
     bootstrap_token_file: str = "/app/data/bootstrap_token.txt"
@@ -110,9 +115,10 @@ class Settings(BaseSettings):
     # un-downloaded packages per incident; the sweep reclaims both.
     collection_package_ttl_hours: int = 24
     collection_max_active_per_incident: int = 10
-    # Ingest (U1.2) — responder uploads the collector's output ZIP. Full
-    # collections are larger than malware samples, so a bigger cap than artifacts.
-    collection_output_max_bytes: int = 2 * 1024 * 1024 * 1024   # 2 GiB
+    # Ingest (U1.2) — responder uploads the collector's output ZIP (multipart). G-fix (R80): every
+    # multipart body is spooled to the backend's memory-only tmpfs (1 GiB, shared with the other uploads
+    # and parses), so the cap is 512 MiB (was 2 GiB); a bigger value only turns into 507 when it is full.
+    collection_output_max_bytes: int = 512 * 1024 * 1024   # 512 MiB
 
     # Evidence — chain of custody
     # 64 hex chars = 32 bytes = AES-256. Generate with `openssl rand -hex 32`.
@@ -129,8 +135,11 @@ class Settings(BaseSettings):
     # mounted /evidence volume (separate, non-root, encrypted at rest). The
     # env var is `EVIDENCE_PATH` to match the rest of the *_PATH env naming.
     evidence_path: str = "/evidence"
-    # Hard cap on per-file upload size (bytes). Larger files = phase-2.
-    evidence_max_upload_bytes: int = 1024 * 1024 * 1024   # 1 GiB
+    # Hard cap on per-file evidence upload size (bytes) through the chunked upload sessions; env
+    # EVIDENCE_MAX_UPLOAD_BYTES (set it in the backend's compose `environment:`). 10 GiB since G2:
+    # every reader streams with bounded memory (export, LE, downloads, verify). The deprecated
+    # multipart routes are capped at 512 MiB (evidence/routes.py LEGACY_MULTIPART_MAX_BYTES; G-fix R80).
+    evidence_max_upload_bytes: int = 10 * 1024 * 1024 * 1024   # 10 GiB
 
     # RFC 3161 trusted timestamping (GS-4) — optional + best-effort. When unset,
     # seals/manifests/exports fall back to the server clock (recorded as such) and

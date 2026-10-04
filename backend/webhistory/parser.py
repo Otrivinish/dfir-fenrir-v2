@@ -31,6 +31,11 @@ from forensic.parser import _parse_tmp_file
 
 SQLITE_MAGIC = b"SQLite format 3\x00"
 
+# G3 (R02) run record: the parser named in every upload and custody-log examination. Bump the version
+# when what it derives from the same file changes.
+PARSER_NAME = "FENRIR browser-history parser"
+PARSER_VERSION = "1.0.0"
+
 _WEBKIT_EPOCH_OFFSET_US = 11_644_473_600_000_000  # microseconds between 1601-01-01 and 1970-01-01
 _MAX_ROWS = 2_000_000  # defensive backstop, not a real-world limit
 

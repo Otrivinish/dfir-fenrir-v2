@@ -6,7 +6,8 @@ A `Manifest` accumulates entries as the bundle is assembled, then emits:
   • INTEGRITY.sha256 — `sha256sum --check INTEGRITY.sha256` compatible
 
 Hashing model: every file written into the bundle is hashed (SHA-256 + SHA-512)
-in-memory immediately, the same byte sequence is then written into the ZIP.
+from the same byte sequence that is written into the ZIP (in memory, or, for an
+exhibit, chunk by chunk as it is streamed in: add_hashed).
 The manifest is the *authority* on what each file should hash to — receivers
 re-derive on their end and compare.
 """
@@ -20,8 +21,8 @@ from typing import Iterable
 
 
 def _now_utc_iso() -> str:
-    """UTC, ISO 8601, no microseconds, trailing Z. Matches the project rule."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    """UTC, ISO 8601, trailing Z; sub-second precision kept (project rule: don't truncate)."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class Manifest:
@@ -42,9 +43,14 @@ class Manifest:
     def add(self, *, path: str, data: bytes, mime: str, source: str) -> dict:
         """Record a file. Returns the manifest entry dict (for caller reference)."""
         sha256, sha512 = self.hash_bytes(data)
+        return self.add_hashed(path=path, size=len(data), sha256=sha256, sha512=sha512, mime=mime, source=source)
+
+    def add_hashed(self, *, path: str, size: int, sha256: str, sha512: str, mime: str, source: str) -> dict:
+        """Record a file whose bytes were hashed as they were streamed into the bundle (G2: an exhibit
+        is never held whole). Same entry as add()."""
         entry = {
             "path":   path,
-            "size":   len(data),
+            "size":   size,
             "sha256": sha256,
             "sha512": sha512,
             "mime":   mime,
@@ -55,9 +61,11 @@ class Manifest:
 
     # ── Emit ────────────────────────────────────────────────────────────────
 
-    def to_json(self, *, audit_anchor: dict | None) -> dict:
+    def to_json(self) -> dict:
+        # 1.1: the always-null `audit_anchor` key is gone. The anchor audit row is written after
+        # the build, so it can't be inside the package (R67).
         return {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "generated_at_utc": self._created_at,
             "platform":         f"DFIR-FENRIR {self._platform_version}",
             "case_reference":   self._case_reference,
@@ -67,21 +75,22 @@ class Manifest:
                 "file_count":  len(self._entries),
                 "total_bytes": sum(e["size"] for e in self._entries),
             },
-            "audit_anchor": audit_anchor,
             "verification": {
                 "hash_algorithms":  ["sha256", "sha512"],
                 "integrity_file":   "INTEGRITY.sha256 — `sha256sum --check INTEGRITY.sha256`",
-                "manifest_hash":    "sha256(MANIFEST.json) is recorded in the hash-chained audit log "
-                                    "at the time of generation; row_hash is exposed as audit_anchor.row_hash.",
-                "hmac_sig":         "INTEGRITY.sig = HMAC-SHA-256(MANIFEST.json, bundle_kek). "
-                                    "Holder of the (out-of-band) bundle KEK can re-derive and compare.",
+                "manifest_hash":    "After the package is sealed, sha256(MANIFEST.json) is recorded in a "
+                                    "le_package_generate row of the platform's hash-chained audit log. That "
+                                    "row is written after the build, so it is not in this package; its id and "
+                                    "row_hash are on the platform's record of the package.",
+                "hmac_sig":         "INTEGRITY.sig = HMAC-SHA-256(MANIFEST.json), key = SHA-256(bundle password). "
+                                    "Whoever holds the (out-of-band) bundle password can re-derive and compare.",
                 "trusted_timestamp": "MANIFEST.tst (when present) = RFC-3161 Time-Stamp Token over "
                                     "sha256(MANIFEST.json) from an external TSA. Verify independently of "
                                     "this platform's clock: `openssl ts -verify -data MANIFEST.json -in MANIFEST.tst`.",
             },
         }
 
-    def to_text(self, *, audit_anchor: dict | None) -> str:
+    def to_text(self) -> str:
         lines = [
             "DFIR-FENRIR — LE PACKAGE MANIFEST",
             f"Generated:  {self._created_at}",
@@ -99,13 +108,6 @@ class Manifest:
             f"Total files: {len(self._entries):,}",
             f"Total size:  {sum(e['size'] for e in self._entries):,} bytes",
         ]
-        if audit_anchor:
-            lines += [
-                "",
-                "Audit anchor (this package's existence is recorded in the platform's hash-chained audit log):",
-                f"  row_id:   {audit_anchor.get('row_id')}",
-                f"  row_hash: {audit_anchor.get('row_hash')}",
-            ]
         return "\n".join(lines) + "\n"
 
     def to_integrity_sha256(self) -> str:

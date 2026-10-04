@@ -5,6 +5,8 @@ import { formatLocalShort, formatLocal } from '../../../lib/datetime.js'
 import { tacticColor } from '../../../lib/mitre.js'
 import { detectNode, detectForest, severityColor } from '../../../lib/processTreeDetect.js'
 import { TIMEZONE_GROUPS } from '../../../lib/timezone.js'
+import { ClockOffsetNotice, OffsetMark, fmtOffset } from '../../../components/ClockOffset.jsx'
+import { exhibitBlock } from '../../../components/ExhibitPicker.jsx'
 
 const IOC_TYPES = [
   { value: 'ip',           label: 'IP address' },
@@ -45,19 +47,15 @@ const PARSERS = [
 // untimestamped ones can still become IOCs (IOCs need no event time); promote skips them.
 const isPromotable = (e) => !!e.event_time && e.time_basis !== 'missing'
 
-// Why an exhibit can't be parsed right now (mirrors the server's 409s), or null.
-function exhibitBlock(ev) {
-  if (ev.status !== 'active') return `status ${ev.status}`
-  if (!ev.current_custodian_id) return 'not in internal custody'
-  if (ev.pending_custodian_id) return 'custody transfer pending'
-  return null
-}
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 export default function TimelineImport() {
-  const { inc } = useOutletContext()
+  const { inc, viewer } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  // G-fix FE-L12: viewers get the closed-incident view of the write controls (the API refuses them).
+  const ro = isClosed || !!viewer
+  const RO_TITLE = isClosed ? 'Closed incidents are read-only' : 'Read-only: viewers can’t change the incident'
   const fileRef = useRef(null)
 
   const [file, setFile]                 = useState(null)
@@ -159,6 +157,11 @@ export default function TimelineImport() {
       source_tz:        detail.source_tz || null,
       truncated:        !!detail.truncated,
       total_seen:       detail.total_seen ?? null,
+      // G4 — the exhibit's clock offset applied (snapshot) and how it compares with the exhibit now
+      clock_offset_seconds: detail.clock_offset_seconds ?? null,
+      clock_offset_status:  detail.clock_offset_status || null,
+      exhibit_time_offset:  detail.exhibit_time_offset || null,
+      exhibit_time_offset_seconds: detail.exhibit_time_offset_seconds ?? null,
     })
     setFilterSuspicious((detail.events?.length || 0) > 1000)
   }
@@ -193,7 +196,7 @@ export default function TimelineImport() {
   function pickFile(f) {
     if (!f) return
     if (f.size > MAX_MB * 1024 * 1024) {
-      setParseError(`File is ${Math.round(f.size / (1024 * 1024))} MB — exceeds ${MAX_MB} MB limit.`)
+      setParseError(`File is ${Math.round(f.size / (1024 * 1024))} MiB — exceeds the ${MAX_MB} MiB limit.`)
       return
     }
     setFile(f)
@@ -347,7 +350,7 @@ export default function TimelineImport() {
   // no time is ever supplied by the browser and an untimestamped event is never placed at "now".
   async function onPromote() {
     const picks = selectedPromotable
-    if (!picks.length || promoting || isClosed || !result?.import_id) return
+    if (!picks.length || promoting || ro || !result?.import_id) return
 
     const confirmed = window.confirm(
       `Add ${picks.length} event${picks.length !== 1 ? 's' : ''} to the incident timeline?\n\n` +
@@ -443,6 +446,11 @@ export default function TimelineImport() {
                     <span className="pill" style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }}
                           title="Parsed from this registered exhibit">⛁ {imp.evidence_identifier}</span>
                   )}
+                  {(imp.clock_offset_status === 'text_only' || imp.clock_offset_status === 'changed') && (
+                    <span style={{ color: 'var(--high)', fontSize: 11 }} data-testid="tlimp-saved-clock"
+                          title={imp.clock_offset_status === 'changed' ? 'The exhibit\u2019s clock offset changed after this import'
+                            : 'Clock offset recorded only as text: not applied'}>⚠ clock</span>
+                  )}
                   <span style={{ color: 'var(--dim)', fontFamily: 'var(--font-mono)' }}>
                     {imp.detected_format || '—'}
                   </span>
@@ -471,12 +479,12 @@ export default function TimelineImport() {
                   <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); disposeImport(imp) }}
-                    disabled={isClosed}
-                    title={isClosed ? 'Closed incidents are read-only' : 'Dispose this import (audit-logged)'}
+                    disabled={ro}
+                    title={ro ? RO_TITLE : 'Dispose this import (audit-logged)'}
                     style={{
                       background: 'transparent', border: '1px solid var(--border)',
                       color: 'var(--crit)', borderRadius: 'var(--radius-sm)',
-                      padding: '2px 8px', fontSize: 11, cursor: isClosed ? 'not-allowed' : 'pointer',
+                      padding: '2px 8px', fontSize: 11, cursor: ro ? 'not-allowed' : 'pointer',
                     }}
                   >× dispose</button>
                 </div>
@@ -541,6 +549,11 @@ export default function TimelineImport() {
             Recorded device clock (at collection): {exhibit.system_time_offset
               ? <strong>{exhibit.system_time_offset}</strong>
               : <span style={{ color: 'var(--dim)' }}>not recorded</span>}
+            {' · '}{exhibit.system_time_offset_seconds !== null && exhibit.system_time_offset_seconds !== undefined
+              ? <>Clock offset <strong>{fmtOffset(exhibit.system_time_offset_seconds)}</strong> will be applied (each event keeps its recorded time).</>
+              : exhibit.system_time_offset
+                ? <>The offset is recorded only as text: <strong>not applied</strong>. Set it in seconds on the exhibit to apply it.</>
+                : <>No clock offset applied.</>}
             {' · '}Year-less syslog lines are dated against {exhibit.acquired_at
               ? <>the acquisition time {formatLocal(exhibit.acquired_at)}</>
               : <>its registration time {formatLocal(exhibit.collected_at)} (no acquisition time recorded)</>}.
@@ -559,8 +572,8 @@ export default function TimelineImport() {
                 type="button"
                 className="btn primary"
                 onClick={onParseExhibit}
-                disabled={isClosed || parsing || !exhibit || !!exhibitBlock(exhibit) || !sourceTz}
-                title={isClosed ? 'Closed incidents are read-only — re-open the incident to import'
+                disabled={ro || parsing || !exhibit || !!exhibitBlock(exhibit) || !sourceTz}
+                title={ro ? (isClosed ? 'Closed incidents are read-only — re-open the incident to import' : RO_TITLE)
                   : !sourceTz ? 'Choose the source timezone first'
                   : 'Verify the exhibit\u2019s hash, parse it and save the events to this incident (recorded in its custody log)'}
               >
@@ -618,7 +631,7 @@ export default function TimelineImport() {
             <div style={{ fontSize: 28, marginBottom: 'var(--space-2)' }} aria-hidden="true">⊕</div>
             <div>Drop an artifact here or click to choose</div>
             <div style={{ fontSize: 12, color: 'var(--dim)', marginTop: 'var(--space-1)' }}>
-              EVTX · Windows XML · SQLite · CSV/TSV · JSON/JSONL · syslog/auth.log · journald JSON · macOS Unified Log — up to {MAX_MB} MB
+              EVTX · Windows XML · SQLite · CSV/TSV · JSON/JSONL · syslog/auth.log · journald JSON · macOS Unified Log — up to {MAX_MB} MiB
             </div>
           </>
         )}
@@ -632,8 +645,8 @@ export default function TimelineImport() {
             type="button"
             className="btn primary"
             onClick={onParse}
-            disabled={isClosed || !sourceTz}
-            title={isClosed ? 'Closed incidents are read-only — re-open the incident to import'
+            disabled={ro || !sourceTz}
+            title={ro ? (isClosed ? 'Closed incidents are read-only — re-open the incident to import' : RO_TITLE)
               : !sourceTz ? 'Choose the source timezone first'
               : 'Parse the file and save events to this incident'}
           >
@@ -700,6 +713,11 @@ export default function TimelineImport() {
           {result.parser_version && (
             <span style={{ color: 'var(--dim)', fontSize: 12 }}>parser {result.parser_version}</span>
           )}
+          {result.clock_offset_seconds !== null && (
+            <span data-testid="tlimp-offset" title="The exhibit's device clock offset, subtracted from the device's times">
+              <span style={{ color: 'var(--muted)' }}>Clock offset: </span>{fmtOffset(result.clock_offset_seconds)}
+            </span>
+          )}
           {basisCounts.assumed_tz > 0 && (
             <span title={`Times without a zone, read as ${result.source_tz || 'the source timezone'}`}>
               <TimeBasisMark basis="assumed_tz" sourceTz={result.source_tz} /> {basisCounts.assumed_tz}
@@ -715,6 +733,8 @@ export default function TimelineImport() {
           )}
         </div>
       )}
+
+      {result && <ClockOffsetNotice imp={result} />}
 
       {/* Parser cap: the import holds only part of the source (M1) */}
       {result && result.truncated && (
@@ -843,7 +863,7 @@ export default function TimelineImport() {
                 type="button"
                 className="btn primary"
                 onClick={onPromote}
-                disabled={promoting || isClosed || selectedPromotable.length === 0}
+                disabled={promoting || ro || selectedPromotable.length === 0}
                 title={selectedPromotable.length < selectedVisible.length
                   ? `${selectedVisible.length - selectedPromotable.length} selected without a timestamp stay off the timeline`
                   : undefined}
@@ -854,8 +874,8 @@ export default function TimelineImport() {
                 type="button"
                 className="btn"
                 onClick={() => setIocBulkOpen(true)}
-                disabled={promoting || isClosed}
-                title={isClosed ? 'Closed incidents are read-only' : 'Add the selected events as IOCs'}
+                disabled={promoting || ro}
+                title={ro ? RO_TITLE : 'Add the selected events as IOCs'}
               >
                 {`Add ${selectedVisible.length} to IOCs`}
               </button>
@@ -900,10 +920,11 @@ export default function TimelineImport() {
                       key={e.idx}
                       event={e}
                       sourceTz={result.source_tz}
+                      clockOffset={result.clock_offset_seconds}
                       checked={selected.has(e.idx)}
                       onToggle={() => toggleRow(e.idx)}
                       onIoc={() => setIocTarget(e)}
-                      isClosed={isClosed}
+                      isClosed={ro}
                     />
                   ))}
                 </tbody>
@@ -988,7 +1009,7 @@ function TimeBasisMark({ basis, sourceTz }) {
   return null
 }
 
-function TriageRow({ event: e, sourceTz, checked, onToggle, onIoc, isClosed }) {
+function TriageRow({ event: e, sourceTz, clockOffset, checked, onToggle, onIoc, isClosed }) {
   const [expanded, setExpanded] = useState(false)
   const tacticId = e.mitre_tactic_id
   const color = tacticId ? tacticColor(tacticId) : 'var(--muted)'
@@ -1026,6 +1047,7 @@ function TriageRow({ event: e, sourceTz, checked, onToggle, onIoc, isClosed }) {
         >
           {e.event_time ? formatLocalShort(e.event_time) : <span style={{ color: 'var(--dim)' }}>no timestamp</span>}
           {e.event_time && <> <TimeBasisMark basis={e.time_basis} sourceTz={sourceTz} /></>}
+          {e.recorded_time && <> <OffsetMark seconds={clockOffset} recorded={e.recorded_time} size={9} /></>}
         </td>
         <td style={{ fontSize: 12, color: 'var(--muted)' }}>{e.source || '—'}</td>
         <td

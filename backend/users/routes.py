@@ -2,7 +2,9 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +16,7 @@ from core.config import settings
 from core.database import get_db
 from core.redis_client import get_redis
 from core.security import ahash_password
+from incidents.access import can_see_incident_filter, get_accessible_incident
 from models import AuditLog, Team, User, UserSession, user_team
 from schemas import (
     AuditLogEntryOut, ResetPasswordRequest, SessionOut, TeamOut,
@@ -48,11 +51,22 @@ async def me(user: User = Depends(current_user)) -> UserOut:
 
 
 @router.get("/assignable", response_model=list[UserAssignable], summary="List assignable users")
-async def list_assignable(_: User = Depends(current_user),
-                          db: AsyncSession = Depends(get_db)) -> list[UserAssignable]:
+async def list_assignable(
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+    incident_id: Optional[uuid.UUID] = Query(
+        default=None, description="Only the users who can see this incident (admins, or by its team rule); "
+                                  "404 if you can't see it yourself."),
+) -> list[UserAssignable]:
     """Minimal list of active users (id, username, etc.) for assignment pickers,
-    ordered by username. Available to any authenticated user."""
-    q = await db.execute(select(User).where(User.is_active == True).order_by(User.username))
+    ordered by username. Available to any authenticated user. With `incident_id`,
+    only the people who can see that incident, i.e. the ones its assignee, decider,
+    witness and handoff-recipient fields accept."""
+    stmt = select(User).where(User.is_active == True)  # noqa: E712
+    if incident_id is not None:
+        await get_accessible_incident(db, incident_id, user)
+        stmt = stmt.where(can_see_incident_filter(incident_id))
+    q = await db.execute(stmt.order_by(User.username))
     return [UserAssignable.model_validate(u) for u in q.scalars()]
 
 

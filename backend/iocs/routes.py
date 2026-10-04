@@ -12,7 +12,7 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import Text, cast, func, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,7 @@ router = APIRouter()
 
 # Cursor helpers mirror incidents.routes — opaque offset-encoded.
 # (Extract to core/cursors.py when a third caller lands.)
+# L11, accepted: a row deleted between two page reads makes an offset cursor skip one row; the war room pages by keyset.
 def _encode_cursor(offset: int) -> str:
     return base64.urlsafe_b64encode(json.dumps({"o": offset}).encode()).decode().rstrip("=")
 
@@ -121,7 +122,7 @@ async def list_iocs(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
     type:   Optional[IocType] = Query(default=None),
-    tag:    Optional[str]     = Query(default=None, description="Filter by tag (canonical lowercase-dashed)"),
+    tag:    Optional[str]     = Query(default=None, description="Filter by tag (canonical lowercase-dashed); a value with no usable characters is 422 invalid_tag"),
     limit:  int               = Query(default=50, ge=1, le=200),
     cursor: Optional[str]     = Query(default=None),
 ) -> IOCList:
@@ -145,12 +146,10 @@ async def list_iocs(
     if type:
         stmt = stmt.where(IOC.type == type)
     if tag:
-        from core.tags import normalize_tag
-        canonical = normalize_tag(tag)
-        if canonical:
-            stmt = stmt.where(
-                func.cast(IOC.tags, type_=None).ilike(f'%"{canonical}"%')
-            )
+        from core.tags import canonical_tag_or_422
+        # Whole-tag, case-folded match on the `json` text (see list_incidents); 422 invalid_tag
+        # when the value normalises to nothing.
+        stmt = stmt.where(cast(IOC.tags, Text).ilike(f'%"{canonical_tag_or_422(tag)}"%'))
 
     stmt = stmt.offset(offset).limit(limit + 1)
     rows = (await db.execute(stmt)).scalars().all()

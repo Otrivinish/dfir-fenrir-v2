@@ -3,15 +3,16 @@
 The responder ran the package's collector on the target host and brings back the
 Velociraptor output container. Flow:
   1. stream the upload to a temp file on the quarantine volume (GBs → never
-     whole-file-in-memory),
+     whole-file-in-memory), hashing the container exactly as received (G4: SHA-256
+     + size, the run record's input hash) in the same pass,
   2. DECRYPT it with the package's wrapped private key — the collector output is
      X.509-encrypted (encrypted on the responder's media; only FENRIR can read
      it). Non-encrypted uploads pass through unchanged,
   3. register the plaintext collection as a first-class Artifact (existing
      analysis tools + the U1.3 timeline-import parser operate on it).
 
-Returns the Artifact so the route can anchor output_sha256 in the audit chain
-and link it to the package.
+Returns the Artifact and the received container's SHA-256 + size so the route can
+anchor both in the audit chain and record them on the package.
 """
 from __future__ import annotations
 
@@ -43,11 +44,13 @@ def _quarantine_dir(incident_id: uuid.UUID) -> Path:
     return Path(settings.quarantine_path) / str(incident_id)
 
 
-def _stream_upload(src, dst: Path) -> bytes:
-    """Sync: stream `src` to `dst` with the size cap. Returns the first bytes
-    (for ZIP-magic validation). Caller runs this in an executor."""
+def _stream_upload(src, dst: Path) -> tuple[bytes, str, int]:
+    """Sync: stream `src` to `dst` with the size cap, hashing it on the way (G4). Returns the
+    first bytes (for ZIP-magic validation), the SHA-256 and the size of the container as received.
+    Caller runs this in an executor."""
     size = 0
     head = b""
+    h256 = hashlib.sha256()
     cap = settings.collection_output_max_bytes
     with dst.open("wb") as f:
         while True:
@@ -55,6 +58,7 @@ def _stream_upload(src, dst: Path) -> bytes:
             if not chunk:
                 break
             size += len(chunk)
+            h256.update(chunk)
             if size > cap:
                 f.close()
                 dst.unlink(missing_ok=True)
@@ -65,7 +69,7 @@ def _stream_upload(src, dst: Path) -> bytes:
             f.write(chunk)
             if len(head) < 8:
                 head += chunk[: 8 - len(head)]
-    return head
+    return head, h256.hexdigest(), size
 
 
 def _hash_file(path: Path) -> tuple[str, str, str, bytes, int]:
@@ -86,14 +90,16 @@ def _hash_file(path: Path) -> tuple[str, str, str, bytes, int]:
 async def register_collection_output(
     db, incident_id: uuid.UUID, package_name: str,
     upload: UploadFile, user, wrapped_private_key: str | None,
-) -> Artifact:
-    """Stream → decrypt → register the plaintext collection as an Artifact."""
+) -> tuple[Artifact, str, int]:
+    """Stream (+ hash the container as received) → decrypt → register the plaintext collection
+    as an Artifact. Returns (artifact, container_sha256, container_size)."""
     loop = asyncio.get_event_loop()
     out_dir = _quarantine_dir(incident_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tmp_path = out_dir / f".ingest-{uuid.uuid4()}.tmp"
-    head = await loop.run_in_executor(None, lambda: _stream_upload(upload.file, tmp_path))
+    head, container_sha256, container_size = await loop.run_in_executor(
+        None, lambda: _stream_upload(upload.file, tmp_path))
     if head[:4] != _ZIP_MAGIC:
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(
@@ -142,4 +148,4 @@ async def register_collection_output(
     )
     db.add(artifact)
     await db.flush()
-    return artifact
+    return artifact, container_sha256, container_size

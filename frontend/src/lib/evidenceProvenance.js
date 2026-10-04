@@ -81,7 +81,7 @@ export function scoreEvidence(ev) {
     chainOk ? 'pass' : 'fail', 'mandatory',
     chainOk ? null : 'Integrity verify failed'))
 
-  // External-custody flag — ISO 27037 §9.3 still holds (chain is intact) but
+  // External-custody flag — ISO 27037 §6.1 still holds (chain is intact) but
   // examine/verify/seal are paused while the row is externally held.
   const isExternalNow = !ev.current_custodian_id && !!ev.current_custodian_external_name
   if (isExternalNow) {
@@ -149,7 +149,7 @@ export function scoreEvidence(ev) {
     checks.push(check('iso_27037_7_1_3_1_1_working_copy',
       'Analysis used a master-verified working copy',
       wc ? 'pass' : 'manual', 'advisory',
-      wc ? null : 'No verified working copy yet — an export auto-creates one'))
+      wc ? null : 'No verified working copy yet — download one, or record a lab copy with its hash, in the item detail'))
   }
 
   // ISO/IEC 27042 — examination documentation (GS-3; advisory; only once examined)

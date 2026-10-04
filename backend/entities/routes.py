@@ -16,8 +16,9 @@ from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
-from core.errors import ApiError
-from evidence.crypto import adecrypt_file_bytes, aencrypt_file_bytes
+from core.errors import ApiError, ApiErrorBody
+from evidence.crypto import EvidenceCryptoError, awrite_encrypted
+from evidence.streaming import decrypted_download, require_free_space
 from incidents.access import get_accessible_incident
 from models import Entity, EntityEvent, EntityFile, EntityRelation, Incident, RespondAction, User, utcnow
 from respond.containment import containment_map
@@ -30,13 +31,20 @@ from schemas import (Criticality, EntityCreate, EntityEventCreate,
 _ENTITY_FILE_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
+# Suffixes the stores reserve for their own files (rotation journals, staging, v0 sidecars): a name ending
+# with one is neutralised, so a stored file can never be taken for one (G-fix R3-1). Same list in files.
+_RESERVED_SUFFIXES = (".keyslot", ".rewrite", ".tmp", ".partial", ".nonce")
+
+
 def _safe_name(name: str) -> str:
-    """Strip path separators and whitespace from filename."""
-    return re.sub(r'[^\w.\-]', '_', Path(name).name)[:200] or "file"
+    """Strip path separators and whitespace from filename; a reserved suffix gets a trailing "_"."""
+    safe = re.sub(r'[^\w.\-]', '_', Path(name).name)[:200] or "file"
+    return safe + "_" if safe.lower().endswith(_RESERVED_SUFFIXES) else safe
 
 
 def _entity_file_path(entity_id: uuid.UUID, file_id: uuid.UUID, original_name: str) -> str:
-    return f"entity-files/{entity_id}/{file_id}_{_safe_name(original_name)}"
+    # New names end with a fixed ".enc" (R3-1); rows written before keep their path (readers use the row's).
+    return f"entity-files/{entity_id}/{file_id}_{_safe_name(original_name)}.enc"
 
 router = APIRouter()
 
@@ -60,6 +68,7 @@ async def _add_system_event(
 
 
 # Cursor helpers mirror incidents.routes / iocs.routes — opaque offset-encoded.
+# L11, accepted: a row deleted between two page reads makes an offset cursor skip one row; the war room pages by keyset.
 def _encode_cursor(offset: int) -> str:
     return base64.urlsafe_b64encode(json.dumps({"o": offset}).encode()).decode().rstrip("=")
 
@@ -451,7 +460,8 @@ async def list_entity_files(
 @router.post("/{incident_id}/entities/{entity_id}/files",
              response_model=EntityFileOut,
              status_code=status.HTTP_201_CREATED,
-             summary="Upload a file to an entity")
+             summary="Upload a file to an entity",
+             responses={507: {"model": ApiErrorBody, "description": "insufficient_storage (the file store, with its 1 GiB reserve, or the upload scratch space is full; nothing stored)"}})
 async def upload_entity_file(
     incident_id: uuid.UUID,
     entity_id:   uuid.UUID,
@@ -487,10 +497,8 @@ async def upload_entity_file(
     original_name = file.filename or "file"
     rel_path      = _entity_file_path(entity_id, file_id, original_name)
 
-    ct, nonce_hex = await aencrypt_file_bytes(raw)
-    dest = Path(settings.logs_path) / rel_path
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(ct)
+    require_free_space(len(raw), "this file", root=settings.logs_path)       # L2: 507, nothing stored
+    stored = await awrite_encrypted(raw, rel_path, root=settings.logs_path)   # FENRGCM v2, staged write
 
     ef = EntityFile(
         id=file_id,
@@ -500,7 +508,7 @@ async def upload_entity_file(
         file_size=len(raw),
         content_type=file.content_type,
         file_path=rel_path,
-        nonce_hex=nonce_hex,
+        nonce_hex=stored.nonce_hex,
         uploaded_by_id=user.id,
     )
     db.add(ef)
@@ -517,7 +525,11 @@ async def upload_entity_file(
 
 
 @router.get("/{incident_id}/entities/{entity_id}/files/{file_id}/download",
-            summary="Download an entity file")
+            summary="Download an entity file",
+            responses={200: {"description": "The file's bytes, with Content-Length. Over 16 MiB the body is "
+                                            "streamed as it is decrypted: if a later part fails its integrity "
+                                            "check the server closes the connection before Content-Length bytes "
+                                            "are sent; treat a short body as a failed download, never as the file."}})
 async def download_entity_file(
     incident_id: uuid.UUID,
     entity_id:   uuid.UUID,
@@ -529,6 +541,10 @@ async def download_entity_file(
     404 if the file record is not found or its data is missing on disk. Requires
     an authenticated user with access to the incident. Returns the decrypted file
     as an attachment Response.
+
+    G2: a file up to 16 MiB is fully decrypted and authenticated before the response starts.
+    A larger one streams with bounded memory and Content-Length set; a failure found
+    mid-stream aborts the connection (the body is shorter than Content-Length).
     """
     await _get_incident(db, incident_id, user)
     ef = (await db.execute(
@@ -540,18 +556,16 @@ async def download_entity_file(
     if not ef:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
 
-    path = Path(settings.logs_path) / ef.file_path
-    if not path.exists():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "File data missing on disk")
-
-    plaintext = await adecrypt_file_bytes(path.read_bytes(), ef.nonce_hex)
     media_type = ef.content_type or "application/octet-stream"
     safe = _safe_name(ef.original_name)
-    return Response(
-        content=plaintext,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe}"'},
-    )
+    try:
+        return await decrypted_download(ef.file_path, ef.nonce_hex, ef.file_size, root=settings.logs_path,
+                                        media_type=media_type,
+                                        headers={"Content-Disposition": f'attachment; filename="{safe}"'})
+    except EvidenceCryptoError as e:
+        if e.reason == "file_missing":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "File data missing on disk")
+        raise
 
 
 @router.delete("/{incident_id}/entities/{entity_id}/files/{file_id}",
