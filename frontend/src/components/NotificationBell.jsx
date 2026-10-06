@@ -14,6 +14,7 @@ const TYPE_LABEL = {
   comment:          'Comment',
   comment_mention:  'Mention',
   handoff_pending:  'Handoff',
+  ic_transferred:   'IC Change',
   custody_transfer: 'Custody',
   legal_deadline:   'Legal Clock',
   assignment:       'Assignment',

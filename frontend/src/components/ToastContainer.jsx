@@ -15,6 +15,7 @@ const TYPE_COLOR = {
   comment:          'muted',
   comment_mention:  'high',
   handoff_pending:  'med',
+  ic_transferred:   'high',
   custody_transfer: 'med',
   assignment:       'med',
   le_package:       'high',

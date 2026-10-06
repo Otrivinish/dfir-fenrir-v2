@@ -57,12 +57,18 @@ async def list_assignable(
     incident_id: Optional[uuid.UUID] = Query(
         default=None, description="Only the users who can see this incident (admins, or by its team rule); "
                                   "404 if you can't see it yourself."),
+    writers_only: bool = Query(
+        default=False, description="J4: only analysts and admins, the people who can act on a handoff "
+                                   "(a viewer can't be a handoff recipient)."),
 ) -> list[UserAssignable]:
     """Minimal list of active users (id, username, etc.) for assignment pickers,
     ordered by username. Available to any authenticated user. With `incident_id`,
     only the people who can see that incident, i.e. the ones its assignee, decider,
-    witness and handoff-recipient fields accept."""
+    witness and handoff-recipient fields accept. `writers_only=true` leaves out
+    viewers (the handoff-recipient picker)."""
     stmt = select(User).where(User.is_active == True)  # noqa: E712
+    if writers_only:
+        stmt = stmt.where(User.role.in_(("analyst", "admin")))
     if incident_id is not None:
         await get_accessible_incident(db, incident_id, user)
         stmt = stmt.where(can_see_incident_filter(incident_id))

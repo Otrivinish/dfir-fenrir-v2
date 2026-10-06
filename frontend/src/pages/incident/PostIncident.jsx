@@ -1,14 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { NavLink, Outlet, useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { formatLocal, formatLocalShort } from '../../lib/datetime.js'
 import { MITRE_TACTICS, tacticColor } from '../../lib/mitre.js'
 import Analytics from './post_incident/Analytics.jsx'
-import Reports from './post_incident/Reports.jsx'
+import Reports, { LR_FIELDS, LR_REMEDIATION } from './post_incident/Reports.jsx'
+import CostsImpact from './post_incident/CostsImpact.jsx'
 
 // ─── Tab navigation ───────────────────────────────────────────────────────────
+// J3 (R29): each sub-tab is a route under /incidents/:id/post-incident/ (App.jsx), so reload
+// and deep links keep it; the bare path redirects to analytics. Closure is last.
 
-const TABS = ['Analytics', 'Closure Checklist', 'Lessons Learned', 'Attack Chain', 'Reports']
+const TABS = [
+  { to: 'analytics',    label: 'Analytics' },
+  { to: 'lessons',      label: 'Lessons Learned' },
+  { to: 'attack-chain', label: 'Attack Chain' },
+  { to: 'costs',        label: 'Costs & Impact' },
+  { to: 'reports',      label: 'Reports' },
+  { to: 'closure',      label: 'Closure Checklist' },
+]
 
 // ─── Closure Checklist ────────────────────────────────────────────────────────
 
@@ -444,7 +454,23 @@ const EMPTY_LL = {
   timeline_remediation_mins: '',
   action_items: [],
   control_improvements: [],
+  meeting_minutes: '',
+  ...Object.fromEntries([...LR_FIELDS, ...LR_REMEDIATION].map(f => [f.key, ''])),
 }
+
+// Free-text fields sent as null when blank (J3: the report narratives and the minutes).
+const LL_TEXT_KEYS = ['meeting_minutes', ...LR_FIELDS.map(f => f.key), ...LR_REMEDIATION.map(f => f.key)]
+
+// Gate 2 (close) needs these three; Details shows them read-only as the Resolution summary.
+const CLOSE_REQUIRED = [
+  ['incident_narrative',              'what happened'],
+  ['root_cause_description',          'root cause'],
+  ['report_security_recommendations', 'recommendations'],
+]
+
+// "Insert key timeline events": key = server milestones (phase, triage, decisions, respond actions,
+// closure …) and ATT&CK-tagged events, listed before the rest; at most this many lines.
+const TL_INSERT_MAX = 50
 
 function llFromApi(data) {
   return {
@@ -467,6 +493,7 @@ function llFromApi(data) {
     timeline_remediation_mins:data.timeline_remediation_mins ?? '',
     action_items:             data.action_items || [],
     control_improvements:     data.control_improvements || [],
+    ...Object.fromEntries(LL_TEXT_KEYS.map(k => [k, data[k] || ''])),
   }
 }
 
@@ -479,6 +506,7 @@ function llToPayload(form) {
   }
   // coerce empty date
   if (!p.conducted_at) p.conducted_at = null
+  for (const k of LL_TEXT_KEYS) p[k] = (p[k] || '').trim() || null
   return p
 }
 
@@ -539,6 +567,8 @@ function LessonsLearned({ inc }) {
   const [saving,  setSaving]  = useState(false)
   const [saved,   setSaved]   = useState(false)
   const [error,   setError]   = useState(null)
+  const [inserting,  setInserting]  = useState(false)
+  const [insertNote, setInsertNote] = useState(null)
   const savedTimer = useRef(null)
 
   useEffect(() => {
@@ -571,9 +601,49 @@ function LessonsLearned({ inc }) {
     window.open(api.exportLessonsLearned(inc.id), '_blank')
   }
 
+  // Draft insert only: appends the incident's timeline events (key events first, times in UTC)
+  // to the narrative; nothing is saved until Save.
+  async function insertTimelineEvents() {
+    setInserting(true); setInsertNote(null)
+    try {
+      const events = []
+      let cursor = null
+      do {
+        const page = await api.listTimelineEvents(inc.id, { limit: 500, ...(cursor ? { cursor } : {}) })
+        events.push(...page.items)
+        cursor = page.next_cursor
+      } while (cursor)
+      const isKey = e => e.is_system || e.mitre_tactic_id || e.mitre_technique_id
+      const key   = events.filter(isKey)
+      const rest  = events.filter(e => !isKey(e))
+      if (!events.length) { setInsertNote('No timeline events to insert.'); return }
+      const line = e => {
+        const text = String(e.description || '').replace(/\s+/g, ' ').trim()
+        const tech = e.mitre_technique_id || e.mitre_tactic_id
+        return `- ${e.event_time} — ${text.length > 200 ? text.slice(0, 199) + '…' : text}` +
+               (tech ? ` [${tech}]` : '') + (e.hostname ? ` (${e.hostname})` : '')
+      }
+      const keyPick  = key.slice(0, TL_INSERT_MAX)
+      const restPick = rest.slice(0, TL_INSERT_MAX - keyPick.length)
+      const blocks = []
+      if (keyPick.length)  blocks.push('Key timeline events (UTC):\n' + keyPick.map(line).join('\n'))
+      if (restPick.length) blocks.push('Other timeline events (UTC):\n' + restPick.map(line).join('\n'))
+      const left = events.length - keyPick.length - restPick.length
+      if (left > 0) blocks.push(`… ${left} more event${left === 1 ? '' : 's'} on the Timeline.`)
+      const text = blocks.join('\n\n')
+      setForm(prev => ({ ...prev, incident_narrative: prev.incident_narrative.trim() ? `${prev.incident_narrative.trimEnd()}\n\n${text}` : text }))
+      setInsertNote(`Inserted ${keyPick.length + restPick.length} event${keyPick.length + restPick.length === 1 ? '' : 's'}: edit the text, then save.`)
+    } catch (e) {
+      setInsertNote(e.message || 'Could not load the timeline.')
+    } finally {
+      setInserting(false)
+    }
+  }
+
   if (loading) return <div className="pi-loading">Loading…</div>
 
   const disabled = isClosed   // everything except action items, which stay editable after Close
+  const missing  = CLOSE_REQUIRED.filter(([k]) => !String(form[k] || '').trim()).map(([, label]) => label)
 
   // ── effectiveness helpers
   function setEff(dimId, key, val) {
@@ -635,6 +705,13 @@ function LessonsLearned({ inc }) {
           Export HTML
         </button>
       </div>
+      {!isClosed && (
+        <div data-ll-close-required style={{ fontSize: 12, marginBottom: 'var(--space-3)', color: missing.length ? 'var(--high)' : 'var(--ok)' }}>
+          {missing.length
+            ? `Required to close — missing: ${missing.join(', ')}.`
+            : '✓ What happened, root cause and recommendations are filled in.'}
+        </div>
+      )}
 
       {/* ── Review details ────────────────────────────────────────────────── */}
       <LLSection title="Review Details">
@@ -656,14 +733,29 @@ function LessonsLearned({ inc }) {
           <StringList value={form.participants} onChange={v => set('participants', v)}
             placeholder="Add participant name…" disabled={disabled} />
         </div>
+        <div className="field" style={{ marginTop: 'var(--space-2)' }}>
+          <label className="field-label" htmlFor="ll-minutes">Meeting minutes (optional)</label>
+          <textarea id="ll-minutes" className="pi-lessons-textarea" rows={4} disabled={disabled} maxLength={32768}
+            placeholder="Minutes of the review meeting: agenda, discussion, decisions…"
+            value={form.meeting_minutes}
+            onChange={e => set('meeting_minutes', e.target.value)} />
+        </div>
       </LLSection>
 
       {/* ── Incident narrative ────────────────────────────────────────────── */}
-      <LLSection title="Incident Narrative">
-        <textarea className="pi-lessons-textarea" rows={6} disabled={disabled}
+      <LLSection title="Incident Narrative (what happened — required to close)">
+        <textarea id="ll-narrative" className="pi-lessons-textarea" rows={6} disabled={disabled}
           placeholder="Factual account of what happened: initial access vector, progression, scope of impact…"
           value={form.incident_narrative}
           onChange={e => set('incident_narrative', e.target.value)} />
+        {!disabled && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginTop: 'var(--space-2)', flexWrap: 'wrap' }}>
+            <button type="button" className="btn ghost" onClick={insertTimelineEvents} disabled={inserting} data-ll-insert-timeline>
+              {inserting ? 'Loading timeline…' : 'Insert key timeline events'}
+            </button>
+            {insertNote && <span style={{ fontSize: 12, color: 'var(--muted)' }} data-ll-insert-note>{insertNote}</span>}
+          </div>
+        )}
       </LLSection>
 
       {/* ── Root cause ───────────────────────────────────────────────────── */}
@@ -678,7 +770,7 @@ function LessonsLearned({ inc }) {
           </div>
         </div>
         <div className="field" style={{ marginTop: 'var(--space-2)' }}>
-          <label className="field-label">Description</label>
+          <label className="field-label">Description (required to close)</label>
           <textarea className="pi-lessons-textarea" rows={3} disabled={disabled}
             placeholder="Explain the root cause in detail…"
             value={form.root_cause_description}
@@ -842,6 +934,33 @@ function LessonsLearned({ inc }) {
         {!disabled && (
           <button type="button" className="btn ghost" style={{ fontSize: 12, marginTop: 'var(--space-1)' }} onClick={addCI}>+ Add improvement</button>
         )}
+      </LLSection>
+
+      {/* ── Report text (was Reports → Lessons & Remediation, J3) ─────────── */}
+      <LLSection title="Report Text — Lessons & Recommendations">
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 'var(--space-3)' }}>
+          Fills §09 of the generated report, before the lists above. Security recommendations are required to close.
+        </div>
+        {LR_FIELDS.map(f => (
+          <div key={f.key} className="field" style={{ marginBottom: 'var(--space-2)' }}>
+            <label className="field-label" htmlFor={`ll-${f.key}`}>{f.label}</label>
+            <textarea id={`ll-${f.key}`} className="pi-lessons-textarea" rows={3} disabled={disabled} maxLength={16384}
+              placeholder={f.placeholder} value={form[f.key]} onChange={e => set(f.key, e.target.value)} />
+          </div>
+        ))}
+      </LLSection>
+
+      <LLSection title="Remediation Plan">
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 'var(--space-3)' }}>
+          Fills §10 of the generated report, before the action items with a due date in each term.
+        </div>
+        {LR_REMEDIATION.map(f => (
+          <div key={f.key} className="field" style={{ marginBottom: 'var(--space-2)' }}>
+            <label className="field-label" htmlFor={`ll-${f.key}`} style={{ borderLeft: `3px solid ${f.color}`, paddingLeft: 8 }}>{f.label}</label>
+            <textarea id={`ll-${f.key}`} className="pi-lessons-textarea" rows={3} disabled={disabled} maxLength={16384}
+              placeholder={f.placeholder} value={form[f.key]} onChange={e => set(f.key, e.target.value)} />
+          </div>
+        ))}
       </LLSection>
 
       {/* ── Footer ───────────────────────────────────────────────────────── */}
@@ -1119,30 +1238,28 @@ function AttackChain({ inc }) {
 // ─── Page root ────────────────────────────────────────────────────────────────
 
 export default function PostIncident() {
-  const { inc } = useOutletContext()
-  const [tab, setTab] = useState(0)
-
+  const ctx = useOutletContext()
   return (
     <div className="pi-root">
-      <div className="pi-tab-bar">
-        {TABS.map((t, i) => (
-          <button
-            key={t}
-            className={`pi-tab${tab === i ? ' pi-tab-active' : ''}`}
-            onClick={() => setTab(i)}
-          >
-            {t}
-          </button>
+      <nav className="pi-tab-bar" aria-label="Post-Incident sections">
+        {TABS.map(t => (
+          <NavLink key={t.to} to={t.to}
+                   className={({ isActive }) => `pi-tab${isActive ? ' pi-tab-active' : ''}`}>
+            {t.label}
+          </NavLink>
         ))}
-      </div>
-
+      </nav>
       <div className="pi-content">
-        {tab === 0 && <Analytics       inc={inc} />}
-        {tab === 1 && <ClosureChecklist inc={inc} />}
-        {tab === 2 && <LessonsLearned  inc={inc} />}
-        {tab === 3 && <AttackChain     inc={inc} />}
-        {tab === 4 && <Reports         inc={inc} />}
+        <Outlet context={ctx} />
       </div>
     </div>
   )
 }
+
+// One route element per sub-tab (App.jsx); each reads the incident from the outlet context.
+export function AnalyticsTab()   { const { inc } = useOutletContext(); return <Analytics        inc={inc} /> }
+export function LessonsTab()     { const { inc } = useOutletContext(); return <LessonsLearned   inc={inc} /> }
+export function AttackChainTab() { const { inc } = useOutletContext(); return <AttackChain      inc={inc} /> }
+export function CostsTab()       { const { inc } = useOutletContext(); return <CostsImpact      inc={inc} /> }
+export function ReportsTab()     { const { inc } = useOutletContext(); return <Reports          inc={inc} /> }
+export function ClosureTab()     { const { inc } = useOutletContext(); return <ClosureChecklist inc={inc} /> }

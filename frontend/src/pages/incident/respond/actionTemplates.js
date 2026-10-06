@@ -149,3 +149,23 @@ for (const [category, groups] of Object.entries(ACTION_TEMPLATES)) {
     }
   }
 }
+
+// J5 (R31): the containment row button an Entities / IOCs row offers, by target kind and type:
+// Isolate for hosts, Disable for user / email accounts, Block for ip / domain / url / hash.
+// Each template's allowed target types are enforced by the backend (respond/containment.py,
+// 422 target_type_mismatch); this only picks which button to show.
+const ROW_CONTAINMENT = {
+  entity: { host: 'isolate_host', user: 'disable_account', email: 'disable_account',
+            ip: 'block_ip', network_range: 'block_ip', domain: 'block_domain' },
+  ioc:    { ip: 'block_ip', domain: 'block_domain', url: 'block_url',
+            hash_md5: 'block_hash', hash_sha1: 'block_hash', hash_sha256: 'block_hash' },
+}
+const ROW_LABEL = { isolate_host: 'Isolate', disable_account: 'Disable' }
+
+// → { label, href } (the Respond page opens its action form prefilled), or null.
+export function rowContainment(kind, item) {
+  const tpl = ROW_CONTAINMENT[kind]?.[item.type]
+  if (!tpl) return null
+  const q = new URLSearchParams({ new_action: tpl, [kind === 'entity' ? 'entity_id' : 'ioc_id']: item.id })
+  return { label: ROW_LABEL[tpl] ?? 'Block', template: tpl, href: `../respond?${q}` }
+}

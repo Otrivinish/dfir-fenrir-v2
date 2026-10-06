@@ -24,9 +24,10 @@ from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
 from incidents.access import get_accessible_incident, require_incident_person
-from models import IOC, Decision, Entity, Incident, RespondAction, TimelineEvent, User
+from models import IOC, Decision, Entity, Incident, PlaybookTask, RespondAction, TimelineEvent, User
 from respond.containment import check_target_type
 from schemas import (
+    LinkedActionRef,
     DecisionCreate,
     DecisionList,
     DecisionOut,
@@ -77,6 +78,72 @@ async def _linked(db: AsyncSession, incident_id: uuid.UUID, model, obj_id: uuid.
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{kind}_other_incident",
                        f"{label} belongs to another incident; link one from this incident")
     return obj
+
+
+async def _linked_ref(db: AsyncSession, incident_id: uuid.UUID, model, obj_id: uuid.UUID, kind: str):
+    """J5: load the decision / playbook task an action links to: 404 {kind}_not_found, 422
+    {kind}_other_incident; an archived task (replaced plan) is 422 task_archived."""
+    obj = await db.get(model, obj_id)
+    label = "Decision" if kind == "decision" else "Playbook task"
+    if obj is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{kind}_not_found", f"{label} not found")
+    if obj.incident_id != incident_id:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{kind}_other_incident",
+                       f"{label} belongs to another incident; link one from this incident")
+    if kind == "task" and obj.archived_at is not None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "task_archived",
+                       "That task is history from a replaced plan; link a task of the current plan.")
+    return obj
+
+
+async def linked_actions_map(db: AsyncSession, column, ids) -> dict[uuid.UUID, list[LinkedActionRef]]:
+    """J5: {decision or task id: the actions linked to it}. `column` is RespondAction.decision_id or
+    RespondAction.task_id. One query."""
+    ids = list(ids)
+    if not ids:
+        return {}
+    rows = (await db.execute(
+        select(column.label("owner_id"), RespondAction.id, RespondAction.title, RespondAction.category,
+               RespondAction.status)
+        .where(column.in_(ids))
+        .order_by(RespondAction.category, RespondAction.order_index, RespondAction.created_at, RespondAction.id)
+    )).all()
+    out: dict[uuid.UUID, list[LinkedActionRef]] = {}
+    for r in rows:
+        out.setdefault(r.owner_id, []).append(
+            LinkedActionRef(id=r.id, title=r.title, category=r.category, status=r.status))
+    return out
+
+
+async def _decision_out(db: AsyncSession, dec: Decision) -> DecisionOut:
+    out = DecisionOut.model_validate(dec)
+    out.linked_actions = (await linked_actions_map(db, RespondAction.decision_id, [dec.id])).get(dec.id, [])
+    return out
+
+
+async def _set_decision_actions(db: AsyncSession, incident_id: uuid.UUID, dec: Decision,
+                                action_ids: list[uuid.UUID]) -> dict:
+    """J5: make `action_ids` exactly the actions this decision approves. Returns {linked, unlinked}
+    (ids as str) for the audit row; 404 action_not_found / 422 action_other_incident."""
+    wanted = list(dict.fromkeys(action_ids))
+    for aid in wanted:
+        act = await db.get(RespondAction, aid)
+        if act is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, "action_not_found", "Response action not found")
+        if act.incident_id != incident_id:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "action_other_incident",
+                           "Response action belongs to another incident; link one from this incident")
+    current = (await db.execute(select(RespondAction).where(RespondAction.decision_id == dec.id))).scalars().all()
+    unlinked = [a for a in current if a.id not in wanted]
+    for a in unlinked:
+        a.decision_id = None
+    linked = []
+    for aid in wanted:
+        act = await db.get(RespondAction, aid)
+        if act.decision_id != dec.id:
+            act.decision_id = dec.id
+            linked.append(str(aid))
+    return {"linked": linked, "unlinked": [str(a.id) for a in unlinked]}
 
 
 async def _fill_target(db: AsyncSession, action: RespondAction,
@@ -197,6 +264,11 @@ async def create_respond_action(
 
     `assignee_id` must be an active user who can see the incident (404
     `user_not_found`, 422 `assignee_no_access`).
+
+    J5: `decision_id` links the decision that approved the action and `task_id` the
+    playbook task it carries out (same incident: 404 `decision_not_found` /
+    `task_not_found`, 422 `decision_other_incident` / `task_other_incident` /
+    `task_archived`). Links only: completing a task never completes an action.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -207,6 +279,10 @@ async def create_respond_action(
     entity = await _linked(db, incident_id, Entity, req.entity_id, "entity") if req.entity_id else None
     ioc    = await _linked(db, incident_id, IOC, req.ioc_id, "ioc") if req.ioc_id else None
     check_target_type(req.template_id, entity, ioc)
+    if req.decision_id:
+        await _linked_ref(db, incident_id, Decision, req.decision_id, "decision")
+    if req.task_id:
+        await _linked_ref(db, incident_id, PlaybookTask, req.task_id, "task")
 
     action = RespondAction(
         id=uuid.uuid4(),
@@ -226,13 +302,15 @@ async def create_respond_action(
         entity_id=req.entity_id,
         ioc_id=req.ioc_id,
         template_id=req.template_id,
+        decision_id=req.decision_id,
+        task_id=req.task_id,
     )
     await _fill_target(db, action, entity, ioc)
     db.add(action)
     await db.flush()
 
     audit_details = {"incident_id": str(incident_id), "category": action.category, "title": action.title}
-    for key in ("entity_id", "ioc_id", "template_id"):
+    for key in ("entity_id", "ioc_id", "template_id", "decision_id", "task_id"):
         if getattr(action, key):
             audit_details[key] = str(getattr(action, key))
     await write_audit(
@@ -275,6 +353,9 @@ async def update_respond_action(
 
     A new `assignee_id` is checked as on create (404 `user_not_found`, 422
     `assignee_no_access`); an explicit `"assignee_id": null` unassigns.
+
+    `decision_id` / `task_id` (J5) change only when sent and are checked as on
+    create; an explicit null unlinks.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -303,6 +384,11 @@ async def update_respond_action(
             ioc if "ioc_id" in sent else (await db.get(IOC, final["ioc_id"]) if final["ioc_id"] else None),
         )
 
+    for key, model, kind in (("decision_id", Decision, "decision"), ("task_id", PlaybookTask, "task")):
+        new = getattr(req, key)
+        if key in sent and new and new != getattr(action, key):
+            await _linked_ref(db, incident_id, model, new, kind)
+
     changed: dict[str, object] = {}
     if req.title       is not None and req.title.strip() != action.title:
         action.title = req.title.strip(); changed["title"] = action.title
@@ -321,7 +407,7 @@ async def update_respond_action(
             await require_incident_person(db, incident_id, req.assignee_id)
         action.assignee_id = req.assignee_id
         changed["assignee_id"] = str(req.assignee_id) if req.assignee_id else None
-    for key in ("entity_id", "ioc_id", "template_id"):
+    for key in ("entity_id", "ioc_id", "template_id", "decision_id", "task_id"):
         new = getattr(req, key)
         if key in sent and new != getattr(action, key):
             setattr(action, key, new)
@@ -507,6 +593,9 @@ async def list_decisions(
 
     has_more    = len(rows) > limit
     items       = [DecisionOut.model_validate(r) for r in rows[:limit]]
+    links       = await linked_actions_map(db, RespondAction.decision_id, [d.id for d in items])
+    for d in items:
+        d.linked_actions = links.get(d.id, [])
     next_cursor = _encode_cursor(offset + limit) if has_more else None
     return DecisionList(items=items, next_cursor=next_cursor)
 
@@ -532,6 +621,10 @@ async def create_decision(
     decider (`decided_by_id`) must be an active user who can see the incident (404
     `user_not_found`, 422 `assignee_no_access`). The decision is audited and a
     system timeline event is emitted. Returns the created decision.
+
+    J5: `action_ids` links the actions this decision approves (sets their
+    `decision_id`; 404 `action_not_found`, 422 `action_other_incident`); the response
+    lists them in `linked_actions`.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -553,15 +646,24 @@ async def create_decision(
     db.add(dec)
     await db.flush()
 
+    audit_details = {"incident_id": str(incident_id), "outcome": dec.outcome, "summary": dec.summary[:120]}
+    if req.action_ids:
+        audit_details["action_ids"] = (await _set_decision_actions(db, incident_id, dec, req.action_ids))["linked"]
     await write_audit(
         db, "decision_create",
         user_id=user.id, username=user.username,
         resource_type="decision", resource_id=str(dec.id),
-        details={"incident_id": str(incident_id), "outcome": dec.outcome,
-                 "summary": dec.summary[:120]},
+        details=audit_details,
         ip_address=request.client.host if request.client else None,
     )
+    add_decision_timeline_event(db, dec, incident_id, user)
 
+    await db.commit()
+    return await _decision_out(db, dec)
+
+
+def add_decision_timeline_event(db: AsyncSession, dec: Decision, incident_id: uuid.UUID, user: User) -> None:
+    """Stage the system timeline event for a new decision (also used by J4 promote). The caller commits."""
     db.add(TimelineEvent(
         id=uuid.uuid4(),
         incident_id=incident_id,
@@ -575,9 +677,6 @@ async def create_decision(
         system_source="decision",
         created_by_id=user.id,
     ))
-
-    await db.commit()
-    return DecisionOut.model_validate(dec)
 
 
 # ─── Decisions — update ──────────────────────────────────────────────────────
@@ -598,7 +697,8 @@ async def update_decision(
     Returns 404 if the decision is not found. Only provided fields are changed
     and audited. A new `decided_by_id` is checked as on create (404
     `user_not_found`, 422 `assignee_no_access`); an explicit `"decided_by_id": null`
-    clears the decider. Returns the updated decision.
+    clears the decider. `action_ids` (J5) replaces the approved actions ([] unlinks
+    all; omit to keep). Returns the updated decision.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -629,6 +729,10 @@ async def update_decision(
         dec.decided_at = req.decided_at;       changed["decided_at"] = True
     if req.tags          is not None:
         dec.tags = req.tags;                   changed["tags"] = req.tags
+    if req.action_ids    is not None:
+        links = await _set_decision_actions(db, incident_id, dec, req.action_ids)
+        if links["linked"] or links["unlinked"]:
+            changed["action_ids"] = links
 
     if changed:
         await write_audit(
@@ -639,7 +743,7 @@ async def update_decision(
             ip_address=request.client.host if request.client else None,
         )
     await db.commit()
-    return DecisionOut.model_validate(dec)
+    return await _decision_out(db, dec)
 
 
 # ─── Decisions — delete ──────────────────────────────────────────────────────

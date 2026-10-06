@@ -9,9 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audit.service import write_audit
 from auth.deps import require_admin
 from core.database import get_db
 from core.security import decrypt_secret, encrypt_secret
+from legal.reminder_email import TOGGLE_KEY as REMINDER_EMAIL_KEY, enabled as reminder_email_enabled
 from mailer.service import send_admin_alert
 from models import PlatformSetting, User
 
@@ -67,6 +69,8 @@ class SmtpConfig(BaseModel):
     graph_client_id:     Optional[str] = None
     graph_client_secret: Optional[str] = None  # omit to keep existing
     graph_sender:        Optional[str] = None
+    # J2: email deadline reminders (legal T-12h/T-2h/overdue, overdue stakeholder notifications). Omit/null to keep.
+    deadline_reminders:  Optional[bool] = None
 
 
 class SmtpConfigOut(BaseModel):
@@ -81,6 +85,8 @@ class SmtpConfigOut(BaseModel):
     graph_client_id:  Optional[str] = None
     graph_secret_set: bool = False
     graph_sender:     Optional[str] = None
+    deadline_reminders:           Optional[bool] = None   # stored org choice; null = never set (default on)
+    deadline_reminders_effective: bool = False            # a transport is configured and the choice isn't off
 
 
 @router.get("/smtp", response_model=SmtpConfigOut, summary="Get email (SMTP/Graph) config")
@@ -90,7 +96,10 @@ async def get_smtp_config(
 ):
     """Get the outbound email configuration (SMTP or Microsoft Graph mode).
     Secrets are never returned — password/secret presence is reported via
-    `password_set` / `graph_secret_set` booleans. Admin access required."""
+    `password_set` / `graph_secret_set` booleans. `deadline_reminders` is the stored
+    org choice for deadline-reminder email (null = never set); `deadline_reminders_effective`
+    is whether reminder email can go out now (a transport is configured and it isn't off).
+    Admin access required."""
     port_str = await _get(db, "smtp.port")
     return SmtpConfigOut(
         mode             = await _get(db, "smtp.mode") or "",
@@ -104,6 +113,8 @@ async def get_smtp_config(
         graph_client_id  = await _get(db, "graph.client_id"),
         graph_secret_set = bool(await _get(db, "graph.client_secret")),
         graph_sender     = await _get(db, "graph.sender"),
+        deadline_reminders = (None if (v := await _get(db, REMINDER_EMAIL_KEY)) is None else v == "on"),
+        deadline_reminders_effective = await reminder_email_enabled(db),
     )
 
 
@@ -116,6 +127,9 @@ async def save_smtp_config(
     """Save the outbound email configuration. Only supplied fields are
     written; omit `password` / `graph_client_secret` to keep the existing
     stored secret. Secrets are encrypted at rest. Admin access required.
+    `deadline_reminders` (J2) switches the deadline-reminder email on or off for the
+    organisation (audited `deadline_reminder_email_setting`); never set = on, but only a
+    configured transport can send, and never for a Dark Operation or TLP:RED incident.
     Returns 204 No Content."""
     uid = user.id
     await _set(db, "smtp.mode", body.mode or "", uid)
@@ -129,6 +143,14 @@ async def save_smtp_config(
     if body.graph_client_id     is not None: await _set(db, "graph.client_id",     body.graph_client_id,     uid)
     if body.graph_client_secret is not None: await _set(db, "graph.client_secret", body.graph_client_secret, uid)
     if body.graph_sender        is not None: await _set(db, "graph.sender",        body.graph_sender,        uid)
+    if body.deadline_reminders is not None:
+        old = await _get(db, REMINDER_EMAIL_KEY)
+        new = "on" if body.deadline_reminders else "off"
+        await _set(db, REMINDER_EMAIL_KEY, new, uid)
+        if old != new:
+            await write_audit(db, "deadline_reminder_email_setting", outcome="success",
+                              resource_type="platform_setting", resource_id=REMINDER_EMAIL_KEY,
+                              resource_label="Email deadline reminders", details={"old": old, "new": new})
     await db.commit()
 
 

@@ -132,6 +132,26 @@ async def _send_graph(db: AsyncSession, to: str, subject: str, body: str) -> boo
         return False
 
 
+async def transport_configured(db: AsyncSession) -> bool:
+    """True when a mail transport (SMTP or Graph) is selected in Settings → Integrations."""
+    return (await _get(db, "smtp.mode")) in ("smtp", "graph")
+
+
+async def send_email(db: AsyncSession, to: str, subject: str, body: str) -> bool:
+    """Send one plain-text email to `to` over the configured transport. True on success; False when
+    no transport is configured or the send failed (logged with the exception type, never raised).
+    The caller decides whether the content may leave the platform (core.outbound_policy)."""
+    mode = await _get(db, "smtp.mode")
+    try:
+        if mode == "smtp":
+            return await _send_smtp(db, to, subject, body)
+        if mode == "graph":
+            return await _send_graph(db, to, subject, body)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("send_email failed (%s)", type(exc).__name__)
+    return False
+
+
 async def send_admin_alert(db: AsyncSession, subject: str, body: str) -> bool:
     """Send alert to admin_email. Returns True on success, False if disabled or failed."""
     mode = await _get(db, "smtp.mode")

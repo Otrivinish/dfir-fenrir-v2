@@ -83,7 +83,7 @@ const CATEGORIES = [
           ] },
           { type: 'note', text: 'Severity and TLP are editable at any time. When in doubt, start higher and revise downward.' },
           { type: 'note', text: 'Title, type, severity, how detected and Detected are required; the rest can wait.' },
-          { type: 'note', text: 'Incidents raised by a SIEM webhook (Splunk, Microsoft Sentinel, Elastic) arrive with **How detected** = **SIEM Alert** and **Detected** = the alert\'s own time, never later than when FENRIR received it. When the alert carries no time, **Detected** is the receipt time and the start checks say so.' },
+          { type: 'note', text: 'Incidents raised by a SIEM webhook (Splunk, Microsoft Sentinel, Elastic) arrive with **How detected** = **SIEM Alert** and **Detected** = the alert\'s own time, never later than when FENRIR received it. When the alert carries no time, **Detected** is the receipt time and the start checks say so. How alerts are read, de-duplicated and turned into IOCs: [[set-siem-intake]].' },
         ],
       },
       {
@@ -103,6 +103,7 @@ const CATEGORIES = [
           { type: 'section', title: 'The start checks', items: [
             '**Incident Commander**, **Communications Lead** and **Legal Liaison** assigned (**Team**).',
             '**Detection time recorded**.',
+            '**Incident type set**: a SIEM alert whose category FENRIR can\'t map opens the incident without a type. Choose one on **Details**.',
             '**Playbook applied**: at least one task. The check names the playbooks suggested for the incident type.',
             '**Legal deadlines initialised**: for ransomware, data breach and BEC, when **Information impact** is **Privacy breach**, or when the incident is tagged *personal-data*.',
             '**Dark Operation decided**: for phishing and BEC, where the attacker may be reading the mailbox. Turn it on, or choose **Record decision: stay off** on **Comms → OOB**. Either choice is audited.',
@@ -257,7 +258,7 @@ const CATEGORIES = [
             '**Benign Positive** — the activity was real but authorised or harmless (e.g. a pen test or an admin task).',
           ] },
           { type: 'section', title: 'TLP (sharing)', items: [
-            '**TLP:RED** blocks every automatic outbound channel, the same as Dark Operation: Teams and Slack webhooks and the alert email (SMTP or Microsoft Graph) for new incident, phase change, severity change and closed, and the automatic DNS checks (SPF, DKIM, DMARC) of an analyzed email\'s sender domain. Each blocked send or check is listed in the incident audit log (`outbound_notification_suppressed` / `outbound_lookup_suppressed`, reason `tlp_red`) and is not sent later.',
+            '**TLP:RED** blocks every automatic outbound channel, the same as Dark Operation: Teams and Slack webhooks, the alert email (SMTP or Microsoft Graph) for new incident, phase change, severity change and closed, the deadline-reminder email ([[iw-legal]]), and the automatic DNS checks (SPF, DKIM, DMARC) of an analyzed email\'s sender domain. Each blocked send or check is listed in the incident audit log (`outbound_notification_suppressed` / `outbound_lookup_suppressed`, reason `tlp_red`) and is not sent later.',
             'On a TLP:RED incident, OSINT lookups, IOC enrichment and the email **Domain auth check** still run, but only after you confirm a warning. Each one is listed in the audit log as `outbound_manual_lookup`.',
             'The header shows **Automatic outbound suppressed (TLP:RED)**. In-app notifications and syslog audit forwarding (actions and IDs only) stay on.',
             '**AMBER+STRICT**, **AMBER**, **GREEN** and **CLEAR** change nothing about outbound sends.',
@@ -277,12 +278,12 @@ const CATEGORIES = [
             'Click **Close**, write a sign-off statement (at least 10 characters) and confirm.',
           ] },
           { type: 'section', title: 'Gate 2: Post-Incident → Closed — blocking', items: [
-            '**Resolution summary** on **Details** — what happened, root cause, recommendations.',
+            '**Resolution summary** — what happened, root cause and recommendations, entered on **Post-Incident → Lessons Learned** (Details shows it read-only).',
             '**Lessons Learned** (Post-Incident tab) set to **Final**, with **Date conducted**, **Participants**, and an **Owner** and **Due date** on every action item.',
             '**Closure Checklist** opened, with every item checked or marked **N/A**, except **Incident formally closed** — Close ticks that one.',
             'No **Playbook** task Open or In progress, apart from Preparation-phase tasks (a warning). Done, or Skipped with a reason.',
             'Every legal deadline already due is Completed or Waived on **Legal**. Deadlines still ahead, such as the NIS2 final report, are carried forward and listed; they don\'t block.',
-            'At least one cost entry, or a filled-in business impact, on **Post-Incident → Reports**.',
+            'At least one cost entry, or a filled-in business impact, on **Post-Incident → Costs & Impact**.',
             '**Evidence**: every exhibit still held has a custodian and is on **legal hold** (otherwise record its disposition: archive, return or destroy); no working-copy download is issued or in progress; every **LE package** is acknowledged by its recipient.',
             'The **Incident Commander\'s sign-off**, and for a personal-data breach the **DPO\'s sign-off**.',
           ] },
@@ -308,7 +309,7 @@ const CATEGORIES = [
             'Records you as the closer, with the close time.',
             'Ticks **Incident formally closed** on the Closure Checklist, if the checklist has been opened.',
             'Writes your statement to the audit log and as an **Incident closed** event on the **Timeline**.',
-            'Makes the incident read-only, except **Lessons Learned → Action items**, which stay editable to track follow-up work, and the costs and business impact on **Post-Incident → Reports**.',
+            'Makes the incident read-only, except **Lessons Learned → Action items**, which stay editable to track follow-up work, and the costs and business impact on **Post-Incident → Costs & Impact**.',
           ] },
           { type: 'section', title: 'Re-opening', items: [
             'Click **Re-open**, choose the phase to return to (Detection & Analysis, C/E/R or Post-Incident) and give a reason.',
@@ -945,7 +946,7 @@ const CATEGORIES = [
             '**Description** — markdown, with a Write / Preview toggle in edit mode.',
             '**Snapshot** — Created / Updated / Closed and the incident times; **Tags** and **Teams** with their own Manage buttons.',
             '**Affected systems** — the incident\'s compromised entities: one scope list with **Entities** ([[iw-entities]]). **+ Add system** marks an entity compromised, or adds a new one; **Clear** removes the flag and keeps the entity; **Manage in Entities →** opens the full list.',
-            '**Resolution summary** — what happened, root cause and recommendations; required to close ([[inc-closing]]).',
+            '**Resolution summary** — what happened, root cause and recommendations; required to close ([[inc-closing]]). Read-only here: **Edit in Lessons learned** opens the one place they are edited ([[pi-lessons]]).',
           ] },
           { type: 'note', text: 'The counts that used to sit on top of Details (IOCs, entities, evidence, timeline, playbook, responders) are on the left rail.' },
           { type: 'note', text: 'Links and bookmarks to an incident open Situation; links to its Details still open Details.' },
@@ -976,6 +977,7 @@ const CATEGORIES = [
             '**Status** — Open · In progress · Done · Skipped. Skipping asks **why**; the reason is kept on the task.',
             '**Assignee** — anyone who can see the incident.',
             '**Due** — date and time in your timezone, stored in UTC. Past due and not finished shows **! Overdue**.',
+            '**→ action** chips — the Respond actions linked to the task ([[iw-respond]]). **from a handoff next step** — made from a handoff ([[iw-handoffs]]).',
           ] },
           { type: 'section', title: 'Apply a template', items: [
             '**Suggested for …** — templates made for the incident\'s type, shown above the plan. Clicking one opens **Apply template**; nothing is applied until you confirm. **New incident** names the same suggestions.',
@@ -993,21 +995,27 @@ const CATEGORIES = [
       {
         id: 'iw-handoffs',
         title: 'Shift Handoffs',
-        tags: ['handoff', 'shift', 'transition', 'acknowledge', 'hypothesis', 'threads'],
+        tags: ['handoff', 'shift', 'transition', 'acknowledge', 'hypothesis', 'threads', 'incident commander', 'ic transfer', 'next steps'],
         body: [
           { type: 'p', text: 'Structured shift handovers between analysts. Each handoff is a snapshot of state + the departing analyst\'s thinking.' },
           { type: 'section', title: 'Per handoff card', items: [
             '**From → To** — outgoing → incoming analyst.',
             '**Status badge** — pending · acknowledged · completed.',
             '**Snapshot counts** — IOCs, entities, evidence, timeline entries at handoff time.',
+            '**Open at handoff** — the open Respond actions and the open playbook tasks of the current phase (title, owner, status), as they were when the handoff was sent.',
+            '**task** badge on a next step — it was also created as a playbook task for the recipient.',
             '**Hypothesis** — one-line summary + confidence (%).',
             '**Key findings + investigation threads** — each with its own status/confidence.',
             '**Pending steps · ruled-out items · open questions · follow-up tasks.**',
           ] },
           { type: 'section', title: 'Actions', items: [
-            '**Create handoff** — opens the structured form (the same shortcut sits in the incident header).',
-            '**Acknowledge** — incoming analyst confirms receipt and takes over.',
+            '**Create handoff** — opens the structured form. **Shift handoff** in the incident header opens the same form directly.',
+            '**Pending** starts with one line per open Respond action and per open task of the current phase. Edit or remove lines before you send.',
+            '**Make task** on a next step — also creates a playbook task in the current phase, assigned to the recipient. Off by default; the task shows **from a handoff next step**.',
+            '**Transfer incident commander to recipient on acknowledgement** — only for the Incident Commander, the Deputy or an admin. Off by default.',
+            '**Acknowledge** — incoming analyst confirms receipt and takes over. With the transfer ticked, the recipient becomes Incident Commander: the old IC assignment is removed, the old IC gets a notification, and the Timeline gets an **IC transfer** system event. All of it is audited.',
           ] },
+          { type: 'note', text: 'Only analysts and admins can receive a handoff. A viewer can\'t acknowledge one, so the recipient list leaves viewers out.' },
         ],
       },
       {
@@ -1086,7 +1094,8 @@ const CATEGORIES = [
           ] },
           { type: 'section', title: 'Clocks and reminders', items: [
             'The incident header shows one chip per regulation: its nearest open deadline, as a countdown. Red = overdue or under 2 h, orange = under 12 h, green = later. Click a chip to open Legal.',
-            'In-app reminders arrive at 12 h before, 2 h before and when overdue. They go to the incident\'s assignees, or to everyone with access when nobody is assigned. They keep coming under Dark Operation and after the incident is closed. Nothing is emailed.',
+            'In-app reminders arrive at 12 h before, 2 h before and when overdue. They go to the incident\'s assignees, or to everyone with access when nobody is assigned. They keep coming under Dark Operation and after the incident is closed.',
+            'The same reminders also go by **email** to the incident\'s **Legal Liaison** and **Incident Commander** (all active admins when neither is assigned). The email holds only the incident reference, the regulation and obligation, the time left and the page path. It is never sent under **Dark Operation** or **TLP:RED** (the audit log records `reminder_email_suppressed`). An admin can turn it off: **Settings → Integrations → Email deadline reminders**.',
           ] },
           { type: 'note', text: 'Completing the NIS2 72 h incident notification moves the NIS2 final report to one calendar month after that completion time. A month-end date clamps to the last day of the next month (31 Jan → 28/29 Feb).' },
           { type: 'note', text: 'On a closed incident you can still complete, waive or annotate deadlines; adding, deleting and re-anchoring need the incident re-opened.' },
@@ -1194,6 +1203,7 @@ const CATEGORIES = [
           { type: 'section', title: 'Views', items: [
             '**Table view** — Type, Value, Name, Criticality dropdown, Compromised toggle, added-at.',
             '**Compromised** entities are the incident\'s **Affected systems** on the Details tab and in reports — add a host once, here or there.',
+            '**Isolate** (hosts), **Disable** (user and email accounts) or **Block** (IPs, network ranges, domains) — opens the **Respond** action form with that containment template and this entity already linked. Not shown to viewers or on a closed incident.',
             '**Isolated** / **Disabled** / **Blocked** / **Pending…** badge next to the Compromised toggle — containment state from **Respond**: the linked containment action is done (green) or still open or in progress (amber). See [[iw-respond]].',
             '**Graph view** — relationship visualisation of connected entities.',
           ] },
@@ -1230,6 +1240,7 @@ const CATEGORIES = [
             'Click a row to expand: full value, **Mark Malicious / Mark Clean / Mark Unknown** buttons, notes editor, enrichment cards.',
             'Per-row **Enrich** runs only the enrichment sources that apply to this IOC type.',
             '**Edit** · **Delete** · **Open correlations**.',
+            '**Block** (IP, domain, URL and hash IOCs) — opens the **Respond** action form with the matching block template and this IOC already linked. Not shown to viewers or on a closed incident.',
           ] },
         ],
       },
@@ -1251,7 +1262,7 @@ const CATEGORIES = [
       {
         id: 'iw-respond',
         title: 'Respond',
-        tags: ['respond', 'kanban', 'containment', 'eradication', 'recovery', 'decision', 'action', 'revert'],
+        tags: ['respond', 'kanban', 'containment', 'eradication', 'recovery', 'decision', 'action', 'revert', 'link', 'task'],
         body: [
           { type: 'p', text: 'A Kanban board for tracking response actions during Containment / Eradication / Recovery.' },
           { type: 'section', title: 'Columns', items: [
@@ -1274,6 +1285,13 @@ const CATEGORIES = [
           ] },
           { type: 'section', title: 'Decision cards', items: [
             'Summary, rationale, outcome, tags, decided-by / decided-at.',
+            'A decision promoted from the War Room or a comment keeps a link to that message ([[co-warroom]]).',
+          ] },
+          { type: 'section', title: 'Links between decisions, actions and tasks', items: [
+            '**Approves these actions** (decision form) or **Approved by decision** (action form) — links a decision to the actions it approves. An action has one approving decision.',
+            '**Playbook task** (action form) — links the action to the playbook task it carries out.',
+            'Links show as chips both ways: on the action card (✓ Decision, ☐ Task), on the decision card, and on the task row in **Playbook**.',
+            'Links are records only. Finishing a task doesn\'t finish the action, and the other way round.',
           ] },
           { type: 'section', title: 'Toolbar', items: [
             '**Action templates** — pick from a built-in library (isolate host, reset credentials, block IOC, etc.) to pre-fill.',
@@ -1327,7 +1345,7 @@ const CATEGORIES = [
           ] },
           { type: 'section', title: 'Where it shows', items: [
             'The header chip **Notifications x of y** (red when one is overdue), the Comms rail count, the **Situation** board clock line, and the banner above the Comms tabs.',
-            'An overdue required notification sends one **in-app** reminder to the incident\'s assignees (everyone with access if none). No email is sent.',
+            'An overdue required notification sends one **in-app** reminder to the incident\'s assignees (everyone with access if none), and one email to the Legal Liaison and Incident Commander under the rules in [[iw-legal]]. The stakeholder is never contacted by FENRIR.',
           ] },
           { type: 'note', text: 'The **Full Technical Report** lists them in **Communications & Notification Log**, and the LE package has `12_Notifications/Stakeholder_Notifications.csv`. From the API: `GET /api/incidents/{id}/stakeholder-notifications` and `PATCH …/stakeholder-notifications/{notification_id}`. Observers can read the tracker.' },
         ],
@@ -1335,16 +1353,18 @@ const CATEGORIES = [
       {
         id: 'iw-post-incident',
         title: 'Post-Incident Tab',
-        tags: ['post-incident', 'analytics', 'closure', 'lessons', 'attack chain', 'reports'],
+        tags: ['post-incident', 'analytics', 'closure', 'lessons', 'attack chain', 'costs', 'impact', 'reports', 'url', 'link'],
         body: [
-          { type: 'p', text: 'Closure activities and reporting. Five inner tabs:' },
-          { type: 'table', headers: ['Sub-tab', 'What it does'], rows: [
-            ['**Analytics**',         'Quantitative incident view — see [[pi-analytics]].'],
-            ['**Closure Checklist**', '12 seeded items plus custom rows — see [[pi-closure]].'],
-            ['**Lessons Learned**',   'Structured 800-61 §4 review — see [[pi-lessons]].'],
-            ['**Attack Chain**',      'Swimlane visualisation of MITRE-tagged events — see [[pi-attack-chain]].'],
-            ['**Reports**',           'Executive / Full / LE Package generation — see [[pi-reports]].'],
+          { type: 'p', text: 'Closure activities and reporting. Six inner tabs, each with its own address, so a reload or a shared link opens the same tab:' },
+          { type: 'table', headers: ['Sub-tab', 'Address', 'What it does'], rows: [
+            ['**Analytics**',         '`post-incident/analytics`',    'Quantitative incident view — see [[pi-analytics]].'],
+            ['**Lessons Learned**',   '`post-incident/lessons`',      'Structured 800-61 §4 review; the only place lessons learned are edited — see [[pi-lessons]].'],
+            ['**Attack Chain**',      '`post-incident/attack-chain`', 'Swimlane visualisation of MITRE-tagged events — see [[pi-attack-chain]].'],
+            ['**Costs & Impact**',    '`post-incident/costs`',        'Business impact assessment and cost entries — see [[pi-costs]].'],
+            ['**Reports**',           '`post-incident/reports`',      'Executive / Full / LE Package generation — see [[pi-reports]].'],
+            ['**Closure Checklist**', '`post-incident/closure`',      '12 seeded items plus custom rows — see [[pi-closure]].'],
           ] },
+          { type: 'note', text: '**Post-Incident** on its own opens **Analytics**. The Fix links of the gates open the sub-tab that fixes the item.' },
         ],
       },
       {
@@ -1673,6 +1693,7 @@ const CATEGORIES = [
         body: [
           { type: 'section', title: 'Comments', items: [
             'Free-text @-mention thread per incident. Mentions deliver notifications.',
+            '**Promote** — turns a comment into a **Timeline** event or a **Respond** decision, as in the War Room ([[co-warroom]]).',
           ] },
           { type: 'section', title: 'OOB (Out-of-Band)', items: [
             'For incidents where the platform itself may be compromised. Switch the incident to **Dark Operation** mode — banner appears, communication blackout in effect. To start dark, tick **Open as Dark Operation** when you create the incident.',
@@ -1750,6 +1771,11 @@ const CATEGORIES = [
             'Pinned to the right edge on incident pages. Click to open/close the drawer.',
             'Press-and-hold (or drag past ~18 px) to reposition the tab vertically; the position persists per browser.',
           ] },
+          { type: 'section', title: 'Promote a message', items: [
+            '**Promote** on a message makes it a **Timeline event** or a **Respond decision**. The text and the time start as the message\'s; edit them before you save.',
+            'The new event or decision keeps a link to the message. The promotion is audited. A message can be promoted once to each kind of record.',
+            'Analysts and admins, on an open incident. Comments have the same button ([[co-comments]]).',
+          ] },
         ],
       },
     ],
@@ -1759,7 +1785,7 @@ const CATEGORIES = [
     icon: '⏲',
     label: 'Post-Incident',
     color: '#84cc16',
-    desc: 'Analytics, closure, lessons, attack chain, reports',
+    desc: 'Analytics, lessons, attack chain, costs, reports, closure',
     articles: [
       {
         id: 'pi-analytics',
@@ -1802,19 +1828,23 @@ const CATEGORIES = [
       {
         id: 'pi-lessons',
         title: 'Lessons Learned',
-        tags: ['lessons', 'rca', 'effectiveness', 'action items', 'control improvements'],
+        tags: ['lessons', 'rca', 'effectiveness', 'action items', 'control improvements', 'minutes', 'meeting', 'remediation', 'recommendations', 'resolution summary', 'timeline'],
         body: [
-          { type: 'p', text: 'Structured post-incident review aligned with 800-61 R3 §4 (Post-Incident Activity).' },
+          { type: 'p', text: 'Structured post-incident review aligned with 800-61 R3 §4 (Post-Incident Activity). This tab is the only place lessons learned are edited: the **Resolution summary** on **Details** and **Lessons Learned & Remediation Plan** on **Reports** show the same fields read-only, with an **Edit in Lessons learned** link.' },
           { type: 'section', title: 'Sections', items: [
-            '**Review metadata** — conducted-by, participants, date.',
-            '**Incident narrative** — markdown.',
+            '**Review details** — date conducted, facilitator, participants, and optional **Meeting minutes**.',
+            '**Incident narrative** — what happened. **Insert key timeline events** adds the incident\'s timeline events to the text, times in UTC: milestones and ATT&CK-tagged events first, then the rest, at most 50 lines. It only fills the draft; nothing is saved until you click **Save lessons learned**.',
             '**Root cause** — categorised (unpatched system / misconfig / human error / etc.) + free text.',
             '**Effectiveness** — 6-dimension rating (Detection / Containment / Comms / Roles / Plan / Docs).',
             '**Observations** — what went well, friction points, near-misses.',
             '**Timeline metrics** — detection / escalation / containment / comms / remediation in minutes.',
             '**Action items** — owner, due date, priority, status.',
             '**Control improvements** — preventive / detective / corrective / process / training.',
+            '**Report text** — what worked well, what could be improved and security recommendations, printed in report §09 before the lists.',
+            '**Remediation plan** — short-, medium- and long-term text, printed in report §10 before the dated action items.',
           ] },
+          { type: 'note', text: 'Required to close (Gate 2): the narrative (**what happened**), the root-cause **Description** and **Security recommendations**. The line under the status buttons says what is still missing.' },
+          { type: 'note', text: 'Meeting minutes go into the HTML export, the full report (§09) and the LE package. Not the executive report.' },
           { type: 'note', text: 'Export as a standalone HTML for distribution. Status flips from Draft → Final when finalised.' },
           { type: 'note', text: 'After the incident is closed, only **Action items** can be edited (**Save action items**); everything else is read-only until it is re-opened.' },
         ],
@@ -1835,11 +1865,24 @@ const CATEGORIES = [
         ],
       },
       {
+        id: 'pi-costs',
+        title: 'Costs & Impact',
+        tags: ['costs', 'cost tracking', 'business impact', 'bia', 'financial', 'currency', 'estimate'],
+        body: [
+          { type: 'p', text: 'What the incident cost and what it affected. Both feed the report\'s Cost Tracking section.' },
+          { type: 'section', title: 'On the page', items: [
+            '**Business Impact Assessment** — financial, operational, data exposure, reputational, regulatory and legal impact, plus notes. **Save business impact**.',
+            '**Cost Tracking** — one row per cost: category, description, amount, currency, IR phase, date and whether it is an estimate. Totals are shown per currency; amounts in different currencies are never added.',
+          ] },
+          { type: 'note', text: 'Gate 2 needs at least one cost entry or a filled-in business impact. Both stay editable after closure, and every change is audited.' },
+        ],
+      },
+      {
         id: 'pi-reports',
         title: 'Reports',
         tags: ['report', 'pdf', 'html', 'executive', 'full', 'post-incident', 'le package', 'sha-256', 'template', 'figures', 'screenshots', 'communications log', 'sign-off', 'csf', 'nciss'],
         body: [
-          { type: 'p', text: 'Generate, preview, and download incident reports. All persist to history.' },
+          { type: 'p', text: 'Generate, preview, and download incident reports. All persist to history. **Lessons Learned & Remediation Plan** at the top shows the report text read-only; edit it on [[pi-lessons]]. Costs and business impact are on [[pi-costs]].' },
           { type: 'section', title: 'Template picker', items: [
             '**Executive Summary** — key facts, KPIs, MITRE tactics, lessons, recommendations. No raw IOC values, no full timeline.',
             '**Full Technical Report** — every section: complete IOC table, timeline, entities, respond actions, playbook, evidence.',
@@ -1984,7 +2027,28 @@ const CATEGORIES = [
           { type: 'section', title: 'What you can configure', items: [
             '**Feeds** — threat-intel sources that enrich IOCs and drive cross-incident correlations.',
             '**Integrations** — outbound connections such as a syslog forwarder for audit rows (TLS 1.3, HMAC where applicable).',
+            '**Email** — SMTP or Microsoft Graph for admin alerts and **Email deadline reminders** ([[iw-legal]]). The reminders are on by default once a mail transport is set; untick to stop them.',
           ] },
+        ],
+      },
+      {
+        id: 'set-siem-intake',
+        title: 'SIEM intake',
+        tags: ['siem', 'splunk', 'sentinel', 'elastic', 'webhook', 'alert', 'dedup', 're-fired', 'ioc', 'integrations', 'admin'],
+        body: [
+          { type: 'p', text: 'Splunk, Microsoft Sentinel and Elastic can open incidents by POSTing their alert to FENRIR. Set it up under **Settings → Integrations → SIEM inbound webhooks**: generate the key and send it in the `X-Fenrir-Key` header.' },
+          { type: 'section', title: 'What an alert becomes', items: [
+            'A new incident: **How detected** = **SIEM Alert**, **Detected** = the alert\'s own time (the receipt time when it has none), severity from the alert, and **Alert reference** = the SIEM and its alert id.',
+            '**Incident type** only when the alert\'s category matches a FENRIR type (for example *malware*, *phishing*, *credential access*). Otherwise it stays empty and the start check **Incident type set** asks you to choose.',
+            'IP addresses, domains, URLs, file hashes and email addresses in known alert fields become **IOCs**, with the alert reference as their source. Internal IP addresses, hosts and user accounts become **Entities** (in scope, not marked compromised).',
+            'The on-call responder and every admin get an in-app notification. Teams/Slack and the admin email follow the outbound policy: never under Dark Operation or TLP:RED ([[inc-severity-tlp]]).',
+          ] },
+          { type: 'section', title: 'Re-fired alerts', items: [
+            'When the same alert arrives again (same SIEM and alert id, or the same rule on the same indicators) within 24 h of its last firing, and its incident is still open, no new incident is opened.',
+            'Instead the incident\'s **Timeline** gets an **Alert re-fired** event with the firing count, any new indicators are added, and the audit log records `siem_alert_attached`.',
+            'Once the incident is closed, or after 24 h of silence, the next firing opens a new incident.',
+          ] },
+          { type: 'note', text: 'A body that is not a JSON object, or a wrongly typed field such as a `result` that is not an object, is refused with 422 and a `code`; a body over 1 MiB with 413. The key is checked first.' },
         ],
       },
       {
@@ -2090,7 +2154,7 @@ const FAQS = [
   },
   {
     q: 'How do I initialise the Legal regulatory deadlines?',
-    a: 'Go to the Legal tab → Initialize deadlines. Pick the applicable regulations (GDPR, NIS2, DORA, PCI-DSS, HIPAA, CCPA) and check the Anchor — it defaults to the incident\'s Detected time; give a regulation its own anchor if its awareness moment differs. Deadlines count from the anchor, the header shows a countdown chip per regulation, and in-app reminders arrive 12 h and 2 h before and when overdue. Initialising again only adds what is missing. Add anything outside the standard list with + Add custom.',
+    a: 'Go to the Legal tab → Initialize deadlines. Pick the applicable regulations (GDPR, NIS2, DORA, PCI-DSS, HIPAA, CCPA) and check the Anchor — it defaults to the incident\'s Detected time; give a regulation its own anchor if its awareness moment differs. Deadlines count from the anchor, the header shows a countdown chip per regulation, and reminders (in-app, and by email unless the incident is dark or TLP:RED) arrive 12 h and 2 h before and when overdue. Initialising again only adds what is missing. Add anything outside the standard list with + Add custom.',
     tags: ['legal', 'gdpr', 'nis2', 'dora', 'deadline', 'anchor', 'reminder'],
   },
   {

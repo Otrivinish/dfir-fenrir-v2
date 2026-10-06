@@ -334,6 +334,16 @@ function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange
                 <div className="pb-task-note">Skipped: {t.skip_reason}</div>
               )}
               {t.source_template_id && <div className="pb-task-note">from template</div>}
+              {t.handoff_id && <div className="pb-task-note" data-task-handoff>from a handoff next step</div>}
+              {t.linked_actions?.length > 0 && (
+                <div className="link-chips" data-task-links style={{ marginTop: 4 }}>
+                  {t.linked_actions.map(a => (
+                    <span key={a.id} className="link-chip" data-chip="action" title={`${a.category}: ${a.title} (${a.status})`}>
+                      → {a.title.slice(0, 40)} · {a.status.replace('_', ' ')}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
             <div>
               <select

@@ -1348,8 +1348,14 @@ export const api = {
   exportLessonsLearned:   (incidentId) => `/api/incidents/${incidentId}/post-incident/lessons/export`,
   getMitreSummary:        (incidentId) => request('GET',   `/api/incidents/${incidentId}/post-incident/mitre-summary`),
   // incidentId (optional): only the users who can see that incident (what its person fields accept).
-  listAssignableUsers:    (incidentId) =>
-    request('GET', `/api/users/assignable${incidentId ? `?incident_id=${encodeURIComponent(incidentId)}` : ''}`),
+  // writersOnly: analysts and admins only (J4 handoff recipients; a viewer can't act on a handoff).
+  listAssignableUsers:    (incidentId, { writersOnly = false } = {}) => {
+    const q = new URLSearchParams()
+    if (incidentId) q.set('incident_id', incidentId)
+    if (writersOnly) q.set('writers_only', 'true')
+    const qs = q.toString()
+    return request('GET', `/api/users/assignable${qs ? `?${qs}` : ''}`)
+  },
 
   // YARA rule library (global)
   listYaraRules:   ()                => request('GET',    '/api/yara'),
@@ -1472,6 +1478,9 @@ export const api = {
   // Handoffs (per-incident + global pending queue)
   listHandoffs:        (incidentId)                        => request('GET',   `/api/incidents/${incidentId}/handoffs`),
   createHandoff:       (incidentId, payload)               => request('POST',  `/api/incidents/${incidentId}/handoffs`, payload),
+  getHandoffPrefill:   (incidentId)                        => request('GET',   `/api/incidents/${incidentId}/handoffs/prefill`),
+  // J4 (R33): promote a War Room message / comment to a timeline event or a decision.
+  promoteMessage:      (incidentId, payload)               => request('POST',  `/api/incidents/${incidentId}/promote`, payload),
   acknowledgeHandoff:  (incidentId, handoffId, payload)    =>
     request('PATCH', `/api/incidents/${incidentId}/handoffs/${handoffId}/acknowledge`, payload),
   listPendingHandoffs: () => request('GET', '/api/handoffs/pending'),

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useOutletContext } from 'react-router-dom'
+import { Link, useNavigate, useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
+import { useAuth } from '../../hooks/useAuth.jsx'
+import { rowContainment } from './respond/actionTemplates.js'
 import { formatLocal } from '../../lib/datetime.js'
 import BulkImportModal from './iocs/BulkImportModal.jsx'
 import TagChip from '../../components/TagChip.jsx'
@@ -59,6 +61,10 @@ const PLATFORMS = [
 export default function IOCs() {
   const { inc, bumpRail } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  // J5: Block opens the Respond action form prefilled (not for viewers or closed incidents).
+  const canContain = !isClosed && user?.role !== 'viewer'
 
   const [allIocs, setAllIocs]               = useState([])
   const [iocs, setIocs]                     = useState([])
@@ -603,6 +609,15 @@ export default function IOCs() {
                     )}
                   </td>
                   <td className="actions">
+                    {canContain && (() => {
+                      const rc = rowContainment('ioc', i)
+                      return rc && (
+                        <button type="button" className="btn ghost" data-row-contain={rc.template}
+                                title={`New containment action (${rc.template}) linked to this IOC`}
+                                onClick={() => navigate(rc.href)}
+                                style={{ fontSize: 11, padding: '2px 6px' }}>{rc.label}</button>
+                      )
+                    })()}
                     <button
                       type="button"
                       className="btn ghost"

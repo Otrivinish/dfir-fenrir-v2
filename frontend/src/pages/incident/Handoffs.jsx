@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { useOutletContext, useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { useAuth } from '../../hooks/useAuth.jsx'
 import { formatLocalShort, relative } from '../../lib/datetime.js'
@@ -48,6 +48,7 @@ function ListBuilder({ items, onChange, fields, addLabel }) {
   const textFields   = fields.filter(f => !f.type || f.type === 'text')
   const selectFields = fields.filter(f => f.type === 'select')
   const rangeFields  = fields.filter(f => f.type === 'range')
+  const checkFields  = fields.filter(f => f.type === 'checkbox')
 
   const renderFields = (values, onChange) => (
     <>
@@ -87,6 +88,12 @@ function ListBuilder({ items, onChange, fields, addLabel }) {
             style={{ width: 70 }}
           />
         </div>
+      ))}
+      {checkFields.map(f => (
+        <label key={f.key} title={f.title} style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, fontSize: 11, color: 'var(--muted)' }}>
+          <input type="checkbox" checked={!!values[f.key]} onChange={e => onChange(f.key, e.target.checked)} />
+          {f.label}
+        </label>
       ))}
     </>
   )
@@ -208,6 +215,31 @@ function SnapStats({ snap }) {
   )
 }
 
+// ── Open items captured in the snapshot (J4) ──────────────────────────────
+
+function OpenItems({ snap }) {
+  const actions = snap?.open_actions ?? []
+  const tasks   = snap?.open_tasks ?? []
+  if (!actions.length && !tasks.length) return null
+  const row = (it, kind) => (
+    <div key={`${kind}-${it.id}`} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12 }}>
+      <span className="pill pill-gray" style={{ fontSize: 9 }}>{kind === 'a' ? (it.category ?? 'action') : 'task'}</span>
+      <span style={{ flex: 1 }}>{it.title}</span>
+      <span style={{ color: 'var(--dim)', fontFamily: 'var(--font-mono)', fontSize: 10 }}>
+        {it.status?.replace('_', ' ')}{it.owner ? ` · ${it.owner}` : ''}
+      </span>
+    </div>
+  )
+  return (
+    <Section label={`Open at handoff (${actions.length} actions, ${tasks.length} tasks)`}>
+      <div data-open-items style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        {actions.map(a => row(a, 'a'))}
+        {tasks.map(t => row(t, 't'))}
+      </div>
+    </Section>
+  )
+}
+
 // ── Rich handoff card (read view) ─────────────────────────────────────────
 
 function HandoffCard({ h, currentUserId, onAck }) {
@@ -243,6 +275,17 @@ function HandoffCard({ h, currentUserId, onAck }) {
 
       {/* Snapshot */}
       <SnapStats snap={h.snapshot_data} />
+      <OpenItems snap={h.snapshot_data} />
+
+      {h.transfer_ic && (
+        <div data-ic-transfer style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 'var(--space-3)' }}>
+          {h.ic_transferred_at
+            ? <>Incident Commander moved to <strong style={{ color: 'var(--text)' }}>{h.incoming_username}</strong> on acknowledgement ({formatLocalShort(h.ic_transferred_at)}).</>
+            : h.status === 'pending'
+              ? <>Acknowledging moves the Incident Commander role to <strong style={{ color: 'var(--text)' }}>{h.incoming_username}</strong>.</>
+              : <>The Incident Commander transfer was not applied (see the audit log).</>}
+        </div>
+      )}
 
       {/* Status note */}
       {h.note && (
@@ -325,6 +368,7 @@ function HandoffCard({ h, currentUserId, onAck }) {
               <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
                 <span className={`pill ${PRIORITY_PILL[s.priority] ?? 'pill-gray'}`} style={{ fontSize: 9 }}>{s.priority}</span>
                 <span style={{ fontSize: 13 }}>{s.action}</span>
+                {s.task_id && <span className="pill pill-gray" style={{ fontSize: 9 }} title="Created as a playbook task for the recipient">task</span>}
               </div>
             ))}
           </div>
@@ -452,6 +496,12 @@ function AckModal({ incidentId, handoff, onClose, onAcked }) {
           {handoff.note && (
             <NoteBlock text={handoff.note} label="Status summary" borderColor="var(--border)" />
           )}
+          {handoff.transfer_ic && (
+            <div className="alert info" role="note" data-ack-ic-note style={{ marginBottom: 'var(--space-3)' }}>
+              <span className="alert-icon">i</span>
+              <span>Acknowledging makes {handoff.incoming_username} the Incident Commander of this incident.</span>
+            </div>
+          )}
           {err && <div className="form-error">{err}</div>}
           <label className="form-label">Acknowledgment note (optional)</label>
           <textarea className="input" rows={3} value={note}
@@ -483,20 +533,45 @@ const EMPTY_FORM = {
   pending:               [],
   next_steps:            [],
   open_questions:        [],
+  transfer_ic:           false,
 }
 
-function HandoffModal({ incidentId, currentUser, onClose, onCreated }) {
+// J4: an open action / task of the board as an editable "pending" draft line.
+const draftLine = (it, kind) => ({
+  item:     `${kind === 'a' ? `Action (${it.category})` : 'Task'}: ${it.title} — ${it.status.replace('_', ' ')}${it.owner ? `, ${it.owner}` : ''}`,
+  priority: kind === 'a' ? 'high' : 'medium',
+  notes:    '',
+})
+
+function HandoffModal({ incidentId, currentUser, canTransferIc, onClose, onCreated }) {
   const [users,   setUsers]   = useState([])
   const [form,    setForm]    = useState({ ...EMPTY_FORM })
   const [saving,  setSaving]  = useState(false)
   const [err,     setErr]     = useState('')
+  const [prefill, setPrefill] = useState(null)   // { open_actions, open_tasks } | null while loading
 
-  // Only people who can see this incident: the API refuses anyone else (422 assignee_no_access).
+  // Only analysts and admins who can see this incident: the API refuses anyone else
+  // (422 assignee_no_access; a viewer 422 recipient_read_only — a viewer can't acknowledge).
   useEffect(() => {
-    api.listAssignableUsers(incidentId)
+    api.listAssignableUsers(incidentId, { writersOnly: true })
       .then(u => setUsers(u.filter(x => x.id !== currentUser?.id)))
       .catch(() => {})
   }, [incidentId, currentUser])
+
+  // J4: prefill "Pending" with the open Respond actions and the open tasks of the current phase,
+  // as editable draft lines (remove what doesn't need handing over).
+  useEffect(() => {
+    let live = true
+    api.getHandoffPrefill(incidentId).then(p => {
+      if (!live) return
+      setPrefill(p)
+      setForm(f => f.pending.length ? f : {
+        ...f,
+        pending: [...p.open_actions.map(a => draftLine(a, 'a')), ...p.open_tasks.map(t => draftLine(t, 't'))],
+      })
+    }).catch(() => { if (live) setPrefill({ open_actions: [], open_tasks: [] }) })
+    return () => { live = false }
+  }, [incidentId])
 
   const fv = key => e => setForm(p => ({ ...p, [key]: e.target.value }))
   const fn = key => e => setForm(p => ({ ...p, [key]: +e.target.value }))
@@ -519,6 +594,7 @@ function HandoffModal({ incidentId, currentUser, onClose, onCreated }) {
         pending:               form.pending,
         next_steps:            form.next_steps,
         open_questions:        form.open_questions,
+        transfer_ic:           canTransferIc && form.transfer_ic,
       }
       const created = await api.createHandoff(incidentId, payload)
       onCreated(created)
@@ -562,9 +638,20 @@ function HandoffModal({ incidentId, currentUser, onClose, onCreated }) {
                 ))}
               </select>
               <span id="hm-incoming-hint" style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, display: 'block' }}>
-                Only people who can see this incident are listed.
+                Only analysts and admins who can see this incident are listed (a viewer can't acknowledge).
               </span>
             </div>
+
+            {canTransferIc && (
+              <div className="field">
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                  <input type="checkbox" id="hm-transfer-ic" checked={form.transfer_ic}
+                         onChange={e => setForm(p => ({ ...p, transfer_ic: e.target.checked }))} />
+                  Transfer incident commander to recipient on acknowledgement
+                </label>
+                <span className="field-hint">Off by default. On acknowledgement the IC assignment moves to the recipient; the change is audited, the current IC is notified and the timeline records it.</span>
+              </div>
+            )}
 
             {/* ── Status summary ── */}
             <div className="field">
@@ -633,11 +720,17 @@ function HandoffModal({ incidentId, currentUser, onClose, onCreated }) {
               fields={[
                 { key: 'action',   label: 'Action', flex: 3 },
                 { key: 'priority', type: 'select', default: 'high', options: PRIORITIES },
+                { key: 'create_task', type: 'checkbox', default: false, label: 'Make task',
+                  title: 'Also create a playbook task (current phase) assigned to the recipient' },
               ]}
             />
 
             {/* ── Pending ── */}
             <SectionHead label="Pending / not yet investigated" />
+            <span className="field-hint" data-prefill-hint>
+              {prefill === null ? 'Loading open actions and tasks…'
+                : `Prefilled with ${prefill.open_actions.length} open Respond action(s) and ${prefill.open_tasks.length} open task(s) of the current phase; edit or remove lines. The handoff also stores them as a snapshot.`}
+            </span>
             <ListBuilder
               items={form.pending}
               onChange={fl('pending')}
@@ -684,8 +777,9 @@ function HandoffModal({ incidentId, currentUser, onClose, onCreated }) {
 // ── Main component ────────────────────────────────────────────────────────
 
 export default function IncidentHandoffs() {
-  const { inc: incident, bumpRail } = useOutletContext()
+  const { inc: incident, bumpRail, access, refreshAccess } = useOutletContext()
   const { user } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
   const incidentId = incident?.id
   const isClosed   = incident?.status === 'closed'
 
@@ -710,6 +804,13 @@ export default function IncidentHandoffs() {
   useEffect(() => { load() }, [load])
 
   const canCreate = !isClosed && user?.role !== 'viewer'
+
+  // The incident header's "Shift handoff" button links here with ?new=1: open the form at once.
+  useEffect(() => {
+    if (searchParams.get('new') !== '1') return
+    if (canCreate) setModal('create')
+    setSearchParams(p => { p.delete('new'); return p }, { replace: true })
+  }, [searchParams, setSearchParams, canCreate])
 
   return (
     <section className="panel">
@@ -751,6 +852,7 @@ export default function IncidentHandoffs() {
         <HandoffModal
           incidentId={incidentId}
           currentUser={user}
+          canTransferIc={!!access?.is_lead}
           onClose={() => setModal(null)}
           onCreated={(h) => { setItems(prev => [h, ...prev]); bumpRail?.() }}
         />
@@ -760,7 +862,10 @@ export default function IncidentHandoffs() {
           incidentId={incidentId}
           handoff={modal}
           onClose={() => setModal(null)}
-          onAcked={(updated) => { setItems(prev => prev.map(h => h.id === updated.id ? updated : h)); bumpRail?.() }}
+          onAcked={(updated) => {
+            setItems(prev => prev.map(h => h.id === updated.id ? updated : h)); bumpRail?.()
+            if (updated.ic_transferred_at) refreshAccess?.()   // the IC (lead) rights just moved
+          }}
         />
       )}
     </section>

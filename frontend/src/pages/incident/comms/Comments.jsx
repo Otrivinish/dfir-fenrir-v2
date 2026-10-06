@@ -3,6 +3,7 @@ import { useOutletContext } from 'react-router-dom'
 import { useAuth } from '../../../hooks/useAuth.jsx'
 import { api } from '../../../api/client.js'
 import { relative, formatLocal } from '../../../lib/datetime.js'
+import PromoteDialog from '../../../components/PromoteDialog.jsx'
 
 export default function Comments() {
   const { inc, isClosed } = useOutletContext()
@@ -79,6 +80,10 @@ export default function Comments() {
   }
 
   const canEdit = (c) => !isClosed && (c.author_id === user?.id || user?.role === 'admin')
+  // J4 (R33): any analyst / admin may promote a comment to a timeline event or a decision.
+  const canPromote = !isClosed && !!user && user.role !== 'viewer'
+  const [promoting, setPromoting] = useState(null)
+  const [promoted,  setPromoted]  = useState({})   // comment id -> 'timeline_event' | 'decision'
 
   if (loading) return <div className="panel-empty">Loading comments…</div>
 
@@ -124,16 +129,30 @@ export default function Comments() {
               <div className="comment-body">{c.body}</div>
             )}
 
-            {canEdit(c) && editId !== c.id && (
+            {(canEdit(c) || canPromote) && editId !== c.id && (
               <div className="comment-actions">
-                <button className="btn-link" type="button" onClick={() => startEdit(c)}>Edit</button>
-                <button className="btn-link danger" type="button" onClick={() => del(c.id)}>Delete</button>
+                {canEdit(c) && <button className="btn-link" type="button" onClick={() => startEdit(c)}>Edit</button>}
+                {canEdit(c) && <button className="btn-link danger" type="button" onClick={() => del(c.id)}>Delete</button>}
+                {canPromote && (
+                  <button className="btn-link" type="button" data-promote-comment onClick={() => setPromoting(c)}>
+                    {promoted[c.id] ? `Promoted ✓ (${promoted[c.id] === 'decision' ? 'decision' : 'timeline'})` : 'Promote'}
+                  </button>
+                )}
               </div>
             )}
           </div>
         ))}
         <div ref={bottomRef} />
       </div>
+
+      {promoting && (
+        <PromoteDialog
+          incidentId={inc.id}
+          source={{ kind: 'comment', id: promoting.id, body: promoting.body, created_at: promoting.created_at }}
+          onClose={() => setPromoting(null)}
+          onDone={(res) => { setPromoted(p => ({ ...p, [promoting.id]: res.target })); setPromoting(null) }}
+        />
+      )}
 
       {!isClosed && (
         <form className="comment-compose" onSubmit={submit}>

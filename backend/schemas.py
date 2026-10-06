@@ -486,7 +486,7 @@ class GateItem(BaseModel):
     fix_hint: Optional[str] = Field(default=None, description="Where and how to fix it.")
     route:    Optional[str] = Field(default=None,
                                     description="Incident sub-page where it is fixed, relative to "
-                                                "/incidents/{id}/ (e.g. respond, legal, post-incident).")
+                                                "/incidents/{id}/ (e.g. respond, legal, post-incident/lessons).")
     due_at:   Optional[datetime] = Field(default=None, description="Deadline (UTC), for legal items.")
 
 
@@ -761,7 +761,8 @@ class StakeholderNotificationList(BaseModel):
 
 
 StartCheckKey = Literal["ic_assigned", "comms_lead_assigned", "legal_liaison_assigned", "detected_at_set",
-                        "playbook_applied", "legal_initialised", "dark_operation_decided", "notifications_on_time"]
+                        "type_set", "playbook_applied", "legal_initialised", "dark_operation_decided",
+                        "notifications_on_time"]
 
 
 class StartCheck(BaseModel):
@@ -2268,6 +2269,14 @@ class PlaybookTemplateUpdate(BaseModel):
                                                          description="Replace the suggested-for types; [] = none.")
 
 
+class LinkedActionRef(BaseModel):
+    """J5 (R31): a Respond action linked to a decision (decision_id) or a playbook task (task_id)."""
+    id:       UUID
+    title:    str
+    category: str
+    status:   str
+
+
 class PlaybookTaskOut(BaseModel):
     id:                 UUID
     incident_id:        UUID
@@ -2291,6 +2300,11 @@ class PlaybookTaskOut(BaseModel):
         "Archived tasks are listed only with include_archived=true and can't be changed."))
     archived_by_id:     Optional[UUID] = None
     archive_reason:     Optional[str] = Field(default=None, description="The replace reason.")
+    handoff_id:         Optional[UUID] = Field(default=None, description=(
+        "J4: the handoff whose next step created this task (opt-in per line on the handoff form)."))
+    linked_actions:     list[LinkedActionRef] = Field(default_factory=list, description=(
+        "J5: Respond actions linked to this task (their task_id). Links only: completing the task never "
+        "completes an action. Filled on list and update."))
 
     @computed_field(description="Open or in progress, in the current plan, and past due_at (UTC, evaluated now).")
     @property
@@ -2655,6 +2669,28 @@ class OrgContactList(BaseModel):
 RespondActionCategory = Literal["containment", "eradication", "recovery"]
 RespondActionStatus   = Literal["open", "in_progress", "done", "deferred", "reverted"]
 DecisionOutcome       = Literal["pending", "approved", "rejected", "deferred"]
+PromotedFromKind      = Literal["warroom", "comment"]
+
+
+class PromoteRequest(BaseModel):
+    """J4 (R33): promote a War Room message or a comment of this incident to a timeline event or a
+    Respond decision."""
+    source_kind: PromotedFromKind
+    source_id:   UUID
+    target:      Literal["timeline_event", "decision"]
+    text:        Optional[str] = Field(default=None, max_length=4096, description=(
+        "The event description / decision summary; omit to use the message text (cut to 4096)."))
+    event_time:  Optional[datetime] = Field(default=None, description=(
+        "UTC. Timeline: the event time; decision: decided_at. Omit to use the message's time."))
+    outcome:     Optional[DecisionOutcome] = Field(default=None, description="Decision only (default pending).")
+    rationale:   Optional[str] = Field(default=None, max_length=4096, description="Decision only.")
+
+
+class PromoteResult(BaseModel):
+    target:      Literal["timeline_event", "decision"]
+    id:          UUID
+    source_kind: PromotedFromKind
+    source_id:   UUID
 
 
 class RespondActionOut(BaseModel):
@@ -2682,6 +2718,9 @@ class RespondActionOut(BaseModel):
     entity_id:      Optional[UUID] = None
     ioc_id:         Optional[UUID] = None
     template_id:    Optional[str] = None
+    # J5 (R31): the decision that approved it and the playbook task it carries out (links only).
+    decision_id:    Optional[UUID] = None
+    task_id:        Optional[UUID] = None
 
     class Config:
         from_attributes = True
@@ -2698,6 +2737,13 @@ _IOC_LINK_DOC = ("IOC this action targets; it must belong to this incident (422 
 _TEMPLATE_DOC = ("Action template id, e.g. isolate_host, block_ip, disable_account. Containment "
                  "templates set the linked entity's / IOC's containment state and accept only a "
                  "matching target type (422 target_type_mismatch, e.g. isolate_host on a hash IOC).")
+
+
+_DECISION_LINK_DOC = ("J5: the decision (this incident's) that approved this action; 404 decision_not_found, "
+                      "422 decision_other_incident.")
+_TASK_LINK_DOC = ("J5: the playbook task (this incident's, current plan) this action carries out; 404 "
+                  "task_not_found, 422 task_other_incident / task_archived. A link only: completing the task "
+                  "doesn't complete the action.")
 
 
 _DEFER_DOC = ("Why the action is deferred (I5). Optional, kept when the status changes; Gate 1 warns "
@@ -2720,6 +2766,8 @@ class RespondActionCreate(BaseModel):
     ioc_id:      Optional[UUID] = Field(default=None, description=_IOC_LINK_DOC)
     template_id: Optional[str] = Field(default=None, max_length=64, pattern=r"^[a-z][a-z0-9_]*$",
                                        description=_TEMPLATE_DOC)
+    decision_id: Optional[UUID] = Field(default=None, description=_DECISION_LINK_DOC)
+    task_id:     Optional[UUID] = Field(default=None, description=_TASK_LINK_DOC)
 
 
 class RespondActionUpdate(BaseModel):
@@ -2737,6 +2785,8 @@ class RespondActionUpdate(BaseModel):
     ioc_id:      Optional[UUID] = Field(default=None, description=_IOC_LINK_DOC + " Null unlinks.")
     template_id: Optional[str] = Field(default=None, max_length=64, pattern=r"^[a-z][a-z0-9_]*$",
                                        description=_TEMPLATE_DOC + " Null clears it.")
+    decision_id: Optional[UUID] = Field(default=None, description=_DECISION_LINK_DOC + " Null unlinks; omit to keep.")
+    task_id:     Optional[UUID] = Field(default=None, description=_TASK_LINK_DOC + " Null unlinks; omit to keep.")
 
 
 class RespondActionList(BaseModel):
@@ -2756,9 +2806,20 @@ class DecisionOut(BaseModel):
     created_by_id: Optional[UUID] = None
     created_at:    datetime
     updated_at:    datetime
+    promoted_from_kind: Optional[PromotedFromKind] = Field(default=None, description=(
+        "J4: promoted from a War Room message (warroom) or a comment (comment); promoted_from_id is its id."))
+    promoted_from_id:   Optional[UUID] = None
+    linked_actions: list[LinkedActionRef] = Field(default_factory=list, description=(
+        "J5: the Respond actions this decision approves (their decision_id)."))
 
     class Config:
         from_attributes = True
+
+
+_ACTION_IDS_DOC = ("J5: the Respond actions (this incident's) this decision approves; sets their decision_id "
+                   "(an action has one approving decision, so linking moves it from another). On update the "
+                   "list replaces the current links ([] unlinks all); omit to keep. 404 action_not_found, 422 "
+                   "action_other_incident.")
 
 
 class DecisionCreate(BaseModel):
@@ -2768,6 +2829,7 @@ class DecisionCreate(BaseModel):
     decided_by_id: Optional[UUID] = None
     decided_at:    Optional[datetime] = None
     tags:          list[str] = Field(default_factory=list)
+    action_ids:    Optional[list[UUID]] = Field(default=None, max_length=200, description=_ACTION_IDS_DOC)
 
 
 class DecisionUpdate(BaseModel):
@@ -2777,6 +2839,7 @@ class DecisionUpdate(BaseModel):
     decided_by_id: Optional[UUID] = Field(default=None, description=_ASSIGNEE_DOC.replace("unassigns", "clears the decider"))
     decided_at:    Optional[datetime] = None
     tags:          Optional[list[str]] = None
+    action_ids:    Optional[list[UUID]] = Field(default=None, max_length=200, description=_ACTION_IDS_DOC)
 
 
 class DecisionList(BaseModel):
@@ -2825,7 +2888,7 @@ class TimelineEventOut(BaseModel):
         default=False,
         description="Read-only. True for an event the server recorded itself (is_system with a reserved "
                     "system_source: closure, gate_override, milestone, triage, respond_action, "
-                    "respond_action_revert, decision, legal_deadline). PATCH and DELETE of such an event are "
+                    "respond_action_revert, decision, legal_deadline, ic_transfer). PATCH and DELETE of such an event are "
                     "409 system_event_immutable.")
     external_safe:        bool            = True
     # C5 provenance. forensic_import_id set = promoted from a Timeline Import run: its facts
@@ -2857,6 +2920,9 @@ class TimelineEventOut(BaseModel):
     created_by_username:  Optional[str]  = None
     created_at:           datetime
     updated_at:           datetime
+    promoted_from_kind:   Optional[Literal["warroom", "comment"]] = Field(default=None, description=(
+        "J4: promoted from a War Room message (warroom) or a comment (comment); promoted_from_id is its id."))
+    promoted_from_id:     Optional[UUID] = None
 
     class Config:
         from_attributes = True
@@ -2882,7 +2948,7 @@ class TimelineEventCreate(BaseModel):
         default=None, max_length=32,
         description="Label of an analyst annotation (is_system=true), e.g. \"manual\". The sources the server "
                     "writes itself (closure, gate_override, milestone, triage, respond_action, "
-                    "respond_action_revert, decision, legal_deadline) are refused: 422 reserved_system_source. "
+                    "respond_action_revert, decision, legal_deadline, ic_transfer) are refused: 422 reserved_system_source. "
                     "Ignored by the batch import.")
 
 
@@ -3069,6 +3135,7 @@ class LessonsLearnedOut(BaseModel):
     conducted_at:   Optional[datetime] = None
     facilitated_by: Optional[str]      = None
     participants:   list[str]          = []
+    meeting_minutes: Optional[str]     = None
 
     incident_narrative:    Optional[str] = None
     root_cause_category:   Optional[str] = None
@@ -3108,6 +3175,9 @@ class LessonsLearnedUpdate(BaseModel):
     conducted_at:   Optional[datetime] = None
     facilitated_by: Optional[str]      = Field(default=None, max_length=256)
     participants:   Optional[list[str]] = None
+    meeting_minutes: Optional[str]      = Field(default=None, max_length=32768,
+                                                description="Optional minutes of the lessons-learned review meeting "
+                                                            "(plain text). Null clears it.")
 
     incident_narrative:    Optional[str] = Field(default=None, max_length=32768)
     root_cause_category:   Optional[str] = Field(default=None, max_length=64)
@@ -3782,6 +3852,8 @@ class IncidentHandoffOut(BaseModel):
     next_steps:             list = Field(default_factory=list)
     open_questions:         list = Field(default_factory=list)
     snapshot_data:          dict = Field(default_factory=dict)
+    transfer_ic:            bool = False
+    ic_transferred_at:      Optional[datetime] = None
     created_at:             datetime
     acknowledged_at:        Optional[datetime] = None
     acknowledged_note:      Optional[str]      = None
@@ -3800,8 +3872,29 @@ class IncidentHandoffCreate(BaseModel):
     threads:                list = Field(default_factory=list)
     ruled_out:              list = Field(default_factory=list)
     pending:                list = Field(default_factory=list)
-    next_steps:             list = Field(default_factory=list)
+    next_steps:             list = Field(default_factory=list, description=(
+        "[{action, priority, create_task?}]. J4: create_task=true makes that line a playbook task for the "
+        "recipient (current phase, linked back by handoff_id); the stored line gets its task_id."))
     open_questions:         list = Field(default_factory=list)
+    transfer_ic:            bool = Field(default=False, description=(
+        "J4: on acknowledgement, move the Incident Commander assignment to the recipient. Only the current "
+        "IC, a lead (Deputy IC) or an admin may set it (403 not_incident_lead)."))
+
+
+class HandoffOpenItem(BaseModel):
+    id:     UUID
+    title:  str
+    owner:  Optional[str] = None
+    status: str
+    category: Optional[str] = None
+    phase:    Optional[str] = None
+
+
+class HandoffPrefill(BaseModel):
+    """J4: what a new handoff starts from; the same lists are stored in the handoff's snapshot."""
+    phase:        str
+    open_actions: list[HandoffOpenItem]
+    open_tasks:   list[HandoffOpenItem]
 
 
 class IncidentHandoffAcknowledge(BaseModel):

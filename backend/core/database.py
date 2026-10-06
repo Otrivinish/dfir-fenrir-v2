@@ -1011,4 +1011,44 @@ _INPLACE_MIGRATIONS: list[str] = [
         END IF;
     END $$
     """,
+
+    # J1 (R26) — SIEM intake dedup. One NEW table from create_all, `siem_alerts` (CHECKs on source / outcome /
+    # content_key, FK incidents ON DELETE CASCADE, two lookup indexes), made with checkfirst: nothing existing is
+    # altered, so there is no statement here and no backfill (earlier SIEM incidents have no row and are never
+    # matched as re-fires). J2 adds no schema: the reminder email reuses B4's reminder_stage and I2's
+    # reminder_sent_at claims as its once-only marker, and its org switch is a platform_settings row.
+
+    # J3 (R30) — optional lessons-learned meeting minutes. Additive nullable TEXT, no default, no backfill
+    # (existing records keep null = no minutes recorded): a metadata-only ADD COLUMN on a small table, well
+    # inside the 5 s lock_timeout.
+    "ALTER TABLE lessons_learned ADD COLUMN IF NOT EXISTS meeting_minutes TEXT",
+
+    # J4 (R32, R33) + J5 (R31). All additive and nullable (or with a constant default), no backfill:
+    # older rows keep "no link" / "not promoted" / "no IC transfer". ADD COLUMN ... REFERENCES briefly
+    # takes SHARE ROW EXCLUSIVE on the referenced small tables; the two CHECKs scan timeline_events /
+    # decisions once (2026-10-06: a few thousand rows), all well inside the 5 s lock_timeout.
+    # Partial indexes keep ON DELETE SET NULL and the reverse-link lookups off a full scan; the partial
+    # UNIQUE indexes make promoting the same message twice to the same kind of record a 409.
+    "ALTER TABLE respond_actions ADD COLUMN IF NOT EXISTS decision_id UUID REFERENCES decisions(id) ON DELETE SET NULL",
+    "ALTER TABLE respond_actions ADD COLUMN IF NOT EXISTS task_id UUID REFERENCES playbook_tasks(id) ON DELETE SET NULL",
+    "CREATE INDEX IF NOT EXISTS ix_respond_actions_decision_id ON respond_actions(decision_id) WHERE decision_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_respond_actions_task_id ON respond_actions(task_id) WHERE task_id IS NOT NULL",
+    "ALTER TABLE playbook_tasks ADD COLUMN IF NOT EXISTS handoff_id UUID REFERENCES incident_handoffs(id) ON DELETE SET NULL",
+    "CREATE INDEX IF NOT EXISTS ix_playbook_tasks_handoff_id ON playbook_tasks(handoff_id) WHERE handoff_id IS NOT NULL",
+    "ALTER TABLE incident_handoffs ADD COLUMN IF NOT EXISTS transfer_ic BOOLEAN NOT NULL DEFAULT false",
+    "ALTER TABLE incident_handoffs ADD COLUMN IF NOT EXISTS ic_transferred_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS promoted_from_kind VARCHAR(16)",
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS promoted_from_id UUID",
+    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS promoted_from_kind VARCHAR(16)",
+    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS promoted_from_id UUID",
+    _add_check_if_missing("timeline_events", "ck_timeline_events_promoted_from_j4",
+                          "(promoted_from_kind IS NULL AND promoted_from_id IS NULL) OR "
+                          "(promoted_from_kind IN ('warroom', 'comment') AND promoted_from_id IS NOT NULL)"),
+    _add_check_if_missing("decisions", "ck_decisions_promoted_from_j4",
+                          "(promoted_from_kind IS NULL AND promoted_from_id IS NULL) OR "
+                          "(promoted_from_kind IN ('warroom', 'comment') AND promoted_from_id IS NOT NULL)"),
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_promoted_from ON timeline_events(promoted_from_kind, promoted_from_id) "
+    "WHERE promoted_from_id IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_decisions_promoted_from ON decisions(promoted_from_kind, promoted_from_id) "
+    "WHERE promoted_from_id IS NOT NULL",
 ]

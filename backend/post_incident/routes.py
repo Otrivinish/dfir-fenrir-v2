@@ -380,9 +380,9 @@ async def save_lessons(
     """Create or update the incident's lessons-learned record.
 
     Requires the analyst role. The record is upserted; only fields present in
-    the request body are applied (covering narrative, root cause,
-    effectiveness, observations, timeline metrics, action items, control
-    improvements and report sections). Once the incident is closed only
+    the request body are applied (covering review details and meeting minutes,
+    narrative, root cause, effectiveness, observations, timeline metrics, action
+    items, control improvements and report sections). Once the incident is closed only
     `action_items` may be sent; any other field is 409 code incident_closed. The
     save is audited and the full record is returned.
     """
@@ -404,6 +404,7 @@ async def save_lessons(
     if "conducted_at"            in fields: row.conducted_at            = req.conducted_at
     if "facilitated_by"          in fields: row.facilitated_by          = req.facilitated_by
     if "participants"            in fields: row.participants            = req.participants or []
+    if "meeting_minutes"         in fields: row.meeting_minutes         = req.meeting_minutes
     if "incident_narrative"      in fields: row.incident_narrative      = req.incident_narrative
     if "root_cause_category"     in fields: row.root_cause_category     = req.root_cause_category
     if "root_cause_description"  in fields: row.root_cause_description  = req.root_cause_description
@@ -633,6 +634,8 @@ def _render_lessons_html(inc, row) -> str:
     parts = [
         section("Incident Narrative",
             f'<p>{_h(val("incident_narrative", ""))}</p>' if val("incident_narrative") else '<p class="empty">Not recorded.</p>'),
+        *([section("Review Meeting Minutes", f'<p style="white-space:pre-wrap;">{_h(val("meeting_minutes"))}</p>')]
+          if val("meeting_minutes") else []),
         section("Root Cause Analysis", f"""
 <table class="kv">
   <tr><th>Category</th><td>{rc_label or '<em>Not categorised</em>'}</td></tr>
