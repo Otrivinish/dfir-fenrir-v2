@@ -74,7 +74,8 @@ import CommsOOB from './pages/incident/comms/OOB.jsx'
 import CommsStakeholders from './pages/incident/comms/Stakeholders.jsx'
 import CommsNotifications from './pages/incident/comms/Notifications.jsx'
 import StakeholderMatrix from './pages/settings/StakeholderMatrix.jsx'
-import PostIncident from './pages/incident/PostIncident.jsx'
+import PostIncident, { AnalyticsTab as PIAnalytics, LessonsTab as PILessons, AttackChainTab as PIAttackChain,
+         CostsTab as PICosts, ReportsTab as PIReports, ClosureTab as PIClosure } from './pages/incident/PostIncident.jsx'
 import AuditLog from './pages/incident/AuditLog.jsx'
 import Assignments from './pages/incident/Assignments.jsx'
 import IncidentHandoffs from './pages/incident/Handoffs.jsx'
@@ -220,7 +221,15 @@ export default function App() {
                   <Route index               element={<Mitre />} />
                   <Route path="attribution"  element={<Attribution />} />
                 </Route>
-                <Route path="post-incident"   element={<PostIncident />} />
+                <Route path="post-incident" element={<PostIncident />}>
+                  <Route index               element={<Navigate to="analytics" replace />} />
+                  <Route path="analytics"    element={<PIAnalytics />} />
+                  <Route path="lessons"      element={<PILessons />} />
+                  <Route path="attack-chain" element={<PIAttackChain />} />
+                  <Route path="costs"        element={<PICosts />} />
+                  <Route path="reports"      element={<PIReports />} />
+                  <Route path="closure"      element={<PIClosure />} />
+                </Route>
                 <Route path="assignments"     element={<Assignments />} />
                 <Route path="handoffs"        element={<IncidentHandoffs />} />
                 <Route path="audit-log"       element={<RequireIncidentCapability cap="read_audit_log"><AuditLog /></RequireIncidentCapability>} />

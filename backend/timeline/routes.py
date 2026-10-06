@@ -67,6 +67,7 @@ async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) ->
 RESERVED_SYSTEM_SOURCES = frozenset({
     "closure", "gate_override", "milestone", "triage",
     "respond_action", "respond_action_revert", "decision", "legal_deadline",
+    "ic_transfer",   # J4: Incident Commander moved on handoff acknowledgement
 })
 
 
@@ -250,7 +251,7 @@ async def create_timeline_event(
     value. `is_system=true` makes it an analyst annotation (shown with the system events);
     its `system_source` is a free label such as "manual", but the sources the server writes
     itself (closure, gate_override, milestone, triage, respond_action, respond_action_revert,
-    decision, legal_deadline) are refused with 422 `reserved_system_source`. Rejects events on
+    decision, legal_deadline, ic_transfer) are refused with 422 `reserved_system_source`. Rejects events on
     a closed incident with 409. Requires the analyst role and write access to the incident;
     the action is audit-logged. Returns the created TimelineEventOut.
     """
@@ -337,7 +338,7 @@ async def update_timeline_event(
     an entity doesn't fill its hostname. Rejects edits on a closed incident with 409 `incident_closed` and
     returns 404 if the event is not in this incident. An event the server recorded itself
     (`server_generated`: is_system with a reserved system_source — closure, gate_override, milestone,
-    triage, respond_action, respond_action_revert, decision, legal_deadline) can't be edited at all,
+    triage, respond_action, respond_action_revert, decision, legal_deadline, ic_transfer) can't be edited at all,
     IR phase and ATT&CK included: 409 `system_event_immutable`. Requires the analyst role and write
     access. Returns the updated TimelineEventOut.
     """

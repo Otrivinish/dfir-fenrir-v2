@@ -159,6 +159,25 @@ async def notify_handoff(
     await commit_and_push(db)
 
 
+async def queue_ic_transferred(
+    db: AsyncSession,
+    recipient_id: uuid.UUID,
+    incident_id: uuid.UUID,
+    incident_ref: str,
+    new_ic_username: str,
+) -> None:
+    """J4: tell a former Incident Commander that a handoff acknowledgement moved the role. In-app only,
+    incident ref only. Queued, not committed: the caller commits with commit_and_push()."""
+    await _create_and_push(
+        db,
+        recipient_id,
+        type="ic_transferred",
+        title="Incident Commander changed",
+        body=f"{new_ic_username} is now Incident Commander on {incident_ref} (handoff acknowledged)",
+        incident_id=incident_id,
+    )
+
+
 async def notify_custody_transfer(
     db: AsyncSession,
     recipient_id: uuid.UUID,
@@ -267,6 +286,36 @@ async def notify_incident_created(
             type="incident_created",
             title="New incident opened",
             body=incident_title,
+            incident_id=incident_id,
+        )
+    await commit_and_push(db)
+
+
+async def notify_siem_incident(
+    db: AsyncSession,
+    incident_id: uuid.UUID,
+    incident_ref: str,
+    source_label: str,
+    alert_title: str,
+):
+    """Tell the on-call responder of today (UTC date, On-Call page) and every active admin that a SIEM
+    alert opened an incident (J1). In-app only, so it is sent under Dark Operation and TLP:RED too;
+    only users who can see the incident. Commits, then pushes."""
+    from models import OnCallEntry, utcnow   # local: keep this module's import surface as it was
+    today = utcnow().date()
+    on_call = set((await db.execute(
+        select(OnCallEntry.user_id).where(OnCallEntry.start_date <= today, OnCallEntry.end_date >= today,
+                                          OnCallEntry.user_id.is_not(None))
+    )).scalars())
+    for user in await _incident_recipients(db, incident_id):
+        if user.role != "admin" and user.id not in on_call:
+            continue
+        await _create_and_push(
+            db,
+            user.id,
+            type="incident_created",
+            title=f"SIEM alert opened {incident_ref}",
+            body=f"{source_label}: {alert_title}"[:300],
             incident_id=incident_id,
         )
     await commit_and_push(db)

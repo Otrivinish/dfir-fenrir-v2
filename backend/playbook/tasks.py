@@ -29,7 +29,8 @@ from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
 from incidents.access import (get_accessible_incident, is_incident_lead, not_incident_lead,
                               require_incident_person)
-from models import Incident, PlaybookTask, PlaybookTemplate, User, utcnow
+from models import Incident, PlaybookTask, PlaybookTemplate, RespondAction, User, utcnow
+from respond.routes import linked_actions_map
 from schemas import (Phase, PlaybookInstantiateRequest, PlaybookTaskCreate,
                      PlaybookTaskOut, PlaybookTaskUpdate)
 
@@ -92,11 +93,17 @@ async def list_tasks(
 
     Any authenticated user with access to the incident may read. Returns the full list (not
     paginated). Each task carries `overdue` (open or in progress and past due_at).
-    include_archived=true appends the archived history (archived_at set).
+    include_archived=true appends the archived history (archived_at set). J5: each task's
+    `linked_actions` lists the Respond actions linked to it (their task_id); J4: `handoff_id`
+    names the handoff a task came from.
     """
     await _get_incident(db, incident_id, user)
     q = await db.execute(_ordered(incident_id, include_archived))
-    return [PlaybookTaskOut.model_validate(t) for t in q.scalars()]
+    out = [PlaybookTaskOut.model_validate(t) for t in q.scalars()]
+    links = await linked_actions_map(db, RespondAction.task_id, [t.id for t in out])
+    for t in out:
+        t.linked_actions = links.get(t.id, [])
+    return out
 
 
 @router.post(
@@ -232,7 +239,9 @@ async def update_task(
             ip_address=request.client.host if request.client else None,
         )
     await db.commit()
-    return PlaybookTaskOut.model_validate(task)
+    out = PlaybookTaskOut.model_validate(task)
+    out.linked_actions = (await linked_actions_map(db, RespondAction.task_id, [task.id])).get(task.id, [])
+    return out
 
 
 @router.delete("/{incident_id}/playbook/tasks/{task_id}",

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { useOutletContext, useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { formatLocalShort } from '../../lib/datetime.js'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
@@ -63,14 +63,28 @@ export default function Respond() {
 
   const [actions,   setActions]   = useState([])
   const [decisions, setDecisions] = useState([])
+  const [tasks,     setTasks]     = useState([])   // J5: playbook tasks, for the action ↔ task links
   const [users,     setUsers]     = useState([])
   const [loading,   setLoading]   = useState(true)
   const [error,     setError]     = useState(null)
   const [busy,      setBusy]      = useState(false)
 
-  // modal state: null | { type:'action', category } | { type:'action-edit', action }
+  // modal state: null | { type:'action', category, prefill? } | { type:'action-edit', action }
   //              | { type:'decision' } | { type:'decision-edit', decision }
   const [modal, setModal] = useState(null)
+
+  // J5: an Entities / IOCs row button links here with ?new_action=<template>&entity_id= | ioc_id=:
+  // open the action form on that template, linked to that entity / IOC.
+  const [searchParams, setSearchParams] = useSearchParams()
+  useEffect(() => {
+    const tpl = TEMPLATE_BY_ID[searchParams.get('new_action') || '']
+    if (!searchParams.get('new_action')) return
+    if (tpl && !isClosed) {
+      setModal({ type: 'action', category: tpl.category, prefill: {
+        template: tpl, entityId: searchParams.get('entity_id') || '', iocId: searchParams.get('ioc_id') || '' } })
+    }
+    setSearchParams(p => { ['new_action', 'entity_id', 'ioc_id'].forEach(k => p.delete(k)); return p }, { replace: true })
+  }, [searchParams, setSearchParams, isClosed])
 
   // The board needs only actions + decisions; the Target picker loads entities / IOCs itself
   // when the action modal opens (ActionModal), so neither slows nor fails the board.
@@ -86,13 +100,15 @@ export default function Respond() {
     setError(null)
     try {
       // Every page (the default page is 100), so the board shows every action and decision.
-      const [aResult, dResult] = await Promise.all([
+      const [aResult, dResult, tResult] = await Promise.all([
         api.listAllPages(api.listRespondActions, inc.id, {}, 200, { signal }),
         api.listAllPages(api.listDecisions, inc.id, {}, 200, { signal }),
+        api.listPlaybookTasks(inc.id).catch(() => []),
       ])
       if (seq !== loadSeq.current) return
       setActions(aResult)
       setDecisions(dResult)
+      setTasks(tResult)
     } catch (e) {
       if (seq === loadSeq.current && !signal.aborted) setError(e.message || 'Could not load respond data')
     } finally {
@@ -108,6 +124,10 @@ export default function Respond() {
     api.listAssignableUsers().then(u => { if (!cancelled) setUsers(u || []) }).catch(() => {})
     return () => { cancelled = true }
   }, [])
+
+  // J5 link chips: titles by id (display only; the links themselves live on the action).
+  const decisionOf = (id) => decisions.find(d => d.id === id)
+  const taskOf     = (id) => tasks.find(t => t.id === id)
 
   const usernameOf = (uid) => {
     if (!uid) return null
@@ -219,6 +239,8 @@ export default function Respond() {
                 <ActionCard
                   key={action.id}
                   action={action}
+                  decision={action.decision_id ? decisionOf(action.decision_id) : null}
+                  task={action.task_id ? taskOf(action.task_id) : null}
                   usernameOf={usernameOf}
                   onStatusChange={(next) => onActionStatusChange(action, next)}
                   onEdit={() => setModal({ type: 'action-edit', action })}
@@ -242,6 +264,7 @@ export default function Respond() {
               <DecisionCard
                 key={dec.id}
                 decision={dec}
+                linkedActions={actions.filter(a => a.decision_id === dec.id)}
                 usernameOf={usernameOf}
                 onEdit={() => setModal({ type: 'decision-edit', decision: dec })}
                 onDelete={() => onDecisionDelete(dec)}
@@ -262,6 +285,9 @@ export default function Respond() {
           incidentId={inc.id}
           category={modal.category ?? modal.action?.category}
           editing={modal.action}
+          prefill={modal.prefill}
+          decisions={decisions}
+          tasks={tasks}
           users={users}
           onClose={() => setModal(null)}
           onSaved={(saved) => {
@@ -279,6 +305,7 @@ export default function Respond() {
         <DecisionModal
           incidentId={inc.id}
           editing={modal.decision}
+          actions={actions}
           users={users}
           onClose={() => setModal(null)}
           onSaved={(saved) => {
@@ -287,6 +314,11 @@ export default function Respond() {
             } else {
               setDecisions(prev => [saved, ...prev])
             }
+            // The approved-action links live on the actions: mirror the saved decision's list.
+            const linked = new Set((saved.linked_actions ?? []).map(a => a.id))
+            setActions(prev => prev.map(a =>
+              linked.has(a.id) ? { ...a, decision_id: saved.id }
+                : a.decision_id === saved.id ? { ...a, decision_id: null } : a))
             setModal(null)
             bumpRail?.()
           }}
@@ -385,7 +417,7 @@ function BoardColumn({ title, color, items, renderItem, emptyHint, onAdd, addLab
 
 // ── Action card ───────────────────────────────────────────────────────────
 
-function ActionCard({ action, usernameOf, onStatusChange, onEdit, onDelete, onRevert, isClosed, busy }) {
+function ActionCard({ action, decision, task, usernameOf, onStatusChange, onEdit, onDelete, onRevert, isClosed, busy }) {
   const target = action.details?.target
   const isReverted = action.status === 'reverted'
   const [revertOpen, setRevertOpen] = useState(false)
@@ -454,6 +486,21 @@ function ActionCard({ action, usernameOf, onStatusChange, onEdit, onDelete, onRe
 
       {action.description && (
         <div style={{ fontSize: 12, color: 'var(--muted)' }}>{action.description}</div>
+      )}
+
+      {(action.decision_id || action.task_id) && (
+        <div className="link-chips" data-action-links>
+          {action.decision_id && (
+            <span className="link-chip" data-chip="decision" title={decision?.summary ?? 'Approving decision'}>
+              ✓ Decision: {decision ? decision.summary.slice(0, 40) : '…'}
+            </span>
+          )}
+          {action.task_id && (
+            <span className="link-chip" data-chip="task" title={task?.title ?? 'Playbook task'}>
+              ☐ Task: {task ? task.title.slice(0, 40) : '…'}
+            </span>
+          )}
+        </div>
       )}
 
       {action.notes && (
@@ -542,7 +589,7 @@ function ActionCard({ action, usernameOf, onStatusChange, onEdit, onDelete, onRe
 
 // ── Decision card ─────────────────────────────────────────────────────────
 
-function DecisionCard({ decision, usernameOf, onEdit, onDelete, isClosed, busy }) {
+function DecisionCard({ decision, linkedActions, usernameOf, onEdit, onDelete, isClosed, busy }) {
   const [expanded, setExpanded] = useState(false)
   const om = outcomeMeta(decision.outcome)
   const longRationale = decision.rationale && decision.rationale.length > 180
@@ -599,6 +646,16 @@ function DecisionCard({ decision, usernameOf, onEdit, onDelete, isClosed, busy }
         </div>
       )}
 
+      {linkedActions.length > 0 && (
+        <div className="link-chips" data-decision-links style={{ marginBottom: 4 }}>
+          {linkedActions.map(a => (
+            <span key={a.id} className="link-chip" data-chip="action" title={`${a.category}: ${a.title} (${a.status})`}>
+              → {a.title.slice(0, 40)} · {statusMeta(a.status).label}
+            </span>
+          ))}
+        </div>
+      )}
+
       <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--dim)' }}>
         {decision.decided_by_id ? `by ${usernameOf(decision.decided_by_id)} · ` : ''}
         {formatLocalShort(decision.decided_at ?? decision.created_at)}
@@ -609,21 +666,25 @@ function DecisionCard({ decision, usernameOf, onEdit, onDelete, isClosed, busy }
 
 // ── Action modal (2-step: template picker → form) ─────────────────────────
 
-function ActionModal({ incidentId, category, editing, users, onClose, onSaved }) {
+function ActionModal({ incidentId, category, editing, prefill, decisions, tasks, users, onClose, onSaved }) {
   const isEdit = !!editing
 
-  // step: 'pick' (template selection) | 'form' (fill details)
-  const [step,        setStep]        = useState(isEdit ? 'form' : 'pick')
+  // step: 'pick' (template selection) | 'form' (fill details). A row button (J5) prefills the
+  // template and the linked entity / IOC, so the form opens directly.
+  const [step,        setStep]        = useState(isEdit || prefill ? 'form' : 'pick')
   // selTemplate = TEMPLATE_BY_ID entry { id, title, targetHint, entityFilter, iocFilter };
   // when editing, the action's own template (for the Target picker filters).
-  const [selTemplate, setSelTemplate] = useState(isEdit ? (TEMPLATE_BY_ID[editing.template_id] ?? null) : null)
+  const [selTemplate, setSelTemplate] = useState(isEdit ? (TEMPLATE_BY_ID[editing.template_id] ?? null) : (prefill?.template ?? null))
 
   // form fields
-  const [title,       setTitle]       = useState(editing?.title           ?? '')
+  const [title,       setTitle]       = useState(editing?.title ?? prefill?.template?.title ?? '')
   const [target,      setTarget]      = useState(editing?.details?.target ?? '')
   // The entity / IOC the action is linked to ('' = free-text target, no link).
-  const [entityId,    setEntityId]    = useState(editing?.entity_id       ?? '')
-  const [iocId,       setIocId]       = useState(editing?.ioc_id          ?? '')
+  const [entityId,    setEntityId]    = useState(editing?.entity_id ?? prefill?.entityId ?? '')
+  const [iocId,       setIocId]       = useState(editing?.ioc_id    ?? prefill?.iocId    ?? '')
+  // J5: the approving decision and the playbook task this action carries out ('' = none).
+  const [decisionId,  setDecisionId]  = useState(editing?.decision_id ?? '')
+  const [taskId,      setTaskId]      = useState(editing?.task_id     ?? '')
   const [description, setDescription] = useState(editing?.description      ?? '')
   const [status,      setStatus]      = useState(editing?.status           ?? 'open')
   const [assigneeId,  setAssigneeId]  = useState(editing?.assignee_id     ?? '')
@@ -651,11 +712,17 @@ function ActionModal({ incidentId, category, editing, users, onClose, onSaved })
       if (!live) return
       setEntities(e.items)
       setIocs(i.items)
+      // A prefilled link (row button) copies the item's value into Target, as picking it does.
+      if (prefill && !isEdit) {
+        const item = prefill.entityId ? e.items.find(x => x.id === prefill.entityId)
+                   : prefill.iocId    ? i.items.find(x => x.id === prefill.iocId) : null
+        if (item) setTarget(t => t || item.value)
+      }
       setPickerErrors([e.error && `entities (${e.error})`, i.error && `IOCs (${i.error})`].filter(Boolean))
       setPickerLoading(false)
     })
     return () => { live = false }
-  }, [incidentId])
+  }, [incidentId, prefill, isEdit])
 
   // pickTemplate receives a TEMPLATE_BY_ID entry, or null for a custom action
   const pickTemplate = (tpl) => {
@@ -708,6 +775,8 @@ function ActionModal({ incidentId, category, editing, users, onClose, onSaved })
         occurred_at: occurredAt || null,
         entity_id:   entityId || null,
         ioc_id:      iocId || null,
+        decision_id: decisionId || null,
+        task_id:     taskId || null,
       }
       // The template is fixed once the action exists; editing leaves it unchanged.
       if (!isEdit && selTemplate) payload.template_id = selTemplate.id
@@ -906,6 +975,25 @@ function ActionModal({ incidentId, category, editing, users, onClose, onSaved })
                   </div>
                 )}
 
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 'var(--space-3)' }}>
+                  <div className="field">
+                    <label className="field-label" htmlFor="am-decision">Approved by decision</label>
+                    <select id="am-decision" className="select" value={decisionId}
+                            onChange={(e) => setDecisionId(e.target.value)}>
+                      <option value="">— none —</option>
+                      {decisions.map(d => <option key={d.id} value={d.id}>{d.summary.slice(0, 60)}</option>)}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label className="field-label" htmlFor="am-task">Playbook task</label>
+                    <select id="am-task" className="select" value={taskId}
+                            onChange={(e) => setTaskId(e.target.value)}>
+                      <option value="">— none —</option>
+                      {tasks.map(t => <option key={t.id} value={t.id}>{t.title.slice(0, 60)}</option>)}
+                    </select>
+                  </div>
+                </div>
+
                 <div className="field">
                   <label className="field-label" htmlFor="am-occurred">Occurred at (optional)</label>
                   <LocalDateTimePicker id="am-occurred" value={occurredAt} onChange={setOccurredAt} />
@@ -952,7 +1040,7 @@ function ActionModal({ incidentId, category, editing, users, onClose, onSaved })
 
 // ── Decision modal ────────────────────────────────────────────────────────
 
-function DecisionModal({ incidentId, editing, users, onClose, onSaved }) {
+function DecisionModal({ incidentId, editing, actions, users, onClose, onSaved }) {
   const isEdit = !!editing
 
   const [summary,     setSummary]     = useState(editing?.summary       ?? '')
@@ -961,6 +1049,9 @@ function DecisionModal({ incidentId, editing, users, onClose, onSaved }) {
   const [decidedById, setDecidedById] = useState(editing?.decided_by_id ?? '')
   const [decidedAt,   setDecidedAt]   = useState(editing?.decided_at || '')
   const [tagsText,    setTagsText]    = useState((editing?.tags ?? []).join(', '))
+  // J5: the actions this decision approves (stored on each action as decision_id).
+  const [actionIds,   setActionIds]   = useState(() =>
+    new Set(editing ? actions.filter(a => a.decision_id === editing.id).map(a => a.id) : []))
   const [busy, setBusy]               = useState(false)
   const [error, setError]             = useState(null)
 
@@ -985,6 +1076,7 @@ function DecisionModal({ incidentId, editing, users, onClose, onSaved }) {
         decided_by_id: decidedById || null,
         decided_at:    decidedAt || null,
         tags:          parseTags(tagsText),
+        action_ids:    [...actionIds],
       }
       const saved = isEdit
         ? await api.updateDecision(incidentId, editing.id, payload)
@@ -1052,6 +1144,26 @@ function DecisionModal({ incidentId, editing, users, onClose, onSaved }) {
                   )}
                 </select>
               </div>
+
+              {actions.length > 0 && (
+                <fieldset className="field" data-dm-actions style={{ border: 'none', padding: 0, margin: 0 }}>
+                  <legend className="field-label">Approves these actions</legend>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 140, overflowY: 'auto' }}>
+                    {actions.map(a => (
+                      <label key={a.id} style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12 }}>
+                        <input type="checkbox" checked={actionIds.has(a.id)}
+                               onChange={(e) => setActionIds(prev => {
+                                 const next = new Set(prev)
+                                 if (e.target.checked) next.add(a.id); else next.delete(a.id)
+                                 return next
+                               })} />
+                        <span style={{ color: 'var(--dim)', fontFamily: 'var(--font-mono)', fontSize: 10 }}>{a.category}</span>
+                        {a.title}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+              )}
 
               <div className="field">
                 <label className="field-label" htmlFor="dm-tags">Tags (comma-separated)</label>

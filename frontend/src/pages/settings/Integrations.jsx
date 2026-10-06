@@ -79,7 +79,7 @@ function SmtpPanel() {
     <section className="panel">
       <h2 className="panel-h">Email (SMTP / M365)</h2>
       <p className="field-hint" style={{ marginBottom: 'var(--space-3)' }}>
-        Used for admin alerts (high/critical incidents). Disabled if mode is unset.
+        Used for admin alerts (high/critical incidents) and deadline reminders. Disabled if mode is unset.
       </p>
       <form className="settings-form" onSubmit={handleSave}>
         <FieldRow label="Mode">
@@ -134,6 +134,19 @@ function SmtpPanel() {
             </FieldRow>
           </>
         )}
+
+        <FieldRow label="Email deadline reminders">
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: cfg.mode ? 'pointer' : 'default' }}>
+            <input type="checkbox" disabled={!cfg.mode} checked={!!cfg.mode && cfg.deadline_reminders !== false}
+                   onChange={e => { setCfg(c => ({ ...c, deadline_reminders: e.target.checked })); setOk('') }} />
+            <span>Email the Legal Liaison and Incident Commander before legal deadlines and when a required notification is overdue</span>
+          </label>
+          <div className="field-hint">
+            {cfg.mode
+              ? 'Only the incident reference, the obligation and the time left. Never sent under Dark Operation or TLP:RED.'
+              : 'Needs a mail transport: choose a mode above.'}
+          </div>
+        </FieldRow>
 
         {error && <div className="alert error" role="alert"><span className="alert-icon">!</span><span>{error}</span></div>}
         {ok    && <div className="alert info"  role="status"><span className="alert-icon">✓</span><span>{ok}</span></div>}

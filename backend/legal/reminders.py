@@ -6,10 +6,11 @@ deadlines (pending / in_progress) due within 12 hours whose `reminder_stage` is 
 stage they have reached, and sends ONE in-app notification per deadline for the highest
 stage reached — to the incident's assignees who can still see it, else to everyone with
 access. Closed incidents are included (obligations outlive closure), and so are Dark
-Operation incidents: in-app notifications stay on under Dark Operation (A1). Nothing leaves
-the platform: no email, no webhooks. A future reminder email (J2) must ask
-`core.outbound_policy.outbound_allowed(inc)` first and skip + audit it under Dark Operation or
-TLP:RED (H3), like `outbound_webhooks.service.suppressed_by_outbound_policy`.
+Operation incidents: in-app notifications stay on under Dark Operation (A1). J2: after a stage is
+claimed and committed, legal/reminder_email.py emails the incident's Legal Liaison and IC (else
+admins) the ref, the regulation and the time left only, unless the org switch is off, no mail
+transport is configured, or `core.outbound_policy.outbound_allowed(inc)` blocks it (Dark Operation /
+TLP:RED, audited `reminder_email_suppressed`). No webhooks.
 
 Each deadline is claimed with a conditional UPDATE (… WHERE reminder_stage = <old>, the status
 still open and deadline_at unchanged) and committed with its notifications, so a stage is sent at
@@ -26,6 +27,7 @@ from typing import Optional
 from sqlalchemy import select, update
 
 from core.database import SessionLocal
+from legal.reminder_email import EmailJob, send_jobs as send_reminder_emails
 from models import Incident, IncidentAssignment, RegulatoryDeadline
 from notifications.service import _create_and_push, _incident_recipients, commit_and_push, discard_pushes
 from stakeholder_notifications.reminders import tick as stakeholder_tick
@@ -83,6 +85,7 @@ async def tick(now: Optional[datetime] = None, session_factory=SessionLocal) -> 
             .limit(500)
         )).all()
         recipients: dict = {}
+        emails: list[EmailJob] = []
         for row in due:
             stage = target_stage(row.deadline_at, now)
             if stage <= row.reminder_stage:
@@ -113,10 +116,18 @@ async def tick(now: Optional[datetime] = None, session_factory=SessionLocal) -> 
                                            incident_id=row.incident_id)
                 await commit_and_push(db)     # pushes only after this row's commit
                 sent += len(recipients[row.incident_id])
+                # J2: the email names a template deadline by its label and obligation (platform strings);
+                # a custom one by its regulation only (its article / obligation are free text).
+                emails.append(EmailJob(
+                    kind="legal_deadline", item_id=row.id, incident_id=row.incident_id, stage=stage,
+                    what=(f"{label} {what} ({row.obligation})" if (row.regulation, row.article, row.obligation)
+                          in _TEMPLATES_BY_KEY else f"{row.regulation} custom {what}")[:300],
+                    due_at=row.deadline_at, path=f"/incidents/{row.incident_id}/legal"))
             except Exception as e:  # noqa: BLE001 — one bad row must not stop the others
                 await db.rollback()
                 discard_pushes(db)            # never push a rolled-back notification
                 log.warning("legal reminders: deadline %s skipped (%s)", row.id, type(e).__name__)
+        await send_reminder_emails(db, emails, now)   # after every claim is committed; never raises
     return sent
 
 

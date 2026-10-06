@@ -315,7 +315,7 @@ async def _report_check(db: AsyncSession, inc: Incident) -> GateItem:
         "Final report not regenerated after the last change", level="warn",
         detail="; ".join(stale) + (f" — last change {_z(changed)}" if changed and stale else ""),
         fix_hint="Generate and save the executive and full reports on Post-Incident → Reports",
-        route="post-incident")
+        route="post-incident/reports")
 
 
 async def _evidence_checks(db: AsyncSession, inc: Incident) -> list[GateItem]:
@@ -364,7 +364,8 @@ async def _evidence_checks(db: AsyncSession, inc: Incident) -> list[GateItem]:
             "le_package_unacknowledged", not unacked, "Every law-enforcement package acknowledged by its recipient",
             f"{len(unacked)} law-enforcement package(s) not acknowledged by the recipient",
             detail=_names([f"{p.case_reference} → {p.requesting_authority}" for p in unacked]),
-            fix_hint="Record the recipient's acknowledgement on Post-Incident → LE Package", route="post-incident"))
+            fix_hint="Record the recipient's acknowledgement on Post-Incident → Reports → LE package",
+            route="post-incident/reports"))
     return checks
 
 
@@ -382,19 +383,20 @@ async def _gate2(db: AsyncSession, inc: Incident,
     checks.append(_check(
         "lessons_summary_incomplete", not missing, "Resolution summary filled in", "Resolution summary incomplete",
         detail="Missing: " + ", ".join(missing),
-        fix_hint="Fill it in on Details → Resolution summary (or Post-Incident → Lessons Learned)", route="details"))
+        fix_hint="Fill in What happened, Root cause and Recommendations on Post-Incident → Lessons Learned",
+        route="post-incident/lessons"))
     checks.append(_check(
         "lessons_not_final", bool(ll and ll.status == "final"), "Lessons learned is Final",
         "Lessons learned is not Final",
-        fix_hint="Set Status to Final on Post-Incident → Lessons Learned", route="post-incident"))
+        fix_hint="Set Status to Final on Post-Incident → Lessons Learned", route="post-incident/lessons"))
     checks.append(_check(
         "lessons_conducted_at_missing", bool(ll and ll.conducted_at is not None), "Lessons-learned review date set",
         "Lessons-learned review date not set",
-        fix_hint="Set Date conducted on Post-Incident → Lessons Learned", route="post-incident"))
+        fix_hint="Set Date conducted on Post-Incident → Lessons Learned", route="post-incident/lessons"))
     checks.append(_check(
         "lessons_participants_missing", bool(ll and any(not _blank(p) for p in (ll.participants or []))),
         "Lessons-learned participants recorded", "No lessons-learned participants recorded",
-        fix_hint="Add Participants on Post-Incident → Lessons Learned", route="post-incident"))
+        fix_hint="Add Participants on Post-Incident → Lessons Learned", route="post-incident/lessons"))
     incomplete = [ai for ai in ((ll and ll.action_items) or [])
                   if not isinstance(ai, dict) or _blank(ai.get("owner")) or _blank(ai.get("due_date"))]
     checks.append(_check(
@@ -402,7 +404,7 @@ async def _gate2(db: AsyncSession, inc: Incident,
         f"{len(incomplete)} lessons-learned action item(s) without an owner or due date",
         detail=_names([(ai.get("action") if isinstance(ai, dict) and not _blank(ai.get("action"))
                         else "(untitled)") for ai in incomplete]),
-        fix_hint="Give each an Owner and a Due date on Post-Incident → Lessons Learned", route="post-incident"))
+        fix_hint="Give each an Owner and a Due date on Post-Incident → Lessons Learned", route="post-incident/lessons"))
 
     items = (await db.execute(
         select(ClosureChecklistItem)
@@ -412,7 +414,7 @@ async def _gate2(db: AsyncSession, inc: Incident,
     if not items:
         checks.append(_check(
             "checklist_not_started", False, "", "Closure checklist not started",
-            fix_hint="Work through Post-Incident → Closure Checklist", route="post-incident"))
+            fix_hint="Work through Post-Incident → Closure Checklist", route="post-incident/closure"))
     else:
         # "Incident formally closed" is ticked by the close itself; an N/A item counts as done.
         active = [i for i in items if i.is_active and i.item_key != "incident_closed"]
@@ -421,14 +423,14 @@ async def _gate2(db: AsyncSession, inc: Incident,
             "checklist_incomplete", not unchecked, "Every closure-checklist item checked or not applicable",
             f"{len(unchecked)} closure-checklist item(s) not checked", detail=_names(unchecked),
             fix_hint="Check them, or mark them N/A with a reason, on Post-Incident → Closure Checklist",
-            route="post-incident"))
+            route="post-incident/closure"))
         na = [i for i in active if i.not_applicable]
         if na:
             no_reason = [i.label for i in na if _blank(i.na_reason)]
             checks.append(_check(
                 "checklist_na_reason_missing", not no_reason, "Every N/A checklist item has a reason",
                 f"{len(no_reason)} N/A checklist item(s) without a reason", level="warn", detail=_names(no_reason),
-                fix_hint="Give the reason on Post-Incident → Closure Checklist", route="post-incident"))
+                fix_hint="Give the reason on Post-Incident → Closure Checklist", route="post-incident/closure"))
 
     tasks = (await db.execute(
         select(PlaybookTask.title, PlaybookTask.phase, PlaybookTask.status, PlaybookTask.skip_reason)
@@ -483,7 +485,8 @@ async def _gate2(db: AsyncSession, inc: Incident,
     checks.append(_check(
         "costs_missing", bool(costs or (bia and any(not _blank(getattr(bia, f)) for f in _BIA_FIELDS))),
         "Costs or business impact entered", "No cost entry and no business-impact assessment",
-        fix_hint="Add a cost, or fill in the business impact, on Post-Incident → Reports", route="post-incident"))
+        fix_hint="Add a cost, or fill in the business impact, on Post-Incident → Costs & Impact",
+        route="post-incident/costs"))
 
     checks += await _evidence_checks(db, inc)
     checks.append(await _report_check(db, inc))

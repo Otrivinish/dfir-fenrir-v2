@@ -529,6 +529,24 @@ Built from the IR-expert workflow audit of 2026-10-01: 21 approved pieces (A1–
   - Close needs the IC's sign-off, and the DPO's for breaches (`POST …/gates/{gate}/sign-off`).
   - Checklist items can be N/A with a reason.
 
+### Backlog wave J (2026-10-06)
+
+- ⚠ **SIEM webhooks** check the key first. Bad bodies return a flat 422 and oversized bodies 413; the response adds `status` and `alert_count`. (J1)
+- **SIEM intake:**
+  - A re-fire within 24 h attaches to the open incident.
+  - IOCs and hosts/users are extracted, and the category maps to a type.
+  - On-call and admins get an in-app notice.
+  - New table `siem_alerts`.
+  - New start check "Incident type set". (J1)
+- ⚠ **Deadline reminders by email:** legal deadlines and overdue stakeholder notifications are also emailed to the Legal Liaison and IC (admins as fallback), with ref, regulation and time left only. Never under Dark Operation or TLP:RED. New Integrations switch "Email deadline reminders" (`deadline_reminders`). (J2)
+- **Post-Incident sub-tabs have URLs** (`…/post-incident/{analytics,lessons,attack-chain,costs,reports,closure}`). New Costs & Impact tab; Closure Checklist is last. (J3)
+- ⚠ **Lessons learned are edited only on Post-Incident → Lessons Learned**, which now also holds the report text and remediation plan. Details and Reports show read-only summaries. New optional `meeting_minutes` field (API, MCP, exports). "Insert key timeline events" drafts the narrative. (J3)
+- ⚠ **Gate check `route` values** now point to the sub-tab (`post-incident/lessons|closure|costs|reports`). (J3)
+- **Shift handoff** in the incident header opens the form, prefilled with open actions and current-phase tasks; a next step can become a task for the recipient. Optionally, acknowledging makes the recipient Incident Commander: off by default, set by the IC, a lead or an admin, audited, with a notice to the old IC. (J4)
+- ⚠ **A viewer can't be a handoff recipient** (422 `recipient_read_only`). Timeline `system_source` `ic_transfer` is reserved: 422 on create, and those events are immutable. (J4)
+- **Promote** War Room messages and comments to a timeline event or a decision (`POST /api/incidents/{id}/promote`). (J4)
+- **Respond actions link** to an approving decision and a playbook task, with chips shown both ways. Entity and IOC rows get **Isolate / Disable / Block** buttons that open the Respond form prefilled. (J5)
+
 ### Upgrade notes
 
 - **Wave G:**

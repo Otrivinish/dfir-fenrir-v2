@@ -92,6 +92,7 @@ from users.routes import router as users_router
 from validated_tools.routes import router as validated_tools_router
 from audit_monitor.routes import router as audit_anchors_router
 from warroom.routes import router as warroom_router
+from promote.routes import router as promote_router
 from notifications.routes import router as notifications_router
 from assignments.routes import router as assignments_router
 from backup.routes import router as backup_router
@@ -428,6 +429,7 @@ app.include_router(presence_router,          prefix="/api/incidents",           
 app.include_router(threat_actors_incident_router, prefix="/api/incidents",      tags=["Attribution"])
 # warroom: literal /warroom/messages + /warroom/online + /warroom/ws under /{incident_id}
 app.include_router(warroom_router,           prefix="/api/incidents",           tags=["War Room"])
+app.include_router(promote_router,           prefix="/api/incidents",           tags=["War Room"])
 app.include_router(dashboard_router,       prefix="/api/dashboard",      tags=["Dashboard"])
 app.include_router(metrics_router,         prefix="/api/metrics",         tags=["Metrics"])
 app.include_router(readiness_router,       prefix="/api/readiness",       tags=["Readiness"])

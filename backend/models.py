@@ -1048,6 +1048,8 @@ class PlaybookTask(Base):
     archived_at    = Column(DateTime(timezone=True), nullable=True)
     archived_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     archive_reason = Column(Text, nullable=True)
+    # J4 (R32): the handoff whose next step created this task (handoff form, opt-in per line).
+    handoff_id     = Column(UUID(as_uuid=True), ForeignKey("incident_handoffs.id", ondelete="SET NULL"), nullable=True)
 
 
 # ─── Respond — containment / eradication / recovery trackers ─────────────────
@@ -1092,6 +1094,10 @@ class RespondAction(Base):
     entity_id   = Column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="SET NULL"), nullable=True)
     ioc_id      = Column(UUID(as_uuid=True), ForeignKey("iocs.id", ondelete="SET NULL"), nullable=True)
     template_id = Column(String(64), nullable=True)
+    # J5 (R31): the decision that approved this action and the playbook task it carries out (same
+    # incident, checked by the route). Links only: completing a task never completes an action.
+    decision_id = Column(UUID(as_uuid=True), ForeignKey("decisions.id", ondelete="SET NULL"), nullable=True)
+    task_id     = Column(UUID(as_uuid=True), ForeignKey("playbook_tasks.id", ondelete="SET NULL"), nullable=True)
 
 
 # ─── Decisions log (per-incident) ────────────────────────────────────────────
@@ -1118,6 +1124,10 @@ class Decision(Base):
     created_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at    = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at    = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    # J4 (R33): promoted from a War Room message or a comment (kind warroom | comment + its id; a
+    # soft reference, so the record survives the message being deleted). Both null or both set (CHECK).
+    promoted_from_kind = Column(String(16), nullable=True)
+    promoted_from_id   = Column(UUID(as_uuid=True), nullable=True)
 
 
 # ─── Recovery tracker (I1, R21) ──────────────────────────────────────────────
@@ -1524,6 +1534,9 @@ class TimelineEvent(Base):
     created_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     created_at    = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at    = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    # J4 (R33): promoted from a War Room message or a comment, as on Decision.
+    promoted_from_kind = Column(String(16), nullable=True)
+    promoted_from_id   = Column(UUID(as_uuid=True), nullable=True)
 
 
 # ─── PCAP analysis results (per-incident) ────────────────────────────────────
@@ -1907,6 +1920,7 @@ class LessonsLearned(Base):
     conducted_at   = Column(DateTime(timezone=True), nullable=True)
     facilitated_by = Column(String(256), nullable=True)
     participants   = Column(JSON, nullable=False, default=list)         # [str, ...]
+    meeting_minutes = Column(Text, nullable=True)   # J3 (R30): optional minutes of the review meeting
 
     # ── Narrative ─────────────────────────────────────────────────────────────
     incident_narrative = Column(Text, nullable=True)
@@ -2185,6 +2199,34 @@ class Notification(Base):
     created_at  = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
 
 
+# ─── SIEM alerts received (J1, R26) ──────────────────────────────────────────
+# One row per alert accepted by an inbound SIEM webhook: the incident it opened ('created') or
+# was attached to as a re-fire ('attached'). The dedup lookup (inbound_webhooks/routes.py) matches
+# the same source + vendor alert id, or the same content key (sha256 of source, rule and the
+# extracted indicators/entities), received within SIEM_DEDUP_WINDOW, on a still-open incident.
+# No payload is stored: the incident, its timeline and the audit log carry what was extracted.
+
+class SiemAlert(Base):
+    __tablename__ = "siem_alerts"
+
+    id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True)
+    source      = Column(String(16), nullable=False)    # splunk | sentinel | elastic
+    alert_id    = Column(String(256))                   # the vendor's alert id, when it sent one
+    content_key = Column(String(64))                    # sha256 hex; null when nothing to key on
+    alert_time  = Column(DateTime(timezone=True))       # the vendor's alert time, when parseable
+    received_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    outcome     = Column(String(16), nullable=False)    # created | attached
+
+    __table_args__ = (
+        CheckConstraint("source IN ('splunk', 'sentinel', 'elastic')", name="ck_siem_alerts_source"),
+        CheckConstraint("outcome IN ('created', 'attached')", name="ck_siem_alerts_outcome"),
+        CheckConstraint("content_key IS NULL OR content_key ~ '^[0-9a-f]{64}$'", name="ck_siem_alerts_content_key"),
+        Index("ix_siem_alerts_source_alert_id", "source", "alert_id", "received_at"),
+        Index("ix_siem_alerts_source_content_key", "source", "content_key", "received_at"),
+    )
+
+
 # ─── Incident assignments (per-incident IR role roster) ──────────────────────
 # Links users to an incident in a specific operational role.
 # One user can hold multiple roles; no duplicate (incident, user, role) triples.
@@ -2284,7 +2326,11 @@ class IncidentHandoff(Base):
     pending               = Column(JSON, nullable=False, default=list)   # [{item, priority, notes}]
     next_steps            = Column(JSON, nullable=False, default=list)   # [{action, priority}]
     open_questions        = Column(JSON, nullable=False, default=list)   # [str]
-    snapshot_data         = Column(JSON, nullable=False, default=dict)   # counters captured at handoff time
+    snapshot_data         = Column(JSON, nullable=False, default=dict)   # counters + open items at handoff time
+    # J4 (R32): opt-in at create (IC / lead / admin only): acknowledging moves the Incident Commander
+    # assignment to the recipient. ic_transferred_at is set when that happened.
+    transfer_ic           = Column(Boolean, nullable=False, default=False, server_default="false")
+    ic_transferred_at     = Column(DateTime(timezone=True))
 
     created_at        = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
     acknowledged_at   = Column(DateTime(timezone=True))

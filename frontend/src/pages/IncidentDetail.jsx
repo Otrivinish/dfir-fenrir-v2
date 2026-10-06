@@ -521,7 +521,8 @@ export default function IncidentDetail() {
               <button
                 className="btn"
                 type="button"
-                onClick={() => navigate('handoffs')}
+                onClick={() => navigate('handoffs?new=1')}
+                data-header-handoff
               >Shift handoff</button>
               {canWrite && (
                 <button
@@ -624,7 +625,7 @@ export default function IncidentDetail() {
         </div>
       </div>
 
-      <WarRoomDrawer incidentId={inc.id} incidentRef={inc.ref} />
+      <WarRoomDrawer incidentId={inc.id} incidentRef={inc.ref} isClosed={isClosed} />
 
       {phaseTarget && (
         <PhaseChangeModal

@@ -1052,7 +1052,8 @@ function generateProReport(data, opts = {}) {
         ? `<div class="table-wrap"><table>
              <thead><tr><th>Recommendation</th><th>Category</th><th>Priority</th></tr></thead>
              <tbody>${ll.control_improvements.map(ci => `<tr><td>${esc(ci.recommendation || '')}</td><td style="text-transform:capitalize">${esc(ci.category || '')}</td><td style="text-transform:capitalize">${esc(ci.priority || '')}</td></tr>`).join('')}</tbody>
-           </table></div>` : '')}` },
+           </table></div>` : '')}
+  ${!isExec && ll && ll.meeting_minutes ? `<h3>Review Meeting Minutes</h3>${narrativeToHtml(ll.meeting_minutes)}` : ''}` },
 
     { key: 'remediation', body: `
   <p class="small" style="color:var(--text-muted);margin-bottom:8px">Terms are measured from ${inc.closed_at ? 'the incident close time' : 'the report generation time (incident still open)'}: ${esc(fmtTs(anchorIso))}.</p>
@@ -1388,7 +1389,7 @@ function _skeletonSections() {
   const list = [
     { key: 'exec_summary', items: [
       `Audience note (when set): ${ph('Advanced options → Audience', 'user')}`,
-      `Narrative: ${ph('lessons_learned.incident_narrative', 'auto')} ${where('Details → Resolution summary → "What happened"')}`,
+      `Narrative: ${ph('lessons_learned.incident_narrative', 'auto')} ${where('Post-Incident → Lessons Learned → Incident Narrative (shown on Details → Resolution summary)')}`,
     ]},
     { key: 'details', items: [
       `Type · Severity · TLP · Triage state · Reporter: ${ph('incident.incident_type / severity / tlp / triage_state / reporter', 'auto')} ${where('Details → Classification')}`,
@@ -1423,7 +1424,7 @@ function _skeletonSections() {
       `Table: ${ph('decisions[*] (summary, outcome, rationale, decided by, decided at)', 'auto')} ${where('Respond → Decisions')}`,
     ]},
     { key: 'impact', items: [
-      `Financial · Operational · Data exposure · Reputational · Regulatory · Notes: ${ph('business_impact.*', 'auto')} ${where('Post-Incident → Reports → Business Impact Assessment')}`,
+      `Financial · Operational · Data exposure · Reputational · Regulatory · Notes: ${ph('business_impact.*', 'auto')} ${where('Post-Incident → Costs & Impact → Business Impact Assessment')}`,
       `Legal obligations: ${ph('regulatory_deadlines[*] regulation + article', 'auto')} + ${ph('business_impact.legal', 'auto')} <span class="static">— empty ("—") unless legal deadlines have been initialized</span> ${where('Legal & regulatory → Initialize deadlines')}`,
     ]},
     { key: 'legal', items: [
@@ -1463,20 +1464,21 @@ function _skeletonSections() {
       `Progress + items: ${ph('closure_checklist[*] (label, checked, owner)', 'auto')} ${where('Post-Incident → Closure Checklist')}`,
     ]},
     { key: 'lessons', items: [
-      `Each sub-heading prints the Reports-tab text first, then the structured Lessons Learned entries:`,
+      `Each sub-heading prints the report text first, then the structured Lessons Learned entries:`,
       `What worked well: ${ph('report_what_worked_well', 'auto')} + ${ph('what_went_well[]', 'auto')}`,
       `What could be improved: ${ph('report_what_could_improve', 'auto')} + ${ph('friction_points[]', 'auto')}`,
       `Security recommendations: ${ph('report_security_recommendations', 'auto')} + ${ph('control_improvements[]', 'auto')}`,
-      `${where('text: Post-Incident → Reports → Lessons Learned & Remediation Plan · lists: Post-Incident → Lessons Learned')}`,
+      `Review meeting minutes (full report only, when recorded): ${ph('meeting_minutes', 'auto')}`,
+      `${where('Post-Incident → Lessons Learned (Report Text, lists, Review Details)')}`,
     ]},
     { key: 'remediation', items: [
       `Short (0–30 d) · Medium (30–90 d) · Long (90+ d): ${ph('report_remediation_short / medium / long', 'auto')} text, then ${ph('action_items[] by due date', 'auto')}`,
       `<span class="static">Terms are measured from the incident's close time (report time while open), so regenerating never moves items. Undated items go under "Unscheduled".</span>`,
-      `${where('text: Post-Incident → Reports · action items: Post-Incident → Lessons Learned → Action Items')}`,
+      `${where('text: Post-Incident → Lessons Learned → Remediation Plan · action items: Post-Incident → Lessons Learned → Action Items')}`,
     ]},
     { key: 'costs', items: [
-      `Financial impact narrative: ${ph('business_impact.financial', 'auto')} ${where('Post-Incident → Reports → Business Impact')}`,
-      `Totals per currency and by category + itemised costs: ${ph('costs[*] (category, description, amount, currency)', 'auto')} ${where('Post-Incident → Reports → Cost Tracking')}`,
+      `Financial impact narrative: ${ph('business_impact.financial', 'auto')} ${where('Post-Incident → Costs & Impact → Business Impact Assessment')}`,
+      `Totals per currency and by category + itemised costs: ${ph('costs[*] (category, description, amount, currency)', 'auto')} ${where('Post-Incident → Costs & Impact → Cost Tracking')}`,
     ]},
     { key: 'sign_off', items: [
       `Closed by · Closed at: ${ph('closure.closed_by / closed_at', 'auto')} ${where('Close (Post-Incident) in the incident header')} <span class="static">— "Not closed" while open</span>`,

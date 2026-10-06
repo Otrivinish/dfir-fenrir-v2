@@ -63,6 +63,11 @@ async def evaluate(db: AsyncSession, inc: Incident,
         detail="The SIEM alert carried no time of its own: this is when FENRIR received it."
                if inc.detected_at_source == "received" else None)
 
+    # J1: a SIEM alert whose category maps to no FENRIR type opens the incident without one (never a guessed type).
+    add("type_set", "Incident type set", inc.incident_type is not None, "details",
+        detail="The SIEM alert carried no category FENRIR maps to an incident type: choose one on Details."
+               if inc.incident_type is None and inc.detection_method == "siem_alert" else None)
+
     tasks = int((await db.execute(
         select(func.count()).select_from(PlaybookTask)
         .where(PlaybookTask.incident_id == inc.id, PlaybookTask.archived_at.is_(None))

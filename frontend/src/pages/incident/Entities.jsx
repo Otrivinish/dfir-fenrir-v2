@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
+import { useAuth } from '../../hooks/useAuth.jsx'
+import { rowContainment } from './respond/actionTemplates.js'
 import { formatLocal } from '../../lib/datetime.js'
 import EntityDetailDrawer from './entities/EntityDetailDrawer.jsx'
 import EntityGraph from './entities/EntityGraph.jsx'
@@ -46,6 +48,10 @@ const critOf      = (v) => CRITICALITY.find(c => c.value === v) || CRITICALITY[1
 export default function Entities() {
   const { inc, bumpRail } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  // J5: Isolate / Disable / Block opens the Respond action form prefilled (not for viewers or closed incidents).
+  const canContain = !isClosed && user?.role !== 'viewer'
 
   const [items, setItems]           = useState([])
   const [relations, setRelations]   = useState([])
@@ -386,6 +392,14 @@ export default function Entities() {
                   </td>
                   <td className="actions" onClick={(e) => e.stopPropagation()}>
                     <span className="row-actions">
+                      {canContain && (() => {
+                        const rc = rowContainment('entity', ent)
+                        return rc && (
+                          <button type="button" className="btn ghost" data-row-contain={rc.template}
+                                  title={`New containment action (${rc.template}) linked to this entity`}
+                                  onClick={() => navigate(rc.href)}>{rc.label}</button>
+                        )
+                      })()}
                       <button
                         type="button"
                         className="btn ghost"

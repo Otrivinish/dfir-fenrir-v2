@@ -363,72 +363,44 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
 }
 
 // Resolution summary -- one of the Gate 2 (close) conditions (Close in the
-// header; Resolve only moves it to Post-Incident). Backed by the existing
-// LessonsLearned record (incident_narrative / root_cause_description /
-// report_security_recommendations) rather than a separate field, so there's one
-// narrative, not two. The close gate (`lessons_summary_incomplete`) uses the
-// same "what's missing" wording as here.
+// header; Resolve only moves it to Post-Incident). Backed by the LessonsLearned
+// record (incident_narrative / root_cause_description /
+// report_security_recommendations). J3 (R30): read-only here; Post-Incident →
+// Lessons Learned is the one editor. The close gate (`lessons_summary_incomplete`)
+// uses the same "what's missing" wording as here.
+const RESOLUTION_FIELDS = [
+  ['incident_narrative',              'What happened',   'what happened'],
+  ['root_cause_description',          'Root cause',      'root cause'],
+  ['report_security_recommendations', 'Recommendations', 'recommendations'],
+]
+
 function ResolutionSection({ incidentId, isClosed }) {
-  const [ll,      setLl]      = useState(null)
-  const [entities, setEntities] = useState(null)
-  const [draft,   setDraft]   = useState(null)
-  const [saving,  setSaving]  = useState(false)
-  const [savedAt, setSavedAt] = useState(null)
-  const [error,   setError]   = useState('')
+  const [ll,    setLl]    = useState(null)
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    Promise.allSettled([
-      api.getLessonsLearned(incidentId),
-      api.listAllEntities(incidentId),   // every page (the default page is 50)
-    ]).then(([l, e]) => {
-      const rec = l.status === 'fulfilled' ? l.value : {}
-      setLl(rec)
-      setDraft({
-        incident_narrative: rec.incident_narrative ?? '',
-        root_cause_description: rec.root_cause_description ?? '',
-        report_security_recommendations: rec.report_security_recommendations ?? '',
-      })
-      setEntities(e.status === 'fulfilled' ? e.value : [])
-    })
+    api.getLessonsLearned(incidentId)
+      .then(setLl)
+      .catch(e => setError(e.message || 'Could not load the resolution summary.'))
   }, [incidentId])
 
-  if (!draft) return null
-
-  const missing = [
-    !draft.incident_narrative.trim() && 'what happened',
-    !draft.root_cause_description.trim() && 'root cause',
-    !draft.report_security_recommendations.trim() && 'recommendations',
-  ].filter(Boolean)
-
-  const save = async () => {
-    setSaving(true); setError('')
-    try {
-      const updated = await api.saveLessonsLearned(incidentId, draft)
-      setLl(updated)
-      setSavedAt(Date.now())
-    } catch (e) {
-      setError(e.message || 'Failed to save.')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const field = (key) => ({
-    value: draft[key],
-    onChange: (e) => setDraft(prev => ({ ...prev, [key]: e.target.value })),
-  })
+  if (!ll && !error) return null
+  const missing = ll ? RESOLUTION_FIELDS.filter(([k]) => !(ll[k] || '').trim()).map(f => f[2]) : []
 
   return (
-    <section className="panel" style={{ marginTop: 'var(--space-4)' }}>
+    <section className="panel" style={{ marginTop: 'var(--space-4)' }} data-resolution-summary>
       <div className="panel-toolbar">
         <h2 className="panel-h" style={{ margin: 0 }}>Resolution summary</h2>
-        {missing.length > 0 ? (
+        {ll && (missing.length > 0 ? (
           <span style={{ color: 'var(--high)', fontSize: 12 }}>
             Required to close — missing: {missing.join(', ')}
           </span>
         ) : (
           <span style={{ color: 'var(--ok)', fontSize: 12 }}>✓ Complete</span>
-        )}
+        ))}
+        <Link to="../post-incident/lessons" className="btn ghost" data-ll-edit-link style={{ marginLeft: 'auto' }}>
+          {isClosed ? 'Open in Lessons learned' : 'Edit in Lessons learned'}
+        </Link>
       </div>
 
       {error && (
@@ -437,43 +409,16 @@ function ResolutionSection({ incidentId, isClosed }) {
         </div>
       )}
 
-      {entities && entities.length > 0 && (
-        <div style={{ marginBottom: 'var(--space-3)' }}>
-          <div style={{ color: 'var(--muted)', fontSize: 12, marginBottom: 4 }}>
-            Entities tracked on this incident (reference — edit on the Entities tab):
-          </div>
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            {entities.map(e => (
-              <span key={e.id} className="pill" style={{ fontSize: 11 }}>{e.type}: {e.value}</span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="form">
-        <div className="field">
-          <label className="field-label">What happened</label>
-          <textarea className="input" rows={4} readOnly={isClosed}
-            placeholder="Summary of the incident for the record…" {...field('incident_narrative')} />
-        </div>
-        <div className="field">
-          <label className="field-label">Root cause</label>
-          <textarea className="input" rows={3} readOnly={isClosed}
-            placeholder="What allowed this to happen…" {...field('root_cause_description')} />
-        </div>
-        <div className="field">
-          <label className="field-label">Recommendations</label>
-          <textarea className="input" rows={3} readOnly={isClosed}
-            placeholder="What should change going forward…" {...field('report_security_recommendations')} />
-        </div>
-      </div>
-
-      {!isClosed && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
-          <button type="button" className="btn primary" onClick={save} disabled={saving}>
-            {saving ? 'Saving…' : 'Save resolution summary'}
-          </button>
-          {savedAt && <span style={{ color: 'var(--dim)', fontSize: 11 }}>Saved.</span>}
+      {ll && (
+        <div className="form">
+          {RESOLUTION_FIELDS.map(([k, label]) => (
+            <div className="field" key={k} data-ll-field={k}>
+              <span className="field-label">{label}</span>
+              {(ll[k] || '').trim()
+                ? <div style={{ whiteSpace: 'pre-wrap', fontSize: 13, color: 'var(--text)' }}>{ll[k]}</div>
+                : <div style={{ color: 'var(--dim)', fontStyle: 'italic', fontSize: 13 }}>Not recorded</div>}
+            </div>
+          ))}
         </div>
       )}
     </section>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, notifyUnauthorized } from '../api/client.js'
 import { useAuth } from '../hooks/useAuth.jsx'
+import PromoteDialog from './PromoteDialog.jsx'
 
 // Derive ws:// or wss:// base from current page protocol.
 function wsBase() {
@@ -16,11 +17,16 @@ const MENTION_MAX_RESULTS = 6
 // Inside an incident (`incidentId` given) the drawer is locked to that incident's room: no
 // picker, so a message can't land in another incident by mistake. Without `incidentId`
 // (a global drawer) the picker of open incidents is shown.
-export default function WarRoomDrawer({ incidentId, incidentRef }) {
+export default function WarRoomDrawer({ incidentId, incidentRef, isClosed = false }) {
   const locked = !!incidentId
+  // J4 (R33): Promote a message to a timeline event / decision — only in the locked (in-incident)
+  // drawer, for analysts and admins, on an open incident. The server checks all of it again.
+  const [promoting, setPromoting] = useState(null)   // message being promoted | null
+  const [promoted,  setPromoted]  = useState(null)   // { id, target } of the last promotion
   const storageKey = incidentId ? `fenrir.warroom.${incidentId}.open` : null
   const { user: me } = useAuth()
   const meUsername = me?.username?.toLowerCase() || ''
+  const canPromote = locked && !isClosed && !!me && me.role !== 'viewer'
 
   const [open, setOpen] = useState(() => {
     if (!storageKey) return false
@@ -424,6 +430,14 @@ export default function WarRoomDrawer({ incidentId, incidentRef }) {
               <div className="warroom-msg-meta">
                 <span className="warroom-msg-user">{m.username}</span>
                 <span className="warroom-msg-time">{fmtTime(m.created_at)}</span>
+                {canPromote && (
+                  <button type="button" className="btn ghost" data-promote-msg
+                          style={{ marginLeft: 'auto', padding: '0 6px', fontSize: 10 }}
+                          title="Promote to a timeline event or a decision"
+                          onClick={() => setPromoting(m)}>
+                    {promoted?.id === m.id ? `✓ ${promoted.target === 'decision' ? 'decision' : 'timeline'}` : 'Promote'}
+                  </button>
+                )}
               </div>
               <div className="warroom-msg-body">
                 {renderBody(m.body, meUsername, userSet)}
@@ -483,6 +497,14 @@ export default function WarRoomDrawer({ incidentId, incidentRef }) {
           >↑</button>
         </div>
       </aside>
+      {promoting && (
+        <PromoteDialog
+          incidentId={incidentId}
+          source={{ kind: 'warroom', id: promoting.id, body: promoting.body, created_at: promoting.created_at }}
+          onClose={() => setPromoting(null)}
+          onDone={(res) => { setPromoted({ id: promoting.id, target: res.target }); setPromoting(null) }}
+        />
+      )}
     </>
   )
 }
