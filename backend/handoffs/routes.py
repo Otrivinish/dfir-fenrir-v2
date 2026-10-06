@@ -40,12 +40,14 @@ async def _build_snapshot(db: AsyncSession, incident_id: uuid.UUID, inc: Inciden
     )).scalar() or 0
 
     pb_total = (await db.execute(
-        select(func.count()).select_from(PlaybookTask).where(PlaybookTask.incident_id == incident_id)
+        select(func.count()).select_from(PlaybookTask).where(PlaybookTask.incident_id == incident_id,
+                                                             PlaybookTask.archived_at.is_(None))   # I3
     )).scalar() or 0
     pb_done = (await db.execute(
         select(func.count()).select_from(PlaybookTask).where(
             PlaybookTask.incident_id == incident_id,
             PlaybookTask.status == "done",
+            PlaybookTask.archived_at.is_(None),
         )
     )).scalar() or 0
 

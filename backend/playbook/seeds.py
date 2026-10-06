@@ -804,6 +804,27 @@ _SEEDS = (
 )
 
 
+# I3: incident types each seeded template is suggested for (IncidentType values). The general
+# frameworks (NIST 800-61 R3, CISA Federal IR) fit every type and are not type-suggested. The
+# migration in core/database.py sets the same values on existing rows once.
+SEED_INCIDENT_TYPES = {
+    "cisa_vuln_resp":           ["vulnerability_exploitation"],
+    "ransomware_containment":   ["ransomware"],
+    "credential_stuffing":      ["credential_compromise"],
+    "phishing_takedown":        ["phishing"],
+    "anomalous_data_egress":    ["data_breach"],
+    "oauth_app_revocation":     ["credential_compromise", "unauthorized_access"],
+    "insider_exfiltration":     ["insider_threat"],
+    "ddos_mitigation":          ["ddos"],
+    "bec_response":             ["bec"],
+    "network_intrusion":        ["unauthorized_access"],
+    "malware_infection":        ["malware"],
+    "data_breach_notification": ["data_breach"],
+    "cloud_compromise":         ["unauthorized_access", "credential_compromise"],
+    "ai_device_code_phishing":  ["phishing", "credential_compromise"],
+}
+
+
 async def seed_playbook_templates(db: AsyncSession) -> None:
     """Idempotently insert the system templates.
 
@@ -825,5 +846,6 @@ async def seed_playbook_templates(db: AsyncSession) -> None:
             category=spec.get("category", ""),
             is_system=True,
             tasks=spec["tasks"],
+            incident_types=SEED_INCIDENT_TYPES.get(spec["key"], []),
         ))
     await db.commit()

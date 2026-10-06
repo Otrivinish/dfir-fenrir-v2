@@ -881,4 +881,134 @@ _INPLACE_MIGRATIONS: list[str] = [
     _add_check_if_missing("entity_files", "ck_entity_files_hashes_h4",
                           "(sha256 IS NULL OR sha256 ~ '^[0-9a-f]{64}$') AND (sha1 IS NULL OR sha1 ~ '^[0-9a-f]{40}$') "
                           "AND (md5 IS NULL OR md5 ~ '^[0-9a-f]{32}$')"),
+
+    # I1 (R21) — the recovery tracker is one NEW table, `recovery_records`, made by create_all (checkfirst: an
+    # existing table is never touched) with its CHECKs, UNIQUE(entity_id) and FKs (incident / entity / users all
+    # RESTRICT). Nothing existing is altered, so there is no statement here and no backfill: a system with no row
+    # reads as not_started.
+
+    # I2 (R22) — stakeholder notification tracker. Two NEW tables from create_all (`incident_severity_levels`,
+    # `stakeholder_notifications`, with their CHECKs / UNIQUEs / FKs) and one additive column. GUARDED ONE-SHOT:
+    # everything below runs only in the migrate run that first adds stakeholder_matrix_rules.incident_types (a
+    # fresh database gets the column from create_all and has nothing to backfill); later runs are a catalog read.
+    #   1. incident_types JSON NOT NULL DEFAULT '[]' (constant default: metadata-only, no rewrite).
+    #   2. Every incident without a level row gets one: its CURRENT severity, reached at detected_at, else
+    #      created_at (source 'backfill'). Earlier escalations aren't known; they aren't invented.
+    #   3. Every OPEN incident gets one pending obligation per matrix rule of its current severity (all existing
+    #      rules have no type filter): the rule snapshot, due = reached + SLA. Ones already overdue are stamped
+    #      reminder_sent_at = now, so the reminder loop doesn't fire a burst for old incidents. Closed incidents
+    #      get none (their record stays as it was).
+    # Not audited (a migration has no actor); the app audits every later change. Tiny tables (2026-10-06: 4 rules,
+    # 119 incidents, 13 open), well inside the 5 s lock_timeout.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'stakeholder_matrix_rules' AND column_name = 'incident_types'
+        ) THEN
+            ALTER TABLE stakeholder_matrix_rules ADD COLUMN incident_types JSON NOT NULL DEFAULT '[]';
+            INSERT INTO incident_severity_levels (id, incident_id, severity, reached_at, source, created_at)
+            SELECT gen_random_uuid(), i.id, i.severity, COALESCE(i.detected_at, i.created_at), 'backfill', now()
+              FROM incidents i
+             WHERE NOT EXISTS (SELECT 1 FROM incident_severity_levels l WHERE l.incident_id = i.id);
+            INSERT INTO stakeholder_notifications
+                   (id, incident_id, rule_id, severity, role, category, required, notify_within_minutes,
+                    clock_start_at, due_at, status, reminder_sent_at, created_at, updated_at)
+            SELECT gen_random_uuid(), i.id, r.id, r.severity, r.role, r.category, r.required, r.notify_within_minutes,
+                   l.reached_at, l.reached_at + make_interval(mins => r.notify_within_minutes), 'pending',
+                   CASE WHEN l.reached_at + make_interval(mins => r.notify_within_minutes) <= now() THEN now() END,
+                   now(), now()
+              FROM incidents i
+              JOIN incident_severity_levels l ON l.incident_id = i.id AND l.severity = i.severity
+              JOIN stakeholder_matrix_rules r ON r.severity = i.severity
+             WHERE i.status <> 'closed';
+        END IF;
+    END $$
+    """,
+
+    # I3 (R24, R60) — playbook fixes. Additive, nullable, no backfill of review dates (null = never reviewed, so
+    # Readiness `playbooks_core` fails until someone marks the core templates reviewed). Archived tasks are the
+    # Done/Skipped history of a replaced plan. Tiny tables (2026-10-06: 16 templates, 35 tasks):
+    # metadata-only ADD COLUMNs, well inside the 5 s lock_timeout.
+    "ALTER TABLE playbook_templates ADD COLUMN IF NOT EXISTS last_reviewed_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE playbook_templates ADD COLUMN IF NOT EXISTS last_reviewed_by_id UUID REFERENCES users(id)",
+    "ALTER TABLE playbook_tasks ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE playbook_tasks ADD COLUMN IF NOT EXISTS archived_by_id UUID REFERENCES users(id)",
+    "ALTER TABLE playbook_tasks ADD COLUMN IF NOT EXISTS archive_reason TEXT",
+    # I3 — playbook_templates.incident_types. GUARDED ONE-SHOT: only the migrate run that first adds the column
+    # sets the seeded system templates' default types (the same values as playbook/seeds.py, which a fresh
+    # database gets from the seeder instead). Custom templates and the general frameworks stay [].
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'playbook_templates' AND column_name = 'incident_types'
+        ) THEN
+            ALTER TABLE playbook_templates ADD COLUMN incident_types JSON NOT NULL DEFAULT '[]';
+            UPDATE playbook_templates t SET incident_types = d.types::json
+              FROM (VALUES
+                ('cisa_vuln_resp',           '["vulnerability_exploitation"]'),
+                ('ransomware_containment',   '["ransomware"]'),
+                ('credential_stuffing',      '["credential_compromise"]'),
+                ('phishing_takedown',        '["phishing"]'),
+                ('anomalous_data_egress',    '["data_breach"]'),
+                ('oauth_app_revocation',     '["credential_compromise", "unauthorized_access"]'),
+                ('insider_exfiltration',     '["insider_threat"]'),
+                ('ddos_mitigation',          '["ddos"]'),
+                ('bec_response',             '["bec"]'),
+                ('network_intrusion',        '["unauthorized_access"]'),
+                ('malware_infection',        '["malware"]'),
+                ('data_breach_notification', '["data_breach"]'),
+                ('cloud_compromise',         '["unauthorized_access", "credential_compromise"]'),
+                ('ai_device_code_phishing',  '["phishing", "credential_compromise"]')
+              ) AS d(key, types)
+             WHERE t.key = d.key AND t.is_system;
+        END IF;
+    END $$
+    """,
+
+    # I4 (R25) — intake fields and the Dark Operation decision marker. Additive and nullable, no backfill:
+    # existing incidents keep null (detected_at_source null = recorded before I4; dark_operation_decided_at
+    # null = never decided, so a phishing/BEC start check warns until someone decides). Metadata-only ADD
+    # COLUMNs on a small table, well inside the 5 s lock_timeout.
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS detected_at_source VARCHAR(16)",
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS functional_impact VARCHAR(16)",
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS information_impact VARCHAR(16)",
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS recoverability VARCHAR(16)",
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS severity_rationale TEXT",
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS alert_reference VARCHAR(256)",
+    "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS dark_operation_decided_at TIMESTAMP WITH TIME ZONE",
+
+    # I5 (R23) — gates v2. One NEW table from create_all, `incident_gate_sign_offs` (CHECKs, FKs RESTRICT),
+    # append-only in the DB like case_notes (H2): the function is CREATE OR REPLACE (no table lock) and the
+    # trigger is created only while pg_trigger lacks it. Three additive nullable / constant-default columns
+    # (metadata-only, no rewrite, no backfill): the closure-checklist N/A state + reason, and a Respond
+    # action's defer reason. The N/A-vs-checked CHECK is added once (tiny table: 2026-10-06, 97 rows).
+    "ALTER TABLE closure_checklist_items ADD COLUMN IF NOT EXISTS not_applicable BOOLEAN NOT NULL DEFAULT false",
+    "ALTER TABLE closure_checklist_items ADD COLUMN IF NOT EXISTS na_reason TEXT",
+    _add_check_if_missing("closure_checklist_items", "ck_closure_items_na_not_checked",
+                          "NOT (checked AND not_applicable)"),
+    "ALTER TABLE respond_actions ADD COLUMN IF NOT EXISTS defer_reason TEXT",
+    """CREATE OR REPLACE FUNCTION fenrir_gate_sign_offs_append_only() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+       BEGIN
+         RAISE EXCEPTION 'incident_gate_sign_offs is append-only (I5): % blocked', TG_OP
+           USING ERRCODE = 'insufficient_privilege';
+       END; $$""",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger
+                       WHERE tgrelid = 'incident_gate_sign_offs'::regclass
+                         AND tgname = 'trg_gate_sign_offs_append_only') THEN
+            CREATE TRIGGER trg_gate_sign_offs_append_only
+                BEFORE UPDATE OR DELETE ON incident_gate_sign_offs
+                FOR EACH ROW EXECUTE FUNCTION fenrir_gate_sign_offs_append_only();
+        END IF;
+    END $$
+    """,
 ]

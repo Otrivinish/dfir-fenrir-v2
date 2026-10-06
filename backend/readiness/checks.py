@@ -155,19 +155,23 @@ async def _matrix(db: AsyncSession, now: datetime):
 @check("playbooks_core", "Ransomware and Data-breach playbooks reviewed within 12 months", "warning", ["ID.IM-04"],
        "/playbooks")
 async def _playbooks(db: AsyncSession, now: datetime):
-    have = dict((await db.execute(select(PlaybookTemplate.key, PlaybookTemplate.updated_at)
+    # I3 (R60): the explicit review date (Mark reviewed), not updated_at (an edit is not a review).
+    have = dict((await db.execute(select(PlaybookTemplate.key, PlaybookTemplate.last_reviewed_at)
                                   .where(PlaybookTemplate.key.in_(REQUIRED_PLAYBOOK_KEYS)))).all())
     problems, ages = [], []
     for key, label in REQUIRED_PLAYBOOK_KEYS.items():
-        updated = have.get(key)
-        if updated is None:
+        if key not in have:
             problems.append(f"{label} playbook (template key {key}) is missing")
-        elif now - updated > PLAYBOOK_MAX_AGE:
-            problems.append(f"{label} playbook last updated {_age(now - updated)} ago")
+            continue
+        reviewed = have[key]
+        if reviewed is None:
+            problems.append(f"{label} playbook never marked reviewed")
+        elif now - reviewed > PLAYBOOK_MAX_AGE:
+            problems.append(f"{label} playbook last reviewed {_age(now - reviewed)} ago")
         else:
-            ages.append(f"{label} updated {_age(now - updated)} ago")
+            ages.append(f"{label} reviewed {_age(now - reviewed)} ago")
     if problems:
-        return "fail", "; ".join(problems) + " (review within 12 months)."
+        return "fail", "; ".join(problems) + " (mark reviewed on Playbooks, within 12 months)."
     return "pass", "; ".join(ages) + "."
 
 

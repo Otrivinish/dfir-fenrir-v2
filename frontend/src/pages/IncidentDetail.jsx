@@ -10,6 +10,8 @@ import DeclareMilestoneModal, { MILESTONES } from '../components/DeclareMileston
 import { CloseIncidentModal, ReopenIncidentModal } from '../components/IncidentClosureModals.jsx'
 import WarRoomDrawer from '../components/WarRoomDrawer.jsx'
 import ClockChips from '../components/ClockChips.jsx'
+import NotificationsChip from '../components/NotificationsChip.jsx'
+import StartChecksChip from '../components/StartChecksChip.jsx'
 import IncidentRail from '../components/IncidentRail.jsx'
 import SevBadge from '../components/SevBadge.jsx'
 import TagChip from '../components/TagChip.jsx'
@@ -19,7 +21,9 @@ import TagChip from '../components/TagChip.jsx'
 // status-band stepper, with confirmation and audit logging.
 // `occurred_at`, `detected_at` and the milestones (`contained_at`, `eradicated_at`,
 // `recovered_at`) are handled separately (datetime entry).
-const EDITABLE = ['title', 'description', 'severity', 'tlp', 'triage_state', 'incident_type', 'detection_method', 'reporter']
+const EDITABLE = ['title', 'description', 'severity', 'tlp', 'triage_state', 'incident_type', 'detection_method', 'reporter',
+                  // I4 intake (blank clears)
+                  'functional_impact', 'information_impact', 'recoverability', 'severity_rationale', 'alert_reference']
 
 // Value for the datetime entry field: the canonical ISO-8601 (`…Z`) string
 // as-is (LocalDateTimePicker renders/edits it in the Fenrir timezone and
@@ -66,7 +70,10 @@ const NAV_GROUPS = [
   {
     label: 'Notify',
     items: [
-      { to: 'comms', label: 'Comms & stakeholders' },
+      { to: 'comms', label: 'Comms & stakeholders', count: s => s.notifications?.required_total > 0
+        ? { text: `${s.notifications.notified}/${s.notifications.required_total}`,
+            title: `${s.notifications.notified} of ${s.notifications.required_total} required stakeholder notifications recorded` +
+                   (s.notifications.overdue ? ` (${s.notifications.overdue} overdue)` : '') } : null },
       { to: 'legal', label: 'Legal & regulatory' },
     ],
   },
@@ -89,6 +96,10 @@ const NAV_GROUPS = [
     phase: 'containment_eradication_recovery',
     items: [
       { to: 'respond', label: 'Respond', count: s => badge(s.respond_open, `${s.respond_open} of ${s.respond_total} actions open or in progress`) },
+      { to: 'recovery', label: 'Recovery', count: s => s.recovery?.total > 0
+        ? { text: `${s.recovery.validated}/${s.recovery.total - s.recovery.not_required}`,
+            title: `${s.recovery.validated} of ${s.recovery.total - s.recovery.not_required} systems validated` +
+                   (s.recovery.not_required ? ` (${s.recovery.not_required} not required)` : '') } : null },
     ],
   },
   {
@@ -570,6 +581,8 @@ export default function IncidentDetail() {
           hint={!isClosed && canWrite && editLock ? 'Save or discard your Details edits to change the phase.' : null}
         />
         <ClockChips incidentId={inc.id} rev={legalRev} />
+        <NotificationsChip incidentId={inc.id} rev={`${railRev}-${inc.updated_at}`} />
+        <StartChecksChip incidentId={inc.id} rev={`${railRev}-${inc.updated_at}`} closed={isClosed} />
         <span className="pills">
           <SevBadge value={inc.severity} />
           <span className={`pill ${pillOf('status',   inc.status)}`}>{labelOf('status',   inc.status)}</span>
@@ -620,6 +633,7 @@ export default function IncidentDetail() {
           targetPhase={phaseTarget}
           triageState={inc.triage_state}
           canOverride={can('override_gate')}
+          canSign={{ ic: can('sign_off_ic'), dpo: can('sign_off_dpo') }}
           onConfirm={confirmPhaseChange}
           onClose={() => setPhaseTarget(null)}
         />
@@ -637,6 +651,7 @@ export default function IncidentDetail() {
         <CloseIncidentModal
           inc={inc}
           canOverride={can('override_gate')}
+          canSign={{ ic: can('sign_off_ic'), dpo: can('sign_off_dpo') }}
           onConfirm={confirmClose}
           onClose={() => setClosureModal(null)}
         />

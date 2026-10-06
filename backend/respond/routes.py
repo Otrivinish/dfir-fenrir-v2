@@ -217,6 +217,7 @@ async def create_respond_action(
         status=req.status,
         assignee_id=req.assignee_id,
         notes=req.notes,
+        defer_reason=(req.defer_reason or "").strip() or None,
         details=req.details or {},
         order_index=req.order_index,
         created_by_id=user.id,
@@ -309,6 +310,8 @@ async def update_respond_action(
         action.description = req.description;  changed["description"] = True
     if req.notes       is not None and req.notes != (action.notes or ""):
         action.notes = req.notes;              changed["notes"] = True
+    if req.defer_reason is not None and (req.defer_reason.strip() or None) != action.defer_reason:
+        action.defer_reason = req.defer_reason.strip() or None;  changed["defer_reason"] = action.defer_reason
     if req.details     is not None:
         action.details = req.details;          changed["details"] = True
     if req.order_index is not None and req.order_index != action.order_index:

@@ -20,7 +20,7 @@ from core.errors import ApiError, ApiErrorBody
 from evidence.crypto import EvidenceCryptoError, awrite_encrypted
 from evidence.streaming import decrypted_download, require_free_space
 from incidents.access import get_accessible_incident
-from models import Entity, EntityEvent, EntityFile, EntityRelation, Incident, RespondAction, User, utcnow
+from models import Entity, EntityEvent, EntityFile, EntityRelation, Incident, RecoveryRecord, RespondAction, User, utcnow
 from files.routes import decorated_files, delete_file_row, file_references, locked_file, referenced_error, required_reason
 from respond.containment import containment_map
 from schemas import (Criticality, EntityCreate, EntityEventCreate,
@@ -276,6 +276,7 @@ async def delete_entity(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Delete an entity from an incident. Returns 409 if the incident is closed
+    (or 409 recovery_record_exists when the system has a recovery record, I1)
     and 404 if the entity is not found. Requires the analyst role and access to
     the incident. Returns `{"status": "ok"}` on success.
     """
@@ -288,6 +289,10 @@ async def delete_entity(
     )).scalar_one_or_none()
     if not ent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Entity not found")
+    # I1: a recovery record (who restored / validated the system) is never deleted with its entity.
+    if (await db.execute(select(RecoveryRecord.id).where(RecoveryRecord.entity_id == ent.id))).first():
+        raise ApiError(status.HTTP_409_CONFLICT, "recovery_record_exists",
+                       "This system has a recovery record; clear its compromised flag instead of deleting it.")
 
     await write_audit(
         db, "entity_delete",

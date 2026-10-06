@@ -28,6 +28,7 @@ from sqlalchemy import select, update
 from core.database import SessionLocal
 from models import Incident, IncidentAssignment, RegulatoryDeadline
 from notifications.service import _create_and_push, _incident_recipients, commit_and_push, discard_pushes
+from stakeholder_notifications.reminders import tick as stakeholder_tick
 
 log = logging.getLogger("legal.reminders")
 
@@ -132,6 +133,15 @@ async def _run() -> None:
             raise
         except Exception as e:  # noqa: BLE001 — the loop never dies
             log.warning("legal reminders: tick failed (%s)", type(e).__name__)
+        # I2: overdue stakeholder notifications, same loop and rules (in-app only).
+        try:
+            sent = await asyncio.wait_for(stakeholder_tick(), timeout=TICK_TIMEOUT_SECONDS)
+            if sent:
+                log.info("stakeholder reminders: %d notification(s) sent", sent)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — the loop never dies
+            log.warning("stakeholder reminders: tick failed (%s)", type(e).__name__)
         first = False
         await asyncio.sleep(TICK_SECONDS)
 

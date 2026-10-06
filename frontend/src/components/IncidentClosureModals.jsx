@@ -7,7 +7,8 @@ import { GateItems, useGate } from './GateItems.jsx'
 // does the POST; errors (e.g. a 409) show inline and keep the modal open.
 // Close shows Gate 2 from the API; when it is unmet, closing needs Override (the
 // sign-off statement is the justification), offered only with the override_gate
-// capability from GET …/access (`canOverride`: the incident lead).
+// capability from GET …/access (`canOverride`: the incident lead). Gate 2 needs the IC's sign-off
+// (and the DPO's for a personal-data breach), given in the gate panel (`canSign` = { ic, dpo }).
 // Re-open: the API decides whether Gate 1 applies (re-opening into Post-Incident an
 // incident closed in another phase); a 409 gate_unmet lists the items here, and the
 // lead may then Override with the reason as the justification.
@@ -46,12 +47,12 @@ function ErrorAlert({ error }) {
   )
 }
 
-export function CloseIncidentModal({ inc, canOverride = false, onConfirm, onClose }) {
+export function CloseIncidentModal({ inc, canOverride = false, canSign = {}, onConfirm, onClose }) {
   const [reason, setReason]     = useState('')
   const [override, setOverride] = useState(false)
   const [busy, setBusy]         = useState(false)
   const [error, setError]       = useState(null)
-  const { gate, setGate, loading, error: gateError } = useGate(inc.id, 'close')
+  const { gate, setGate, loading, error: gateError, reload } = useGate(inc.id, 'close')
   useEscape(busy, onClose)
 
   const unmet      = !!gate && !gate.met
@@ -65,8 +66,9 @@ export function CloseIncidentModal({ inc, canOverride = false, onConfirm, onClos
     } catch (err) {
       if (err.code === 'gate_unmet' && Array.isArray(err.data?.unmet)) {
         // The gate changed since it was loaded: show the server's list.
-        setGate(g => ({ gate: 'close', label: g?.label || 'Gate 2', carried_forward: g?.carried_forward || [],
-                        met: false, exempt: false, unmet: err.data.unmet }))
+        setGate(g => ({ ...(g || {}), gate: 'close', label: g?.label || 'Gate 2',
+                        carried_forward: g?.carried_forward || [], met: false, exempt: false,
+                        unmet: err.data.unmet, warnings: err.data.warnings || g?.warnings || [] }))
         setError('The gate is not met: see the list above.')
       } else {
         setError(err.message || 'Could not close the incident.')
@@ -103,7 +105,7 @@ export function CloseIncidentModal({ inc, canOverride = false, onConfirm, onClos
               {gateError && (
                 <ErrorAlert error={`${gateError} The server still checks the gate when you close.`} />
               )}
-              <GateItems incidentId={inc.id} gate={gate} onNavigate={onClose} />
+              <GateItems incidentId={inc.id} gate={gate} onNavigate={onClose} canSign={canSign} onSigned={reload} />
               {unmet && !canOverride && (
                 <span className="field-hint" data-override-unavailable>
                   Only this incident's lead (Incident Commander or Deputy) or an admin can override the gate.
@@ -166,7 +168,7 @@ export function ReopenIncidentModal({ incidentId, canOverride = false, onConfirm
     } catch (err) {
       if (err.code === 'gate_unmet' && Array.isArray(err.data?.unmet)) {
         setGate({ gate: 'post_incident', label: 'Gate 1', carried_forward: [], met: false, exempt: false,
-                  unmet: err.data.unmet })
+                  unmet: err.data.unmet, warnings: err.data.warnings || [] })
         setError('Gate 1 is not met: see the list above.')
       } else {
         setError(err.message || 'Could not re-open the incident.')

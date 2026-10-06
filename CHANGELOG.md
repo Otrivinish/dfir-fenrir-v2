@@ -504,6 +504,31 @@ Built from the IR-expert workflow audit of 2026-10-01: 21 approved pieces (A1–
   - MCP follows these changes.
 - **Security:** entity-file download and delete are confined to the incident in the URL. (H4)
 
+### Backlog wave I (2026-10-06)
+
+- **Recovery tracker** for each in-scope system: restore point, restored and validated by whom, monitoring window. Declare recovered is offered once every system is done, never set automatically. Report and LE sections added. (I1)
+- ⚠ **API:** `GET/PATCH /api/incidents/{id}/recovery`; the snapshot gains `recovery`; deleting an entity that has a recovery record returns 409. The MCP respond tools gain recovery. (I1)
+- **Stakeholder notification tracker.** Matrix rules become countdowns from the moment the incident first reached that severity (escalations are recorded). Record each notification's time, sender and channel; a header chip shows "x of y". (I2)
+- ⚠ **API and MCP:**
+  - `…/stakeholder-notifications`.
+  - The snapshot gains `notifications`.
+  - Matrix rules gain `incident_types`.
+  - LE adds `12_Notifications`. (I2)
+- ⚠ **Playbooks:**
+  - Templates are appended by default. Replacing the plan is lead or admin only, needs a reason, and keeps finished tasks as history.
+  - Tasks follow the 800-61 phase order; skipping needs a reason.
+  - Templates are suggested by incident type.
+  - "Mark reviewed" sets the review date; Readiness warns until the core playbooks are reviewed. (I3)
+- ⚠ **New incident requires** type, severity, detection method and Detected; POST /incidents otherwise returns 422 `required_fields_missing`. (I4)
+  - The other intake fields are optional.
+  - Start checks (warnings, overdue after 60 minutes) show in the header and on the Situation board.
+  - SIEM incidents record whether Detected came from the alert or the receipt time.
+- ⚠ **Gates v2:** checks are labelled block or warn. (I5)
+  - Gate 1 also blocks on unvalidated systems, unlogged required notifications and breach obligations.
+  - Gate 2 also blocks on exhibit custody or legal hold, open working copies and unacknowledged LE packages.
+  - Close needs the IC's sign-off, and the DPO's for breaches (`POST …/gates/{gate}/sign-off`).
+  - Checklist items can be N/A with a reason.
+
 ### Upgrade notes
 
 - **Wave G:**

@@ -9,20 +9,22 @@ import { GateItems, useGate } from './GateItems.jsx'
 // `onConfirm(targetPhase, { phase_reason?, override_gate? })` returns a promise; the
 // modal shows loading + surfaces errors inline. `canOverride` is the override_gate
 // capability from GET …/access (the incident lead); without it no Override is offered.
+// `canSign` = { ic, dpo } (sign_off_ic / sign_off_dpo from GET …/access): a breach's Gate 1 can
+// need the DPO's sign-off, given in the gate panel. Warnings (I5) are shown, never blocking.
 // A false / benign positive leaving Detection & Analysis can later close without Gate 2, so
 // the API needs triage_reason for that move (M2: 422 triage_reason_required): `triageState`
 // is the incident's triage_state, and the modal then asks for it.
 const REASON_MIN = 10
 const CLOSABLE_ANY_PHASE = ['false_positive', 'benign_positive']
 
-export default function PhaseChangeModal({ incidentId, currentPhase, targetPhase, triageState, canOverride = false, onConfirm, onClose }) {
+export default function PhaseChangeModal({ incidentId, currentPhase, targetPhase, triageState, canOverride = false, canSign = {}, onConfirm, onClose }) {
   const [busy, setBusy]         = useState(false)
   const [error, setError]       = useState(null)
   const [reason, setReason]     = useState('')
   const [triageReason, setTriageReason] = useState('')
   const [override, setOverride] = useState(false)
   const gated = targetPhase === 'post_incident'
-  const { gate, setGate, loading, error: gateError } = useGate(incidentId, 'post_incident', gated)
+  const { gate, setGate, loading, error: gateError, reload } = useGate(incidentId, 'post_incident', gated)
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
@@ -62,8 +64,9 @@ export default function PhaseChangeModal({ incidentId, currentPhase, targetPhase
     } catch (e) {
       if (e.code === 'gate_unmet' && Array.isArray(e.data?.unmet)) {
         // The gate changed since it was loaded: show the server's list.
-        setGate(g => ({ gate: 'post_incident', label: g?.label || 'Gate 1', carried_forward: g?.carried_forward || [],
-                        met: false, exempt: false, unmet: e.data.unmet }))
+        setGate(g => ({ ...(g || {}), gate: 'post_incident', label: g?.label || 'Gate 1',
+                        carried_forward: g?.carried_forward || [], met: false, exempt: false,
+                        unmet: e.data.unmet, warnings: e.data.warnings || g?.warnings || [] }))
         setError('The gate is not met: see the list above.')
       } else if (e.code === 'triage_reason_required') {
         setError(`Say why this incident is a ${triageLabel || 'false or benign positive'}: at least ${REASON_MIN} characters. `
@@ -110,7 +113,7 @@ export default function PhaseChangeModal({ incidentId, currentPhase, targetPhase
                 <span>{gateError} The server still checks the gate when you confirm.</span>
               </div>
             )}
-            {gated && <GateItems incidentId={incidentId} gate={gate} onNavigate={onClose} />}
+            {gated && <GateItems incidentId={incidentId} gate={gate} onNavigate={onClose} canSign={canSign} onSigned={reload} />}
             {unmet && !canOverride && (
               <span className="field-hint" data-override-unavailable>
                 Only this incident's lead (Incident Commander or Deputy) or an admin can override the gate.

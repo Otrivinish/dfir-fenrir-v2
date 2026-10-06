@@ -36,6 +36,7 @@ import AdminStorage from './pages/admin/Storage.jsx'
 import AdminSessions from './pages/admin/Sessions.jsx'
 import AdminAPIDocs from './pages/admin/APIDocs.jsx'
 import Situation from './pages/incident/Situation.jsx'
+import Recovery from './pages/incident/Recovery.jsx'
 import Details from './pages/incident/Details.jsx'
 import Playbook from './pages/incident/Playbook.jsx'
 import Timeline from './pages/incident/Timeline.jsx'
@@ -71,6 +72,7 @@ import AttackLayout from './pages/incident/AttackLayout.jsx'
 import CommsComments from './pages/incident/comms/Comments.jsx'
 import CommsOOB from './pages/incident/comms/OOB.jsx'
 import CommsStakeholders from './pages/incident/comms/Stakeholders.jsx'
+import CommsNotifications from './pages/incident/comms/Notifications.jsx'
 import StakeholderMatrix from './pages/settings/StakeholderMatrix.jsx'
 import PostIncident from './pages/incident/PostIncident.jsx'
 import AuditLog from './pages/incident/AuditLog.jsx'
@@ -205,11 +207,13 @@ export default function App() {
                   <Route path="collections"    element={<Collections />} />
                 </Route>
                 <Route path="respond"         element={<Respond />} />
+                <Route path="recovery"        element={<Recovery />} />
                 <Route path="comms" element={<Comms />}>
                   <Route index                   element={<Navigate to="comments" replace />} />
                   <Route path="comments"         element={<CommsComments />} />
                   <Route path="oob"              element={<CommsOOB />} />
                   <Route path="stakeholders"     element={<CommsStakeholders />} />
+                  <Route path="notifications"    element={<CommsNotifications />} />
                 </Route>
                 <Route path="legal"           element={<Legal />} />
                 <Route path="mitre" element={<AttackLayout />}>

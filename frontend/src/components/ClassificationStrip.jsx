@@ -15,12 +15,16 @@ export function TeamChip({ team }) {
 }
 
 // The incident's classification as one read-only line that wraps when narrow: Type · Severity ·
-// TLP · Triage · How detected · Reporter · Teams · Tags. Used on the Situation board and on
+// TLP · Triage · How detected · Reporter · (Impact · Why this severity · Alert, when set) · Teams · Tags. Used on the Situation board and on
 // Details outside edit mode (edit mode keeps the form).
 export default function ClassificationStrip({ inc }) {
   const teams = inc.teams ?? []
   const tags  = inc.tags ?? []
   const none  = (text) => <span className="cls-none">{text}</span>
+  // I4: the 800-61 impact categories that are set, short labels (the part before the dash).
+  const short = (group, v) => labelOf(group, v).split(' — ')[0]
+  const impact = [['functional_impact', 'Functional'], ['information_impact', 'Information'], ['recoverability', 'Recoverability']]
+    .filter(([k]) => inc[k]).map(([k, l]) => `${l}: ${short(k, inc[k])}`).join(' · ')
   return (
     <div className="cls-strip">
       <dl className="cls-strip-items">
@@ -30,6 +34,9 @@ export default function ClassificationStrip({ inc }) {
         <div><dt>Triage</dt><dd><span className={`pill ${pillOf('triage_state', inc.triage_state)}`}>{labelOf('triage_state', inc.triage_state)}</span></dd></div>
         <div><dt>How detected</dt><dd>{inc.detection_method ? labelOf('detection_method', inc.detection_method) : none('Unknown')}</dd></div>
         <div><dt>Reporter</dt><dd>{inc.reporter || none('—')}</dd></div>
+        {impact && <div><dt>Impact</dt><dd>{impact}</dd></div>}
+        {inc.severity_rationale && <div><dt>Why this severity</dt><dd>{inc.severity_rationale}</dd></div>}
+        {inc.alert_reference && <div><dt>Alert</dt><dd>{inc.alert_reference}</dd></div>}
         <div><dt>Teams</dt><dd>{teams.length ? teams.map(t => <TeamChip key={t.id} team={t} />) : none('Unrestricted')}</dd></div>
         <div><dt>Tags</dt><dd>{tags.length ? tags.map(t => <TagChip key={t} tag={t} />) : none('None')}</dd></div>
       </dl>

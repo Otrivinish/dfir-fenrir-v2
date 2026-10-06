@@ -205,7 +205,8 @@ async def delete_checklist_item(
 
 @router.patch("/{incident_id}/post-incident/checklist/{item_id}",
               response_model=ClosureChecklistItemOut,
-              responses={409: {"model": ApiErrorBody, "description": "incident_closed"}},
+              responses={409: {"model": ApiErrorBody, "description": "incident_closed"},
+                         422: {"model": ApiErrorBody, "description": "nothing_to_change, not_applicable_not_allowed"}},
               summary="Toggle a closure checklist item")
 async def toggle_checklist_item(
     incident_id: uuid.UUID,
@@ -215,12 +216,17 @@ async def toggle_checklist_item(
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> ClosureChecklistItemOut:
-    """Check or uncheck a closure checklist item.
+    """Check or uncheck a closure checklist item, or mark it not applicable (I5).
 
+    Body {checked} or {not_applicable, na_reason?}; neither is 422 code nothing_to_change.
     Requires the analyst role; the incident must not be closed (409 code
     incident_closed); returns 404 if the item is not found. Checking records the
-    current user and timestamp; unchecking clears them. The change is audited and
-    the updated item is returned.
+    current user and timestamp and clears N/A; unchecking clears them. not_applicable=true
+    unchecks the item and stores na_reason (optional: Gate 2 counts an N/A item as done and
+    warns, checklist_na_reason_missing, when it has no reason); not_applicable=false clears
+    N/A and its reason. "Incident formally closed" (item_key incident_closed) is ticked by Close
+    and can't be marked N/A (422 code not_applicable_not_allowed). The change is audited and the
+    updated item is returned.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -235,16 +241,32 @@ async def toggle_checklist_item(
     if not item:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Checklist item not found")
 
-    item.checked      = req.checked
-    item.checked_by_id = user.id if req.checked else None
-    item.checked_by    = (user.full_name or user.username) if req.checked else None
-    item.checked_at    = datetime.now(timezone.utc) if req.checked else None
+    if req.checked is None and req.not_applicable is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "nothing_to_change",
+                       "Send checked (true/false) or not_applicable (true/false, with an optional na_reason).")
+    if req.not_applicable and item.item_key == "incident_closed":
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "not_applicable_not_allowed",
+                       "\"Incident formally closed\" is ticked by Close; it can't be marked not applicable.")
+    checked = bool(req.checked) and not req.not_applicable
+    if req.not_applicable is not None:
+        item.not_applicable = req.not_applicable
+        item.na_reason = ((req.na_reason or "").strip() or None) if req.not_applicable else None
+    elif checked:
+        item.not_applicable, item.na_reason = False, None
+    if req.checked is not None or req.not_applicable:
+        item.checked       = checked
+        item.checked_by_id = user.id if checked else None
+        item.checked_by    = (user.full_name or user.username) if checked else None
+        item.checked_at    = datetime.now(timezone.utc) if checked else None
 
+    details = {"incident_id": str(incident_id), "item_key": item.item_key, "checked": item.checked}
+    if req.not_applicable is not None:
+        details.update(not_applicable=item.not_applicable, na_reason=item.na_reason)
     await write_audit(
         db, "closure_checklist_toggle",
         user_id=user.id, username=user.username,
         resource_type="closure_checklist_item", resource_id=str(item.id),
-        details={"incident_id": str(incident_id), "item_key": item.item_key, "checked": req.checked},
+        details=details,
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -855,7 +877,7 @@ async def get_incident_analytics(
     # ── Playbook tasks
     task_rows = (await db.execute(
         select(PlaybookTask.status, func.count().label("n"))
-        .where(PlaybookTask.incident_id == incident_id)
+        .where(PlaybookTask.incident_id == incident_id, PlaybookTask.archived_at.is_(None))   # I3: current plan
         .group_by(PlaybookTask.status)
     )).all()
     task_by_status = {r.status: r.n for r in task_rows}

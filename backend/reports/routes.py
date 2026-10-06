@@ -19,11 +19,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from affected_systems.routes import compromised_systems
+from recovery.service import scope_rows as recovery_scope_rows, summarize as recovery_summarize, to_out as recovery_to_out
+from stakeholder_notifications.service import (levels as sn_levels, levels_out as sn_levels_out,
+                                               obligations as sn_obligations, summarize as sn_summarize,
+                                               to_out as sn_to_out)
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
 from files.routes import report_file_present, report_image_digest
 from incidents.access import get_accessible_incident
+from incidents.gates import sign_off_history as gate_sign_off_history
 from models import (
     AuditLog, BusinessImpact, CaseNote, ClosureChecklistItem, Decision, Entity, EntityFile, EntityRelation,
     Evidence, GeneratedReport, Incident, IncidentAssignment, IncidentAttribution,
@@ -92,7 +97,8 @@ async def get_report_data(
     """Assemble the complete data bundle for an incident report, for client-side rendering.
 
     Aggregates the incident with its IOCs (threat-intel enriched), entities and relations,
-    timeline, playbook tasks, respond actions, decisions, closure checklist, lessons learned,
+    timeline, playbook tasks (the current plan; a replaced plan's Done/Skipped tasks in
+    playbook_tasks_archived), respond actions, decisions, closure checklist, lessons learned,
     evidence summary, business impact, costs, a MITRE summary computed from the timeline,
     assignments, regulatory deadlines (with met/violated compliance), stakeholders (identity +
     role only), threat-actor attributions and affected systems. Sensitive fields (e.g.
@@ -121,9 +127,19 @@ async def get_report_data(
       with a Z suffix.
     - `sign_offs[]`: Incident Commander, Deputy, Legal Liaison and DPO, each with the
       users assigned to that role on this incident ({username, name}; empty if none).
+    - `gate_sign_offs[]` (I5): every recorded gate sign-off, oldest first: {id, gate,
+      gate_label, role ic|dpo, role_label, username, signed_as, signed_at (UTC Z), statement,
+      state_sha256, current (made since the last re-open: only those count)}.
     - `case_notes[]` (H2): the append-only case notes, oldest first: {id, created_at (UTC Z),
       author_username, body (current OOB passphrase shown as "[passphrase]"), corrects_id,
       corrected_by_id, links (counts per kind), content_sha256}.
+    - `recovery` (I1): {summary, items} as GET …/recovery returns them (every in-scope system,
+      timestamps UTC Z): restore point, restored at/by, validation method and checklist,
+      validated at/by, same_person_validation, monitoring window, notes.
+    - `stakeholder_notifications` (I2): {summary, severity_levels, items} as GET
+      …/stakeholder-notifications returns them (every obligation, superseded included, timestamps
+      UTC Z): role, category, required, severity, clock start, due, status, notified at/by/channel,
+      linked stakeholder name, not-required reason, note.
     """
     # Access gate — returns 404 (not 403) for incidents the caller can't see,
     # matching the rest of the per-incident routers. Without this any analyst
@@ -150,11 +166,13 @@ async def get_report_data(
         .order_by(TimelineEvent.event_time)
     )).scalars().all()
 
-    tasks = (await db.execute(
+    all_tasks = (await db.execute(
         select(PlaybookTask)
         .where(PlaybookTask.incident_id == incident_id)
         .order_by(PlaybookTask.order_index)
     )).scalars().all()
+    # I3: playbook_tasks = the current plan; the Done/Skipped tasks of a replaced plan go to
+    # playbook_tasks_archived (below).
 
     actions = (await db.execute(
         select(RespondAction)
@@ -300,7 +318,7 @@ async def get_report_data(
     # and playbook tasks
     assignee_ids = {a.assignee_id for a in actions if a.assignee_id}
     assignee_ids |= {d.decided_by_id for d in decisions if d.decided_by_id}
-    assignee_ids |= {t.assignee_id for t in tasks if t.assignee_id}
+    assignee_ids |= {t.assignee_id for t in all_tasks if t.assignee_id}
     # E4: OOB log authors, the closer and the assignees (sign-off names).
     assignee_ids |= {o.created_by_id for o in oob_log if o.created_by_id}
     assignee_ids |= {a.user_id for a in assignments if a.user_id}
@@ -321,11 +339,11 @@ async def get_report_data(
         d["performed_by"] = username_map.get(str(a.assignee_id), "") if a.assignee_id else ""
         actions_out.append(d)
 
-    tasks_out = []
-    for t in tasks:
+    tasks_out, archived_tasks_out = [], []
+    for t in all_tasks:
         d = jsonable_encoder(t)
         d["assignee_username"] = username_map.get(str(t.assignee_id), "") if t.assignee_id else ""
-        tasks_out.append(d)
+        (tasks_out if t.archived_at is None else archived_tasks_out).append(d)
 
     decisions_out = []
     for dec in decisions:
@@ -414,6 +432,19 @@ async def get_report_data(
         for n in case_notes
     ]
 
+    # I1: the recovery tracker -- every in-scope system with its restore / validation record.
+    rec_rows = await recovery_scope_rows(db, incident_id)
+    recovery_out = {"summary": recovery_summarize(inc, rec_rows).model_dump(mode="json"),
+                    "items":   [o.model_dump(mode="json") for o in await recovery_to_out(db, rec_rows)]}
+
+    # I2: the stakeholder notification tracker -- every obligation with what was recorded.
+    sn_rows = await sn_obligations(db, incident_id)
+    notifications_out = {
+        "summary":         sn_summarize(sn_rows).model_dump(mode="json"),
+        "severity_levels": [lv.model_dump(mode="json") for lv in sn_levels_out(await sn_levels(db, incident_id))],
+        "items":           [o.model_dump(mode="json") for o in await sn_to_out(db, sn_rows)],
+    }
+
     # Close sign-off: the reason from the latest incident_close audit row. Only close_incident writes
     # that row and audit_logs is append-only, so a client can't forge it (a timeline event can be).
     close_reason = None
@@ -454,6 +485,7 @@ async def get_report_data(
         "entity_relations": jsonable_encoder(list(entity_relations)),
         "timeline_events":  jsonable_encoder(list(timeline)),
         "playbook_tasks":   tasks_out,
+        "playbook_tasks_archived": archived_tasks_out,
         "respond_actions":  actions_out,
         "decisions":        decisions_out,
         "lessons_learned":  jsonable_encoder(ll) if ll else None,
@@ -477,7 +509,10 @@ async def get_report_data(
         "oob_log":          oob_log_out,
         "closure":          closure,
         "sign_offs":        sign_offs,
+        "gate_sign_offs":   await gate_sign_off_history(db, incident_id),
         "case_notes":       case_notes_out,
+        "recovery":         recovery_out,
+        "stakeholder_notifications": notifications_out,
     }
 
 

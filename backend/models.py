@@ -320,6 +320,18 @@ class Incident(Base):
 
     # Detection and affected scope
     detection_method = Column(String(32))   # siem_alert | user_report | threat_hunting | external_notification | automated_scan | pen_test | other
+    # I4: where detected_at came from — reported (entered by a person or API client), alert (the SIEM
+    # alert's own time) or received (the SIEM alert carried no usable time: the receipt time). Null = legacy.
+    detected_at_source = Column(String(16))
+
+    # I4 intake (all optional): NIST SP 800-61 impact categories, why this severity, the alert it came from.
+    functional_impact  = Column(String(16))   # none | low | medium | high
+    information_impact = Column(String(16))   # none | privacy | proprietary | integrity
+    recoverability     = Column(String(16))   # regular | supplemented | extended | not_recoverable
+    severity_rationale = Column(Text)
+    alert_reference    = Column(String(256))  # source system + alert id, free text
+    # I4: when Dark Operation was last explicitly decided (on or off, audited); null = never decided.
+    dark_operation_decided_at = Column(DateTime(timezone=True))
 
     # Freeform analyst tags — normalised to lowercase-dashed at the API boundary.
     # Capped at 20 by core.tags. See `normalize_tags()` for the canonical helper.
@@ -990,6 +1002,11 @@ class PlaybookTemplate(Base):
     is_system   = Column(Boolean, nullable=False, default=False)
     # tasks JSON: [{ "title", "description"?, "phase", "order" }, ...]
     tasks       = Column(JSON, nullable=False, default=list)
+    # I3 (R24): incident types this template is suggested for (IncidentType values); [] = none.
+    incident_types = Column(JSON, nullable=False, default=list, server_default=text("'[]'"))
+    # I3 (R60): set only by POST /api/playbook-templates/{id}/review; null = never reviewed.
+    last_reviewed_at    = Column(DateTime(timezone=True), nullable=True)
+    last_reviewed_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
     created_at  = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at  = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
@@ -1026,6 +1043,12 @@ class PlaybookTask(Base):
     created_at    = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at    = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
+    # I3: a Done / Skipped task kept as read-only history when the plan was replaced. Archived
+    # tasks are not part of the current plan (lists, counts, gates) and can't be changed.
+    archived_at    = Column(DateTime(timezone=True), nullable=True)
+    archived_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    archive_reason = Column(Text, nullable=True)
+
 
 # ─── Respond — containment / eradication / recovery trackers ─────────────────
 # Single table with a `category` discriminator (containment | eradication |
@@ -1060,6 +1083,8 @@ class RespondAction(Base):
     reverted_at    = Column(DateTime(timezone=True))
     reverted_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     revert_reason  = Column(Text)
+    # I5 (R23): why the action was deferred. Optional; Gate 1 warns about a deferred action without one.
+    defer_reason   = Column(Text)
 
     # C1: the entity / IOC the action targets (same incident, checked by the route)
     # and the template it was made from. Deleting the entity/IOC unlinks the action.
@@ -1093,6 +1118,121 @@ class Decision(Base):
     created_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at    = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at    = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+# ─── Recovery tracker (I1, R21) ──────────────────────────────────────────────
+# One row per in-scope system (a compromised host / service / network_range entity), made on its
+# first write; a system without a row is "not_started". State machine and rules: recovery/service.py.
+# FKs RESTRICT: the record of who restored and validated a system outlives nothing it names (the
+# entity delete route refuses with 409 recovery_record_exists; incidents are never deleted).
+
+class RecoveryRecord(Base):
+    __tablename__ = "recovery_records"
+    __table_args__ = (
+        CheckConstraint("state IN ('not_started', 'restoring', 'restored', 'validated', 'not_required')",
+                        name="ck_recovery_records_state"),
+        CheckConstraint("(state = 'not_required') = (not_required_reason IS NOT NULL)",
+                        name="ck_recovery_records_not_required_reason"),
+        CheckConstraint("(state IN ('restored', 'validated')) = (restored_at IS NOT NULL AND restored_by_id IS NOT NULL)",
+                        name="ck_recovery_records_restored"),
+        CheckConstraint("(state = 'validated') = (validated_at IS NOT NULL AND validated_by_id IS NOT NULL)",
+                        name="ck_recovery_records_validated"),
+        CheckConstraint("monitoring_start IS NULL OR monitoring_end IS NULL OR monitoring_end >= monitoring_start",
+                        name="ck_recovery_records_window"),
+        CheckConstraint("validated_at IS NULL OR validated_at >= restored_at", name="ck_recovery_records_order"),
+    )
+
+    id                  = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id         = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="RESTRICT"), nullable=False, index=True)
+    entity_id           = Column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="RESTRICT"), nullable=False, unique=True)
+    state               = Column(String(16), nullable=False, default="not_started")
+    not_required_reason = Column(Text)
+    restore_point_ref   = Column(String(512))                       # backup id / snapshot / image description
+    restore_point_at    = Column(DateTime(timezone=True))           # the point in time the restore returns to
+    restored_at         = Column(DateTime(timezone=True))
+    restored_by_id      = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True)
+    validation_method   = Column(Text)
+    validation_checklist = Column(JSON, nullable=False, default=list)  # [{item, done}]
+    validated_at        = Column(DateTime(timezone=True))
+    validated_by_id     = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True)
+    monitoring_start    = Column(DateTime(timezone=True))
+    monitoring_end      = Column(DateTime(timezone=True))
+    notes               = Column(Text)
+    created_at          = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at          = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    updated_by_id       = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True)
+
+
+# ─── Stakeholder notification tracker (I2, R22) ─────────────────────────────
+# incident_severity_levels: when the incident FIRST reached each severity (one row per level).
+# The initial level is anchored at detected_at (else created_at); a later change at the time
+# of the change. A stakeholder-matrix rule's countdown starts at its severity's row.
+# stakeholder_notifications: one obligation per (incident, matrix rule, rule severity), a
+# snapshot of the rule when it arose. Obligations are never deleted: one whose rule no longer
+# matches (severity / type / rule changed or removed) gets superseded_at. Rules and the
+# recompute: stakeholder_notifications/service.py.
+
+class IncidentSeverityLevel(Base):
+    __tablename__ = "incident_severity_levels"
+    __table_args__ = (
+        UniqueConstraint("incident_id", "severity", name="uq_incident_severity_levels_incident_severity"),
+        CheckConstraint("severity IN ('low', 'medium', 'high', 'critical')", name="ck_incident_severity_levels_severity"),
+        CheckConstraint("source IN ('initial', 'change', 'backfill')", name="ck_incident_severity_levels_source"),
+    )
+
+    id             = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id    = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False)
+    severity       = Column(String(16), nullable=False)
+    reached_at     = Column(DateTime(timezone=True), nullable=False)
+    source         = Column(String(16), nullable=False)
+    recorded_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, index=True)
+    created_at     = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class StakeholderNotification(Base):
+    __tablename__ = "stakeholder_notifications"
+    __table_args__ = (
+        UniqueConstraint("incident_id", "rule_id", "severity", name="uq_stakeholder_notifications_incident_rule_severity"),
+        CheckConstraint("status IN ('pending', 'notified', 'not_required')", name="ck_stakeholder_notifications_status"),
+        CheckConstraint("severity IN ('low', 'medium', 'high', 'critical')", name="ck_stakeholder_notifications_severity"),
+        CheckConstraint("channel IS NULL OR channel IN ('phone', 'email', 'in_person', 'oob', 'other')",
+                        name="ck_stakeholder_notifications_channel"),
+        CheckConstraint("(status = 'notified') = (notified_at IS NOT NULL AND notified_by_id IS NOT NULL AND channel IS NOT NULL)",
+                        name="ck_stakeholder_notifications_notified"),
+        CheckConstraint("(status = 'not_required') = (not_required_reason IS NOT NULL)",
+                        name="ck_stakeholder_notifications_not_required"),
+        CheckConstraint("due_at >= clock_start_at", name="ck_stakeholder_notifications_due"),
+        Index("ix_stakeholder_notifications_overdue_scan", "due_at",
+              postgresql_where=text("status = 'pending' AND superseded_at IS NULL AND reminder_sent_at IS NULL")),
+    )
+
+    id                    = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id           = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True)
+    rule_id               = Column(UUID(as_uuid=True), ForeignKey("stakeholder_matrix_rules.id", ondelete="SET NULL"),
+                                   nullable=True, index=True)
+    # Snapshot of the rule when the obligation arose (later rule edits don't rewrite it).
+    severity              = Column(String(16), nullable=False)
+    role                  = Column(String(128), nullable=False)
+    category              = Column(String(32), nullable=False)
+    required              = Column(Boolean, nullable=False)
+    notify_within_minutes = Column(Integer, nullable=False)
+    clock_start_at        = Column(DateTime(timezone=True), nullable=False)   # severity first reached
+    due_at                = Column(DateTime(timezone=True), nullable=False)
+    status                = Column(String(16), nullable=False, default="pending")
+    superseded_at         = Column(DateTime(timezone=True))
+    superseded_reason     = Column(String(32))
+    notified_at           = Column(DateTime(timezone=True))
+    notified_by_id        = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, index=True)
+    channel               = Column(String(16))
+    oob_log_id            = Column(UUID(as_uuid=True), ForeignKey("oob_logs.id", ondelete="SET NULL"), nullable=True, index=True)
+    stakeholder_id        = Column(UUID(as_uuid=True), ForeignKey("incident_stakeholders.id", ondelete="SET NULL"),
+                                   nullable=True, index=True)
+    note                  = Column(Text)
+    not_required_reason   = Column(Text)
+    reminder_sent_at      = Column(DateTime(timezone=True))
+    created_at            = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at            = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    updated_by_id         = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, index=True)
 
 
 # ─── Comments (per-incident flat thread) ─────────────────────────────────────
@@ -1197,6 +1337,36 @@ class CaseNote(Base):
     timeline_event_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=False, server_default=text("'{}'"))
     content_sha256     = Column(String(64), nullable=False)
 
+
+
+# ─── Gate sign-offs (I5, R23) ────────────────────────────────────────────────
+# The Incident Commander's and the DPO's sign-off on a phase gate (Gate 1 post_incident, Gate 2 close),
+# one row each, append-only like case notes: a BEFORE UPDATE OR DELETE trigger raises (core/database.py)
+# and the FKs are RESTRICT. `gate_state` is the gate's blocking checks as the signer saw them (key, status,
+# label, detail; sign-off checks excluded) and `state_sha256` = SHA-256 of its canonical JSON
+# (incidents/gates.state_hash). Only sign-offs made since the incident was last re-opened count.
+
+class IncidentGateSignOff(Base):
+    __tablename__ = "incident_gate_sign_offs"
+    __table_args__ = (
+        CheckConstraint("gate IN ('post_incident', 'close')", name="ck_gate_sign_offs_gate"),
+        CheckConstraint("role IN ('ic', 'dpo')", name="ck_gate_sign_offs_role"),
+        CheckConstraint("char_length(statement) BETWEEN 10 AND 2000", name="ck_gate_sign_offs_statement"),
+        CheckConstraint("state_sha256 ~ '^[0-9a-f]{64}$'", name="ck_gate_sign_offs_sha256"),
+        Index("ix_gate_sign_offs_incident", "incident_id", "gate", "signed_at"),
+    )
+
+    id           = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id  = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="RESTRICT"), nullable=False)
+    gate         = Column(String(16), nullable=False)
+    role         = Column(String(8), nullable=False)        # ic | dpo
+    user_id      = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    username     = Column(String(64), nullable=False)       # denormalised for reports
+    signed_as    = Column(String(64), nullable=False)       # the basis: operational role key(s) held, or admin
+    signed_at    = Column(DateTime(timezone=True), nullable=False)
+    statement    = Column(Text, nullable=False)
+    gate_state   = Column(JSON, nullable=False)
+    state_sha256 = Column(String(64), nullable=False)
 
 # ─── OOB communications log (per-incident) ───────────────────────────────────
 # Records out-of-band contact events. Channel list matches old Fenrir:
@@ -1715,6 +1885,10 @@ class ClosureChecklistItem(Base):
     # Soft-delete flag — DELETE flips this to FALSE so the idempotent seed
     # loop in post_incident/routes.py doesn't resurrect dismissed defaults.
     is_active   = Column(Boolean, nullable=False, default=True)
+    # I5 (R23): "not applicable", never at the same time as checked. The reason is optional; Gate 2
+    # warns about an N/A item without one.
+    not_applicable = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    na_reason      = Column(Text, nullable=True)
 
     __table_args__ = (UniqueConstraint("incident_id", "item_key", name="uq_closure_item"),)
 
@@ -2239,6 +2413,8 @@ class StakeholderMatrixRule(Base):
     notify_within_minutes = Column(Integer,     nullable=False)
     category              = Column(String(32),  nullable=False, default="operational")
     required              = Column(Boolean,     nullable=False, default=False)
+    # I2: incident types the rule applies to; empty = every type (including none set).
+    incident_types        = Column(JSON,        nullable=False, default=list, server_default=text("'[]'"))
 
     created_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"),
                            nullable=True)

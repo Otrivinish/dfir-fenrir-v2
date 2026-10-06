@@ -3,6 +3,7 @@ import { useOutletContext, Link } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { PHASE, labelOf } from '../../lib/incidentVocab.js'
 import { formatLocal } from '../../lib/datetime.js'
+import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 
 const STATUS_LABEL = {
   open:         'Open',
@@ -10,40 +11,43 @@ const STATUS_LABEL = {
   done:         'Done',
   skipped:      'Skipped',
 }
-const STATUS_PILL = {
-  open:         'pill-gray',
-  in_progress:  'pill-med',
-  done:         'pill-ok',
-  skipped:      'pill-gray',
-}
-
 export default function Playbook() {
-  const { inc, bumpRail } = useOutletContext()
+  const { inc, bumpRail, access } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  // Replace is the incident lead's (IC / Deputy) or an admin's: the API says so in /access (I3).
+  const canReplace = !!access?.capabilities?.includes('replace_playbook')
 
   const [tasks, setTasks]         = useState([])
+  const [archived, setArchived]   = useState([])     // Done/Skipped history of replaced plans (read-only)
   const [templates, setTemplates] = useState([])
+  const [suggested, setSuggested] = useState([])     // templates suggested for the incident type
   const [users, setUsers]         = useState([])
   const [loading, setLoading]     = useState(true)
   const [error, setError]         = useState(null)
+  const [notice, setNotice]       = useState(null)
   const [busy, setBusy]           = useState(false)
-  const [modal, setModal]         = useState(null)   // null | 'add' | 'apply'
+  const [modal, setModal]         = useState(null)   // null | 'add' | {apply: templateId} | {skip: task}
 
   const load = useCallback(async () => {
     setError(null)
     try {
-      const [t, tpl] = await Promise.all([
-        api.listPlaybookTasks(inc.id),
+      const [t, tpl, sug] = await Promise.all([
+        api.listPlaybookTasks(inc.id, { includeArchived: true }),
         api.listPlaybookTemplates().catch(() => []),
+        inc.incident_type
+          ? api.listPlaybookTemplates({ incident_type: inc.incident_type }).catch(() => [])
+          : Promise.resolve([]),
       ])
-      setTasks(t)
+      setTasks(t.filter(x => !x.archived_at))
+      setArchived(t.filter(x => x.archived_at))
       setTemplates(tpl)
+      setSuggested(sug)
     } catch (e) {
       setError(e.message || 'Could not load playbook')
     } finally {
       setLoading(false)
     }
-  }, [inc.id])
+  }, [inc.id, inc.incident_type])
 
   useEffect(() => { load() }, [load])
 
@@ -62,6 +66,9 @@ export default function Playbook() {
     const u = users.find(x => x.id === uid)
     return u ? u.username : uid.slice(0, 8) + '…'
   }
+
+  // Suggested templates not yet in the current plan.
+  const openSuggestions = suggested.filter(s => !tasks.some(t => t.source_template_id === s.id))
 
   // Group tasks by phase, preserving PHASE ordering.
   const groups = useMemo(() => {
@@ -85,31 +92,30 @@ export default function Playbook() {
   const totalTasks = tasks.length
   const progress   = totalTasks > 0 ? Math.round((totalDone / totalTasks) * 100) : 0
 
-  const onStatusChange = async (task, next) => {
+  const patchTask = async (task, payload, what) => {
     setBusy(true); setError(null)
     try {
-      const updated = await api.updatePlaybookTask(inc.id, task.id, { status: next })
+      const updated = await api.updatePlaybookTask(inc.id, task.id, payload)
       setTasks(prev => prev.map(t => t.id === updated.id ? updated : t))
       bumpRail?.()
+      return true
     } catch (e) {
-      setError(e.message || 'Could not update status')
+      setError(e.message || `Could not ${what}`)
+      return false
     } finally {
       setBusy(false)
     }
   }
 
-  const onAssigneeChange = async (task, next) => {
-    setBusy(true); setError(null)
-    try {
-      const updated = await api.updatePlaybookTask(inc.id, task.id, { assignee_id: next || null })
-      setTasks(prev => prev.map(t => t.id === updated.id ? updated : t))
-      bumpRail?.()
-    } catch (e) {
-      setError(e.message || 'Could not change assignee')
-    } finally {
-      setBusy(false)
-    }
+  // Skipping needs a reason (the API answers 422 skip_reason_required without one).
+  const onStatusChange = (task, next) => {
+    if (next === 'skipped') { setModal({ skip: task }); return }
+    patchTask(task, { status: next }, 'update status')
   }
+
+  const onDueChange = (task, next) => patchTask(task, { due_at: next || null }, 'change the due date')
+
+  const onAssigneeChange = (task, next) => patchTask(task, { assignee_id: next || null }, 'change assignee')
 
   const onDelete = async (task) => {
     if (!window.confirm(`Delete task "${task.title}"?`)) return
@@ -149,7 +155,7 @@ export default function Playbook() {
           <button
             type="button"
             className="btn"
-            onClick={() => setModal('apply')}
+            onClick={() => setModal({ apply: '' })}
             disabled={isClosed || templates.length === 0}
             title={isClosed ? 'Closed incidents are read-only' : 'Apply a template'}
           >Apply template</button>
@@ -165,6 +171,25 @@ export default function Playbook() {
       {error && (
         <div className="alert error" role="alert">
           <span className="alert-icon">!</span><span>{error}</span>
+        </div>
+      )}
+      {notice && (
+        <div className="alert info" role="status">
+          <span className="alert-icon">i</span><span>{notice}</span>
+        </div>
+      )}
+
+      {!loading && !isClosed && openSuggestions.length > 0 && (
+        <div className="pb-suggest" role="note" aria-labelledby="pb-suggest-head">
+          <span id="pb-suggest-head" className="pb-suggest-head">
+            Suggested for {labelOf('incident_type', inc.incident_type)}:
+          </span>
+          {openSuggestions.map(s => (
+            <button key={s.id} type="button" className="btn ghost" onClick={() => setModal({ apply: s.id })}
+                    title="Opens Apply template with this template selected (nothing is applied yet)">
+              {s.name} ({s.task_count} tasks)
+            </button>
+          ))}
         </div>
       )}
 
@@ -190,12 +215,15 @@ export default function Playbook() {
             usernameOf={usernameOf}
             onStatusChange={onStatusChange}
             onAssigneeChange={onAssigneeChange}
+            onDueChange={onDueChange}
             onDelete={onDelete}
             isClosed={isClosed}
             busy={busy}
           />
         ))
       )}
+
+      {!loading && archived.length > 0 && <ArchivedTasks tasks={archived} usernameOf={usernameOf} />}
 
       {modal === 'add' && (
         <AddTaskModal
@@ -204,13 +232,37 @@ export default function Playbook() {
           onSaved={(t) => { setTasks(prev => [...prev, t]); setModal(null); bumpRail?.() }}
         />
       )}
-      {modal === 'apply' && (
+      {modal?.apply !== undefined && (
         <ApplyTemplateModal
           incidentId={inc.id}
           templates={templates}
+          suggested={suggested}
+          typeLabel={inc.incident_type ? labelOf('incident_type', inc.incident_type) : null}
+          initialTemplateId={modal.apply}
           existingCount={totalTasks}
+          canReplace={canReplace}
           onClose={() => setModal(null)}
-          onApplied={(allTasks) => { setTasks(allTasks); setModal(null); bumpRail?.() }}
+          onApplied={({ mode, plan, tpl }) => {
+            setModal(null); bumpRail?.(); load()
+            if (mode === 'append') {
+              // Append never removes a task, so the growth of the plan is what was added.
+              const added = plan.length - totalTasks, skipped = (tpl?.task_count ?? added) - added
+              setNotice(`Added ${added} task${added === 1 ? '' : 's'} from ${tpl?.name || 'the template'}` +
+                (skipped > 0 ? `; ${skipped} already in the plan ${skipped === 1 ? 'was' : 'were'} skipped.` : '.'))
+            } else {
+              setNotice('Plan replaced. Done and Skipped tasks of the old plan are under History.')
+            }
+          }}
+        />
+      )}
+      {modal?.skip && (
+        <SkipTaskModal
+          task={modal.skip}
+          onClose={() => setModal(null)}
+          onSave={async (reason) => {
+            if (await patchTask(modal.skip, { status: 'skipped', skip_reason: reason }, 'skip the task')) setModal(null)
+          }}
+          busy={busy}
         />
       )}
     </section>
@@ -219,7 +271,7 @@ export default function Playbook() {
 
 // ── Phase group ───────────────────────────────────────────────────────────
 
-function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange, onDelete, isClosed, busy }) {
+function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange, onDueChange, onDelete, isClosed, busy }) {
   return (
     <div style={{ marginBottom: 'var(--space-4)' }}>
       <h3 style={{
@@ -239,7 +291,7 @@ function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange
         {group.tasks.map(t => (
           <li key={t.id} style={{
             display: 'grid',
-            gridTemplateColumns: '120px 1fr 180px 180px 80px',
+            gridTemplateColumns: '120px 1fr 170px 220px 70px',
             gap: 'var(--space-2)',
             padding: 'var(--space-2) var(--space-3)',
             background: 'var(--surface-2)',
@@ -278,6 +330,10 @@ function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange
                   done {formatLocal(t.completed_at)}
                 </div>
               )}
+              {t.status === 'skipped' && t.skip_reason && (
+                <div className="pb-task-note">Skipped: {t.skip_reason}</div>
+              )}
+              {t.source_template_id && <div className="pb-task-note">from template</div>}
             </div>
             <div>
               <select
@@ -298,11 +354,17 @@ function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange
                 )}
               </select>
             </div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
-              <span className={`pill ${STATUS_PILL[t.status] || 'pill-gray'}`}>{STATUS_LABEL[t.status]}</span>
-              {t.source_template_id && (
-                <div style={{ color: 'var(--dim)', fontSize: 10, marginTop: 4 }}>from template</div>
-              )}
+            <div className="pb-due">
+              <LocalDateTimePicker
+                id={`pb-due-${t.id}`}
+                value={t.due_at || ''}
+                onChange={(v) => onDueChange(t, v)}
+                disabled={isClosed || busy}
+                clearable
+                hint={false}
+                placeholder="Due (optional)"
+              />
+              {t.overdue && <div className="pb-overdue"><span aria-hidden="true">! </span>Overdue</div>}
             </div>
             <div style={{ textAlign: 'right' }}>
               <button
@@ -316,6 +378,74 @@ function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange
           </li>
         ))}
       </ul>
+    </div>
+  )
+}
+
+// ── History: Done/Skipped tasks of replaced plans (read-only) ─────────────
+
+function ArchivedTasks({ tasks, usernameOf }) {
+  return (
+    <details className="pb-history">
+      <summary>History: {tasks.length} task{tasks.length === 1 ? '' : 's'} from replaced plans (read-only)</summary>
+      <ul>
+        {tasks.map(t => (
+          <li key={t.id}>
+            <span className="pb-history-status">{STATUS_LABEL[t.status]}</span>
+            <span className="pb-history-title">{t.title}</span>
+            <span className="pb-task-note">
+              {labelOf('phase', t.phase)}
+              {t.status === 'done' && t.completed_at ? ` · done ${formatLocal(t.completed_at)}` : ''}
+              {t.status === 'skipped' && t.skip_reason ? ` · skipped: ${t.skip_reason}` : ''}
+              {t.assignee_id ? ` · ${usernameOf(t.assignee_id)}` : ''}
+              {` · replaced ${formatLocal(t.archived_at)}${t.archive_reason ? `: ${t.archive_reason}` : ''}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  )
+}
+
+// ── Skip task modal (a reason is required) ───────────────────────────────
+
+function SkipTaskModal({ task, onClose, onSave, busy }) {
+  const [reason, setReason] = useState('')
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [busy, onClose])
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" role="dialog" aria-labelledby="pb-skip-title">
+        <div className="modal-head">
+          <h2 id="pb-skip-title">Skip task</h2>
+          <button type="button" className="modal-close" onClick={onClose} disabled={busy}>×</button>
+        </div>
+        <form onSubmit={(e) => { e.preventDefault(); if (reason.trim()) onSave(reason.trim()) }}>
+          <div className="modal-body">
+            <div className="form">
+              <div style={{ fontWeight: 500 }}>{task.title}</div>
+              <div className="field">
+                <label className="field-label" htmlFor="pb-skip-reason">Why is it skipped?</label>
+                <textarea id="pb-skip-reason" className="input" value={reason} rows={3} maxLength={2048}
+                          onChange={(e) => setReason(e.target.value)} autoFocus required
+                          placeholder="e.g. Not applicable: no on-premises Exchange in scope" />
+                <div className="field-hint">Recorded on the task and in the audit log.</div>
+              </div>
+            </div>
+          </div>
+          <div className="modal-foot">
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn primary" disabled={busy || !reason.trim()}>
+              {busy ? 'Saving…' : 'Skip task'}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   )
 }
@@ -405,17 +535,21 @@ function AddTaskModal({ incidentId, onClose, onSaved }) {
 }
 
 // ── Apply template modal ──────────────────────────────────────────────────
+// Append (default, any analyst) adds the template's tasks; the API skips tasks of the same template
+// already in the plan. Replace is for the incident lead or an admin and needs a reason.
 
-function ApplyTemplateModal({ incidentId, templates, existingCount, onClose, onApplied }) {
-  const [templateId, setTemplateId] = useState(templates[0]?.id || '')
-  const [confirmed,  setConfirmed]  = useState(false)
+function ApplyTemplateModal({ incidentId, templates, suggested, typeLabel, initialTemplateId, existingCount,
+                              canReplace, onClose, onApplied }) {
+  const suggestedIds = new Set(suggested.map(t => t.id))
+  const others = templates.filter(t => !suggestedIds.has(t.id))
+  const [templateId, setTemplateId] = useState(initialTemplateId || suggested[0]?.id || templates[0]?.id || '')
+  const [mode, setMode]             = useState('append')
+  const [reason, setReason]         = useState('')
   const [busy, setBusy]             = useState(false)
   const [error, setError]           = useState(null)
 
   const hasExisting = existingCount > 0
-
-  // Reset confirmation when template changes
-  useEffect(() => { setConfirmed(false) }, [templateId])
+  const replacing = mode === 'replace' && hasExisting
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
@@ -427,14 +561,15 @@ function ApplyTemplateModal({ incidentId, templates, existingCount, onClose, onA
     e.preventDefault()
     setError(null)
     if (!templateId) { setError('Pick a template.'); return }
-    if (hasExisting && !confirmed) { setError('Confirm that existing tasks will be removed.'); return }
+    if (replacing && !reason.trim()) { setError('Say why the plan is replaced.'); return }
     setBusy(true)
     try {
-      const tasks = await api.instantiatePlaybook(incidentId, {
+      const plan = await api.instantiatePlaybook(incidentId, {
         template_id: templateId,
-        replace: true,
+        mode: replacing ? 'replace' : 'append',
+        ...(replacing ? { reason: reason.trim() } : {}),
       })
-      onApplied(tasks)
+      onApplied({ mode: replacing ? 'replace' : 'append', plan, tpl: templates.find(t => t.id === templateId) })
     } catch (e2) {
       setError(e2.message || 'Could not apply template')
     } finally {
@@ -442,6 +577,11 @@ function ApplyTemplateModal({ incidentId, templates, existingCount, onClose, onA
     }
   }
 
+  const option = (t) => (
+    <option key={t.id} value={t.id}>
+      {t.name} ({t.task_count} tasks){t.is_system ? '' : ' — custom'}
+    </option>
+  )
   const selected = templates.find(t => t.id === templateId)
 
   return (
@@ -459,11 +599,12 @@ function ApplyTemplateModal({ incidentId, templates, existingCount, onClose, onA
                 <label className="field-label" htmlFor="pb-tpl">Template</label>
                 <select id="pb-tpl" className="select" value={templateId}
                         onChange={(e) => setTemplateId(e.target.value)} autoFocus>
-                  {templates.map(t => (
-                    <option key={t.id} value={t.id}>
-                      {t.name} ({t.task_count} tasks){t.is_system ? '' : ' — custom'}
-                    </option>
-                  ))}
+                  {suggested.length > 0 ? (
+                    <>
+                      <optgroup label={`Suggested for ${typeLabel}`}>{suggested.map(option)}</optgroup>
+                      <optgroup label="All other templates">{others.map(option)}</optgroup>
+                    </>
+                  ) : templates.map(option)}
                 </select>
               </div>
 
@@ -474,26 +615,31 @@ function ApplyTemplateModal({ incidentId, templates, existingCount, onClose, onA
               )}
 
               {hasExisting && (
-                <div style={{
-                  padding: 'var(--space-3)',
-                  background: 'color-mix(in srgb, var(--high) 12%, transparent)',
-                  border: '1px solid var(--high)',
-                  borderRadius: 'var(--radius)',
-                }}>
-                  <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--high)', marginBottom: 'var(--space-1)' }}>
-                    This will delete the existing playbook
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--text)', marginBottom: 'var(--space-2)', lineHeight: 1.5 }}>
-                    The {existingCount} existing task{existingCount !== 1 ? 's' : ''} — including any completed or in-progress work — will be permanently deleted and replaced with the selected template.
-                  </div>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', cursor: 'pointer', fontSize: 13 }}>
-                    <input
-                      type="checkbox"
-                      checked={confirmed}
-                      onChange={(e) => setConfirmed(e.target.checked)}
-                    />
-                    I understand all saved progress will be lost
+                <fieldset className="pb-mode">
+                  <legend className="field-label">The plan already has {existingCount} task{existingCount !== 1 ? 's' : ''}</legend>
+                  <label>
+                    <input type="radio" name="pb-mode" value="append" checked={mode === 'append'}
+                           onChange={() => setMode('append')} />
+                    <span><b>Add to the plan</b>: the template's tasks are added; tasks from this template
+                      that are already in the plan are skipped.</span>
                   </label>
+                  <label className={canReplace ? '' : 'pb-mode-off'}>
+                    <input type="radio" name="pb-mode" value="replace" checked={mode === 'replace'}
+                           onChange={() => setMode('replace')} disabled={!canReplace} />
+                    <span><b>Replace the plan</b>: Done and Skipped tasks move to History (read-only); Open and
+                      In-progress tasks are removed.
+                      {!canReplace && ' Only the incident lead (IC or Deputy IC) or an admin can replace the plan.'}</span>
+                  </label>
+                </fieldset>
+              )}
+
+              {replacing && (
+                <div className="field">
+                  <label className="field-label" htmlFor="pb-replace-reason">Why replace the plan?</label>
+                  <textarea id="pb-replace-reason" className="input" value={reason} rows={3} maxLength={2048}
+                            onChange={(e) => setReason(e.target.value)} required
+                            placeholder="e.g. Reclassified from phishing to ransomware" />
+                  <div className="field-hint">Recorded on the archived tasks and in the audit log.</div>
                 </div>
               )}
 
@@ -509,9 +655,9 @@ function ApplyTemplateModal({ incidentId, templates, existingCount, onClose, onA
             <button
               type="submit"
               className="btn primary"
-              disabled={busy || (hasExisting && !confirmed)}
+              disabled={busy || (replacing && !reason.trim())}
             >
-              {busy ? 'Applying…' : 'Apply playbook'}
+              {busy ? 'Applying…' : replacing ? 'Replace plan' : hasExisting ? 'Add to plan' : 'Apply playbook'}
             </button>
           </div>
         </form>

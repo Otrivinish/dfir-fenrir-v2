@@ -19,6 +19,7 @@ from core.security import decrypt_secret
 from incidents.reference import assign as assign_reference
 from models import Incident, PlatformSetting
 from outbound_webhooks.service import suppressed_by_outbound_policy
+from stakeholder_notifications.service import record_level as record_severity_level, sync as sync_notifications
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -104,6 +105,8 @@ async def _create_incident(
     if too_old:
         vendor_time = None
     detected_at = min(vendor_time, created_at) if vendor_time else created_at
+    # I4: say where detected_at came from — never pass the receipt time off as the alert's time.
+    detected_at_source = "alert" if vendor_time is not None and vendor_time <= created_at else "received"
     inc = Incident(
         id=uuid.uuid4(),
         incident_number=inc_num,
@@ -115,6 +118,7 @@ async def _create_incident(
         reporter=reporter,
         detection_method="siem_alert",
         detected_at=detected_at,
+        detected_at_source=detected_at_source,
     )
     db.add(inc)
     await db.flush()
@@ -123,9 +127,13 @@ async def _create_incident(
         outcome="success",
         resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
         details={"ref": inc.ref, "severity": inc.severity, "reporter": reporter, "source": "siem_webhook",
-                 "detected_at": detected_at.isoformat(), "vendor_time_used": vendor_time is not None,
+                 "detected_at": detected_at.isoformat(), "detected_at_source": detected_at_source,
+                 "vendor_time_used": vendor_time is not None,
                  "vendor_time_too_old": too_old},
     )
+    # I2: the opening severity counts from detected_at; its stakeholder-matrix obligations are created now.
+    await record_severity_level(db, inc, at=detected_at, source="initial")
+    await sync_notifications(db, inc, cause="incident_created")
     await db.commit()
     await db.refresh(inc)
     return inc
@@ -174,7 +182,7 @@ async def inbound_splunk(
     outbound webhooks and an admin alert for high/critical. Returns the new
     incident's id, ref and status. detection_method is siem_alert; detected_at
     is `result._time` (epoch or ISO 8601) capped at receipt; receipt time when it is
-    missing, unparseable or more than 30 days before receipt."""
+    missing, unparseable or more than 30 days before receipt (detected_at_source alert or received)."""
     await _verify_key(db, x_fenrir_key)
 
     result = payload.get("result") or {}
@@ -207,7 +215,7 @@ async def inbound_sentinel(
     high/critical. Returns the new incident's id, ref and status.
     detection_method is siem_alert; detected_at is `TimeGenerated` capped at
     receipt; receipt time when it is missing, unparseable or more than 30 days
-    before receipt."""
+    before receipt (detected_at_source alert or received)."""
     await _verify_key(db, x_fenrir_key)
 
     title = (payload.get("title") or payload.get("name") or "Sentinel Alert")[:200]
@@ -234,7 +242,7 @@ async def inbound_elastic(
     high/critical. Returns the new incident's id, ref and status.
     detection_method is siem_alert; detected_at is top-level `@timestamp`
     capped at receipt; receipt time when it is missing, unparseable or more
-    than 30 days before receipt."""
+    than 30 days before receipt (detected_at_source alert or received)."""
     await _verify_key(db, x_fenrir_key)
 
     rule    = payload.get("rule") or {}

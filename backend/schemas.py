@@ -1,5 +1,5 @@
 """All Pydantic request/response schemas."""
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional, Union
 from uuid import UUID
 
@@ -244,10 +244,25 @@ SystemType      = Literal[
 ]
 
 
+# I4: NIST SP 800-61 impact categories (Rev. 2 §3.2.6, carried by Rev. 3 practice), all optional.
+FunctionalImpact  = Literal["none", "low", "medium", "high"]
+InformationImpact = Literal["none", "privacy", "proprietary", "integrity"]
+Recoverability    = Literal["regular", "supplemented", "extended", "not_recoverable"]
+DetectedAtSource  = Literal["reported", "alert", "received"]
+# I4: the fields POST /api/incidents requires (owner decision 2026-10-06).
+INCIDENT_CREATE_REQUIRED = ("title", "severity", "incident_type", "detection_method", "detected_at")
+_IMPACT_DOC = ("NIST SP 800-61 impact category. functional_impact: none|low|medium|high; information_impact: "
+               "none|privacy (personal data)|proprietary|integrity; recoverability: regular|supplemented|extended|"
+               "not_recoverable.")
+
+
 class IncidentCreate(BaseModel):
-    title:            str = Field(min_length=3, max_length=200)
+    """New incident. Required (owner decision 2026-10-06): title, severity, incident_type, detection_method,
+    detected_at; any of them missing or null is one 422 code required_fields_missing whose `fields` lists them
+    all. Everything else is optional."""
+    title:            Optional[str] = Field(default=None, min_length=3, max_length=200, description="Required.")
     description:      Optional[str] = None
-    severity:         Severity = "medium"
+    severity:         Optional[Severity] = Field(default=None, description="Required.")
     phase:            StartPhase = Field(default="detection_and_analysis",
                                          description="Starting phase: detection_and_analysis or containment_eradication_recovery only.")
     tlp:              Tlp      = "amber"
@@ -258,18 +273,37 @@ class IncidentCreate(BaseModel):
                                                         "false_positive or benign_positive outside detection_and_analysis, "
                                                         "since it can then be closed without Gate 2. When given, it is "
                                                         "audited and added to the Timeline.")
-    incident_type:    Optional[IncidentType]    = None
-    detection_method: Optional[DetectionMethod] = None
+    incident_type:    Optional[IncidentType]    = Field(default=None, description="Required.")
+    detection_method: Optional[DetectionMethod] = Field(default=None, description="Required.")
     reporter:         Optional[str] = Field(default=None, max_length=128)
     occurred_at:      Optional[datetime] = None
     detected_at:      Optional[datetime] = Field(default=None,
-                                                 description="When the incident was detected (UTC). Not before occurred_at, not in the future; never set by the server.")
+                                                 description="Required. When the incident was detected (UTC). Not before occurred_at, not in the future; never set by the server.")
+    # I4 optional intake.
+    ic_user_id:       Optional[UUID] = Field(default=None, description=(
+        "Assign this user as Incident Commander in the same transaction. Unknown id 404 user_not_found; a "
+        "deactivated user, or one who can't see the incident (its team_ids), 422 assignee_no_access."))
+    functional_impact:  Optional[FunctionalImpact]  = Field(default=None, description=_IMPACT_DOC)
+    information_impact: Optional[InformationImpact] = Field(default=None, description=_IMPACT_DOC)
+    recoverability:     Optional[Recoverability]    = Field(default=None, description=_IMPACT_DOC)
+    severity_rationale: Optional[str] = Field(default=None, max_length=2000, description="Why this severity.")
+    alert_reference:    Optional[str] = Field(default=None, max_length=256,
+                                          description="The alert this came from: source system and alert id, e.g. 'Sentinel 4f2a91'.")
+    first_host:       Optional[str] = Field(default=None, min_length=1, max_length=255, description=(
+        "First affected host: added to Entities as a compromised host (in scope)."))
+    first_ioc:        Optional["IntakeIoc"] = Field(default=None, description="First indicator of compromise: added to IOCs (source 'intake').")
     team_ids:         list[UUID] = Field(default_factory=list,
                                          description="Restrict the new incident to these teams ([] = visible to everyone). "
                                                      "An admin may pick any team; an analyst only teams they belong to (409 "
                                                      "would_lock_out). An unknown team is 422 team_not_found.")
     tags:             list[str]  = Field(default_factory=list)
-    dark_operation:   bool       = False  # open dark: no Teams/Slack/email alert from the start
+    dark_operation:   bool       = Field(default=False, description=(
+        "Open dark: no Teams/Slack/email alert from the start. Sent explicitly (true or false), it records the "
+        "Dark Operation decision (dark_operation_decided_at, audited with the creation); omitted, no decision "
+        "is recorded."))
+
+    class Config:
+        json_schema_extra = {"required": list(INCIDENT_CREATE_REQUIRED)}
 
 
 class IncidentUpdate(BaseModel):
@@ -283,7 +317,13 @@ class IncidentUpdate(BaseModel):
     detection_method: Optional[DetectionMethod]  = None
     reporter:         Optional[str]              = Field(default=None, max_length=128)
     occurred_at:      Optional[datetime]         = None
-    detected_at:      Optional[datetime]         = None
+    detected_at:      Optional[datetime]         = Field(default=None, description=(
+        "Sets detected_at_source to reported (null clears both)."))
+    functional_impact:  Optional[FunctionalImpact]  = Field(default=None, description=_IMPACT_DOC + " null clears.")
+    information_impact: Optional[InformationImpact] = Field(default=None, description=_IMPACT_DOC + " null clears.")
+    recoverability:     Optional[Recoverability]    = Field(default=None, description=_IMPACT_DOC + " null clears.")
+    severity_rationale: Optional[str]               = Field(default=None, max_length=2000, description="null or blank clears.")
+    alert_reference:    Optional[str]               = Field(default=None, max_length=256, description="null or blank clears.")
     contained_at:     Optional[datetime]         = Field(default=None,
                                                          description="When the incident was contained (UTC). Declared, never set by the server. Not in the future.")
     eradicated_at:    Optional[datetime]         = Field(default=None,
@@ -349,9 +389,20 @@ class IncidentOut(BaseModel):
     closed_by_id:     Optional[UUID] = None
     occurred_at:      Optional[datetime] = None
     detected_at:      Optional[datetime] = None
+    detected_at_source: Optional[DetectedAtSource] = Field(default=None, description=(
+        "Where detected_at came from: reported (entered by a person or API client), alert (the SIEM alert's own "
+        "time) or received (the SIEM alert carried no usable time, so this is when FENRIR received it). Null for "
+        "incidents recorded before this field existed."))
     contained_at:     Optional[datetime] = None
     eradicated_at:    Optional[datetime] = None
     recovered_at:     Optional[datetime] = None
+    functional_impact:  Optional[FunctionalImpact]  = None
+    information_impact: Optional[InformationImpact] = None
+    recoverability:     Optional[Recoverability]    = None
+    severity_rationale: Optional[str] = None
+    alert_reference:    Optional[str] = None
+    dark_operation_decided_at: Optional[datetime] = Field(default=None, description=(
+        "When Dark Operation was last explicitly decided (on or off); null = never decided."))
     teams:            list[TeamRef] = []
     tags:             list[str]      = Field(default_factory=list)
 
@@ -418,10 +469,19 @@ class IncidentReopen(BaseModel):
 GateName = Literal["post_incident", "close"]
 
 
+GateLevel = Literal["block", "warn"]
+GateCheckStatus = Literal["met", "unmet"]
+SignOffRole = Literal["ic", "dpo"]
+
+
 class GateItem(BaseModel):
-    """One gate condition: unmet (blocking) or carried forward (open, not blocking)."""
-    key:      str = Field(description="Stable machine-readable condition key, e.g. recovered_at_missing.")
-    label:    str = Field(description="What is missing, in plain words.")
+    """One gate check (in checks[], unmet[], warnings[]) or a carried-forward obligation (not a check)."""
+    key:      str = Field(description="Stable machine-readable check key, e.g. recovered_at_missing.")
+    label:    str = Field(description="The message: what is missing when unmet, what is satisfied when met.")
+    level:    Optional[GateLevel] = Field(default=None, description=(
+        "block: an unmet check stops the transition (409 gate_unmet) unless the incident lead overrides with a "
+        "reason; warn: shown and recorded in the transition audit, never stops it. Null on carried_forward items."))
+    status:   Optional[GateCheckStatus] = Field(default=None, description="met | unmet. Null on carried_forward items.")
     detail:   Optional[str] = Field(default=None, description="Specifics, e.g. the open actions' titles.")
     fix_hint: Optional[str] = Field(default=None, description="Where and how to fix it.")
     route:    Optional[str] = Field(default=None,
@@ -430,15 +490,63 @@ class GateItem(BaseModel):
     due_at:   Optional[datetime] = Field(default=None, description="Deadline (UTC), for legal items.")
 
 
+class GateSignOffCreate(BaseModel):
+    role:      Optional[SignOffRole] = Field(default=None, description=(
+        "ic: the Incident Commander's sign-off (the incident's IC / Deputy IC, or an admin); dpo: the Data "
+        "Protection Officer's (an analyst assigned the data_protection_officer role on the incident, or an "
+        "admin). Missing is 422 code role_required."))
+    statement: Optional[str] = Field(default=None, max_length=2000, description=(
+        "The sign-off statement, at least 10 characters after trimming (422 code statement_required)."))
+
+    class Config:
+        json_schema_extra = {"required": ["role", "statement"]}
+
+
+class GateSignOffOut(BaseModel):
+    """One recorded sign-off (append-only)."""
+    id:           UUID
+    gate:         GateName
+    role:         SignOffRole
+    user_id:      UUID
+    username:     str
+    signed_as:    str = Field(description="The basis: the operational role key(s) the signer held on the incident "
+                                          "(incident_commander, deputy_commander, data_protection_officer), or admin.")
+    signed_at:    datetime
+    statement:    str
+    state_sha256: str = Field(description="SHA-256 of the gate's blocking checks as the signer saw them "
+                                          "(sign-off checks excluded).")
+    current:      bool = Field(description="Made since the incident was last re-opened: only these count for the gate.")
+    matches_current_state: bool = Field(description="state_sha256 equals the gate's state_sha256 now. False means "
+                                                    "the blocking checks changed since the sign-off (informational).")
+
+
 class GateResult(BaseModel):
     gate:            GateName
     label:           str
-    met:             bool = Field(description="True when nothing blocks (or the gate is exempt).")
+    met:             bool = Field(description="True when no block-level check is unmet (or the gate is exempt). "
+                                              "Warn-level checks never affect it.")
     exempt:          bool = Field(default=False,
                                   description="The gate does not apply: close for a false or benign positive.")
-    unmet:           list[GateItem] = Field(default_factory=list)
+    unmet:           list[GateItem] = Field(default_factory=list,
+                                            description="The unmet block-level checks: what stops the transition.")
+    warnings:        list[GateItem] = Field(default_factory=list,
+                                            description="The unmet warn-level checks: shown, recorded, never blocking.")
+    checks:          list[GateItem] = Field(default_factory=list,
+                                            description="Every check that applies to this incident, met or unmet, "
+                                                        "with its level, in display order.")
     carried_forward: list[GateItem] = Field(default_factory=list,
                                             description="Open obligations that do not block this gate.")
+    sign_offs_required: list[SignOffRole] = Field(default_factory=list, description=(
+        "Sign-offs this gate needs: close always ic; dpo on close for a personal-data breach, and on "
+        "post_incident when a breach's GDPR / NIS2 obligation was waived as not required."))
+    sign_offs:       list[GateSignOffOut] = Field(default_factory=list,
+                                                  description="Sign-offs on this gate since the last re-open, newest first.")
+    state_sha256:    Optional[str] = Field(default=None, description="SHA-256 of the blocking checks now "
+                                                                     "(sign-off checks excluded): what a sign-off records.")
+    open_preparation_tasks: Optional[int] = Field(default=None, description=(
+        "Gate 2 (close) only: how many open or in-progress playbook tasks are in the 800-61 Preparation phase "
+        "(organisation readiness work copied in by a template). They warn (preparation_tasks_open) and never "
+        "block the close (I5)."))
 
 
 class IncidentGates(BaseModel):
@@ -448,7 +556,8 @@ class IncidentGates(BaseModel):
 
 
 IncidentCapability = Literal["read_audit_log", "manage_le_package", "set_teams", "override_gate",
-                             "remove_any_assignment", "assign_lead_roles", "remove_own_assignment"]
+                             "remove_any_assignment", "assign_lead_roles", "remove_own_assignment",
+                             "replace_playbook", "sign_off_ic", "sign_off_dpo"]
 
 
 class IncidentAccess(BaseModel):
@@ -461,7 +570,8 @@ class IncidentAccess(BaseModel):
                     "override_gate, remove_any_assignment: the incident lead. assign_lead_roles (create or "
                     "remove IC / Deputy assignments): the lead, or, while no active analyst or admin holds "
                     "IC / Deputy, the incident's creator or today's on-call analyst. "
-                    "remove_own_assignment: analysts and admins.")
+                    "remove_own_assignment: analysts and admins. sign_off_ic: the incident lead. sign_off_dpo: an "
+                    "admin, or an analyst assigned the data_protection_officer role on the incident.")
 
 
 class GateUnmetBody(BaseModel):
@@ -470,6 +580,209 @@ class GateUnmetBody(BaseModel):
     code:   Literal["gate_unmet"]
     gate:   GateName
     unmet:  list[GateItem]
+    warnings: list[GateItem] = Field(default_factory=list, description="Warn-level checks also unmet (not blocking).")
+
+
+# ─── Recovery tracker (I1, R21) ─────────────────────────────────────────────
+# One record per in-scope system: a compromised entity of type host, service or network_range.
+# Rules (state machine, required fields, time checks) live in recovery/service.py.
+
+RecoveryState = Literal["not_started", "restoring", "restored", "validated", "not_required"]
+
+
+class RecoveryChecklistItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    item: str  = Field(min_length=1, max_length=200)
+    done: bool = False
+
+
+class RecoveryUpdate(BaseModel):
+    """Change one system's recovery record. Every field is optional; send only what changes
+    (`null` clears an optional field). `state` moves the state machine one step:
+    not_started → restoring | not_required; restoring → restored; restored → validated.
+    Going back (restoring → not_started, restored → restoring, validated → restoring,
+    not_required → not_started) needs `reason` and clears the later sign-offs.
+    restored needs a restore point (`restore_point_ref`); validated needs `validation_method`;
+    not_required needs `not_required_reason`. `restored_at` / `validated_at` default to now and
+    are recorded with the caller as restored_by / validated_by."""
+    model_config = ConfigDict(extra="forbid")
+
+    state:                Optional[RecoveryState] = None
+    reason:               Optional[str] = Field(default=None, max_length=2000,
+                                                description="Why the system goes back a step (required then); audited.")
+    not_required_reason:  Optional[str] = Field(default=None, max_length=2000,
+                                                description="Why this system needs no restore (required for not_required).")
+    restore_point_ref:    Optional[str] = Field(default=None, max_length=512,
+                                                description="Backup id, snapshot or image the system is restored from.")
+    restore_point_at:     Optional[datetime] = Field(default=None, description="The point in time the restore returns to (UTC); not in the future, not after restored_at.")
+    restored_at:          Optional[datetime] = Field(default=None, description="When the restore finished (UTC); with state=restored, or to correct it while restored/validated.")
+    validation_method:    Optional[str] = Field(default=None, max_length=4000,
+                                                description="How the system was checked clean (scans, EDR sweep, hash comparison …).")
+    validation_checklist: Optional[list[RecoveryChecklistItem]] = Field(default=None, max_length=30)
+    validated_at:         Optional[datetime] = Field(default=None, description="When validation finished (UTC); with state=validated, or to correct it while validated. Not before restored_at.")
+    monitoring_start:     Optional[datetime] = Field(default=None, description="Start of the heightened-monitoring window (UTC).")
+    monitoring_end:       Optional[datetime] = Field(default=None, description="End of the monitoring window (UTC); not before monitoring_start.")
+    notes:                Optional[str] = Field(default=None, max_length=8000)
+
+
+class RecoverySystemOut(BaseModel):
+    """One in-scope system and its recovery record. `record_id` is null until the first write
+    (state not_started)."""
+    entity_id:             UUID
+    entity_type:           str
+    entity_value:          str
+    entity_name:           Optional[str] = None
+    criticality:           str
+    record_id:             Optional[UUID] = None
+    state:                 RecoveryState
+    allowed_transitions:   list[RecoveryState] = Field(description="States `state` may move to next (going back needs `reason`).")
+    not_required_reason:   Optional[str] = None
+    restore_point_ref:     Optional[str] = None
+    restore_point_at:      Optional[datetime] = None
+    restored_at:           Optional[datetime] = None
+    restored_by_id:        Optional[UUID] = None
+    restored_by_username:  Optional[str] = None
+    validation_method:     Optional[str] = None
+    validation_checklist:  list[RecoveryChecklistItem] = Field(default_factory=list)
+    validated_at:          Optional[datetime] = None
+    validated_by_id:       Optional[UUID] = None
+    validated_by_username: Optional[str] = None
+    same_person_validation: bool = Field(default=False, description="Warning: the person who validated the system "
+                                                                    "also restored it (not blocked).")
+    monitoring_start:      Optional[datetime] = None
+    monitoring_end:        Optional[datetime] = None
+    notes:                 Optional[str] = None
+    updated_at:            Optional[datetime] = None
+    updated_by_username:   Optional[str] = None
+
+
+class RecoverySummary(BaseModel):
+    """Roll-up over the incident's in-scope systems (compromised host / service / network_range entities)."""
+    total:        int
+    not_started:  int
+    restoring:    int
+    restored:     int
+    validated:    int
+    not_required: int
+    complete: bool = Field(description="At least one in-scope system, and every one is validated or not_required.")
+    same_person_validations: int = Field(description="Validated systems whose validator also restored them (warning).")
+    monitoring_started: int = Field(description="Systems whose monitoring window has started (monitoring_start ≤ now).")
+    can_declare_recovered: bool = Field(description="complete, the incident has no recovered_at and is not closed: "
+                                                    "the UI offers Declare recovered (PATCH /api/incidents/{id} recovered_at). "
+                                                    "Nothing is set automatically.")
+
+
+class RecoveryList(BaseModel):
+    items:       list[RecoverySystemOut]
+    next_cursor: Optional[str] = None
+    summary:     RecoverySummary
+
+
+# ─── Stakeholder notification tracker (I2, R22) ────────────────────────────
+# One obligation per stakeholder-matrix rule that matches the incident's severity (and type).
+# Rules (recompute, transitions, required fields, time checks): stakeholder_notifications/service.py.
+
+NotificationStatus  = Literal["pending", "notified", "not_required"]
+NotificationChannel = Literal["phone", "email", "in_person", "oob", "other"]
+
+
+class StakeholderNotificationUpdate(BaseModel):
+    """Record or change one obligation; send only what changes. `status`:
+    pending → notified | not_required; notified / not_required → pending needs `reason` (clears
+    the recorded notification or the not-required reason). notified needs `channel`;
+    `notified_at` defaults to now and may not be in the future; the caller is recorded as
+    notified_by. not_required needs `not_required_reason`. Correcting a recorded notification
+    (notified_at, channel, oob_log_id, stakeholder_id) needs `reason`."""
+    model_config = ConfigDict(extra="forbid")
+
+    status:              Optional[NotificationStatus] = None
+    notified_at:         Optional[datetime] = Field(default=None, description="When the stakeholder was told (UTC); default now; not in the future.")
+    channel:             Optional[NotificationChannel] = Field(default=None, description="How: phone, email, in_person, oob (out-of-band) or other.")
+    oob_log_id:          Optional[UUID] = Field(default=None, description="Optional link to this incident's out-of-band log entry.")
+    stakeholder_id:      Optional[UUID] = Field(default=None, description="Optional link to this incident's stakeholder record (who was told).")
+    note:                Optional[str] = Field(default=None, max_length=4000)
+    not_required_reason: Optional[str] = Field(default=None, max_length=2000, description="Why this notification is not needed (required for not_required).")
+    reason:              Optional[str] = Field(default=None, max_length=2000,
+                                           description="Why a recorded status is undone or a recorded notification corrected; audited.")
+
+
+class StakeholderNotificationOut(BaseModel):
+    """One notification obligation. `rule_id` is null once its matrix rule was deleted. Role,
+    category, required and the SLA are a snapshot of the rule when the obligation arose."""
+    id:                    UUID
+    rule_id:               Optional[UUID] = None
+    severity:              Severity
+    role:                  str
+    category:              str
+    required:              bool = Field(description="False = an advisory rule: listed, not counted in the roll-up, no reminder.")
+    notify_within_minutes: int
+    clock_start_at:        datetime = Field(description="When the incident first reached `severity` (the countdown start).")
+    due_at:                datetime
+    status:                NotificationStatus
+    allowed_transitions:   list[NotificationStatus]
+    overdue:               bool = Field(description="pending, not superseded, and past due_at.")
+    superseded:            bool = Field(description="The rule no longer matches the incident (kept, not counted).")
+    superseded_at:         Optional[datetime] = None
+    superseded_reason:     Optional[str] = Field(default=None, description="severity_changed, incident_type, rule_changed or rule_removed.")
+    notified_at:           Optional[datetime] = None
+    notified_by_id:        Optional[UUID] = None
+    notified_by_username:  Optional[str] = None
+    channel:               Optional[NotificationChannel] = None
+    oob_log_id:            Optional[UUID] = None
+    stakeholder_id:        Optional[UUID] = None
+    stakeholder_name:      Optional[str] = None
+    note:                  Optional[str] = None
+    not_required_reason:   Optional[str] = None
+    created_at:            datetime
+    updated_at:            datetime
+    updated_by_username:   Optional[str] = None
+
+
+class StakeholderNotificationSummary(BaseModel):
+    """Roll-up over the incident's ACTIVE (not superseded) obligations from REQUIRED rules."""
+    required_total: int = Field(description="Required obligations that apply (not_required ones excluded): the y of 'x of y'.")
+    notified:       int = Field(description="Of those, notified: the x of 'x of y'.")
+    overdue:        int = Field(description="Of those, pending past due_at.")
+    not_required:   int = Field(description="Required obligations recorded as not required (with a reason).")
+    next_due_at:    Optional[datetime] = Field(default=None, description="Earliest due_at among the pending ones.")
+
+
+class SeverityLevelOut(BaseModel):
+    severity:   Severity
+    reached_at: datetime = Field(description="When the incident first reached this severity (UTC).")
+    source:     Literal["initial", "change", "backfill"]
+
+
+class StakeholderNotificationList(BaseModel):
+    items:           list[StakeholderNotificationOut]
+    next_cursor:     Optional[str] = None
+    summary:         StakeholderNotificationSummary
+    severity_levels: list[SeverityLevelOut] = Field(description="Each severity the incident has reached, first time, oldest first.")
+
+
+StartCheckKey = Literal["ic_assigned", "comms_lead_assigned", "legal_liaison_assigned", "detected_at_set",
+                        "playbook_applied", "legal_initialised", "dark_operation_decided", "notifications_on_time"]
+
+
+class StartCheck(BaseModel):
+    key:    StartCheckKey
+    label:  str
+    status: Literal["ok", "warning", "overdue"] = Field(description=(
+        "ok; warning while missing; overdue once missing longer than overdue_after_minutes after the incident was "
+        "created. notifications_on_time is overdue as soon as a stakeholder notification is overdue."))
+    detail: Optional[str] = None
+    route:  str = Field(description="Incident sub-page where it is fixed, relative to /incidents/{id}/.")
+
+
+class IncidentStartChecks(BaseModel):
+    """I4: what should be in place soon after an incident is opened. Warnings only: nothing blocks."""
+    total:    int
+    ok:       int
+    warning:  int
+    overdue:  int
+    overdue_after_minutes: int
+    overdue_at: datetime = Field(description="created_at + overdue_after_minutes: when a missing check turns overdue.")
+    items:    list[StartCheck] = Field(description="Only the checks that apply to this incident.")
 
 
 class IncidentSnapshot(BaseModel):
@@ -495,6 +808,11 @@ class IncidentSnapshot(BaseModel):
     respond_total:    int = Field(description="All Respond actions, any status (done, deferred and "
                                               "reverted included).")
     handoffs_pending: int = Field(description="Shift handoffs not yet acknowledged (status pending).")
+    recovery:         RecoverySummary = Field(description="Recovery tracker roll-up (I1): per-state counts over "
+                                                          "the in-scope systems; see GET …/recovery.")
+    notifications:    StakeholderNotificationSummary = Field(description="Stakeholder notification tracker roll-up (I2); "
+                                                                         "see GET …/stakeholder-notifications.")
+    start_checks:     IncidentStartChecks = Field(description="Incident-start checks (I4); see GET …/start-checks.")
 
 
 # ─── Containment state (C1) ─────────────────────────────────────────────────
@@ -569,6 +887,15 @@ class IOCCreate(BaseModel):
     # C5 — an exhibit (evidence item) of THIS incident the indicator was found in
     # (404 evidence_not_found / 422 evidence_other_incident).
     evidence_id: Optional[UUID] = None
+
+
+class IntakeIoc(BaseModel):
+    """I4: the first indicator, given with POST /api/incidents."""
+    type:  IocType
+    value: str = Field(min_length=1, max_length=2048)
+
+
+IncidentCreate.model_rebuild()
 
 
 class IOCUpdate(BaseModel):
@@ -1873,7 +2200,19 @@ class PlaybookTaskTemplate(BaseModel):
     order:       int         = 0
 
 
-class PlaybookTemplateOut(BaseModel):
+_TPL_TYPES_DOC = "Incident types this template is suggested for (I3); [] = not suggested for any type."
+_TPL_REVIEWED_DOC = ("When someone last marked the template reviewed (POST …/review); null = never. Editing the "
+                     "template doesn't change it. Readiness's 12-month playbook check uses this date.")
+
+
+class _TemplateTypesOut(BaseModel):
+    @field_validator("incident_types", mode="before", check_fields=False)
+    @classmethod
+    def _none_is_empty(cls, v):
+        return v or []
+
+
+class PlaybookTemplateOut(_TemplateTypesOut):
     id:          UUID
     key:         str
     name:        str
@@ -1881,6 +2220,10 @@ class PlaybookTemplateOut(BaseModel):
     category:    Optional[str] = None
     is_system:   bool
     tasks:       list[PlaybookTaskTemplate] = Field(default_factory=list)
+    incident_types:      list[str] = Field(default_factory=list, description=_TPL_TYPES_DOC)
+    last_reviewed_at:    Optional[datetime] = Field(default=None, description=_TPL_REVIEWED_DOC)
+    last_reviewed_by_id: Optional[UUID] = None
+    last_reviewed_by:    Optional[str] = Field(default=None, description="Username of the last reviewer.")
     created_at:  datetime
     updated_at:  datetime
 
@@ -1888,7 +2231,7 @@ class PlaybookTemplateOut(BaseModel):
         from_attributes = True
 
 
-class PlaybookTemplateSummary(BaseModel):
+class PlaybookTemplateSummary(_TemplateTypesOut):
     """List view — omits the tasks array."""
     id:           UUID
     key:          str
@@ -1899,6 +2242,10 @@ class PlaybookTemplateSummary(BaseModel):
     task_count:   int = 0
     run_count:    int = 0
     last_run_at:  Optional[datetime] = None
+    incident_types:      list[str] = Field(default_factory=list, description=_TPL_TYPES_DOC)
+    last_reviewed_at:    Optional[datetime] = Field(default=None, description=_TPL_REVIEWED_DOC)
+    last_reviewed_by_id: Optional[UUID] = None
+    last_reviewed_by:    Optional[str] = Field(default=None, description="Username of the last reviewer.")
 
     class Config:
         from_attributes = True
@@ -1909,6 +2256,7 @@ class PlaybookTemplateCreate(BaseModel):
     description: Optional[str]   = Field(default=None, max_length=4096)
     category:    Optional[str]   = Field(default=None, max_length=64)
     tasks:       list[PlaybookTaskTemplate] = Field(default_factory=list)
+    incident_types: list[IncidentType] = Field(default_factory=list, max_length=20, description=_TPL_TYPES_DOC)
 
 
 class PlaybookTemplateUpdate(BaseModel):
@@ -1916,6 +2264,8 @@ class PlaybookTemplateUpdate(BaseModel):
     description: Optional[str]   = Field(default=None, max_length=4096)
     category:    Optional[str]   = Field(default=None, max_length=64)
     tasks:       Optional[list[PlaybookTaskTemplate]] = None
+    incident_types: Optional[list[IncidentType]] = Field(default=None, max_length=20,
+                                                         description="Replace the suggested-for types; [] = none.")
 
 
 class PlaybookTaskOut(BaseModel):
@@ -1936,6 +2286,19 @@ class PlaybookTaskOut(BaseModel):
     created_by_id:      Optional[UUID] = None
     created_at:         datetime
     updated_at:         datetime
+    archived_at:        Optional[datetime] = Field(default=None, description=(
+        "Set when the plan was replaced and this Done/Skipped task was kept as read-only history (I3). "
+        "Archived tasks are listed only with include_archived=true and can't be changed."))
+    archived_by_id:     Optional[UUID] = None
+    archive_reason:     Optional[str] = Field(default=None, description="The replace reason.")
+
+    @computed_field(description="Open or in progress, in the current plan, and past due_at (UTC, evaluated now).")
+    @property
+    def overdue(self) -> bool:
+        if self.archived_at is not None or self.due_at is None or self.status not in ("open", "in_progress"):
+            return False
+        due = self.due_at if self.due_at.tzinfo else self.due_at.replace(tzinfo=timezone.utc)
+        return due <= datetime.now(timezone.utc)
 
     class Config:
         from_attributes = True
@@ -1960,17 +2323,28 @@ class PlaybookTaskUpdate(BaseModel):
     phase:       Optional[Phase] = None
     order_index: Optional[int] = None
     status:      Optional[TaskStatus] = None
-    skip_reason: Optional[str] = Field(default=None, max_length=2048)
+    skip_reason: Optional[str] = Field(default=None, max_length=2048, description=(
+        "Why the task is skipped. Required (non-blank, sent now or already stored) whenever the task ends up "
+        "skipped: 422 skip_reason_required. Cleared when a skipped task moves to another status."))
     assignee_id: Optional[UUID] = Field(default=None, description=_ASSIGNEE_DOC)
-    due_at:      Optional[datetime] = None
+    due_at:      Optional[datetime] = Field(default=None, description="Due time (UTC). Null clears; omit to keep.")
+
+
+PlaybookApplyMode = Literal["append", "replace"]
 
 
 class PlaybookInstantiateRequest(BaseModel):
     template_id: UUID
-    # If False (default), tasks from the template are appended to the
-    # existing list. If True, the incident's current task list is cleared
-    # first (admin-only on the route).
-    replace:     bool = False
+    mode:        Optional[PlaybookApplyMode] = Field(default=None, description=(
+        "append (default): add the template's tasks to the current plan, skipping any task of the same "
+        "template with the same title and phase that the current plan already has. replace: the incident "
+        "lead (IC/Deputy) or an admin only (403 not_incident_lead), with a reason (422 reason_required); "
+        "Done and Skipped tasks are kept as read-only history (archived), Open and In-progress tasks are "
+        "removed, then the template's tasks are added."))
+    reason:      Optional[str] = Field(default=None, max_length=2048,
+                                       description="Why the plan is replaced (required for mode=replace; audited).")
+    replace:     Optional[bool] = Field(default=None, deprecated=True, description=(
+        "Deprecated: use mode. true = mode replace, false = mode append; contradicting mode is 422 mode_conflict."))
 
 
 # ─── Comms — comments + OOB ─────────────────────────────────────────────────
@@ -2302,6 +2676,7 @@ class RespondActionOut(BaseModel):
     reverted_at:    Optional[datetime] = None
     reverted_by_id: Optional[UUID] = None
     revert_reason:  Optional[str] = None
+    defer_reason:   Optional[str] = None
     # The entity / IOC the action targets (null = unlinked free-text target) and
     # the template it was made from.
     entity_id:      Optional[UUID] = None
@@ -2325,6 +2700,11 @@ _TEMPLATE_DOC = ("Action template id, e.g. isolate_host, block_ip, disable_accou
                  "matching target type (422 target_type_mismatch, e.g. isolate_host on a hash IOC).")
 
 
+_DEFER_DOC = ("Why the action is deferred (I5). Optional, kept when the status changes; Gate 1 warns "
+              "(respond_deferred_reason_missing) about a deferred containment / eradication / recovery "
+              "action without one. Blank clears.")
+
+
 class RespondActionCreate(BaseModel):
     category:    RespondActionCategory
     title:       str = Field(min_length=1, max_length=512)
@@ -2335,6 +2715,7 @@ class RespondActionCreate(BaseModel):
     details:     dict = Field(default_factory=dict)
     order_index: int = 0
     occurred_at: Optional[datetime] = None
+    defer_reason: Optional[str] = Field(default=None, max_length=4096, description=_DEFER_DOC)
     entity_id:   Optional[UUID] = Field(default=None, description=_ENTITY_LINK_DOC)
     ioc_id:      Optional[UUID] = Field(default=None, description=_IOC_LINK_DOC)
     template_id: Optional[str] = Field(default=None, max_length=64, pattern=r"^[a-z][a-z0-9_]*$",
@@ -2350,6 +2731,7 @@ class RespondActionUpdate(BaseModel):
     details:     Optional[dict] = None
     order_index: Optional[int] = None
     occurred_at: Optional[datetime] = None
+    defer_reason: Optional[str] = Field(default=None, max_length=4096, description=_DEFER_DOC)
     # For these three, an explicit null clears the value; omit a field to keep it.
     entity_id:   Optional[UUID] = Field(default=None, description=_ENTITY_LINK_DOC + " Null unlinks.")
     ioc_id:      Optional[UUID] = Field(default=None, description=_IOC_LINK_DOC + " Null unlinks.")
@@ -2648,10 +3030,20 @@ class ClosureChecklistItemOut(BaseModel):
     assigned_to:      Optional[str]    = None
     notes:            Optional[str]    = None
     sort_order:       int
+    not_applicable:   bool = False
+    na_reason:        Optional[str]    = None
     class Config: from_attributes = True
 
 class ClosureChecklistToggle(BaseModel):
-    checked: bool
+    """Send `checked`, or `not_applicable` (+ optional `na_reason`); at least one (422 code
+    nothing_to_change). Checking clears N/A; marking N/A unchecks the item. Gate 2 counts an N/A item
+    as done, and warns (checklist_na_reason_missing) when it has no reason."""
+    checked:        Optional[bool] = None
+    not_applicable: Optional[bool] = Field(default=None, description="Mark (true) or unmark (false) the item "
+                                                                      "not applicable (I5).")
+    na_reason:      Optional[str]  = Field(default=None, max_length=2000,
+                                           description="Why it is not applicable; only with not_applicable=true. "
+                                                       "Blank is stored as none.")
 
 class ClosureChecklistMeta(BaseModel):
     assigned_to_id: Optional[UUID] = None
@@ -3772,10 +4164,16 @@ class StakeholderMatrixRuleOut(BaseModel):
     notify_within_minutes: int
     category:              str
     required:              bool
+    incident_types:        list[str] = Field(default_factory=list, description="Incident types the rule applies to; empty = every type.")
     created_at:            datetime
     updated_at:            datetime
     class Config:
         from_attributes = True
+
+    @field_validator("incident_types", mode="before")
+    @classmethod
+    def _none_is_empty(cls, v):
+        return v or []
 
 
 class StakeholderMatrixRuleCreate(BaseModel):
@@ -3784,6 +4182,8 @@ class StakeholderMatrixRuleCreate(BaseModel):
     notify_within_minutes: int = Field(ge=1, le=10080)   # ≤ 1 week
     category:              StakeholderMatrixCategory = "operational"
     required:              bool = False
+    incident_types:        list[IncidentType] = Field(default_factory=list, max_length=20,
+                                                      description="Only incidents of these types (I2); empty = every type.")
 
 
 class StakeholderMatrixRuleUpdate(BaseModel):
@@ -3792,6 +4192,8 @@ class StakeholderMatrixRuleUpdate(BaseModel):
     notify_within_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
     category:              Optional[StakeholderMatrixCategory] = None
     required:              Optional[bool] = None
+    incident_types:        Optional[list[IncidentType]] = Field(default=None, max_length=20,
+                                                                description="Replace the type filter; [] = every type.")
 
 
 class StakeholderMatrixRuleList(BaseModel):

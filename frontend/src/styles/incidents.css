@@ -1529,3 +1529,82 @@ a.case-note-flag { color: var(--accent); text-decoration: none; }
 .an-evidence-kind { display: flex; flex-direction: column; gap: 2px; }
 .an-evidence-n    { font-size: 20px; font-weight: 700; font-family: var(--font-mono); color: var(--text); }
 .an-evidence-lbl  { font-size: 11px; color: var(--muted); text-transform: capitalize; }
+
+/* Recovery tracker (pages/incident/Recovery.jsx, I1). State colour stays on the pill; the
+   same-person flag is text in --text with a --high mark. Tokens only. */
+.rec-summary { font-size: 13px; color: var(--muted); }
+.rec-summary b { font-family: var(--font-mono); color: var(--text); }
+.rec-declare { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.rec-declare .btn { margin-left: auto; }
+.rec-table td { vertical-align: top; font-size: 12px; }
+.rec-mono { font-family: var(--font-mono); font-size: 12px; overflow-wrap: break-word; }
+.rec-table td:first-child { min-width: 150px; }
+.rec-time { font-family: var(--font-mono); font-size: 11px; color: var(--text); }
+.rec-dim  { color: var(--muted); font-size: 11px; }
+.rec-wrap { overflow-wrap: break-word; min-width: 120px; max-width: 260px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.rec-flag { font-size: 11px; font-weight: 600; color: var(--text); }
+.rec-flag::first-letter { color: var(--high); }
+.rec-actions { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-1); }
+.rec-actions .btn { white-space: nowrap; }
+.rec-window { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+@media (max-width: 560px) { .rec-window { grid-template-columns: minmax(0, 1fr); } }
+.rec-checklist { display: flex; flex-direction: column; gap: var(--space-1); align-items: flex-start; }
+.rec-check-row { display: flex; align-items: center; gap: var(--space-2); width: 100%; }
+.rec-check-row .input { flex: 1; min-width: 0; }
+
+/* Stakeholder notification tracker (comms/Notifications.jsx, StakeholderMatrixBanner.jsx, I2).
+   Countdowns reuse .clock-chip; the overdue mark is text in --crit next to a label. Tokens only. */
+.sn-summary { font-size: 13px; color: var(--muted); }
+.sn-summary b { font-family: var(--font-mono); color: var(--text); }
+.sn-overdue { color: var(--crit); font-weight: 700; }
+.sn-intro { margin: 0 0 var(--space-2); }
+.sn-levels { font-size: 12px; color: var(--muted); margin-bottom: var(--space-3); }
+.sn-levels b { color: var(--text); }
+.sn-table td { vertical-align: top; font-size: 12px; }
+.sn-table td:first-child { min-width: 160px; }
+.sn-role { font-weight: 600; color: var(--text); }
+.sn-time { font-family: var(--font-mono); font-size: 11px; color: var(--text); }
+.sn-dim { color: var(--muted); font-size: 11px; }
+.sn-done { color: var(--text); font-size: 11px; }
+.sn-done::first-letter { color: var(--ok); }
+.sn-wrap { overflow-wrap: break-word; min-width: 120px; max-width: 260px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.sn-table .clock-chip { margin: 2px 0; }
+.sn-superseded td { opacity: 0.7; }
+.sn-actions { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-1); }
+.sn-actions .btn { white-space: nowrap; }
+.sn-banner {
+  margin-bottom: var(--space-3); padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-left: 3px solid var(--accent); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.sn-banner.overdue { border-color: color-mix(in srgb, var(--crit) 45%, transparent); border-left-color: var(--crit); }
+.sn-banner-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); margin-bottom: 6px; }
+.sn-banner-head > span:first-child {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent);
+}
+.sn-banner.overdue .sn-banner-head > span:first-child { color: var(--crit); }
+.sn-banner-count { font-size: 12px; color: var(--text); font-family: var(--font-mono); }
+.sn-banner-link { margin-left: auto; font-size: 12px; color: var(--accent); }
+.sn-banner-items { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.sn-banner-item {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.sn-banner-item strong { color: var(--text); }
+
+/* ── I4: New-incident optional intake + incident-start checks. Tokens only. ── */
+.newinc-optional {
+  display: flex; flex-direction: column; gap: var(--space-3);
+  padding-top: var(--space-3); border-top: 1px solid var(--border);
+}
+.newinc-optional-head { margin: 0; font-size: 13px; font-weight: 600; color: var(--muted); }
+.sc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.sc-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); font-size: 13px; }
+.sc-mark { font-family: var(--font-mono); font-weight: 700; min-width: 1.2em; }
+.sc-item.ok .sc-mark { color: var(--ok); }
+.sc-item.warning .sc-mark { color: var(--high); }
+.sc-item.overdue .sc-mark, .sc-item.overdue .sc-state { color: var(--crit); font-weight: 700; }
+.sc-item.ok .sc-label { color: var(--muted); }
+.sc-state { font-size: 12px; color: var(--muted); }
+.sc-detail { flex-basis: 100%; padding-left: calc(1.2em + var(--space-2)); font-size: 12px; color: var(--muted); }

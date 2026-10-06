@@ -63,10 +63,11 @@ export default function OOB() {
   // Keep local darkOp in sync if parent refreshes inc
   useEffect(() => { setDarkOp(inc.dark_operation) }, [inc.dark_operation])
 
-  const toggleDarkOp = async () => {
+  // I4: every call records an explicit decision; `keep` confirms the current state ("stay off").
+  const toggleDarkOp = async (keep = false) => {
     setToggling(true)
     try {
-      const res = await api.toggleDarkOperation(inc.id, !darkOp)
+      const res = await api.toggleDarkOperation(inc.id, keep === true ? darkOp : !darkOp)
       setDarkOp(res.dark_operation)
       refresh()
     } catch (e) {
@@ -149,7 +150,7 @@ export default function OOB() {
           <input
             type="checkbox"
             checked={darkOp}
-            onChange={isClosed ? undefined : toggleDarkOp}
+            onChange={isClosed ? undefined : () => toggleDarkOp()}
             disabled={isClosed || toggling}
             style={{ accentColor: 'var(--crit)', width: 16, height: 16 }}
           />
@@ -167,6 +168,16 @@ export default function OOB() {
           admin test messages. OSINT lookups, IOC enrichment and the email Domain auth check run
           only when you start them and confirm a warning; each is listed in the audit log as
           outbound_manual_lookup. Verify all callers using the passphrase below.
+        </p>
+        <p className="field-hint" data-dark-decision>
+          {inc.dark_operation_decided_at
+            ? <>Decision recorded {formatLocal(inc.dark_operation_decided_at)}.</>
+            : <>No decision recorded yet (a start check when email compromise is suspected).</>}
+          {!inc.dark_operation_decided_at && !darkOp && !isClosed && (
+            <> <button type="button" className="btn" onClick={() => toggleDarkOp(true)} disabled={toggling}>
+              Record decision: stay off
+            </button></>
+          )}
         </p>
         {inc.outbound_suppressed_by?.includes('tlp_red') && (
           <p data-outbound-status style={{ fontSize: 13, fontWeight: 600, color: 'var(--crit)', marginTop: 'var(--space-2)' }}>
