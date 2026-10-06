@@ -1047,8 +1047,8 @@ _INPLACE_MIGRATIONS: list[str] = [
     _add_check_if_missing("decisions", "ck_decisions_promoted_from_j4",
                           "(promoted_from_kind IS NULL AND promoted_from_id IS NULL) OR "
                           "(promoted_from_kind IN ('warroom', 'comment') AND promoted_from_id IS NOT NULL)"),
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_promoted_from ON timeline_events(promoted_from_kind, promoted_from_id) "
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_timeline_events_promoted_from ON timeline_events(promoted_from_kind, promoted_from_id) " +
     "WHERE promoted_from_id IS NOT NULL",
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_decisions_promoted_from ON decisions(promoted_from_kind, promoted_from_id) "
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_decisions_promoted_from ON decisions(promoted_from_kind, promoted_from_id) " +
     "WHERE promoted_from_id IS NOT NULL",
 ]
