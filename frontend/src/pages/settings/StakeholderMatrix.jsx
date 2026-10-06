@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api/client.js'
+import { INCIDENT_TYPE, labelOf } from '../../lib/incidentVocab.js'
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low']
 const CATEGORIES = [
@@ -84,8 +85,9 @@ export default function StakeholderMatrix() {
         <div style={{ flex: 1 }}>
           <h2 className="panel-h" style={{ margin: 0 }}>Stakeholder Matrix</h2>
           <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--muted)' }}>
-            Define who must be notified per incident severity, and within what timeframe.
-            A banner appears on the Communications tab when severity matches a required rule.
+            Define who must be notified per incident severity (optionally only for some incident types), and within
+            what timeframe. Each matching rule becomes a notification with a countdown on the incident (Comms ›
+            Notifications), counted from when the incident first reached that severity. Changes apply to open incidents.
           </p>
         </div>
         {!adding && (
@@ -137,6 +139,7 @@ export default function StakeholderMatrix() {
                   <th>Stakeholder role</th>
                   <th style={{ width: 140 }}>Notify within</th>
                   <th style={{ width: 130 }}>Category</th>
+                  <th>Incident types</th>
                   <th style={{ width: 90 }}>Required</th>
                   <th className="actions">Actions</th>
                 </tr>
@@ -144,7 +147,7 @@ export default function StakeholderMatrix() {
               <tbody>
                 {sevRules.map(rule => editing === rule.id ? (
                   <tr key={rule.id}>
-                    <td colSpan={5} style={{ padding: 0 }}>
+                    <td colSpan={6} style={{ padding: 0 }}>
                       <RuleForm
                         initial={rule}
                         onSave={(payload) => save(payload, rule.id)}
@@ -163,6 +166,11 @@ export default function StakeholderMatrix() {
                       </span>
                     </td>
                     <td style={{ textTransform: 'capitalize', fontSize: 12 }}>{rule.category}</td>
+                    <td style={{ fontSize: 12 }} data-rule-types>
+                      {(rule.incident_types || []).length
+                        ? rule.incident_types.map(t => labelOf('incident_type', t)).join(', ')
+                        : <span style={{ color: 'var(--muted)' }}>All types</span>}
+                    </td>
                     <td>
                       {rule.required ? (
                         <span className="pill pill-crit" style={{ fontSize: 10 }}>★ Required</span>
@@ -197,6 +205,8 @@ function RuleForm({ initial, onSave, onCancel, busy }) {
   const [minutes,  setMinutes]  = useState(initial?.notify_within_minutes ?? 60)
   const [category, setCategory] = useState(initial?.category || 'operational')
   const [required, setRequired] = useState(initial?.required ?? false)
+  const [types,    setTypes]    = useState(initial?.incident_types || [])
+  const toggleType = t => setTypes(p => (p.includes(t) ? p.filter(x => x !== t) : [...p, t]))
 
   function submit(e) {
     e?.preventDefault?.()
@@ -208,6 +218,7 @@ function RuleForm({ initial, onSave, onCancel, busy }) {
       notify_within_minutes: Number(minutes),
       category,
       required,
+      incident_types: types,
     })
   }
 
@@ -249,6 +260,19 @@ function RuleForm({ initial, onSave, onCancel, busy }) {
         <input type="checkbox" checked={required} onChange={e => setRequired(e.target.checked)} />
         Required
       </label>
+      <fieldset style={{ gridColumn: '1 / -1', gridRow: 2, border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+        <legend style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4, padding: 0 }}>
+          Incident types {types.length === 0 && <span style={{ textTransform: 'none', letterSpacing: 0 }}>(none ticked = all types)</span>}
+        </legend>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-1) var(--space-3)' }}>
+          {INCIDENT_TYPE.map(t => (
+            <label key={t.value} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, cursor: 'pointer' }}>
+              <input type="checkbox" checked={types.includes(t.value)} onChange={() => toggleType(t.value)} data-type={t.value} />
+              {t.label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
       <div style={{ display: 'flex', gap: 'var(--space-1)', marginBottom: 4 }}>
         <button type="submit"  className="btn primary" style={{ fontSize: 12 }} disabled={busy || !role.trim()}>
           {busy ? 'Saving…' : (initial ? 'Save' : 'Add')}

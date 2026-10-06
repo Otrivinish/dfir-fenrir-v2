@@ -23,18 +23,24 @@ from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
 from core.tags import canonical_tag_or_422, normalize_tags
-from incidents.access import (accessible_filter, get_accessible_incident, incident_capabilities,
-                              is_incident_lead, not_incident_lead)
-from incidents.gates import GATE_LABEL, GATES, evaluate_gate
+from incidents.access import (DPO_ROLE_KEY, LEAD_ROLE_KEYS, accessible_filter, get_accessible_incident,
+                              held_role_keys, incident_capabilities, is_incident_dpo, is_incident_lead,
+                              not_incident_lead, require_incident_person)
+from incidents.gates import GATE_LABEL, GATES, evaluate_gate, gate_state, sign_off_out
 from incidents.reference import assign as assign_reference
-from models import (ClosureChecklistItem, Entity, EntityFile, Evidence, IOC, Incident,
-                    IncidentAssignment, IncidentHandoff, PlaybookTask, RespondAction, Team,
+from incidents.start_checks import evaluate as evaluate_start_checks
+from models import (ClosureChecklistItem, Entity, EntityEvent, EntityFile, Evidence, IOC, Incident,
+                    IncidentAssignment, IncidentGateSignOff, IncidentHandoff, OperationalRole, PlaybookTask, RespondAction, Team,
                     TimelineEvent, User, incident_teams, user_team, utcnow)
-from notifications.service import notify_incident_created, notify_phase_changed
+from notifications.service import notify_assignment, notify_incident_created, notify_phase_changed
 from outbound_webhooks.service import suppressed_by_outbound_policy
-from schemas import (GateResult, GateUnmetBody, IncidentAccess, IncidentClose, IncidentCreate, IncidentGates, IncidentList,
-                     IncidentOut, IncidentReopen, IncidentSnapshot, IncidentUpdate, IncidentState, Phase,
-                     Severity, Tlp)
+from recovery.service import rollup as recovery_rollup
+from stakeholder_notifications.service import (record_level as record_severity_level, rollup as notifications_rollup,
+                                               sync as sync_notifications)
+from schemas import (INCIDENT_CREATE_REQUIRED, GateName, GateResult, GateSignOffCreate, GateSignOffOut, GateUnmetBody,
+                     IncidentAccess, IncidentClose, IncidentCreate,
+                     IncidentGates, IncidentList, IncidentOut, IncidentReopen, IncidentSnapshot, IncidentStartChecks,
+                     IncidentUpdate, IncidentState, Phase, Severity, Tlp)
 
 router = APIRouter()
 
@@ -191,8 +197,9 @@ def _require_gate(result: GateResult, override: bool, how: str) -> Optional[Gate
             status.HTTP_409_CONFLICT, "gate_unmet",
             f"{GATE_LABEL[result.gate]} not met: {'; '.join(i.label for i in result.unmet)}. "
             f"Fix these, or resend with override_gate=true {how}.",
-            extra={"gate": result.gate, "unmet": [i.model_dump(mode="json", exclude_none=True)
-                                                  for i in result.unmet]},
+            extra={"gate": result.gate,
+                   "unmet": [i.model_dump(mode="json", exclude_none=True) for i in result.unmet],
+                   "warnings": [i.model_dump(mode="json", exclude_none=True) for i in result.warnings]},
         )
     return result
 
@@ -220,7 +227,8 @@ async def _record_override(db: AsyncSession, inc: Incident, user: User, result: 
         db, "incident_gate_override",
         outcome="success",
         resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
-        details={"gate": result.gate, "unmet": keys, "reason": reason, **details},
+        details={"gate": result.gate, "unmet": keys, "warnings": [i.key for i in result.warnings],
+                 "reason": reason, **details},
     )
 
 
@@ -301,20 +309,63 @@ async def _create_team_ids(db: AsyncSession, user: User, requested: list[uuid.UU
     return team_ids
 
 
+# I4 intake fields: optional at create, editable (and clearable) by PATCH.
+INTAKE_FIELDS = ("functional_impact", "information_impact", "recoverability", "severity_rationale", "alert_reference")
+
+
+def _clean(v):
+    return (v.strip() or None) if isinstance(v, str) else v
+
+
+async def _check_new_ic(db: AsyncSession, user_id: uuid.UUID, team_ids: list[uuid.UUID]) -> User:
+    """I4 — the Incident Commander named at create, checked before the reference is allocated so a
+    refusal never uses up an incident number: the F2 rules (404 user_not_found; 422 assignee_no_access
+    when deactivated or unable to see the incident), with visibility judged on the requested team_ids.
+    require_incident_person re-checks against the stored row before the assignment is written."""
+    person = await db.get(User, user_id)
+    if person is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "user_not_found",
+                       "Unknown user for the Incident Commander: no account has this id.")
+    if not person.is_active:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "assignee_no_access",
+                       "The selected account is deactivated: choose an active user as the Incident Commander.")
+    if team_ids and person.role != "admin" and (await db.execute(
+            select(user_team.c.team_id).where(user_team.c.user_id == person.id,
+                                              user_team.c.team_id.in_(team_ids)).limit(1)
+    )).scalar_one_or_none() is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "assignee_no_access",
+                       f"{person.username} can't see this incident (not in any of its teams), so can't be the "
+                       "Incident Commander. Add one of their teams, or choose someone else.")
+    return person
+
+
 @router.post("", response_model=IncidentOut, status_code=status.HTTP_201_CREATED,
-             responses={409: {"model": ApiErrorBody, "description": "would_lock_out (team_ids)"},
+             responses={404: {"model": ApiErrorBody, "description": "user_not_found (ic_user_id)"},
+                        409: {"model": ApiErrorBody, "description": "would_lock_out (team_ids)"},
                         422: {"model": ApiErrorBody,
-                              "description": "team_not_found, detected_before_occurred, detected_in_future "
-                                             "or triage_reason_required"}})
+                              "description": "required_fields_missing (body adds fields[]), team_not_found, "
+                                             "detected_before_occurred, detected_in_future, assignee_no_access, "
+                                             "ic_role_unavailable or triage_reason_required"}})
 async def create_incident(
     req: IncidentCreate, request: Request,
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> IncidentOut:
-    """Open an incident. phase must be detection_and_analysis or
+    """Open an incident. Required: title, severity, incident_type, detection_method and
+    detected_at; any missing or null is 422 code required_fields_missing, with every missing
+    one in `fields`. phase must be detection_and_analysis or
     containment_eradication_recovery. detected_at is stored as given (the
-    server never fills it in); 422 when it is before occurred_at or in the
-    future (2 min clock-skew allowance).
+    server never fills it in; detected_at_source becomes reported); 422 when it is before
+    occurred_at or in the future (2 min clock-skew allowance).
+
+    Optional intake, all written in the same transaction as the incident and audited with it:
+    ic_user_id assigns that user as Incident Commander (F2 people rules: 404 user_not_found,
+    422 assignee_no_access; the IC role must be active, else 422 ic_role_unavailable; the IC
+    gets an in-app notification unless it is the creator); functional_impact,
+    information_impact, recoverability (NIST SP 800-61 categories), severity_rationale,
+    alert_reference; first_host adds a compromised host entity (in scope); first_ioc adds an
+    IOC with source "intake". dark_operation sent explicitly records the Dark Operation
+    decision (dark_operation_decided_at). See GET …/start-checks for what should follow.
 
     team_ids restricts the incident to those teams from the start (empty = visible to
     everyone). An unknown team is 422 code team_not_found. An admin may pick any team; an
@@ -326,12 +377,27 @@ async def create_incident(
     triage_reason_required), as on PATCH: such an incident can be closed without Gate 2.
     A triage_reason is audited with the creation and adds a system timeline event
     ("Triage set")."""
+    missing = [f for f in INCIDENT_CREATE_REQUIRED if _clean(getattr(req, f)) is None]
+    if missing:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "required_fields_missing",
+                       f"Missing required field(s): {', '.join(missing)}.", extra={"fields": missing})
     _check_detected_at(req.occurred_at, req.detected_at)
     if req.triage_state in CLOSABLE_ANY_PHASE and req.phase != "detection_and_analysis":
         triage_reason = _triage_reason(req.triage_reason)
     else:
         triage_reason = (req.triage_reason or "").strip() or None
     team_ids = await _create_team_ids(db, user, req.team_ids)
+    ic_role = None
+    if req.ic_user_id is not None:
+        await _check_new_ic(db, req.ic_user_id, team_ids)
+        ic_role = (await db.execute(select(OperationalRole).where(
+            OperationalRole.key == "incident_commander", OperationalRole.is_active == True)  # noqa: E712
+        )).scalar_one_or_none()
+        if ic_role is None:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "ic_role_unavailable",
+                           "The Incident Commander operational role is inactive or missing: an admin must restore "
+                           "it (Settings → Operational roles) before an IC can be assigned.")
+    decided = "dark_operation" in req.model_fields_set
     inc_num, inc_ref, created_at = await assign_reference(db)
     inc = Incident(
         id=uuid.uuid4(),
@@ -350,8 +416,11 @@ async def create_incident(
         created_by_id=user.id,
         occurred_at=req.occurred_at,
         detected_at=req.detected_at,
+        detected_at_source="reported",
         tags=normalize_tags(req.tags),
         dark_operation=req.dark_operation,
+        dark_operation_decided_at=created_at if decided else None,
+        **{f: _clean(getattr(req, f)) for f in INTAKE_FIELDS},
     )
     db.add(inc)
     await db.flush()
@@ -360,6 +429,40 @@ async def create_incident(
         await db.execute(
             incident_teams.insert().values(incident_id=inc.id, team_id=team_id)
         )
+
+    # I4 optional intake: IC, first host, first IOC — same transaction, each audited like its own endpoint.
+    ic = None
+    if ic_role is not None:
+        ic = await require_incident_person(db, inc.id, req.ic_user_id, "the Incident Commander")
+        row = IncidentAssignment(id=uuid.uuid4(), incident_id=inc.id, user_id=ic.id, username=ic.username,
+                                 role_id=ic_role.id, role_label=ic_role.label, notes="Assigned at intake",
+                                 assigned_by_id=user.id, assigned_by_username=user.username)
+        db.add(row)
+        await db.flush()
+        await write_audit(db, "assignment_create", resource_type="assignment", resource_id=str(row.id),
+                          resource_label=f"{ic.username} → {ic_role.label}",
+                          details={"incident_id": str(inc.id), "source": "intake"})
+    host = None
+    if req.first_host is not None and req.first_host.strip():
+        host = Entity(id=uuid.uuid4(), incident_id=inc.id, type="host", value=req.first_host.strip(),
+                      criticality="medium", attributes={}, compromised=True, added_by_id=user.id)
+        db.add(host)
+        await db.flush()
+        for title in ("Entity added", "Marked as compromised"):
+            db.add(EntityEvent(id=uuid.uuid4(), entity_id=host.id, incident_id=inc.id, event_type="system",
+                               title=title, actor_id=user.id))
+        await write_audit(db, "entity_create", resource_type="entity", resource_id=str(host.id),
+                          details={"incident_id": str(inc.id), "type": "host", "value": host.value,
+                                   "compromised": True, "source": "intake"})
+    ioc = None
+    if req.first_ioc is not None and req.first_ioc.value.strip():
+        ioc = IOC(id=uuid.uuid4(), incident_id=inc.id, type=req.first_ioc.type, value=req.first_ioc.value.strip(),
+                  source="intake", confidence=50, tags=[], added_by_id=user.id)
+        db.add(ioc)
+        await db.flush()
+        await write_audit(db, "ioc_create", resource_type="ioc", resource_id=str(ioc.id),
+                          details={"incident_id": str(inc.id), "type": ioc.type, "value": ioc.value,
+                                   "source": "intake"})
 
     if triage_reason:
         db.add(TimelineEvent(
@@ -383,12 +486,27 @@ async def create_incident(
         outcome="success",
         resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
         details={"ref": inc.ref, "severity": inc.severity, "phase": inc.phase, "tlp": inc.tlp,
-                 "dark_operation": inc.dark_operation,
+                 "dark_operation": inc.dark_operation, "dark_operation_decided": decided,
                  "detected_at": inc.detected_at.isoformat() if inc.detected_at else None,
+                 "incident_type": inc.incident_type, "detection_method": inc.detection_method,
+                 **{f: getattr(inc, f) for f in INTAKE_FIELDS if getattr(inc, f) is not None},
+                 **({"ic_user_id": str(ic.id)} if ic else {}),
+                 **({"first_host_entity_id": str(host.id)} if host else {}),
+                 **({"first_ioc_id": str(ioc.id)} if ioc else {}),
                  **({"team_ids": [str(t) for t in team_ids]} if team_ids else {}),
                  **({"triage_state": inc.triage_state, "triage_reason": triage_reason} if triage_reason else {})},
     )
-    await db.commit()
+    # I2: the opening severity counts from the awareness time (detected_at, else the creation time);
+    # the stakeholder-matrix obligations for it are created now.
+    await record_severity_level(db, inc, at=inc.detected_at or created_at, source="initial", user_id=user.id)
+    await sync_notifications(db, inc, cause="incident_created", user_id=user.id)
+    if ic is not None and ic.id != user.id:
+        await notify_assignment(        # commits the whole creation, then pushes
+            db, assignee_id=ic.id, incident_id=inc.id, incident_ref=inc.ref,
+            role_label=ic_role.label, assigner_username=user.username,
+        )
+    else:
+        await db.commit()
     await db.refresh(inc)
     await _fire_hooks(db, "incident_created", inc)
     await notify_incident_created(db, user.id, inc.id, inc.title)
@@ -416,7 +534,7 @@ async def get_incident_snapshot(
     db: AsyncSession = Depends(get_db),
 ) -> IncidentSnapshot:
     # Access check via the standard helper; raises 404 on no-access.
-    await get_accessible_incident(db, incident_id, user)
+    inc = await get_accessible_incident(db, incident_id, user)
 
     async def _count(model) -> int:
         stmt = select(func.count()).select_from(model).where(model.incident_id == incident_id)
@@ -436,7 +554,7 @@ async def get_incident_snapshot(
     # Playbook: group by status in a single round-trip.
     pb_stmt = (
         select(PlaybookTask.status, func.count())
-        .where(PlaybookTask.incident_id == incident_id)
+        .where(PlaybookTask.incident_id == incident_id, PlaybookTask.archived_at.is_(None))   # I3: current plan
         .group_by(PlaybookTask.status)
     )
     pb_rows = (await db.execute(pb_stmt)).all()
@@ -459,14 +577,43 @@ async def get_incident_snapshot(
         select(func.count()).select_from(IncidentHandoff)
         .where(IncidentHandoff.incident_id == incident_id, IncidentHandoff.status == "pending")
     )).scalar() or 0)
+    notifications = await notifications_rollup(db, inc.id)
 
     return IncidentSnapshot(
         iocs=iocs, entities=entities, evidence=evidence, timeline=timeline,
         affected_systems=affected_systems, assignments=assignments,
         playbook_total=pb_total, playbook_done=pb_done, playbook_skipped=pb_skipped,
         files=files, respond_open=respond_open, respond_total=respond_total,
-        handoffs_pending=handoffs_pending,
+        handoffs_pending=handoffs_pending, recovery=await recovery_rollup(db, inc),
+        notifications=notifications, start_checks=await evaluate_start_checks(db, inc, notifications),
     )
+
+
+# ─── Incident-start checks (I4) ──────────────────────────────────────────────
+
+@router.get("/{incident_id}/start-checks", response_model=IncidentStartChecks,
+            summary="Get the incident-start checks")
+async def get_incident_start_checks(
+    incident_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> IncidentStartChecks:
+    """What should be in place soon after the incident was opened, evaluated now. Warnings
+    only: nothing is blocked. Any user with access to the incident may read.
+
+    items[] holds only the checks that apply, each {key, label, status, detail, route}:
+    ic_assigned, comms_lead_assigned, legal_liaison_assigned (an active user holds the
+    role here); detected_at_set; playbook_applied (at least one current task; detail
+    names the templates suggested for the type); legal_initialised (at least one legal
+    deadline; applies to types ransomware, data_breach and bec, information_impact
+    privacy, or the tag personal-data); dark_operation_decided (Dark Operation is on or was
+    explicitly decided; applies to types phishing and bec); notifications_on_time (no
+    stakeholder notification overdue). A missing check is `warning` until
+    overdue_after_minutes (60) after the incident was created, then `overdue`;
+    notifications_on_time is `overdue` as soon as a notification is. route is the incident
+    sub-page where it is fixed, relative to /incidents/{id}/."""
+    inc = await get_accessible_incident(db, incident_id, user)
+    return await evaluate_start_checks(db, inc)
 
 
 # ─── Phase gates ─────────────────────────────────────────────────────────────
@@ -480,22 +627,104 @@ async def get_incident_gates(
     """Both phase gates, evaluated now by the same code that enforces them. Read-only;
     any user with access to the incident may read.
 
-    items[] holds {gate, label, met, exempt, unmet[], carried_forward[]} for gate
-    `post_incident` (Gate 1, checked by every PATCH that moves the incident into
-    post_incident) and gate `close` (Gate 2, checked by POST …/close; exempt for a
-    false or benign positive). Each unmet item has a stable `key`, a `label` and optional
-    `detail`, `fix_hint` and `route` (the incident sub-page where it is fixed);
-    carried-forward items are open legal deadlines that do not block, with `due_at`.
+    items[] holds, for gate `post_incident` (Gate 1, checked by every PATCH that moves the
+    incident into post_incident and by a re-open into post_incident) and gate `close` (Gate 2,
+    checked by POST …/close; exempt for a false or benign positive): {gate, label, met, exempt,
+    checks[], unmet[], warnings[], carried_forward[], sign_offs_required[], sign_offs[],
+    state_sha256}. checks[] lists every check that applies, each {key, label, level block|warn,
+    status met|unmet, detail, fix_hint, route (the incident sub-page where it is fixed)}; unmet[]
+    is the unmet block-level checks (what 409 gate_unmet reports; `met` is true when it is
+    empty), warnings[] the unmet warn-level ones (never blocking; recorded in the transition's
+    audit row). carried_forward[] are open legal deadlines that do not block, with `due_at`.
 
-    Gate 1: contained_at, eradicated_at, recovered_at set; no containment / eradication /
-    recovery action open or in progress; mandatory legal deadlines that are due or have a
-    window of 72 h or less completed or waived. Gate 2: resolution summary filled in;
-    lessons learned Final with a conducted date, participants, and an owner and due date on
-    every action item; closure checklist started and every active item except
-    incident_closed checked; no playbook task open or in progress; legal deadlines already
-    due completed or waived; a cost entry or a business-impact assessment with content."""
+    Gate 1 block: contained_at, eradicated_at, recovered_at set; no containment / eradication /
+    recovery action open or in progress; mandatory legal deadlines due or within 72 h completed
+    or waived; every in-scope system validated or not required (Recovery); every required
+    stakeholder notification notified or not required; for a personal-data breach a GDPR / NIS2
+    obligation recorded, plus the DPO's sign-off when one was waived. Gate 1 warn: deferred
+    action without a reason; no system in scope.
+    Gate 2 block: resolution summary; lessons learned Final with a conducted date, participants,
+    and an owner and due date on every action item; checklist started and every active item
+    (except incident_closed) checked or N/A; no non-Preparation playbook task open; legal
+    deadlines already due handled; a cost entry or a business-impact assessment with content;
+    every exhibit still held has a custodian and is on legal hold; no working-copy download
+    issued or in progress; every LE package acknowledged; the IC's sign-off, and the DPO's for a
+    breach. Gate 2 warn: N/A item or skipped task without a reason; open Preparation tasks;
+    executive and full reports not generated after the last audited change.
+    Sign off with POST …/gates/{gate}/sign-off."""
     inc = await get_accessible_incident(db, incident_id, user)
     return IncidentGates(incident_id=inc.id, items=[await evaluate_gate(db, inc, g) for g in GATES])
+
+
+@router.post("/{incident_id}/gates/{gate}/sign-off", response_model=GateSignOffOut,
+             status_code=status.HTTP_201_CREATED, summary="Sign off a phase gate",
+             responses={403: {"model": ApiErrorBody, "description": "not_incident_lead (role ic), not_incident_dpo "
+                                                                    "(role dpo)"},
+                        409: {"model": ApiErrorBody, "description": "incident_closed, or sign_off_not_required "
+                                                                    "(the gate doesn't need that role's sign-off now)"},
+                        422: {"model": ApiErrorBody, "description": "role_required, statement_required"}})
+async def sign_off_gate(
+    incident_id: uuid.UUID, gate: GateName, req: GateSignOffCreate,
+    user: User = Depends(require_analyst),
+    db: AsyncSession = Depends(get_db),
+) -> GateSignOffOut:
+    """Record the Incident Commander's (role ic) or the DPO's (role dpo) sign-off on a gate.
+    Body {role, statement}: statement at least 10 characters (422 code statement_required);
+    missing role is 422 code role_required.
+
+    Who: role ic — the incident lead (an analyst assigned Incident Commander or Deputy IC on this
+    incident, or an admin), else 403 code not_incident_lead; role dpo — an analyst assigned the
+    data_protection_officer role on this incident, or an admin, else 403 code not_incident_dpo.
+    The role must be in the gate's sign_offs_required (GET …/gates), else 409 code
+    sign_off_not_required: close always needs ic, and dpo for a personal-data breach;
+    post_incident needs dpo when a breach's GDPR / NIS2 obligation was waived as not required.
+    A closed incident is 409 code incident_closed.
+
+    Append-only: the record keeps the signer, the basis (signed_as), the statement, server time,
+    and the gate's block-level checks as they are now with their SHA-256 (state_sha256). A later
+    sign-off by the same role is added beside it. Only sign-offs made since the incident was last
+    re-opened count. Audited (incident_gate_sign_off); it appears in the full report and the LE
+    package. Signing doesn't change the phase: the gate still needs its other checks met."""
+    statement = (req.statement or "").strip()
+    if req.role is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "role_required", "role is required: ic or dpo")
+    if len(statement) < REASON_MIN:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "statement_required",
+                       f"statement is required: at least {REASON_MIN} characters")
+    # Lock the row: a sign-off and a phase change / close on the same incident are serialised.
+    inc = await get_accessible_incident(db, incident_id, user, for_update=True)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
+    if req.role == "ic" and not await is_incident_lead(db, user, inc):
+        raise not_incident_lead("give the Incident Commander's sign-off")
+    if req.role == "dpo" and not await is_incident_dpo(db, user, inc):
+        raise ApiError(status.HTTP_403_FORBIDDEN, "not_incident_dpo",
+                       "Only the analyst assigned Data Protection Officer on this incident, or an admin, can "
+                       "give the DPO's sign-off.")
+    result = await evaluate_gate(db, inc, gate)
+    if req.role not in result.sign_offs_required:
+        raise ApiError(status.HTTP_409_CONFLICT, "sign_off_not_required",
+                       f"{GATE_LABEL[gate]} doesn't need a {'DPO' if req.role == 'dpo' else 'IC'} sign-off now"
+                       + (" (false or benign positive: the gate is exempt)." if result.exempt else "."))
+    state, sha = gate_state(inc.id, gate, result.checks)
+    basis = LEAD_ROLE_KEYS if req.role == "ic" else (DPO_ROLE_KEY,)
+    held = [k for k in await held_role_keys(db, user, inc) if k in basis]
+    row = IncidentGateSignOff(
+        id=uuid.uuid4(), incident_id=inc.id, gate=gate, role=req.role, user_id=user.id, username=user.username,
+        signed_as=",".join(held) or "admin",
+        signed_at=utcnow(), statement=statement, gate_state=state, state_sha256=sha)
+    db.add(row)
+    await db.flush()
+    await write_audit(
+        db, "incident_gate_sign_off",
+        outcome="success",
+        resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
+        details={"sign_off_id": str(row.id), "gate": gate, "role": req.role, "signed_as": row.signed_as,
+                 "statement": statement, "state_sha256": sha,
+                 "unmet": [i.key for i in result.unmet], "warnings": [i.key for i in result.warnings]},
+    )
+    await db.commit()
+    return sign_off_out(row, current=True, state_sha256=sha)
 
 
 # ─── Caller's rights on the incident (E3) ────────────────────────────────────
@@ -512,7 +741,7 @@ async def get_incident_access(
     API token's role cap applies) assigned as Incident Commander or Deputy Incident
     Commander here; a viewer is never lead, even when assigned. Removing the assignment
     ends the rights on the next request. capabilities: read_audit_log, manage_le_package,
-    set_teams, override_gate, remove_any_assignment (lead); assign_lead_roles (lead, or,
+    set_teams, override_gate, remove_any_assignment, replace_playbook (lead); assign_lead_roles (lead, or,
     while no active analyst/admin holds IC or Deputy, the creator or today's on-call
     analyst); remove_own_assignment (analysts and admins)."""
     inc = await get_accessible_incident(db, incident_id, user)
@@ -667,13 +896,14 @@ async def update_incident(
                       if f in sent and getattr(req, f) is not None and getattr(inc, f) is None]
 
     # Gate 1 runs before anything is changed; an unmet gate or an error leaves the incident as it was.
-    overridden = None
+    overridden, gate = None, None
     if phase_change and req.phase == "post_incident":
         gate = await evaluate_gate(db, inc, "post_incident",
                                    milestones={f: getattr(req if f in sent else inc, f) for f in MILESTONES})
         overridden = _require_gate(gate, req.override_gate, "and a phase_reason of at least 10 characters")
 
     changed: dict[str, object] = {}
+    old_severity = inc.severity
     for field in ("title", "description", "severity", "phase", "tlp", "triage_state", "incident_type", "detection_method", "reporter"):
         new = getattr(req, field)
         if new is not None and new != getattr(inc, field):
@@ -686,6 +916,16 @@ async def update_incident(
             val = getattr(req, field)
             setattr(inc, field, val)
             changed[field] = val.isoformat() if val else None
+    if "detected_at" in sent:      # I4: a time set here was entered by a person or API client
+        inc.detected_at_source = "reported" if req.detected_at is not None else None
+
+    # I4 intake fields: null (or blank text) clears.
+    for field in INTAKE_FIELDS:
+        if field in sent:
+            val = _clean(getattr(req, field))
+            if val != getattr(inc, field):
+                setattr(inc, field, val)
+                changed[field] = val
 
     # A milestone set for the first time goes on the timeline, at the declared time.
     for field in newly_declared:
@@ -765,6 +1005,9 @@ async def update_incident(
             details["from_phase"] = old_phase
             if phase_reason:
                 details["phase_reason"] = phase_reason
+            if gate is not None:     # I5: Gate 1 ran; its warnings never block, they are recorded here
+                details["gate"] = "overridden" if overridden else "met"
+                details["gate_warnings"] = [i.key for i in gate.warnings]
         if "triage_state" in changed:
             details["from_triage_state"] = old_triage
             if triage_reason:
@@ -778,6 +1021,13 @@ async def update_incident(
             resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
             details=details,
         )
+    # I2: a severity reached for the first time starts its matrix rules' clocks now; a severity or
+    # type change re-derives the stakeholder notification obligations (never deleting one).
+    if "severity" in changed:
+        await record_severity_level(db, inc, at=utcnow(), source="change", user_id=user.id, from_severity=old_severity)
+    if "severity" in changed or "incident_type" in changed:
+        await sync_notifications(db, inc, cause="severity_changed" if "severity" in changed else "type_changed",
+                                 user_id=user.id)
     await db.commit()
     await db.refresh(inc)
     if "phase" in changed:
@@ -913,7 +1163,8 @@ async def close_incident(
         resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
         details={"reason": reason, "phase": inc.phase, "triage_state": inc.triage_state,
                  "checklist_item_ticked": ticked,
-                 "gate": "skipped" if gate.exempt else "overridden" if overridden else "met"},
+                 "gate": "skipped" if gate.exempt else "overridden" if overridden else "met",
+                 "gate_warnings": [i.key for i in gate.warnings]},
     )
     await db.commit()
     await db.refresh(inc)
@@ -964,11 +1215,12 @@ async def reopen_incident(
         raise not_incident_lead("override a phase gate")
 
     # Gate 1 runs before anything is changed; an unmet gate or an error leaves the incident closed.
-    gate_state, overridden = None, None
+    gate_status, overridden, gate_warnings = None, None, []
     if req.phase == "post_incident" and inc.phase != "post_incident":
         gate = await evaluate_gate(db, inc, "post_incident")
         overridden = _require_gate(gate, req.override_gate, "(the reason is recorded as the justification)")
-        gate_state = "overridden" if overridden else "met"
+        gate_status = "overridden" if overridden else "met"
+        gate_warnings = [i.key for i in gate.warnings]
 
     previous = {"from_phase": inc.phase,
                 "previous_closed_at": inc.closed_at.isoformat() if inc.closed_at else None,
@@ -989,7 +1241,7 @@ async def reopen_incident(
         outcome="success",
         resource_type="incident", resource_id=str(inc.id), resource_label=inc.title,
         details={"reason": reason, "phase": inc.phase, **previous, "checklist_item_unticked": unticked,
-                 **({"gate": gate_state} if gate_state else {})},
+                 **({"gate": gate_status, "gate_warnings": gate_warnings} if gate_status else {})},
     )
     await db.commit()
     await db.refresh(inc)

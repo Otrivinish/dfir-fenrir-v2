@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth.jsx'
 import { api } from '../api/client.js'
-import { PHASE } from '../lib/incidentVocab.js'
+import { PHASE, INCIDENT_TYPE, labelOf } from '../lib/incidentVocab.js'
 import { formatLocal } from '../lib/datetime.js'
 
 const ALL_CATS = 'All'
@@ -20,6 +20,9 @@ function timeAgo(isoStr) {
 export default function Playbooks() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
+  // The API's rule (I3): a system template is edited / marked reviewed by an admin; a custom one by an
+  // analyst or admin. Viewers get a read-only view.
+  const canEdit = (tpl) => tpl.is_system ? isAdmin : (isAdmin || user?.role === 'analyst')
 
   const [templates, setTemplates]  = useState([])
   const [loading, setLoading]      = useState(true)
@@ -140,8 +143,15 @@ export default function Playbooks() {
       {previewTpl && (
         <PreviewModal
           tpl={previewTpl}
+          canEdit={canEdit(previewTpl)}
           onClose={() => setPreviewTpl(null)}
           onExecute={(t) => { setPreviewTpl(null); onExecute(t) }}
+          onUpdated={(full) => {
+            const patch = { incident_types: full.incident_types, last_reviewed_at: full.last_reviewed_at,
+                            last_reviewed_by: full.last_reviewed_by }
+            setTemplates(prev => prev.map(t => t.id === full.id ? { ...t, ...patch } : t))
+            setPreviewTpl(prev => prev && prev.id === full.id ? { ...prev, ...patch } : prev)
+          }}
         />
       )}
 
@@ -240,10 +250,28 @@ function PlaybookCard({ tpl, isAdmin, onOpen, onExecute, onDelete }) {
 
 // ── Preview modal — read-only view of a playbook's steps ──────────────────────
 
-function PreviewModal({ tpl, onClose, onExecute }) {
+function PreviewModal({ tpl, canEdit, onClose, onExecute, onUpdated }) {
   const [full, setFull]       = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState(null)
+  const [busy, setBusy]       = useState(false)
+  const [saveErr, setSaveErr] = useState(null)
+  const [types, setTypes]     = useState(null)   // null = not editing; else the staged incident types
+
+  const save = async (call) => {
+    setBusy(true); setSaveErr(null)
+    try {
+      const updated = await call()
+      setFull(updated); onUpdated(updated); setTypes(null)
+    } catch (e) {
+      setSaveErr(e.message || 'Could not save')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const markReviewed = () => save(() => api.reviewPlaybookTemplate(tpl.id))
+  const saveTypes = () => save(() => api.updatePlaybookTemplate(tpl.id, { incident_types: types }))
+  const toggleType = (v) => setTypes(prev => prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v])
 
   useEffect(() => {
     let cancelled = false
@@ -287,6 +315,49 @@ function PreviewModal({ tpl, onClose, onExecute }) {
               <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 'var(--space-2)', lineHeight: 1.5 }}>
                 {tpl.description}
               </p>
+            )}
+            <div className="pb-review" style={{ marginTop: 'var(--space-2)' }}>
+              {tpl.last_reviewed_at
+                ? <span>Last reviewed <b>{formatLocal(tpl.last_reviewed_at)}</b>{tpl.last_reviewed_by ? <> by <b>{tpl.last_reviewed_by}</b></> : null}</span>
+                : <span>Never marked reviewed</span>}
+              {canEdit && (
+                <button type="button" className="btn ghost" onClick={markReviewed} disabled={busy}
+                        title="Record that you reviewed this playbook today (Readiness checks the core playbooks were reviewed within 12 months)">
+                  Mark reviewed
+                </button>
+              )}
+            </div>
+            <div className="pb-review" style={{ marginTop: 'var(--space-2)' }}>
+              <span>Suggested for:</span>
+              {types === null ? (
+                <>
+                  <span className="pb-types">
+                    {(tpl.incident_types || []).length
+                      ? tpl.incident_types.map(v => <span key={v} className="pill">{labelOf('incident_type', v)}</span>)
+                      : <span>no incident type</span>}
+                  </span>
+                  {canEdit && (
+                    <button type="button" className="btn ghost" disabled={busy}
+                            onClick={() => setTypes(tpl.incident_types || [])}>Edit types</button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <span className="pb-types" role="group" aria-label="Incident types">
+                    {INCIDENT_TYPE.map(o => (
+                      <button key={o.value} type="button" className={`chip ${types.includes(o.value) ? 'on' : ''}`}
+                              aria-pressed={types.includes(o.value)} onClick={() => toggleType(o.value)}>{o.label}</button>
+                    ))}
+                  </span>
+                  <button type="button" className="btn ghost" onClick={() => setTypes(null)} disabled={busy}>Cancel</button>
+                  <button type="button" className="btn primary" onClick={saveTypes} disabled={busy}>Save types</button>
+                </>
+              )}
+            </div>
+            {saveErr && (
+              <div className="alert error" role="alert" style={{ marginTop: 'var(--space-2)' }}>
+                <span className="alert-icon">!</span><span>{saveErr}</span>
+              </div>
             )}
           </div>
 
@@ -346,7 +417,6 @@ function ExecuteModal({ tpl, onClose }) {
   const [incidents,   setIncidents]   = useState([])
   const [incidentId,  setIncidentId]  = useState('')
   const [existingCount, setExistingCount] = useState(0)
-  const [confirmed,   setConfirmed]   = useState(false)
   const [loading,     setLoading]     = useState(true)
   const [taskLoading, setTaskLoading] = useState(false)
   const [busy, setBusy]               = useState(false)
@@ -372,7 +442,6 @@ function ExecuteModal({ tpl, onClose }) {
     if (!incidentId) { setExistingCount(0); return }
     let cancelled = false
     setTaskLoading(true)
-    setConfirmed(false)
     api.listPlaybookTasks(incidentId)
       .then(tasks => { if (!cancelled) setExistingCount(tasks.length) })
       .catch(() => { if (!cancelled) setExistingCount(0) })
@@ -388,13 +457,13 @@ function ExecuteModal({ tpl, onClose }) {
 
   const hasExisting = existingCount > 0
 
+  // I3: the library only appends. Replacing a plan is the incident lead's, from the incident's Playbook tab.
   const onSubmit = async (e) => {
     e.preventDefault()
     if (!incidentId) { setError('Select an incident.'); return }
-    if (hasExisting && !confirmed) { setError('Confirm that the existing playbook will be replaced.'); return }
     setBusy(true); setError(null)
     try {
-      await api.instantiatePlaybook(incidentId, { template_id: tpl.id, replace: true })
+      await api.instantiatePlaybook(incidentId, { template_id: tpl.id, mode: 'append' })
       onClose()
       navigate(`/incidents/${incidentId}/playbook`)
     } catch (e2) {
@@ -452,26 +521,10 @@ function ExecuteModal({ tpl, onClose }) {
               </div>
 
               {!taskLoading && hasExisting && (
-                <div style={{
-                  padding: 'var(--space-3)',
-                  background: 'color-mix(in srgb, var(--high) 12%, transparent)',
-                  border: '1px solid var(--high)',
-                  borderRadius: 'var(--radius)',
-                }}>
-                  <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--high)', marginBottom: 'var(--space-1)' }}>
-                    This incident already has a playbook
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--text)', marginBottom: 'var(--space-2)', lineHeight: 1.5 }}>
-                    The {existingCount} existing task{existingCount !== 1 ? 's' : ''} — including any completed or in-progress work — will be permanently deleted and replaced.
-                  </div>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', cursor: 'pointer', fontSize: 13 }}>
-                    <input
-                      type="checkbox"
-                      checked={confirmed}
-                      onChange={(e) => setConfirmed(e.target.checked)}
-                    />
-                    I understand all saved progress will be lost
-                  </label>
+                <div className="field-hint">
+                  This incident already has {existingCount} task{existingCount !== 1 ? 's' : ''}. The template's
+                  tasks are added to them; tasks from this template already in the plan are skipped. To replace
+                  the plan, use Apply template on the incident's Playbook tab (incident lead or admin).
                 </div>
               )}
 
@@ -487,9 +540,9 @@ function ExecuteModal({ tpl, onClose }) {
             <button
               type="submit"
               className="btn primary"
-              disabled={busy || loading || taskLoading || incidents.length === 0 || (hasExisting && !confirmed)}
+              disabled={busy || loading || taskLoading || incidents.length === 0}
             >
-              {busy ? 'Applying…' : 'Apply & open'}
+              {busy ? 'Applying…' : hasExisting ? 'Add & open' : 'Apply & open'}
             </button>
           </div>
         </form>
@@ -509,6 +562,7 @@ function NewTemplateModal({ onClose, onCreated }) {
   const [name, setName]         = useState('')
   const [category, setCategory] = useState('')
   const [description, setDesc]  = useState('')
+  const [types, setTypes]       = useState([])
   const [steps, setSteps]       = useState([
     { title: '', description: '', phase: 'detection_and_analysis', order: 10 },
   ])
@@ -548,6 +602,7 @@ function NewTemplateModal({ onClose, onCreated }) {
         name: name.trim(),
         description: description.trim() || null,
         category: category || null,
+        incident_types: types,
         tasks: validSteps.map((s, i) => ({
           title: s.title.trim(),
           description: s.description.trim() || null,
@@ -595,6 +650,19 @@ function NewTemplateModal({ onClose, onCreated }) {
                 <textarea id="tpl-desc" className="input" value={description}
                           onChange={(e) => setDesc(e.target.value)}
                           rows={2} maxLength={4096} placeholder="One-line summary of when to use this playbook." />
+              </div>
+
+              <div className="field">
+                <span className="field-label" id="tpl-types-label">Suggest for incident types (optional)</span>
+                <div className="pb-types" role="group" aria-labelledby="tpl-types-label">
+                  {INCIDENT_TYPE.map(o => (
+                    <button key={o.value} type="button" className={`chip ${types.includes(o.value) ? 'on' : ''}`}
+                            aria-pressed={types.includes(o.value)} disabled={busy}
+                            onClick={() => setTypes(prev => prev.includes(o.value) ? prev.filter(x => x !== o.value) : [...prev, o.value])}>
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div className="field">

@@ -97,6 +97,43 @@ export const ENTITY_TYPE = [
   { value: 'other',         label: 'Other' },
 ]
 
+// I4 intake: NIST SP 800-61 impact categories (backend FunctionalImpact / InformationImpact /
+// Recoverability) and the IOC types a first indicator can have (backend IocType).
+export const FUNCTIONAL_IMPACT = [
+  { value: 'none',   label: 'None — no effect on services' },
+  { value: 'low',    label: 'Low — minimal effect; all critical services still delivered' },
+  { value: 'medium', label: 'Medium — a subset of critical services lost' },
+  { value: 'high',   label: 'High — critical services can no longer be delivered' },
+]
+
+export const INFORMATION_IMPACT = [
+  { value: 'none',        label: 'None — no information exfiltrated, changed or deleted' },
+  { value: 'privacy',     label: 'Privacy breach — personal data accessed or exfiltrated' },
+  { value: 'proprietary', label: 'Proprietary breach — confidential business data' },
+  { value: 'integrity',   label: 'Integrity loss — information changed or deleted' },
+]
+
+export const RECOVERABILITY = [
+  { value: 'regular',         label: 'Regular — predictable with existing resources' },
+  { value: 'supplemented',    label: 'Supplemented — predictable with more resources' },
+  { value: 'extended',        label: 'Extended — unpredictable; outside help needed' },
+  { value: 'not_recoverable', label: 'Not recoverable — e.g. data published' },
+]
+
+export const IOC_TYPE = [
+  { value: 'ip',            label: 'IP address' },
+  { value: 'domain',        label: 'Domain' },
+  { value: 'url',           label: 'URL' },
+  { value: 'hash_md5',      label: 'Hash (MD5)' },
+  { value: 'hash_sha1',     label: 'Hash (SHA1)' },
+  { value: 'hash_sha256',   label: 'Hash (SHA256)' },
+  { value: 'email',         label: 'Email' },
+  { value: 'registry_key',  label: 'Registry key' },
+  { value: 'file_path',     label: 'File path' },
+  { value: 'crypto_wallet', label: 'Crypto wallet' },
+  { value: 'other',         label: 'Other' },
+]
+
 function makeLookup(rows) {
   const out = {}
   for (const r of rows) out[r.value] = r
@@ -112,6 +149,9 @@ export const byValue = {
   detection_method: makeLookup(DETECTION_METHOD),
   system_type:      makeLookup(SYSTEM_TYPE),
   entity_type:      makeLookup(ENTITY_TYPE),
+  functional_impact:  makeLookup(FUNCTIONAL_IMPACT),
+  information_impact: makeLookup(INFORMATION_IMPACT),
+  recoverability:     makeLookup(RECOVERABILITY),
 }
 
 export function labelOf(group, value) { return byValue[group]?.[value]?.label ?? value }

@@ -62,7 +62,7 @@ async def get_readiness(
     roles active; on_call_14d (blocker, GV.RR-02) an active responder on call every UTC day of the
     next 14 (only analyst and admin accounts count; a viewer can't respond); matrix_high_critical (blocker, RS.CO-02) ≥1 required stakeholder-matrix rule for High
     and for Critical; playbooks_core (warning, ID.IM-04) the Ransomware and Data-breach playbook
-    templates exist and were updated within 12 months; threat_intel (warning, ID.RA-02) ≥1
+    templates exist and were marked reviewed within 12 months (I3: last_reviewed_at, not updated_at); threat_intel (warning, ID.RA-02) ≥1
     enrichment API key and every enabled feed pulled within 24 h; smtp (warning) email configured;
     validated_tools (warning, ISO/IEC 27041) ≥1 active validated tool; backup_recent (blocker,
     PR.DS-11) newest backup under 26 h old and the last manual run not failed (a fresh backup that is

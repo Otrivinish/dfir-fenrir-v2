@@ -54,6 +54,22 @@ function ClosureChecklist({ inc }) {
     }
   }
 
+  // I5: mark / unmark "not applicable"; the reason is optional (Gate 2 warns when it is missing).
+  async function setNa(item, notApplicable, reason) {
+    if (busy[item.id] || isClosed) return
+    setBusy(b => ({ ...b, [item.id]: true }))
+    setRowError(r => { const n = { ...r }; delete n[item.id]; return n })
+    try {
+      const updated = await api.setClosureItemNa(inc.id, item.id,
+        notApplicable ? { not_applicable: true, na_reason: reason || null } : { not_applicable: false })
+      setItems(prev => prev.map(i => i.id === updated.id ? updated : i))
+    } catch (e) {
+      setRowError(r => ({ ...r, [item.id]: e.message || 'Could not save' }))
+    } finally {
+      setBusy(b => { const n = { ...b }; delete n[item.id]; return n })
+    }
+  }
+
   async function patchMeta(item, payload) {
     setBusy(b => ({ ...b, [item.id]: true }))
     setRowError(r => { const n = { ...r }; delete n[item.id]; return n })
@@ -101,7 +117,7 @@ function ClosureChecklist({ inc }) {
   if (loading) return <div className="pi-loading">Loading checklist…</div>
   if (error)   return <div className="pi-error">{error}</div>
 
-  const checked = items.filter(i => i.checked).length
+  const checked = items.filter(i => i.checked || i.not_applicable).length   // N/A counts as done (Gate 2)
   const pct     = items.length ? Math.round((checked / items.length) * 100) : 0
 
   return (
@@ -170,6 +186,7 @@ function ClosureChecklist({ inc }) {
             error={rowError[item.id]}
             isClosed={isClosed}
             onToggle={() => toggle(item)}
+            onNa={(na, reason) => setNa(item, na, reason)}
             onMeta={(payload) => patchMeta(item, payload)}
             onDelete={() => deleteItem(item)}
           />
@@ -179,8 +196,10 @@ function ClosureChecklist({ inc }) {
   )
 }
 
-function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onMeta, onDelete }) {
+function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onNa, onMeta, onDelete }) {
   const [expanded,    setExpanded]    = useState(false)
+  const [naOpen,      setNaOpen]      = useState(false)
+  const [naDraft,     setNaDraft]     = useState('')
   const [notesDraft,  setNotesDraft]  = useState(item.notes || '')
   const [editingNote, setEditingNote] = useState(false)
 
@@ -215,7 +234,29 @@ function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onMe
         </button>
 
         <div style={{ flex: 1, minWidth: 0 }}>
-          <span className="pi-checklist-label">{item.label}</span>
+          <span className="pi-checklist-label" style={item.not_applicable ? { color: 'var(--muted)' } : undefined}>{item.label}</span>
+          {item.not_applicable && (
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }} data-checklist-na>
+              <span className="pill pill-gray" style={{ marginRight: 'var(--space-1)' }}>N/A</span>
+              {item.na_reason ? item.na_reason : <span style={{ fontStyle: 'italic' }}>No reason given (Gate 2 warns)</span>}
+            </div>
+          )}
+          {naOpen && (
+            <div style={{ marginTop: 'var(--space-2)', display: 'flex', gap: 'var(--space-2)', alignItems: 'flex-start' }}>
+              <input autoFocus className="input" style={{ flex: 1, fontSize: 12 }} maxLength={2000}
+                     aria-label={`Why "${item.label}" is not applicable`}
+                     placeholder="Why it is not applicable (recommended)"
+                     value={naDraft} onChange={e => setNaDraft(e.target.value)}
+                     onKeyDown={e => {
+                       if (e.key === 'Enter')  { e.preventDefault(); onNa(true, naDraft.trim()); setNaOpen(false) }
+                       if (e.key === 'Escape') { setNaOpen(false) }
+                     }} />
+              <button type="button" className="btn primary" style={{ fontSize: 12, padding: '4px 10px' }}
+                      onClick={() => { onNa(true, naDraft.trim()); setNaOpen(false) }}>Mark N/A</button>
+              <button type="button" className="btn ghost" style={{ fontSize: 12, padding: '4px 10px' }}
+                      onClick={() => setNaOpen(false)}>Cancel</button>
+            </div>
+          )}
 
           {/* Meta line */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', marginTop: 4, fontSize: 12, color: 'var(--muted)' }}>
@@ -268,6 +309,18 @@ function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onMe
         {/* Actions */}
         {!isClosed && (
           <div style={{ display: 'flex', gap: 'var(--space-1)', flexShrink: 0 }}>
+            {item.not_applicable ? (
+              <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '2px 6px' }}
+                      onClick={() => onNa(false)} disabled={busyToggle} title="This item applies after all">
+                Clear N/A
+              </button>
+            ) : !item.checked && !naOpen && item.item_key !== 'incident_closed' && (
+              <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '2px 6px' }}
+                      onClick={() => { setNaDraft(item.na_reason || ''); setNaOpen(true) }} disabled={busyToggle}
+                      title="Mark not applicable, with a reason">
+                N/A
+              </button>
+            )}
             {!editingNote && (
               <button
                 type="button"

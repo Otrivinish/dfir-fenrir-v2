@@ -431,6 +431,9 @@ export const api = {
   createIncident:      (payload)  => request('POST',  '/api/incidents', payload),
   updateIncident:      (id, body) => request('PATCH', `/api/incidents/${id}`, body),
   getIncidentGates:    (id)       => request('GET',   `/api/incidents/${id}/gates`),
+  // I5: { role: 'ic'|'dpo', statement } — the API decides who may sign and whether the gate needs it.
+  signOffGate:         (id, gate, payload) => request('POST', `/api/incidents/${id}/gates/${gate}/sign-off`, payload),
+  getIncidentStartChecks: (id)    => request('GET',   `/api/incidents/${id}/start-checks`),
   // My rights on this incident (E3): {is_lead, capabilities[]}; the API decides.
   getIncidentAccess:   (id)       => request('GET',   `/api/incidents/${id}/access`),
   closeIncident:       (id, reason, overrideGate = false) => request('POST', `/api/incidents/${id}/close`,
@@ -854,15 +857,18 @@ export const api = {
   runBackup:   () => request('POST', '/api/admin/backups/run'),
 
   // Playbook templates
-  listPlaybookTemplates:   ()              => request('GET',    '/api/playbook-templates'),
+  // I3: { incident_type } lists only the templates suggested for that type.
+  listPlaybookTemplates:   (params = {})   => request('GET',    '/api/playbook-templates' +
+    (params.incident_type ? `?incident_type=${encodeURIComponent(params.incident_type)}` : '')),
   getPlaybookTemplate:     (id)            => request('GET',    `/api/playbook-templates/${id}`),
   createPlaybookTemplate:  (payload)       => request('POST',   '/api/playbook-templates', payload),
   updatePlaybookTemplate:  (id, payload)   => request('PATCH',  `/api/playbook-templates/${id}`, payload),
   deletePlaybookTemplate:  (id)            => request('DELETE', `/api/playbook-templates/${id}`),
+  reviewPlaybookTemplate:  (id)            => request('POST',   `/api/playbook-templates/${id}/review`),
 
   // Playbook tasks (per incident)
-  listPlaybookTasks: (incidentId) =>
-    request('GET',    `/api/incidents/${incidentId}/playbook/tasks`),
+  listPlaybookTasks: (incidentId, { includeArchived = false } = {}) =>
+    request('GET',    `/api/incidents/${incidentId}/playbook/tasks${includeArchived ? '?include_archived=true' : ''}`),
   createPlaybookTask: (incidentId, payload) =>
     request('POST',   `/api/incidents/${incidentId}/playbook/tasks`, payload),
   updatePlaybookTask: (incidentId, taskId, payload) =>
@@ -926,6 +932,30 @@ export const api = {
     return request('GET', `/api/incidents/${incidentId}/case-notes${s ? '?' + s : ''}`)
   },
   createCaseNote: (incidentId, payload) => request('POST', `/api/incidents/${incidentId}/case-notes`, payload),
+
+  // Recovery tracker (I1): in-scope systems + roll-up; filters state; PATCH one system (fields / one state step)
+  listRecovery: (incidentId, params = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    }
+    const s = qs.toString()
+    return request('GET', `/api/incidents/${incidentId}/recovery${s ? '?' + s : ''}`)
+  },
+  updateRecovery: (incidentId, entityId, payload) => request('PATCH', `/api/incidents/${incidentId}/recovery/${entityId}`, payload),
+
+  // Stakeholder notification tracker (I2): obligations from the matrix + roll-up + severity levels;
+  // filters status / active; PATCH one obligation (record notified / not required, undo, correct)
+  listStakeholderNotifications: (incidentId, params = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    }
+    const s = qs.toString()
+    return request('GET', `/api/incidents/${incidentId}/stakeholder-notifications${s ? '?' + s : ''}`)
+  },
+  updateStakeholderNotification: (incidentId, notificationId, payload) =>
+    request('PATCH', `/api/incidents/${incidentId}/stakeholder-notifications/${notificationId}`, payload),
 
   // Comms — OOB passphrase + dark operation
   getPassphrase:        (incidentId)          => request('GET',   `/api/incidents/${incidentId}/oob/passphrase`),
@@ -1307,6 +1337,9 @@ export const api = {
     request('DELETE', `/api/incidents/${incidentId}/post-incident/checklist/${itemId}`),
   toggleClosureItem:      (incidentId, itemId, checked) =>
     request('PATCH', `/api/incidents/${incidentId}/post-incident/checklist/${itemId}`, { checked }),
+  // I5: { not_applicable, na_reason? } marks / unmarks the item N/A.
+  setClosureItemNa:       (incidentId, itemId, payload) =>
+    request('PATCH', `/api/incidents/${incidentId}/post-incident/checklist/${itemId}`, payload),
   patchChecklistMeta:     (incidentId, itemId, payload) =>
     request('PATCH', `/api/incidents/${incidentId}/post-incident/checklist/${itemId}/meta`, payload),
   getLessonsLearned:      (incidentId) => request('GET',   `/api/incidents/${incidentId}/post-incident/lessons`),

@@ -157,6 +157,15 @@ def render_readme(
                                         {{v:1, id, incident_id, author_id, created_at (as in the CSV), body,
                                         corrects_id, source_scratchpad_id (null if empty), evidence_ids,
                                         entity_ids, ioc_ids, timeline_event_ids (sorted lists)}}
+    11_Recovery/                        Recovery tracker (CSV): per compromised system, the restore point, who restored
+                                        and validated it and when, the validation method and the monitoring window
+                                        (present if any).
+    12_Notifications/                   Stakeholder notification tracker (CSV): per stakeholder-matrix obligation, when its
+                                        countdown started and was due, and who notified the stakeholder, when and how,
+                                        or why it was not required (present if any).
+    13_Sign_Offs/                       Phase-gate sign-offs (CSV): the Incident Commander's and the DPO's, who signed which
+                                        gate, on what basis and when, the statement and the SHA-256 of the gate state
+                                        they signed; "current" = made since the last re-open (present if any).
 
 ## How to open this package
 

@@ -307,6 +307,7 @@ function IncidentRow({ inc, legal }) {
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 export default function Dashboard() {
+  const navigate = useNavigate()
   const [summary,   setSummary]   = useState(null)
   const [activity,  setActivity]  = useState(null)
   const [incidents, setIncidents] = useState(null)
@@ -405,15 +406,11 @@ export default function Dashboard() {
     return () => { try { ws.close() } catch { /* ok */ } }
   }, [load])
 
+  // Open the new incident straight away (its Situation board shows the start checks), as from Incidents.
   const onCreatedIncident = useCallback((newInc) => {
     setShowCreate(false)
-    // Optimistic: prepend to the open-incidents list so the operator sees it
-    // immediately without waiting for a roundtrip.
-    if (newInc && newInc.status === 'open') {
-      setIncidents(prev => [newInc, ...(prev || [])])
-    }
-    load()
-  }, [load])
+    navigate(`/incidents/${newInc.id}`)
+  }, [navigate])
 
   // Stale incidents — no updated_at change in STALE_DAYS days. Derived from
   // the open-incidents list so we don't need a dedicated endpoint.

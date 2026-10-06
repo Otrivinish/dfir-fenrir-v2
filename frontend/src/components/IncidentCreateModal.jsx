@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client.js'
-import { SEVERITY, PHASE, TLP, INCIDENT_TYPE, DETECTION_METHOD, TRIAGE_STATE } from '../lib/incidentVocab.js'
+import { SEVERITY, PHASE, TLP, INCIDENT_TYPE, DETECTION_METHOD, TRIAGE_STATE,
+         FUNCTIONAL_IMPACT, INFORMATION_IMPACT, RECOVERABILITY, IOC_TYPE } from '../lib/incidentVocab.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 import TagInput from './TagInput.jsx'
 import LocalDateTimePicker from './LocalDateTimePicker.jsx'
 
+// Required by the API (I4, owner decision 2026-10-06): title, severity, type, how detected, detected.
+// Severity, type, method and Detected start empty: the operator chooses; nothing is pre-filled.
 const INITIAL = {
   title: '',
   description: '',
-  severity: 'medium',
+  severity: '',
   phase: 'detection_and_analysis',
   tlp: 'amber',
   incident_type: '',
@@ -19,7 +22,24 @@ const INITIAL = {
   occurred_at: '',
   detected_at: '',
   dark_operation: false,
+  // I4 optional intake
+  ic_user_id: '',
+  functional_impact: '',
+  information_impact: '',
+  recoverability: '',
+  severity_rationale: '',
+  alert_reference: '',
+  first_host: '',
+  first_ioc_type: 'ip',
+  first_ioc_value: '',
 }
+
+const REQUIRED = [
+  ['title', 'Title'], ['severity', 'Severity'], ['incident_type', 'Incident type'],
+  ['detection_method', 'How detected'], ['detected_at', 'Detected'],
+]
+const OPTIONAL_TEXT = ['functional_impact', 'information_impact', 'recoverability', 'severity_rationale',
+                       'alert_reference', 'first_host']
 
 // An incident is opened because something was detected: the API accepts only these start phases.
 const START_PHASES = PHASE.filter(p => p.value === 'detection_and_analysis' || p.value === 'containment_eradication_recovery')
@@ -39,11 +59,20 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
   const [selectedTeamIds, setSelectedTeamIds] = useState([])
   const [tags, setTags] = useState([])
   const [blockers, setBlockers] = useState([])   // failing readiness blockers: shown, never blocking
+  const [suggested, setSuggested] = useState([])  // playbook templates suggested for the chosen type (I3)
+  const [people, setPeople] = useState([])        // Incident Commander picker (active users)
 
   useEffect(() => {
-    // Detected defaults to now (editable); the API never fills it in itself.
-    if (open) { setForm({ ...INITIAL, detected_at: new Date().toISOString() }); setError(''); setBusy(false); setSelectedTeamIds([]); setTags([]) }
+    // Detected starts empty: the operator enters it (the API never fills it in either).
+    if (open) { setForm(INITIAL); setError(''); setBusy(false); setSelectedTeamIds([]); setTags([]) }
   }, [open])
+
+  useEffect(() => {
+    if (!open || !readsReadiness) return
+    let live = true
+    api.listAssignableUsers().then(d => { if (live) setPeople(d) }).catch(() => {})
+    return () => { live = false }
+  }, [open, readsReadiness])
 
   useEffect(() => {
     setBlockers([])
@@ -54,6 +83,18 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
       .catch(() => {})   // 403 or offline: no callout
     return () => { live = false }
   }, [open, readsReadiness])
+
+  // Suggest, never apply: the templates for the chosen type are named here and offered on the
+  // incident's Playbook tab after it is created.
+  useEffect(() => {
+    setSuggested([])
+    if (!open || !form.incident_type) return
+    let live = true
+    api.listPlaybookTemplates({ incident_type: form.incident_type })
+      .then(d => { if (live) setSuggested(d) })
+      .catch(() => {})
+    return () => { live = false }
+  }, [open, form.incident_type])
 
   useEffect(() => {
     if (open && canPickTeams && allTeams.length === 0) {
@@ -78,7 +119,10 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
   const onSubmit = async (e) => {
     e.preventDefault()
     setError('')
+    const missing = REQUIRED.filter(([k]) => !String(form[k] ?? '').trim()).map(([, label]) => label)
+    if (missing.length) { setError(`Required: ${missing.join(', ')}.`); return }
     if (form.title.trim().length < 3) { setError('Title must be at least 3 characters.'); return }
+    const optional = Object.fromEntries(OPTIONAL_TEXT.map(k => [k, form[k].trim()]).filter(([, v]) => v))
     setBusy(true)
     try {
       const created = await api.createIncident({
@@ -87,8 +131,8 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
         severity: form.severity,
         phase: form.phase,
         tlp: form.tlp,
-        incident_type: form.incident_type || null,
-        detection_method: form.detection_method || null,
+        incident_type: form.incident_type,
+        detection_method: form.detection_method,
         triage_state: form.triage_state,
         ...(askTriageReason && form.triage_reason.trim() ? { triage_reason: form.triage_reason.trim() } : {}),
         reporter: form.reporter.trim() || null,
@@ -96,7 +140,11 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
         detected_at: form.detected_at,
         team_ids: selectedTeamIds,
         tags,
-        dark_operation: form.dark_operation,
+        // Sent only when ticked: an explicit choice records the Dark Operation decision (I4).
+        ...(form.dark_operation ? { dark_operation: true } : {}),
+        ...optional,
+        ...(form.ic_user_id ? { ic_user_id: form.ic_user_id } : {}),
+        ...(form.first_ioc_value.trim() ? { first_ioc: { type: form.first_ioc_type, value: form.first_ioc_value.trim() } } : {}),
       })
       onCreated(created)
     } catch (err) {
@@ -142,17 +190,24 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
               </div>
 
               <div className="field">
-                <label className="field-label" htmlFor="inc-type">Incident type (optional)</label>
-                <select id="inc-type" className="select" value={form.incident_type} onChange={set('incident_type')}>
-                  <option value="">— unclassified —</option>
+                <label className="field-label" htmlFor="inc-type">Incident type</label>
+                <select id="inc-type" className="select" value={form.incident_type} onChange={set('incident_type')} required>
+                  <option value="">— choose —</option>
                   {INCIDENT_TYPE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
+                {suggested.length > 0 && (
+                  <div className="field-hint">
+                    Suggested playbook{suggested.length === 1 ? '' : 's'}: {suggested.map(t => t.name).join(' · ')}.
+                    After you create the incident, its start checks link to the Playbook tab to apply one.
+                  </div>
+                )}
               </div>
 
               <div className="form-row">
                 <div className="field">
                   <label className="field-label" htmlFor="inc-sev">Severity</label>
-                  <select id="inc-sev" className="select" value={form.severity} onChange={set('severity')}>
+                  <select id="inc-sev" className="select" value={form.severity} onChange={set('severity')} required>
+                    <option value="">— choose —</option>
                     {SEVERITY.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
                 </div>
@@ -173,9 +228,9 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
 
               <div className="form-row">
                 <div className="field">
-                  <label className="field-label" htmlFor="inc-method">How detected (optional)</label>
-                  <select id="inc-method" className="select" value={form.detection_method} onChange={set('detection_method')}>
-                    <option value="">— not set —</option>
+                  <label className="field-label" htmlFor="inc-method">How detected</label>
+                  <select id="inc-method" className="select" value={form.detection_method} onChange={set('detection_method')} required>
+                    <option value="">— choose —</option>
                     {DETECTION_METHOD.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
                 </div>
@@ -200,6 +255,22 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
                   </span>
                 </div>
               )}
+
+              <div className="field">
+                <label className="field-label" htmlFor="inc-occurred">When did it occur? (optional)</label>
+                <LocalDateTimePicker id="inc-occurred" value={form.occurred_at}
+                       onChange={v => setForm(f => ({ ...f, occurred_at: v }))} />
+                <span style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, display: 'block' }}>Used for Mean Time to Detect. Leave blank if unknown.</span>
+              </div>
+
+              <div className="field">
+                <label className="field-label" htmlFor="inc-detected">Detected</label>
+                <LocalDateTimePicker id="inc-detected" value={form.detected_at} required
+                       onChange={v => setForm(f => ({ ...f, detected_at: v }))} />
+                <span className="field-hint">
+                  When the alert fired or the report came in. Required; nothing is filled in for you.
+                </span>
+              </div>
 
               <div className="field">
                 <label className="field-label" htmlFor="inc-reporter">Reporter (optional)</label>
@@ -231,21 +302,70 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
                 </div>
               )}
 
-              <div className="field">
-                <label className="field-label" htmlFor="inc-occurred">When did it occur? (optional)</label>
-                <LocalDateTimePicker id="inc-occurred" value={form.occurred_at}
-                       onChange={v => setForm(f => ({ ...f, occurred_at: v }))} />
-                <span style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, display: 'block' }}>Used for Mean Time to Detect. Leave blank if unknown.</span>
-              </div>
-
-              <div className="field">
-                <label className="field-label" htmlFor="inc-detected">Detected</label>
-                <LocalDateTimePicker id="inc-detected" value={form.detected_at} required
-                       onChange={v => setForm(f => ({ ...f, detected_at: v }))} />
-                <span className="field-hint">
-                  When the alert fired or the report came in. Pre-filled with now; change it if detection was earlier.
-                </span>
-              </div>
+              <section className="newinc-optional" aria-labelledby="newinc-opt-head">
+                <h3 id="newinc-opt-head" className="newinc-optional-head">Optional — fill in what you already know</h3>
+                <div className="field">
+                  <label className="field-label" htmlFor="inc-ic">Incident Commander</label>
+                  <select id="inc-ic" className="select" value={form.ic_user_id} onChange={set('ic_user_id')}>
+                    <option value="">— not yet —</option>
+                    {people.map(u => <option key={u.id} value={u.id}>{u.username}{u.full_name ? ` (${u.full_name})` : ''}{u.id === user?.id ? ' — me' : ''}</option>)}
+                  </select>
+                  <span className="field-hint">Assigned with the incident. They must be able to see it (its teams) and get an in-app notification.</span>
+                </div>
+                <div className="form-row">
+                  <div className="field">
+                    <label className="field-label" htmlFor="inc-fimpact">Functional impact</label>
+                    <select id="inc-fimpact" className="select" value={form.functional_impact} onChange={set('functional_impact')}>
+                      <option value="">— not assessed —</option>
+                      {FUNCTIONAL_IMPACT.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label className="field-label" htmlFor="inc-iimpact">Information impact</label>
+                    <select id="inc-iimpact" className="select" value={form.information_impact} onChange={set('information_impact')}>
+                      <option value="">— not assessed —</option>
+                      {INFORMATION_IMPACT.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="inc-recover">Recoverability</label>
+                  <select id="inc-recover" className="select" value={form.recoverability} onChange={set('recoverability')}>
+                    <option value="">— not assessed —</option>
+                    {RECOVERABILITY.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                  <span className="field-hint">NIST SP 800-61 impact categories.</span>
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="inc-sevwhy">Why this severity</label>
+                  <textarea id="inc-sevwhy" className="input" rows={2} maxLength={2000} value={form.severity_rationale}
+                            onChange={set('severity_rationale')} placeholder="e.g. Domain admin account used on 3 servers" />
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="inc-alertref">Alert reference</label>
+                  <input id="inc-alertref" className="input" maxLength={256} value={form.alert_reference}
+                         onChange={set('alert_reference')} placeholder="Source system and alert id, e.g. Sentinel 4f2a91" />
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="inc-host">First affected host</label>
+                  <input id="inc-host" className="input" maxLength={255} value={form.first_host}
+                         onChange={set('first_host')} placeholder="e.g. FIN-WS-07" />
+                  <span className="field-hint">Added to Entities as a compromised host (in scope).</span>
+                </div>
+                <div className="form-row">
+                  <div className="field">
+                    <label className="field-label" htmlFor="inc-ioc-type">First IOC type</label>
+                    <select id="inc-ioc-type" className="select" value={form.first_ioc_type} onChange={set('first_ioc_type')}>
+                      {IOC_TYPE.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label className="field-label" htmlFor="inc-ioc-value">First IOC value</label>
+                    <input id="inc-ioc-value" className="input" maxLength={2048} value={form.first_ioc_value}
+                           onChange={set('first_ioc_value')} placeholder="e.g. 203.0.113.7" />
+                  </div>
+                </div>
+              </section>
 
               <div className="field">
                 <label className="field-label">Tags (optional)</label>

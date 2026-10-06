@@ -35,6 +35,8 @@ from entities.routes import router as entities_router
 from files.routes import router as files_router
 from notes.routes import router as notes_router
 from case_notes.routes import router as case_notes_router
+from recovery.routes import router as recovery_router
+from stakeholder_notifications.routes import router as stakeholder_notifications_router
 from webhistory.routes import router as webhistory_router
 from evidence.crypto import STALE_PARTIAL_MINUTES, assert_kek_configured, check_storage_gate, sweep_staging
 from evidence.download import router as exports_download_router
@@ -382,6 +384,8 @@ app.include_router(entities_router,  prefix="/api/incidents",          tags=["En
 app.include_router(files_router,     prefix="/api/incidents",          tags=["Files"])
 app.include_router(notes_router,     prefix="/api/incidents",          tags=["Notes"])
 app.include_router(case_notes_router, prefix="/api/incidents",         tags=["Case notes"])
+app.include_router(recovery_router,   prefix="/api/incidents",         tags=["Recovery"])
+app.include_router(stakeholder_notifications_router, prefix="/api/incidents", tags=["Stakeholder Notifications"])
 app.include_router(webhistory_router, prefix="/api/incidents",         tags=["Browser History"])
 app.include_router(evidence_router,  prefix="/api/incidents",          tags=["Evidence"])
 app.include_router(uploads_router,   prefix="/api/incidents",          tags=["Uploads"])

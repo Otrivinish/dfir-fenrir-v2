@@ -52,6 +52,9 @@ from le_package.manifest import Manifest, hmac_manifest
 from le_package.readme import render_readme
 from le_package.sop import CHAIN_OF_CUSTODY_SOP
 from case_notes.hashing import LINK_FIELDS, content_sha256, created_at_text
+from recovery.service import scope_rows as recovery_scope_rows, to_out as recovery_to_out
+from stakeholder_notifications.service import obligations as sn_obligations, to_out as sn_to_out
+from incidents.gates import sign_off_history as gate_sign_off_history
 from models import (Artifact, AuditLog, BrowserHistoryUpload, CaseNote, Comment, CustodyExport, DefenderPdfImport,
                     EmailAnalysis, Evidence, ForensicImport, IOC, Incident, IncidentStakeholder, LessonsLearned,
                     OOBLog, PCAPAnalysis, TimelineEvent, User, YaraMatch,
@@ -737,6 +740,67 @@ async def _section_case_notes(db: AsyncSession, inc_id: uuid.UUID, manifest: Man
     _add_file(zf, manifest, "10_Case_Notes/Case_Notes.csv", _csv_bytes(header, rows), "text/csv", "case_notes table")
 
 
+async def _section_recovery(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
+    """I1: the recovery tracker, one row per in-scope system (compromised host / service / network_range
+    entity) in type, value order -- restore point, who restored and validated it and when, how, and the
+    monitoring window. Present if the incident has any in-scope system."""
+    items = await recovery_to_out(db, await recovery_scope_rows(db, inc_id))
+    if not items:
+        return
+    header = ["entity_id", "entity_type", "entity_value", "entity_name", "criticality", "record_id", "state",
+              "not_required_reason", "restore_point_ref", "restore_point_at_utc", "restored_at_utc", "restored_by_id",
+              "restored_by_username", "validation_method", "validation_checklist_json", "validated_at_utc",
+              "validated_by_id", "validated_by_username", "same_person_validation", "monitoring_start_utc",
+              "monitoring_end_utc", "notes", "updated_at_utc", "updated_by_username"]
+    rows = [[str(i.entity_id), i.entity_type, i.entity_value, i.entity_name, i.criticality,
+             str(i.record_id) if i.record_id else None, i.state, i.not_required_reason, i.restore_point_ref,
+             _iso_z(i.restore_point_at), _iso_z(i.restored_at), str(i.restored_by_id) if i.restored_by_id else None,
+             i.restored_by_username, i.validation_method,
+             json.dumps([c.model_dump() for c in i.validation_checklist], ensure_ascii=False) if i.validation_checklist else None,
+             _iso_z(i.validated_at), str(i.validated_by_id) if i.validated_by_id else None, i.validated_by_username,
+             "yes" if i.same_person_validation else "no", _iso_z(i.monitoring_start), _iso_z(i.monitoring_end),
+             i.notes, _iso_z(i.updated_at), i.updated_by_username] for i in items]
+    _add_file(zf, manifest, "11_Recovery/Recovery.csv", _csv_bytes(header, rows), "text/csv", "recovery_records table")
+
+
+async def _section_notifications(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
+    """I2: the stakeholder notification tracker, one row per obligation (superseded ones included,
+    flagged): the matrix rule it came from, when its countdown started (the incident first reaching
+    that severity), when it was due, and who notified the stakeholder, when and how -- or why it was
+    not required. Present if the incident has any obligation. Contact details are never included."""
+    items = await sn_to_out(db, await sn_obligations(db, inc_id))
+    if not items:
+        return
+    header = ["notification_id", "rule_id", "severity", "role", "category", "required", "notify_within_minutes",
+              "clock_start_at_utc", "due_at_utc", "status", "overdue", "superseded", "superseded_at_utc",
+              "superseded_reason", "notified_at_utc", "notified_by_id", "notified_by_username", "channel",
+              "oob_log_id", "stakeholder_id", "stakeholder_name", "not_required_reason", "note", "updated_at_utc",
+              "updated_by_username"]
+    rows = [[str(i.id), str(i.rule_id) if i.rule_id else None, i.severity, i.role, i.category,
+             "yes" if i.required else "no", i.notify_within_minutes, _iso_z(i.clock_start_at), _iso_z(i.due_at),
+             i.status, "yes" if i.overdue else "no", "yes" if i.superseded else "no", _iso_z(i.superseded_at),
+             i.superseded_reason, _iso_z(i.notified_at), str(i.notified_by_id) if i.notified_by_id else None,
+             i.notified_by_username, i.channel, str(i.oob_log_id) if i.oob_log_id else None,
+             str(i.stakeholder_id) if i.stakeholder_id else None, i.stakeholder_name, i.not_required_reason, i.note,
+             _iso_z(i.updated_at), i.updated_by_username] for i in items]
+    _add_file(zf, manifest, "12_Notifications/Stakeholder_Notifications.csv", _csv_bytes(header, rows), "text/csv",
+              "stakeholder_notifications table")
+
+
+async def _section_sign_offs(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
+    """I5: the phase-gate sign-offs (IC, DPO), oldest first: who signed which gate, on what basis, when, the
+    statement and the SHA-256 of the gate state they signed. Present if the incident has any sign-off."""
+    rows = await gate_sign_off_history(db, inc_id)
+    if not rows:
+        return
+    header = ["sign_off_id", "gate", "role", "username", "signed_as", "signed_at_utc", "statement", "state_sha256",
+              "current"]
+    _add_file(zf, manifest, "13_Sign_Offs/Gate_Sign_Offs.csv",
+              _csv_bytes(header, [[r["id"], r["gate"], r["role"], r["username"], r["signed_as"], r["signed_at"],
+                                   r["statement"], r["state_sha256"], "yes" if r["current"] else "no"] for r in rows]),
+              "text/csv", "incident_gate_sign_offs table")
+
+
 async def _section_audit(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest,
                           zf: zipfile.ZipFile) -> tuple[int, bytes]:
     """Per-incident audit trail (incl. hash chain) + verifier output.
@@ -994,6 +1058,9 @@ async def _build_into(entry, staged: StagedOutput, oz, *, db: AsyncSession, inc:
         audit_row_count, _ = await _section_audit(db, inc.id, manifest, zf)
         _section_legal(manifest, zf, tlp=inc.tlp)
         await _section_case_notes(db, inc.id, manifest, zf)
+        await _section_recovery(db, inc.id, manifest, zf)
+        await _section_notifications(db, inc.id, manifest, zf)
+        await _section_sign_offs(db, inc.id, manifest, zf)
 
         # Manifest, integrity, README — written LAST so all sections are accounted for.
         manifest_json = _json_bytes(manifest.to_json())

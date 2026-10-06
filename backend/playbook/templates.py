@@ -1,14 +1,18 @@
-"""Playbook template endpoints — list, detail, create, update, delete."""
+"""Playbook template endpoints — list, detail, create, update, delete, mark reviewed (I3)."""
 import uuid
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.deps import current_user, require_admin
+from audit.service import write_audit
+from auth.deps import current_user, require_admin, require_analyst
 from core.database import get_db
-from models import PlaybookTask, PlaybookTemplate, User
+from core.errors import ApiError, ApiErrorBody
+from models import PlaybookTask, PlaybookTemplate, User, utcnow
 from schemas import (
+    IncidentType,
     PlaybookTemplateCreate,
     PlaybookTemplateOut,
     PlaybookTemplateSummary,
@@ -16,6 +20,19 @@ from schemas import (
 )
 
 router = APIRouter()
+
+
+async def _reviewers(db: AsyncSession, templates: list[PlaybookTemplate]) -> dict[uuid.UUID, str]:
+    ids = {t.last_reviewed_by_id for t in templates if t.last_reviewed_by_id}
+    if not ids:
+        return {}
+    return dict((await db.execute(select(User.id, User.username).where(User.id.in_(ids)))).all())
+
+
+async def _out(db: AsyncSession, t: PlaybookTemplate) -> PlaybookTemplateOut:
+    out = PlaybookTemplateOut.model_validate(t)
+    out.last_reviewed_by = (await _reviewers(db, [t])).get(t.last_reviewed_by_id)
+    return out
 
 
 async def _run_stats(
@@ -43,18 +60,22 @@ async def _run_stats(
     }
 
 
-def _summary(t: PlaybookTemplate, stats: dict) -> PlaybookTemplateSummary:
+def _summary(t: PlaybookTemplate, stats: dict, reviewers: dict) -> PlaybookTemplateSummary:
     s = stats.get(t.id, {})
     out = PlaybookTemplateSummary.model_validate(t)
     out.task_count  = len(t.tasks or [])
     out.run_count   = s.get("run_count", 0)
     out.last_run_at = s.get("last_run_at")
+    out.last_reviewed_by = reviewers.get(t.last_reviewed_by_id)
     return out
 
 
 @router.get("", response_model=list[PlaybookTemplateSummary],
             summary="List playbook templates")
 async def list_templates(
+    incident_type: Optional[IncidentType] = Query(None, description=(
+        "Only templates suggested for this incident type (its incident_types contains it); the "
+        "suggestions shown on an incident's Playbook tab and in New incident.")),
     _: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[PlaybookTemplateSummary]:
@@ -62,7 +83,9 @@ async def list_templates(
 
     Any authenticated user may read. System templates are ordered first, then
     by name. Each summary includes `task_count`, `run_count` (distinct
-    incidents instantiated from it) and `last_run_at`.
+    incidents instantiated from it), `last_run_at`, `incident_types` and the review
+    date (`last_reviewed_at` / `last_reviewed_by`; null = never reviewed). `incident_type`
+    filters to the templates suggested for that type.
     """
     q = await db.execute(
         select(PlaybookTemplate).order_by(
@@ -71,8 +94,11 @@ async def list_templates(
         )
     )
     templates = list(q.scalars())
+    if incident_type:
+        templates = [t for t in templates if incident_type in (t.incident_types or [])]
     stats = await _run_stats(db, [t.id for t in templates])
-    return [_summary(t, stats) for t in templates]
+    reviewers = await _reviewers(db, templates)
+    return [_summary(t, stats, reviewers) for t in templates]
 
 
 @router.get("/{template_id}", response_model=PlaybookTemplateOut,
@@ -92,7 +118,7 @@ async def get_template(
     )).scalar_one_or_none()
     if not t:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Template not found")
-    return PlaybookTemplateOut.model_validate(t)
+    return await _out(db, t)
 
 
 @router.post("", response_model=PlaybookTemplateOut, status_code=status.HTTP_201_CREATED,
@@ -117,6 +143,7 @@ async def create_template(
         category=body.category or "",
         is_system=False,
         tasks=[step.model_dump() for step in body.tasks],
+        incident_types=list(dict.fromkeys(body.incident_types)),
     )
     db.add(t)
     await db.commit()
@@ -132,11 +159,12 @@ async def update_template(
     actor: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> PlaybookTemplateOut:
-    """Update a playbook template's name, description, category, or tasks.
+    """Update a playbook template's name, description, category, tasks or incident_types.
 
     Any authenticated user may edit custom templates; editing a system template
     requires the admin role (403 otherwise). Returns 404 if the template does
-    not exist. Only provided fields are changed. Returns the updated template.
+    not exist. Only provided fields are changed. An edit does not change the review
+    date (POST …/review does). Returns the updated template.
     """
     t = (await db.execute(
         select(PlaybookTemplate).where(PlaybookTemplate.id == template_id)
@@ -150,10 +178,51 @@ async def update_template(
     if body.description is not None: t.description = body.description
     if body.category    is not None: t.category    = body.category
     if body.tasks       is not None: t.tasks       = [s.model_dump() for s in body.tasks]
+    if body.incident_types is not None: t.incident_types = list(dict.fromkeys(body.incident_types))
 
     await db.commit()
     await db.refresh(t)
-    return PlaybookTemplateOut.model_validate(t)
+    return await _out(db, t)
+
+
+@router.post("/{template_id}/review", response_model=PlaybookTemplateOut,
+             summary="Mark a playbook template reviewed",
+             responses={403: {"model": ApiErrorBody, "description": "admin_required (system template)"}})
+async def review_template(
+    template_id: uuid.UUID,
+    request: Request,
+    actor: User = Depends(require_analyst),
+    db: AsyncSession = Depends(get_db),
+) -> PlaybookTemplateOut:
+    """Record that the template was reviewed now: sets `last_reviewed_at` (UTC) and
+    `last_reviewed_by`. The only way to set them (an edit does not).
+
+    Analyst or admin for a custom template; a system (seeded) template needs an admin (403
+    admin_required), as for editing it. 404 if the template does not exist. Audited as
+    playbook_template_review. Readiness's "playbooks reviewed within 12 months" check
+    (playbooks_core) reads this date. Returns the template.
+    """
+    t = (await db.execute(
+        select(PlaybookTemplate).where(PlaybookTemplate.id == template_id)
+    )).scalar_one_or_none()
+    if not t:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Template not found")
+    if t.is_system and actor.role != "admin":
+        raise ApiError(status.HTTP_403_FORBIDDEN, "admin_required",
+                       "Only an admin can mark a system template reviewed.")
+    previous = t.last_reviewed_at
+    t.last_reviewed_at, t.last_reviewed_by_id = utcnow(), actor.id
+    await write_audit(
+        db, "playbook_template_review",
+        user_id=actor.id, username=actor.username,
+        resource_type="playbook_template", resource_id=str(t.id),
+        details={"template_key": t.key, "name": t.name,
+                 "previous_reviewed_at": previous.isoformat() if previous else None},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    await db.refresh(t)
+    return await _out(db, t)
 
 
 @router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT,

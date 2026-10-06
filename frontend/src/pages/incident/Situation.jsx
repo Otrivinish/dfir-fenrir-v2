@@ -9,6 +9,7 @@ import { legalClocks, span } from '../../components/ClockChips.jsx'
 import ClassificationStrip from '../../components/ClassificationStrip.jsx'
 import ContainmentBadge from '../../components/ContainmentBadge.jsx'
 import StakeholderMatrixBanner from '../../components/StakeholderMatrixBanner.jsx'
+import { notificationsChip } from '../../components/NotificationsChip.jsx'
 
 // Situation board: the incident landing tab. A read-only, one-screen summary built from
 // existing endpoints; every rule (gates, containment state, counts) comes from the API.
@@ -137,6 +138,17 @@ function Clocks({ inc, data }) {
     }
   }
 
+  // I2: stakeholder notifications "x of y" from the snapshot roll-up (required matrix rules only).
+  let notify
+  if (!data) notify = <span className="sit-muted">Loading…</span>
+  else if (data.snapshot.error) notify = <span className="sit-error" role="alert">Couldn’t load notifications.</span>
+  else {
+    const c = notificationsChip(data.snapshot.value.notifications, now)
+    notify = c
+      ? <Link to="../comms/notifications" className={`sit-legal ${c.cls === 'done' ? '' : c.cls}`} title={c.title} data-notify-line>{c.text}</Link>
+      : <span className="sit-muted">None required</span>
+  }
+
   return (
     <section className="panel sit-panel" aria-label="Clocks" data-panel="Clocks">
       <dl className="sit-clocks">
@@ -151,12 +163,15 @@ function Clocks({ inc, data }) {
         })}
         <div className="sit-clock" data-clock="elapsed"><dt>Elapsed</dt><dd>{elapsed}</dd></div>
         <div className="sit-clock" data-clock="legal"><dt>Nearest legal deadline</dt><dd>{legal}</dd></div>
+        <div className="sit-clock" data-clock="notifications"><dt>Stakeholder notifications</dt><dd>{notify}</dd></div>
       </dl>
     </section>
   )
 }
 
 // ── Panels ──────────────────────────────────────────────────────────────────
+
+const ROLE_SHORT = { ic: 'IC', dpo: 'DPO' }
 
 function GatePanel({ inc, data }) {
   const name = inc.status === 'closed' ? null : inc.phase === 'post_incident' ? 'close' : 'post_incident'
@@ -167,25 +182,83 @@ function GatePanel({ inc, data }) {
         const g = (d.gates.value.items || []).find(x => x.gate === name)
         if (!g) return <div className="sit-muted">No gate reported.</div>
         if (g.exempt) return <div className="sit-muted" data-gate-state="exempt">{g.label} does not apply to a false or benign positive.</div>
+        const warns = g.warnings || []
+        const signs = (g.sign_offs_required || []).map(role => {
+          const s = (g.sign_offs || []).find(x => x.role === role)
+          return <span key={role} data-signoff-role={role} data-signoff-state={s ? 'signed' : 'missing'}>
+            {ROLE_SHORT[role]} {s ? '✓' : 'missing'}
+          </span>
+        })
+        const warnLine = warns.length > 0 && (
+          <div className="sit-sub" data-gate-group="warn">
+            {warns.length} {warns.length === 1 ? 'warning' : 'warnings'} (not blocking):{' '}
+            {warns.slice(0, 2).map((it, i) => (
+              <span key={it.key} data-gate-key={it.key} data-gate-level="warn">
+                {i > 0 && '; '}{it.route ? <Link to={`../${it.route}`}>{it.label}</Link> : it.label}
+              </span>
+            ))}
+            {warns.length > 2 && '; …'}
+          </div>
+        )
+        const signLine = signs.length > 0 && (
+          <div className="sit-sub" data-gate-signoffs>Sign-offs: {signs.reduce((a, el, i) => i ? [...a, ', ', el] : [el], [])}</div>
+        )
         if (g.met) return (
           <div data-gate-state="met">
             <span className="sit-ok"><span className="sit-ok-mark" aria-hidden="true">✓</span> {g.label}: met</span>
+            {warnLine}
+            {signLine}
             {g.carried_forward?.length > 0 && <div className="sit-sub">{g.carried_forward.length} open obligation(s) carried forward</div>}
           </div>
         )
         const top = g.unmet.slice(0, 3)
         return (
           <div data-gate-state="unmet">
-            <div className="sit-warn">{g.label}: {g.unmet.length} {g.unmet.length === 1 ? 'item' : 'items'} missing</div>
-            <ul className="sit-list">
+            <div className="sit-warn">{g.label}: {g.unmet.length} blocking {g.unmet.length === 1 ? 'item' : 'items'}</div>
+            <ul className="sit-list" data-gate-group="block">
               {top.map(it => (
-                <li key={it.key} data-gate-key={it.key}>
+                <li key={it.key} data-gate-key={it.key} data-gate-level="block">
                   {it.route ? <Link to={`../${it.route}`}>{it.label}</Link> : it.label}
                 </li>
               ))}
             </ul>
             {g.unmet.length > top.length && <div className="sit-sub">+{g.unmet.length - top.length} more, listed when you change phase or close</div>}
+            {warnLine}
+            {signLine}
           </div>
+        )
+      }}
+    </Panel>
+  )
+}
+
+// I4: incident-start checks from the snapshot (the API computes each status). Open ones first, each
+// with a link to the page that fixes it; met ones are only counted. Hidden on a closed incident.
+const SC_MARK = { ok: '✓', warning: '!', overdue: '✕' }
+
+function StartChecksPanel({ data }) {
+  const sc = ready(data, 'snapshot') ? data.snapshot.value.start_checks : null
+  return (
+    <Panel title="Start checks" meta={sc ? `${sc.ok} of ${sc.total} met` : null} data={data} need={['snapshot']}>
+      {() => {
+        if (!sc) return <div className="sit-muted">Not reported.</div>
+        const open = sc.items.filter(i => i.status !== 'ok').sort((a, b) => (a.status === 'overdue' ? 0 : 1) - (b.status === 'overdue' ? 0 : 1))
+        if (!open.length) return <div className="sit-ok"><span className="sit-ok-mark" aria-hidden="true">✓</span> All {sc.total} start checks met</div>
+        return (
+          <>
+            <ul className="sc-list">
+              {open.map(i => (
+                <li key={i.key} className={`sc-item ${i.status}`} data-start-check={i.key} data-status={i.status}>
+                  <span className="sc-mark" aria-hidden="true">{SC_MARK[i.status]}</span>
+                  <span className="sc-label">{i.label}</span>
+                  <span className="sc-state">{i.status === 'overdue' ? 'overdue' : 'missing'}</span>
+                  <Link to={`../${i.route}`} className="sit-more">Fix →</Link>
+                  {i.detail && <span className="sc-detail">{i.detail}</span>}
+                </li>
+              ))}
+            </ul>
+            {sc.warning > 0 && <div className="sit-sub">Missing checks turn overdue {sc.overdue_after_minutes} min after the incident was opened ({formatLocal(sc.overdue_at)}).</div>}
+          </>
         )
       }}
     </Panel>
@@ -252,6 +325,12 @@ function ScopePanel({ data }) {
               <span><b>{s.affected_systems}</b> compromised</span>
               <span><b>{s.entities}</b> entities</span>
               <Link to="../iocs"><b>{s.iocs}</b> IOCs</Link>
+              {s.recovery?.total > 0 && (
+                <Link to="../recovery" data-recovery-count>
+                  Recovery <b>{s.recovery.validated}/{s.recovery.total - s.recovery.not_required}</b> validated
+                  {s.recovery.not_required > 0 && <> · {s.recovery.not_required} not required</>}
+                </Link>
+              )}
             </div>
             {hosts.length === 0 ? <div className="sit-muted">No entity is marked compromised yet.</div> : (
               <ul className="sit-list">
@@ -398,7 +477,7 @@ export default function Situation() {
   const rk = useMemo(() => ({}), [inc, data])
   return (
     <div className="sit-board">
-      <StakeholderMatrixBanner severity={inc.severity} />
+      <StakeholderMatrixBanner incidentId={inc.id} rev={inc.updated_at} to="../comms/notifications" />
       <PanelBoundary title="Classification" resetKey={rk}>
         <section className="panel sit-panel" aria-label="Classification" data-panel="Classification">
           <div className="panel-toolbar">
@@ -411,6 +490,7 @@ export default function Situation() {
       <PanelBoundary title="Clocks" resetKey={rk}><Clocks inc={inc} data={data} /></PanelBoundary>
       <div className="sit-grid">
         <div className="sit-col">
+          {inc.status !== 'closed' && <PanelBoundary title="Start checks" resetKey={rk}><StartChecksPanel data={data} /></PanelBoundary>}
           <PanelBoundary title="Next gate" resetKey={rk}><GatePanel inc={inc} data={data} /></PanelBoundary>
           <PanelBoundary title="Open response actions" resetKey={rk}><ContainmentPanel data={data} /></PanelBoundary>
           <PanelBoundary title="Scope" resetKey={rk}><ScopePanel data={data} /></PanelBoundary>

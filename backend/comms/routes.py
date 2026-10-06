@@ -24,7 +24,7 @@ from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
 from incidents.access import get_accessible_incident
-from models import Comment, Incident, OOBLog, User
+from models import Comment, Incident, OOBLog, User, utcnow
 from notifications.service import notify_comment
 from schemas import (
     CommentCreate,
@@ -315,23 +315,33 @@ async def toggle_dark_operation(
 ) -> dict:
     """Enable or disable dark-operation mode on the incident via `enabled`.
     Requires the analyst role. State changes are audited. 409 incident_closed on a
-    closed incident (R73; re-open it first). Returns the current
-    `{"dark_operation": bool}`.
+    closed incident (R73; re-open it first).
+
+    Every call is an explicit decision (I4): it sets `dark_operation_decided_at`, which the
+    incident-start check dark_operation_decided reads. Confirming the current state while
+    no decision was recorded yet (e.g. "stay off") is audited as dark_operation_decided;
+    repeating an already recorded decision changes nothing. Returns the current
+    `{"dark_operation": bool, "dark_operation_decided_at": UTC ISO 8601}`.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
-    if inc.dark_operation != req.enabled:
+    changed = inc.dark_operation != req.enabled
+    if changed or inc.dark_operation_decided_at is None:
         inc.dark_operation = req.enabled
+        inc.dark_operation_decided_at = utcnow()
         await write_audit(
-            db, "dark_operation_enabled" if req.enabled else "dark_operation_disabled",
+            db, ("dark_operation_enabled" if req.enabled else "dark_operation_disabled") if changed
+            else "dark_operation_decided",
             user_id=user.id, username=user.username,
             resource_type="incident", resource_id=str(incident_id),
             details={"incident_id": str(incident_id), "enabled": req.enabled},
             ip_address=request.client.host if request.client else None,
         )
         await db.commit()
-    return {"dark_operation": inc.dark_operation}
+    return {"dark_operation": inc.dark_operation,
+            "dark_operation_decided_at": inc.dark_operation_decided_at.isoformat().replace("+00:00", "Z")
+            if inc.dark_operation_decided_at else None}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -60,15 +60,22 @@ c=$("${CURL[@]}" -o "$TMP/body" -w '%{http_code}' -H 'Content-Type: application/
 check 401 "failed login rejected cleanly (lockout counter)" "$c"
 
 # ── Incident (find or create) ──────────────────────────────────────────────
+# I4: title, severity, incident_type, detection_method and detected_at are required at create.
+NOW_Z="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+INTAKE="\"incident_type\":\"other\",\"detection_method\":\"other\",\"detected_at\":\"$NOW_Z\""
+c=$(api POST /api/incidents -H 'Content-Type: application/json' -d '{"title":"[SMOKE] must be refused"}')
+check 422 "create without the required intake fields refused" "$c" \
+  && grep -q '"required_fields_missing"' "$TMP/body" && pass "refusal names required_fields_missing"
 TITLE="[SMOKE] container hardening"
 api GET "/api/incidents?limit=200" >/dev/null
 INC="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(next((i["id"] for i in d.get("items",[]) if i.get("title")==sys.argv[2]),""))' "$TMP/body" "$TITLE")"
 if [ -z "$INC" ]; then
-  c=$(api POST /api/incidents -H 'Content-Type: application/json' -d "{\"title\":\"$TITLE\",\"severity\":\"low\",\"description\":\"Automated smoke-test incident (scripts/smoke-test.sh).\"}")
+  c=$(api POST /api/incidents -H 'Content-Type: application/json' -d "{\"title\":\"$TITLE\",\"severity\":\"low\",$INTAKE,\"description\":\"Automated smoke-test incident (scripts/smoke-test.sh).\"}")
   check 201 "create smoke incident" "$c" && INC="$(jget id)"
 else pass "reuse smoke incident $INC"; fi
 [ -n "$INC" ] || { echo "no incident — aborting"; exit 98; }
 I="/api/incidents/$INC"
+c=$(api GET "$I/start-checks"); check 200 "GET incident-start checks (I4)" "$c"
 
 # ── Phase gates (own dark incident, kept in C/E/R; only refused moves, so nothing changes) ─
 GTAG="smoke-phase-gates"
@@ -76,7 +83,7 @@ GTAG="smoke-phase-gates"
 api GET "/api/incidents?tag=$GTAG&status=open&limit=50" >/dev/null
 GINC="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(next((i["id"] for i in d.get("items",[]) if i.get("title")==sys.argv[2]),""))' "$TMP/body" "[SMOKE] phase gates")"
 if [ -z "$GINC" ]; then
-  c=$(api POST /api/incidents -H 'Content-Type: application/json' -d "{\"title\":\"[SMOKE] phase gates\",\"severity\":\"low\",\"phase\":\"containment_eradication_recovery\",\"dark_operation\":true,\"tags\":[\"$GTAG\"],\"description\":\"Automated smoke-test incident for the phase gates (scripts/smoke-test.sh). Keep it in C/E/R.\"}")
+  c=$(api POST /api/incidents -H 'Content-Type: application/json' -d "{\"title\":\"[SMOKE] phase gates\",\"severity\":\"low\",$INTAKE,\"phase\":\"containment_eradication_recovery\",\"dark_operation\":true,\"tags\":[\"$GTAG\"],\"description\":\"Automated smoke-test incident for the phase gates (scripts/smoke-test.sh). Keep it in C/E/R.\"}")
   check 201 "create gate smoke incident" "$c" && GINC="$(jget id)"
 else pass "reuse gate smoke incident $GINC"; fi
 if [ -n "$GINC" ]; then

@@ -5,6 +5,11 @@ Distinct from `backend/stakeholders/` which is per-incident contact CRUD.
 
 Read access: any authenticated user (the incident Comms banner needs it).
 Write access: admin only (org policy).
+
+I2: a rule may be limited to incident types (`incident_types`, empty = every type). Every
+create / update / delete re-derives the notification obligations of every OPEN incident
+(stakeholder_notifications.service.sync_open_incidents): new obligations appear, ones whose rule
+no longer matches are kept and marked superseded. Closed incidents are never touched.
 """
 import uuid
 
@@ -17,6 +22,7 @@ from audit.service import write_audit
 from auth.deps import current_user, require_admin
 from core.database import get_db
 from models import StakeholderMatrixRule, User
+from stakeholder_notifications.service import sync_open_incidents
 from schemas import (
     StakeholderMatrixRuleCreate,
     StakeholderMatrixRuleList,
@@ -58,8 +64,11 @@ async def create_rule(
     db:   AsyncSession = Depends(get_db),
 ) -> StakeholderMatrixRuleOut:
     """Create an org-wide rule mapping incident severity and stakeholder role to
-    a notification SLA and category. Admin only. Returns the created rule, or
-    409 if a rule for the same severity / role / category already exists."""
+    a notification SLA and category, optionally only for some `incident_types`
+    (empty = every type). Admin only. Returns the created rule, or 409 if a rule
+    for the same severity / role / category already exists. Open incidents that
+    match get a new notification obligation (I2); the countdown starts when the
+    incident first reached the severity, so it may already be overdue."""
     rule = StakeholderMatrixRule(
         id=uuid.uuid4(),
         severity=req.severity,
@@ -67,6 +76,7 @@ async def create_rule(
         notify_within_minutes=req.notify_within_minutes,
         category=req.category,
         required=req.required,
+        incident_types=list(dict.fromkeys(req.incident_types)),
         created_by_id=user.id,
     )
     db.add(rule)
@@ -86,10 +96,11 @@ async def create_rule(
         details={
             "severity": rule.severity, "role": rule.role,
             "category": rule.category, "required": rule.required,
-            "notify_within_minutes": rule.notify_within_minutes,
+            "notify_within_minutes": rule.notify_within_minutes, "incident_types": rule.incident_types,
         },
         ip_address=request.client.host if request.client else None,
     )
+    await sync_open_incidents(db, cause="matrix_rule_created", user_id=user.id)
     await db.commit()
     return StakeholderMatrixRuleOut.model_validate(rule)
 
@@ -105,7 +116,10 @@ async def update_rule(
     db:   AsyncSession = Depends(get_db),
 ) -> StakeholderMatrixRuleOut:
     """Partially update a stakeholder matrix rule (severity, role, category,
-    notify_within_minutes, required); only supplied fields change. Admin only.
+    notify_within_minutes, required, incident_types); only supplied fields change. Admin only.
+    Open incidents are re-derived (I2): a severity or type change supersedes obligations that no
+    longer match and adds new ones; obligations already created keep the role, category,
+    required flag and SLA they were created with.
     Returns the updated rule, 404 if missing, or 409 if the change collides with
     an existing severity / role / category combination."""
     rule = (await db.execute(
@@ -130,6 +144,10 @@ async def update_rule(
         rule.category = req.category; changed["category"] = req.category
     if "required" in fields and req.required is not None and req.required != rule.required:
         rule.required = req.required; changed["required"] = req.required
+    if "incident_types" in fields and req.incident_types is not None:
+        types = list(dict.fromkeys(req.incident_types))
+        if types != (rule.incident_types or []):
+            rule.incident_types = types; changed["incident_types"] = types
 
     if changed:
         try:
@@ -147,6 +165,7 @@ async def update_rule(
             details={"changes": changed},
             ip_address=request.client.host if request.client else None,
         )
+        await sync_open_incidents(db, cause="matrix_rule_updated", user_id=user.id)
     await db.commit()
     return StakeholderMatrixRuleOut.model_validate(rule)
 
@@ -161,7 +180,8 @@ async def delete_rule(
     db:   AsyncSession = Depends(get_db),
 ) -> Response:
     """Delete an org-wide stakeholder matrix rule. Admin only. Returns 204 No
-    Content, or 404 if the rule does not exist."""
+    Content, or 404 if the rule does not exist. Its obligations are kept (rule_id
+    null); on open incidents they are marked superseded (I2)."""
     rule = (await db.execute(
         select(StakeholderMatrixRule).where(StakeholderMatrixRule.id == rule_id)
     )).scalar_one_or_none()
@@ -174,10 +194,12 @@ async def delete_rule(
         resource_type="stakeholder_matrix_rule", resource_id=str(rule.id),
         details={
             "severity": rule.severity, "role": rule.role,
-            "category": rule.category, "required": rule.required,
+            "category": rule.category, "required": rule.required, "incident_types": rule.incident_types,
         },
         ip_address=request.client.host if request.client else None,
     )
     await db.delete(rule)
+    await db.flush()   # the DB sets its obligations' rule_id to NULL; the sync supersedes the open ones
+    await sync_open_incidents(db, cause="matrix_rule_deleted", user_id=user.id)
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -2,7 +2,8 @@ import { Fragment, useState, useEffect, useCallback } from 'react'
 import { useOutletContext, Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { formatLocal } from '../../lib/datetime.js'
-import { SEVERITY, TLP, TRIAGE_STATE, INCIDENT_TYPE, DETECTION_METHOD, ENTITY_TYPE, labelOf } from '../../lib/incidentVocab.js'
+import { SEVERITY, TLP, TRIAGE_STATE, INCIDENT_TYPE, DETECTION_METHOD, ENTITY_TYPE, labelOf,
+         FUNCTIONAL_IMPACT, INFORMATION_IMPACT, RECOVERABILITY } from '../../lib/incidentVocab.js'
 import { api } from '../../api/client.js'
 import { matchEntity } from '../../lib/entityMatch.js'
 import TagChip from '../../components/TagChip.jsx'
@@ -553,6 +554,26 @@ export default function Details() {
           <label className="field-label" htmlFor="cls-reporter">Reporter</label>
           <input id="cls-reporter" className="input" value={draft.reporter} onChange={setField('reporter')}
                  readOnly={readOnly} maxLength={128} placeholder="—" />
+        </div>
+        {[['functional_impact', 'Functional impact', FUNCTIONAL_IMPACT], ['information_impact', 'Information impact', INFORMATION_IMPACT],
+          ['recoverability', 'Recoverability', RECOVERABILITY]].map(([k, label, opts]) => (
+          <div className="field" key={k}>
+            <label className="field-label" htmlFor={`cls-${k}`}>{label}</label>
+            <select id={`cls-${k}`} className="select" value={draft[k] ?? ''} onChange={setField(k)}>
+              <option value="">— not assessed —</option>
+              {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+        ))}
+        <div className="field">
+          <label className="field-label" htmlFor="cls-alertref">Alert reference</label>
+          <input id="cls-alertref" className="input" value={draft.alert_reference ?? ''} onChange={setField('alert_reference')}
+                 maxLength={256} placeholder="Source system and alert id" />
+        </div>
+        <div className="field" style={{ gridColumn: '1 / -1' }}>
+          <label className="field-label" htmlFor="cls-sevwhy">Why this severity</label>
+          <textarea id="cls-sevwhy" className="input" rows={2} maxLength={2000} value={draft.severity_rationale ?? ''}
+                    onChange={setField('severity_rationale')} placeholder="—" />
         </div>
         <div className="field">
           <label className="field-label" htmlFor="cls-occurred">Occurred</label>

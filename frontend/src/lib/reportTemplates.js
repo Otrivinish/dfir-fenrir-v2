@@ -95,6 +95,7 @@ export const REPORT_SECTIONS = [
   { key: 'stakeholders',  title: 'Stakeholders',                        csf: ['RS.CO-02', 'RS.CO-03'] },
   { key: 'detection',     title: 'Detection & Identification', fullOnly: true, csf: ['DE.AE-02', 'DE.AE-03', 'DE.AE-07'] },
   { key: 'cer',           title: 'Containment, Eradication & Recovery', fullOnly: true, csf: ['RS.MI-01', 'RS.MI-02', 'RC.RP-02'] },
+  { key: 'recovery',      title: 'Recovery Validation', fullOnly: true,  csf: ['RC.RP-02', 'RC.RP-03', 'RC.RP-05'] },
   { key: 'decisions',     title: 'Decisions Log',                       csf: ['RS.AN-06', 'RS.MA-04'] },
   { key: 'impact',        title: 'Impact Assessment',                   csf: ['RS.AN-08', 'DE.AE-04'] },
   { key: 'legal',         title: 'Legal & Regulatory Deadlines',        csf: ['GV.OC-03', 'RS.CO-02'] },
@@ -348,6 +349,58 @@ function _proCERSubsection(actions, category, title) {
     </table></div>`
 }
 
+// I2: the stakeholder notification tracker (stakeholder_notifications from the API): roll-up, then one
+// row per obligation from the stakeholder matrix, superseded ones flagged. Never contact details.
+const SN_STATUS = { pending: 'Pending', notified: 'Notified', not_required: 'Not required' }
+const SN_CHANNEL = { phone: 'Phone', email: 'Email', in_person: 'In person', oob: 'Out-of-band', other: 'Other' }
+function _proNotificationsSection(sn) {
+  const items = (sn && sn.items) || []
+  const s = (sn && sn.summary) || {}
+  if (!items.length) return ''
+  const rows = items.map(x => {
+    const late = x.status === 'notified' && x.notified_at && new Date(x.notified_at) > new Date(x.due_at)
+    return `<tr>
+    <td style="font-weight:600">${esc(x.role)}<div class="small">${esc(x.category)}${x.required ? '' : ' · advisory'}${x.superseded ? ` · superseded (${esc((x.superseded_reason || '').replace(/_/g, ' '))})` : ''}</div></td>
+    <td style="text-transform:capitalize">${esc(x.severity)}</td>
+    <td class="mono small">${esc(fmtTs(x.clock_start_at))}</td>
+    <td class="mono small">${esc(fmtTs(x.due_at))}</td>
+    <td>${esc(SN_STATUS[x.status] || x.status)}${x.overdue ? ' <strong>(overdue)</strong>' : ''}${late ? ' <strong>(late)</strong>' : ''}${x.not_required_reason ? `<div class="small">${esc(x.not_required_reason)}</div>` : ''}</td>
+    <td class="mono small">${x.notified_at ? `${esc(fmtTs(x.notified_at))}<div class="small">${esc(SN_CHANNEL[x.channel] || x.channel || '')}${x.notified_by_username ? ` · ${esc(x.notified_by_username)}` : ''}${x.stakeholder_name ? ` · to ${esc(x.stakeholder_name)}` : ''}</div>` : '—'}</td>
+  </tr>`
+  }).join('')
+  return `<h3 style="margin:0 0 8px">Stakeholder notifications (stakeholder matrix)</h3>
+    <p>${s.notified || 0} of ${s.required_total || 0} required notification(s) recorded${s.overdue ? `, ${s.overdue} overdue` : ''}${s.not_required ? `, ${s.not_required} recorded as not required` : ''}. Each countdown starts when the incident first reached the rule's severity.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Stakeholder</th><th>Severity</th><th>Clock start</th><th>Due</th><th>Status</th><th>Notified</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`
+}
+
+// I1: one row per in-scope system (recovery.items from the API), with the roll-up above it.
+const RECOVERY_STATE = { not_started: 'Not started', restoring: 'Restoring', restored: 'Restored', validated: 'Validated', not_required: 'Not required' }
+function _proRecoverySection(rec) {
+  const items = (rec && rec.items) || []
+  const s = (rec && rec.summary) || {}
+  if (!items.length) {
+    return '<div class="placeholder-box"><strong>[ NO COMPROMISED SYSTEMS IN SCOPE ]</strong></div>'
+  }
+  const who = (at, by) => at ? `${esc(fmtTs(at))}${by ? `<div class="small">${esc(by)}</div>` : ''}` : '—'
+  const rows = items.map(x => `<tr>
+    <td class="mono">${esc(x.entity_value)}<div class="small">${esc((x.entity_type || '').replace(/_/g, ' '))}</div></td>
+    <td>${esc(RECOVERY_STATE[x.state] || x.state)}${x.not_required_reason ? `<div class="small">${esc(x.not_required_reason)}</div>` : ''}</td>
+    <td class="small">${esc(x.restore_point_ref || '—')}${x.restore_point_at ? `<div class="mono small">${esc(fmtTs(x.restore_point_at))}</div>` : ''}</td>
+    <td class="mono small">${who(x.restored_at, x.restored_by_username)}</td>
+    <td class="mono small">${who(x.validated_at, x.validated_by_username)}${x.same_person_validation ? '<div class="small"><strong>Same person restored and validated</strong></div>' : ''}</td>
+    <td class="small">${esc(x.validation_method || '—')}${(x.validation_checklist || []).length ? `<div class="small">${x.validation_checklist.filter(c => c.done).length}/${x.validation_checklist.length} checks done</div>` : ''}</td>
+    <td class="mono small">${x.monitoring_start || x.monitoring_end ? `${x.monitoring_start ? esc(fmtTs(x.monitoring_start)) : '—'} → ${x.monitoring_end ? esc(fmtTs(x.monitoring_end)) : 'open'}` : '—'}</td>
+  </tr>`).join('')
+  return `<p>${s.validated || 0} of ${(s.total || 0) - (s.not_required || 0)} system(s) validated clean${s.not_required ? `, ${s.not_required} not requiring restore` : ''}${s.complete ? ' — recovery of every system in scope is validated.' : ` — ${(s.not_started || 0) + (s.restoring || 0) + (s.restored || 0)} still open.`}${s.same_person_validations ? ` ${s.same_person_validations} validation(s) by the person who restored the system.` : ''}</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>System</th><th>State</th><th>Restore point</th><th>Restored</th><th>Validated</th><th>Method</th><th>Monitoring window</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`
+}
+
 function _proRemBucket(items, color) {
   const rows = items.map(ai =>
     `<tr><td>${esc(ai.action || '')}</td><td>${esc(ai.owner || '—')}</td><td class="mono small">${esc(ai.due_date || '—')}</td><td style="text-transform:capitalize">${esc(ai.priority || '')}</td><td>${esc((ai.status || '').replace(/_/g, ' '))}</td></tr>`
@@ -559,6 +612,7 @@ function generateProReport(data, opts = {}) {
   const oobLog      = data.oob_log || []
   const closure     = data.closure || {}
   const signOffs    = data.sign_offs || []
+  const gateSignOffs = data.gate_sign_offs || []
   const caseNotes   = data.case_notes || []
   // Figures: images prepared by the Reports page (fetched, hashed, embedded); without
   // them (e.g. a caller that only has the data) every figure is listed, not embedded.
@@ -831,7 +885,19 @@ function generateProReport(data, opts = {}) {
       <td><span class="sig-line"></span></td>
       <td><span class="sig-line"></span></td>
     </tr>`)).join('')}</tbody>
+  </table></div>
+  <h3>Recorded gate sign-offs</h3>
+  ${gateSignOffs.length ? `<div class="table-wrap"><table class="table-fixed">
+    <colgroup><col style="width:18%"><col style="width:20%"><col style="width:16%"><col style="width:46%"></colgroup>
+    <thead><tr><th>Gate</th><th>Role · signer</th><th>Signed at</th><th>Statement · gate-state SHA-256</th></tr></thead>
+    <tbody>${gateSignOffs.map(g => `<tr>
+      <td class="small">${esc(g.gate_label)}</td>
+      <td class="small"><strong>${esc(g.role_label)}</strong><div>${esc(g.username)} <span class="tiny mono">(${esc(g.signed_as)})</span></div>${g.current ? '' : '<div class="tiny">before a re-open; no longer counts</div>'}</td>
+      <td class="mono small">${esc(fmtTs(g.signed_at))}</td>
+      <td class="small"><div style="white-space:pre-wrap">${esc(g.statement)}</div><div class="tiny mono">${esc(g.state_sha256)}</div></td>
+    </tr>`).join('')}</tbody>
   </table></div>`
+    : '<div class="placeholder-box"><strong>[ NO GATE SIGN-OFF RECORDED ]</strong></div>'}`
 
   // ── Sections ─────────────────────────────────────────────────────────────
   // KEEP IN SYNC: keys/titles/fullOnly come from REPORT_SECTIONS; "Show structure"
@@ -905,6 +971,8 @@ function generateProReport(data, opts = {}) {
   ${_proCERSubsection(acts, 'eradication', 'Eradication Actions')}
   ${_proCERSubsection(acts, 'recovery',    'Recovery Actions')}` },
 
+    { key: 'recovery', body: _proRecoverySection(data.recovery) },
+
     { key: 'decisions', body: decisionsHtml },
 
     { key: 'impact', body: `
@@ -922,7 +990,7 @@ function generateProReport(data, opts = {}) {
 
     { key: 'legal', body: deadlinesHtml },
 
-    { key: 'comms_log', body: commsLogHtml },
+    { key: 'comms_log', body: _proNotificationsSection(data.stakeholder_notifications) + commsLogHtml },
 
     { key: 'root_cause', body: `
   <h3>Initial Attack Vector / Root Cause Category</h3>
@@ -1347,6 +1415,10 @@ function _skeletonSections() {
     { key: 'cer', items: [
       `Containment / Eradication / Recovery tables (aligned columns): ${ph('respond_actions[*] (title, description, status, occurred at, notes, assignee = "By")', 'auto')} ${where('Respond → actions')}`,
     ]},
+    { key: 'recovery', items: [
+      `Roll-up: ${ph('recovery.summary (validated of in scope, not required, open, same-person validations)', 'auto')} ${where('Recovery')}`,
+      `Table: ${ph('recovery.items[*] (system, state, restore point, restored at/by, validated at/by, method + checklist, monitoring window)', 'auto')} ${where('Recovery')}`,
+    ]},
     { key: 'decisions', items: [
       `Table: ${ph('decisions[*] (summary, outcome, rationale, decided by, decided at)', 'auto')} ${where('Respond → Decisions')}`,
     ]},
@@ -1359,6 +1431,7 @@ function _skeletonSections() {
       `Compliance: ${ph('met / violated (late or overdue) / pending / waived', 'auto')} <span class="static">— computed by the server</span>`,
     ]},
     { key: 'comms_log', items: [
+      `Notifications: ${ph('stakeholder_notifications (summary + items: role, severity, clock start, due, status, notified at/by/channel)', 'auto')} ${where('Comms & stakeholders → Notifications')}`,
       `Table: ${ph('oob_log[*] (time, direction, channel, stakeholder, summary, identity verified + method, logged by)', 'auto')} ${where('Comms & stakeholders → Out-of-band')}`,
       `<span class="static">Contact details and the verification passphrase are never printed.</span>`,
     ]},
@@ -1409,6 +1482,7 @@ function _skeletonSections() {
       `Closed by · Closed at: ${ph('closure.closed_by / closed_at', 'auto')} ${where('Close (Post-Incident) in the incident header')} <span class="static">— "Not closed" while open</span>`,
       `Close sign-off statement: ${ph('closure.reason', 'auto')} <span class="static">— the reason given at Close</span>`,
       `Signature line per role: ${ph('sign_offs[*] (Incident Commander, Deputy, Legal Liaison, DPO → assignees)', 'auto')} ${where('Team')} <span class="static">— "Not assigned" when the role is empty; signature and date are left blank for ink</span>`,
+      `Recorded gate sign-offs: ${ph('gate_sign_offs[*] (gate, role, signer, signed at, statement, gate-state SHA-256)', 'auto')} ${where('the Resolve / Close gate panel')} <span class="static">— append-only; ones made before a re-open are marked</span>`,
     ]},
   ]
   // Order and titles always follow REPORT_SECTIONS (the single source).

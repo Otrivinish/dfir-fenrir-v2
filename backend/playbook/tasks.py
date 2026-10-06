@@ -9,27 +9,49 @@ Routes:
   POST   /{incident_id}/playbook/tasks          add custom task
   PATCH  /{incident_id}/playbook/tasks/{tid}    update (status/title/assignee/etc.)
   DELETE /{incident_id}/playbook/tasks/{tid}    delete
-  POST   /{incident_id}/playbook/instantiate    apply a template (append or replace)
+  POST   /{incident_id}/playbook/instantiate    apply a template (append, or replace: lead only)
 
-Writes: analyst+. Closed-incident writes return 409. Audited.
+Writes: analyst+ (replace: the incident lead or an admin). Closed-incident writes return 409. Audited.
+I3: lists sort by 800-61 R3 phase order, then order_index; a replaced plan's Done/Skipped tasks are
+kept as archived, read-only history (409 task_archived on any change).
 """
 import uuid
 from datetime import datetime, timezone
+from typing import get_args
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
 from auth.deps import current_user, require_admin, require_analyst
 from core.database import get_db
-from core.errors import ApiErrorBody
-from incidents.access import get_accessible_incident, require_incident_person
+from core.errors import ApiError, ApiErrorBody
+from incidents.access import (get_accessible_incident, is_incident_lead, not_incident_lead,
+                              require_incident_person)
 from models import Incident, PlaybookTask, PlaybookTemplate, User, utcnow
-from schemas import (PlaybookInstantiateRequest, PlaybookTaskCreate,
+from schemas import (Phase, PlaybookInstantiateRequest, PlaybookTaskCreate,
                      PlaybookTaskOut, PlaybookTaskUpdate)
 
 router = APIRouter()
+
+# 800-61 R3 order (the Phase literal is declared in it); an unknown value sorts last.
+_PHASES = get_args(Phase)
+_PHASE_RANK = case({p: i for i, p in enumerate(_PHASES)}, value=PlaybookTask.phase, else_=len(_PHASES))
+_DONE = ("done", "skipped")
+
+
+def _ordered(incident_id: uuid.UUID, include_archived: bool = False):
+    """The incident's tasks: current plan first, then archived; each by phase order, order_index."""
+    stmt = select(PlaybookTask).where(PlaybookTask.incident_id == incident_id)
+    if not include_archived:
+        stmt = stmt.where(PlaybookTask.archived_at.is_(None))
+    return stmt.order_by(PlaybookTask.archived_at.is_not(None), _PHASE_RANK, PlaybookTask.order_index,
+                         PlaybookTask.created_at, PlaybookTask.id)
+
+
+def _blank(v) -> bool:
+    return not (isinstance(v, str) and v.strip())
 
 # F2 — person-reference errors on assignee_id (incidents.access.require_incident_person).
 _PERSON_ERRORS = {404: {"model": ApiErrorBody, "description": "user_not_found (unknown assignee_id)"},
@@ -50,6 +72,9 @@ async def _get_task(db: AsyncSession, incident_id: uuid.UUID, task_id: uuid.UUID
     )).scalar_one_or_none()
     if not t:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
+    if t.archived_at is not None:
+        raise ApiError(status.HTTP_409_CONFLICT, "task_archived",
+                       "This task is history from a replaced plan and can't be changed.")
     return t
 
 
@@ -57,20 +82,20 @@ async def _get_task(db: AsyncSession, incident_id: uuid.UUID, task_id: uuid.UUID
             summary="List playbook tasks")
 async def list_tasks(
     incident_id: uuid.UUID,
+    include_archived: bool = Query(False, description="Also return the archived (read-only) Done/Skipped "
+                                                      "tasks of replaced plans, after the current plan."),
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[PlaybookTaskOut]:
-    """List all playbook tasks for an incident, ordered by phase and order index.
+    """List the incident's current playbook plan, in NIST SP 800-61 R3 phase order (Preparation,
+    Detection & Analysis, Containment Eradication & Recovery, Post-Incident), then order_index.
 
-    Any authenticated user with access to the incident may read. Returns the
-    full list of tasks (not paginated).
+    Any authenticated user with access to the incident may read. Returns the full list (not
+    paginated). Each task carries `overdue` (open or in progress and past due_at).
+    include_archived=true appends the archived history (archived_at set).
     """
     await _get_incident(db, incident_id, user)
-    q = await db.execute(
-        select(PlaybookTask)
-        .where(PlaybookTask.incident_id == incident_id)
-        .order_by(PlaybookTask.phase, PlaybookTask.order_index, PlaybookTask.created_at)
-    )
+    q = await db.execute(_ordered(incident_id, include_archived))
     return [PlaybookTaskOut.model_validate(t) for t in q.scalars()]
 
 
@@ -149,16 +174,23 @@ async def update_task(
     """Update a playbook task (status, title, phase, assignee, due date, etc.).
 
     Requires the analyst role; returns 404 if the task is missing and 409 if
-    the incident is closed. Only provided fields are changed and audited.
-    Setting status to `done` stamps completion time and completer; any other
-    status clears them. A new `assignee_id` must be an active user who can see the
-    incident (404 user_not_found, 422 assignee_no_access); an explicit
-    `"assignee_id": null` unassigns. Returns the updated task.
+    the incident is closed or the task is archived (task_archived). Only provided fields
+    are changed and audited. Setting status to `done` stamps completion time and
+    completer; any other status clears them. Skipping needs a non-blank skip_reason (sent
+    now or already stored): 422 skip_reason_required; leaving Skipped clears it. A new
+    `assignee_id` must be an active user who can see the incident (404 user_not_found,
+    422 assignee_no_access); an explicit `"assignee_id": null` unassigns, and
+    `"due_at": null` clears the due date. Returns the updated task.
     """
     inc  = await _get_incident(db, incident_id, user)
     task = await _get_task(db, incident_id, task_id)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    target = req.status if req.status is not None else task.status
+    if target == "skipped" and (req.status == "skipped" or req.skip_reason is not None) \
+            and _blank(req.skip_reason if req.skip_reason is not None else task.skip_reason):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "skip_reason_required",
+                       "Say why the task is skipped (skip_reason).")
 
     changed: dict[str, object] = {}
     if req.title       is not None and req.title       != task.title:
@@ -174,12 +206,14 @@ async def update_task(
             await require_incident_person(db, incident_id, req.assignee_id)
         task.assignee_id = req.assignee_id
         changed["assignee_id"] = str(req.assignee_id) if req.assignee_id else None
-    if req.due_at      is not None and req.due_at      != task.due_at:
+    if "due_at" in req.model_fields_set and req.due_at != task.due_at:
         task.due_at = req.due_at; changed["due_at"] = req.due_at.isoformat() if req.due_at else None
     if req.skip_reason is not None and req.skip_reason != (task.skip_reason or ""):
         task.skip_reason = req.skip_reason; changed["skip_reason"] = req.skip_reason
 
     if req.status is not None and req.status != task.status:
+        if task.status == "skipped" and task.skip_reason is not None:   # the reason described that skip
+            task.skip_reason = None; changed["skip_reason"] = None
         task.status = req.status
         changed["status"] = req.status
         if req.status == "done":
@@ -213,8 +247,8 @@ async def delete_task(
     """Permanently delete a playbook task from an incident.
 
     Requires the analyst role; returns 404 if the task is missing and 409 if
-    the incident is closed. The deletion is audited and the response is
-    `{"status": "ok"}`.
+    the incident is closed or the task is archived history (task_archived). The deletion is
+    audited and the response is `{"status": "ok"}`.
     """
     inc  = await _get_incident(db, incident_id, user)
     task = await _get_task(db, incident_id, task_id)
@@ -240,27 +274,46 @@ async def delete_task(
 @router.post(
     "/{incident_id}/playbook/instantiate",
     response_model=list[PlaybookTaskOut],
-    summary="Instantiate a playbook template",
+    summary="Apply a playbook template (append, or replace the plan)",
+    responses={403: {"model": ApiErrorBody, "description": "not_incident_lead (mode=replace)"},
+               409: {"model": ApiErrorBody, "description": "the incident is closed"},
+               422: {"model": ApiErrorBody, "description": "reason_required (mode=replace) · mode_conflict"}},
 )
 async def instantiate_template(
     incident_id: uuid.UUID,
     req: PlaybookInstantiateRequest,
     request: Request,
-    # `replace=True` is destructive — admin only. Append-only path is analyst.
     user: User = Depends(require_analyst),
     db:   AsyncSession = Depends(get_db),
 ) -> list[PlaybookTaskOut]:
-    """Apply a playbook template to an incident, creating its tasks.
+    """Apply a playbook template to an incident.
 
-    Requires the analyst role; the incident must not be closed (409) and the
-    referenced template must exist (404). With `replace=True` all existing
-    tasks for the incident are deleted before the template's tasks are added;
-    otherwise the new tasks are appended. The action is audited and the full
-    current task list (ordered by phase and order index) is returned.
+    Requires the analyst role; the incident must not be closed (409) and the template must
+    exist (404).
+    - mode=append (default): adds the template's tasks to the current plan. A template task
+      is skipped when the current plan already has a task from the same template with the
+      same title and phase (an exact duplicate); the audit row counts them (skipped_duplicates).
+    - mode=replace: only the incident lead (an analyst assigned as IC / Deputy IC) or an admin
+      (403 not_incident_lead), with a non-blank `reason` (422 reason_required). Done and Skipped
+      tasks of the current plan are archived (kept read-only, with the reason); Open and
+      In-progress tasks are deleted; then all the template's tasks are added.
+    The deprecated `replace` flag maps to mode (422 mode_conflict if they disagree). Audited as
+    playbook_instantiate. Returns the current plan in 800-61 R3 phase order.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    if req.mode is not None and req.replace is not None and (req.mode == "replace") != req.replace:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "mode_conflict",
+                       "mode and the deprecated replace flag disagree: send mode only.")
+    mode = req.mode or ("replace" if req.replace else "append")
+    reason = (req.reason or "").strip()
+    if mode == "replace":
+        if not await is_incident_lead(db, user, inc):
+            raise not_incident_lead("replace the playbook plan (analysts can append a template)")
+        if not reason:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "reason_required",
+                           "Say why the plan is replaced (reason).")
 
     tpl = (await db.execute(
         select(PlaybookTemplate).where(PlaybookTemplate.id == req.template_id)
@@ -268,23 +321,34 @@ async def instantiate_template(
     if not tpl:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Template not found")
 
-    cleared = 0
-    if req.replace:
-        existing = (await db.execute(
-            select(PlaybookTask).where(PlaybookTask.incident_id == incident_id)
-        )).scalars().all()
-        for t in existing:
-            await db.delete(t)
-        cleared = len(existing)
+    current = (await db.execute(_ordered(incident_id))).scalars().all()
+    archived, removed = [], []
+    present: set[tuple] = set()
+    if mode == "replace":
+        now = utcnow()
+        for t in current:
+            if t.status in _DONE:
+                t.archived_at, t.archived_by_id, t.archive_reason = now, user.id, reason
+                archived.append(t)
+            else:
+                removed.append(t.title)
+                await db.delete(t)
+    else:
+        present = {(t.source_template_id, t.title, t.phase) for t in current if t.source_template_id}
 
     new_tasks: list[PlaybookTask] = []
+    skipped = 0
     for idx, spec in enumerate(tpl.tasks or []):
+        title, phase = spec.get("title") or "", spec.get("phase") or "preparation"
+        if (tpl.id, title, phase) in present:
+            skipped += 1
+            continue
         new_tasks.append(PlaybookTask(
             id=uuid.uuid4(),
             incident_id=incident_id,
-            title=spec.get("title") or "",
+            title=title,
             description=spec.get("description"),
-            phase=spec.get("phase") or "preparation",
+            phase=phase,
             order_index=int(spec.get("order") or 0),
             status="open",
             source_template_id=tpl.id,
@@ -294,27 +358,27 @@ async def instantiate_template(
     db.add_all(new_tasks)
     await db.flush()
 
+    details = {
+        "incident_id":        str(incident_id),
+        "template_id":        str(tpl.id),
+        "template_key":       tpl.key,
+        "mode":               mode,
+        "replace":            mode == "replace",
+        "task_count":         len(new_tasks),
+        "skipped_duplicates": skipped,
+    }
+    if mode == "replace":
+        details.update(reason=reason, archived=len(archived), cleared=len(removed),
+                       removed_titles=removed[:50])
     await write_audit(
         db, "playbook_instantiate",
         user_id=user.id, username=user.username,
         resource_type="incident", resource_id=str(incident_id),
-        details={
-            "incident_id":  str(incident_id),
-            "template_id":  str(tpl.id),
-            "template_key": tpl.key,
-            "task_count":   len(new_tasks),
-            "replace":      req.replace,
-            "cleared":      cleared,
-        },
+        details=details,
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
 
-    # Return the full current list so the client picks up any pre-existing
-    # tasks (append mode) without a separate round-trip.
-    q = await db.execute(
-        select(PlaybookTask)
-        .where(PlaybookTask.incident_id == incident_id)
-        .order_by(PlaybookTask.phase, PlaybookTask.order_index, PlaybookTask.created_at)
-    )
+    # The full current plan, so the client picks up pre-existing tasks without a round-trip.
+    q = await db.execute(_ordered(incident_id))
     return [PlaybookTaskOut.model_validate(t) for t in q.scalars()]

@@ -30,6 +30,7 @@ from models import (Incident, IncidentAssignment, OnCallEntry, OperationalRole, 
 
 # Operational role keys (auth/bootstrap.py SEED_ROLES) that make an analyst the incident lead.
 LEAD_ROLE_KEYS = ("incident_commander", "deputy_commander")
+DPO_ROLE_KEY = "data_protection_officer"   # I5: signs off a breach's gates
 
 
 async def _team_visible(db: AsyncSession, incident_id: uuid.UUID, user_id: uuid.UUID) -> bool:
@@ -173,6 +174,26 @@ async def is_incident_lead(db: AsyncSession, user: User, incident: Incident) -> 
     return row is not None
 
 
+async def held_role_keys(db: AsyncSession, user: User, incident: Incident) -> list[str]:
+    """The active operational role keys the user is assigned on the incident, sorted."""
+    return sorted(set((await db.execute(
+        select(OperationalRole.key)
+        .join(IncidentAssignment, IncidentAssignment.role_id == OperationalRole.id)
+        .where(IncidentAssignment.incident_id == incident.id, IncidentAssignment.user_id == user.id,
+               OperationalRole.is_active.is_(True))
+    )).scalars()))
+
+
+async def is_incident_dpo(db: AsyncSession, user: User, incident: Incident) -> bool:
+    """I5: who may give the DPO's gate sign-off. Admin, or an analyst (effective role, as
+    is_incident_lead) assigned the data_protection_officer role on this incident."""
+    if user.role == "admin":
+        return True
+    if user.role != "analyst":
+        return False
+    return DPO_ROLE_KEY in await held_role_keys(db, user, incident)
+
+
 async def incident_has_lead(db: AsyncSession, incident_id: uuid.UUID) -> bool:
     """Whether someone can act as lead: an IC / Deputy assignment held by an active
     analyst or admin who can see the incident (admin, or allowed by the team rule).
@@ -252,6 +273,9 @@ CAPABILITIES = {
     "assign_lead_roles":     "Create or remove Incident Commander / Deputy assignments (lead, or the "
                              "creator / today's on-call analyst while the incident has no lead)",
     "remove_own_assignment": "Remove your own assignment (analyst or admin)",
+    "replace_playbook":      "Replace the playbook plan with a template, giving a reason (lead)",
+    "sign_off_ic":           "Give the Incident Commander's gate sign-off (lead)",
+    "sign_off_dpo":          "Give the DPO's gate sign-off (admin, or the analyst assigned Data Protection Officer)",
 }
 
 
@@ -260,7 +284,10 @@ async def incident_capabilities(db: AsyncSession, user: User, incident: Incident
     lead = await is_incident_lead(db, user, incident)
     caps: list[str] = []
     if lead:
-        caps += ["read_audit_log", "manage_le_package", "set_teams", "override_gate", "remove_any_assignment"]
+        caps += ["read_audit_log", "manage_le_package", "set_teams", "override_gate", "remove_any_assignment",
+                 "replace_playbook", "sign_off_ic"]
+    if await is_incident_dpo(db, user, incident):
+        caps.append("sign_off_dpo")
     if await may_manage_lead_roles(db, user, incident):
         caps.append("assign_lead_roles")
     if user.role in ("admin", "analyst"):

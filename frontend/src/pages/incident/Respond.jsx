@@ -460,6 +460,12 @@ function ActionCard({ action, usernameOf, onStatusChange, onEdit, onDelete, onRe
         <div style={{ fontSize: 11, color: 'var(--dim)', fontStyle: 'italic' }}>{action.notes}</div>
       )}
 
+      {action.status === 'deferred' && (
+        <div style={{ fontSize: 11, color: 'var(--muted)' }} data-defer-reason>
+          {action.defer_reason ? <>Deferred: {action.defer_reason}</> : <>Deferred without a reason: Edit to add one (Gate 1 warns).</>}
+        </div>
+      )}
+
       {isReverted && (action.revert_reason || action.reverted_at) && (
         <div style={{
           fontSize: 11, color: 'var(--dim)',
@@ -622,6 +628,7 @@ function ActionModal({ incidentId, category, editing, users, onClose, onSaved })
   const [status,      setStatus]      = useState(editing?.status           ?? 'open')
   const [assigneeId,  setAssigneeId]  = useState(editing?.assignee_id     ?? '')
   const [notes,       setNotes]       = useState(editing?.notes            ?? '')
+  const [deferReason, setDeferReason] = useState(editing?.defer_reason     ?? '')
   const [occurredAt,  setOccurredAt]  = useState(editing?.occurred_at || '')
   const [busy,        setBusy]        = useState(false)
   const [error,       setError]       = useState(null)
@@ -697,6 +704,7 @@ function ActionModal({ incidentId, category, editing, users, onClose, onSaved })
         assignee_id: assigneeId || null,
         notes:       notes.trim() || null,
         details:     { ...(editing?.details ?? {}), target: target.trim() || undefined },
+        defer_reason: status === 'deferred' ? deferReason.trim() : (editing?.defer_reason ?? undefined),
         occurred_at: occurredAt || null,
         entity_id:   entityId || null,
         ioc_id:      iocId || null,
@@ -884,6 +892,19 @@ function ActionModal({ incidentId, category, editing, users, onClose, onSaved })
                     </select>
                   </div>
                 </div>
+
+                {status === 'deferred' && (
+                  <div className="field">
+                    <label className="field-label" htmlFor="am-defer">Why is it deferred?</label>
+                    <textarea id="am-defer" className="input" value={deferReason}
+                              onChange={(e) => setDeferReason(e.target.value)} rows={2} maxLength={4096}
+                              aria-describedby="am-defer-hint"
+                              placeholder="e.g. business owner accepted the risk until the maintenance window" />
+                    <span id="am-defer-hint" className="field-hint">
+                      Recommended: Gate 1 (into Post-Incident) warns about a deferred action without a reason.
+                    </span>
+                  </div>
+                )}
 
                 <div className="field">
                   <label className="field-label" htmlFor="am-occurred">Occurred at (optional)</label>

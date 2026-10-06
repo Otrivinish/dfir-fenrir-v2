@@ -71,17 +71,48 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'Open an incident the moment something is detected, so its first-hour facts are on record from the start.' },
           { type: 'steps', items: [
-            'Sidebar → **Incidents** → **+ New Incident**.',
-            'Enter a title and set **Severity** (Low / Medium / High / Critical) and **TLP**.',
+            'Sidebar → **Incidents** (or the **Dashboard**) → **+ New Incident**.',
+            'Enter a title, choose the **Incident type** and **Severity** (Low / Medium / High / Critical), and set **TLP**.',
             'Pick the starting **Phase** — **Detection & Analysis**, or **Containment, Eradication & Recovery** if containment is already under way. An incident cannot start in Preparation or Post-Incident.',
-            'Set **How detected** and **Triage state** (default **Suspected**).',
-            'Check **Detected** — it is pre-filled with now. Change it to when the alert fired or the report came in. It cannot be earlier than **When did it occur?** or in the future.',
-            'The incident opens on its **Situation** board ([[iw-details]]): classification, clocks, the next gate, open response actions, team gaps and the newest events on one screen.',
-            'Fill the gaps it shows: **Team** to assign the Incident Commander and the other roles, **Edit details** for anything missing from the classification, then move through phases using the phase stepper at the top.',
+            'Choose **How detected** and the **Triage state** (default **Suspected**).',
+            'Enter **Detected**: when the alert fired or the report came in. Nothing is filled in for you. It cannot be earlier than **When did it occur?** or in the future.',
+            'Optionally fill in what you already know: the **Incident Commander**, the impact, why this severity, the alert reference, and the first host and IOC ([[inc-start-checks]]).',
+            'The incident opens on its **Situation** board ([[iw-details]]): start checks, classification, clocks, the next gate, open response actions, team gaps and the newest events on one screen.',
+            'Work through the **Start checks** it lists — each has a **Fix →** link — then move through phases using the phase stepper at the top.',
             'Start collecting data in **Examine**, **Timeline**, **Entities** and **IOCs**.',
           ] },
           { type: 'note', text: 'Severity and TLP are editable at any time. When in doubt, start higher and revise downward.' },
-          { type: 'note', text: 'Incidents raised by a SIEM webhook (Splunk, Microsoft Sentinel, Elastic) arrive with **How detected** = **SIEM Alert** and **Detected** = the alert\'s own time, never later than when FENRIR received it.' },
+          { type: 'note', text: 'Title, type, severity, how detected and Detected are required; the rest can wait.' },
+          { type: 'note', text: 'Incidents raised by a SIEM webhook (Splunk, Microsoft Sentinel, Elastic) arrive with **How detected** = **SIEM Alert** and **Detected** = the alert\'s own time, never later than when FENRIR received it. When the alert carries no time, **Detected** is the receipt time and the start checks say so.' },
+        ],
+      },
+      {
+        id: 'inc-start-checks',
+        title: 'Intake fields and start checks',
+        tags: ['intake', 'start checks', 'incident commander', 'impact', 'severity rationale', 'alert reference', 'first host', 'first ioc', 'dark operation', 'overdue'],
+        body: [
+          { type: 'p', text: 'Start checks list what should be in place within the first hour of an incident. They warn; they never block anything.' },
+          { type: 'section', title: 'Optional intake fields in New incident', items: [
+            '**Incident Commander**: assigned with the incident. They must be able to see it (its teams) and get an in-app notification.',
+            '**Functional impact**, **Information impact** and **Recoverability**: the NIST SP 800-61 impact categories. **Information impact: Privacy breach** means personal data is involved.',
+            '**Why this severity**: one line on why you chose it, so a later reader understands the call.',
+            '**Alert reference**: the source system and the alert id, for example *Sentinel 4f2a91*.',
+            '**First affected host**: added to **Entities** as a compromised host. **First IOC**: added to **IOCs** with source *intake*.',
+            'Everything here can be changed later on **Details** → **Edit details**.',
+          ] },
+          { type: 'section', title: 'The start checks', items: [
+            '**Incident Commander**, **Communications Lead** and **Legal Liaison** assigned (**Team**).',
+            '**Detection time recorded**.',
+            '**Playbook applied**: at least one task. The check names the playbooks suggested for the incident type.',
+            '**Legal deadlines initialised**: for ransomware, data breach and BEC, when **Information impact** is **Privacy breach**, or when the incident is tagged *personal-data*.',
+            '**Dark Operation decided**: for phishing and BEC, where the attacker may be reading the mailbox. Turn it on, or choose **Record decision: stay off** on **Comms → OOB**. Either choice is audited.',
+            '**No stakeholder notification overdue** ([[iw-notifications]]).',
+          ] },
+          { type: 'section', title: 'Where you see them', items: [
+            'The **Start checks** chip in the incident header: met / total, amber while some are missing, red when any is overdue.',
+            'The **Start checks** panel on the **Situation** board, with a **Fix →** link to the page that fixes each one.',
+          ] },
+          { type: 'note', text: 'A missing check turns **overdue** 60 minutes after the incident was opened. An overdue stakeholder notification is overdue at once.' },
         ],
       },
       {
@@ -136,7 +167,7 @@ const CATEGORIES = [
           { type: 'section', title: 'What it shows', items: [
             'Each check as **Pass**, **Fail** or **Unknown**, its level (**Blocker** or **Warning**), its NIST CSF 2.0 ID, and a **Fix** link to the page where it is fixed. Most fixes need an admin.',
             '**Blockers:** at least 2 active admins · TOTP enforced and every admin enrolled · Incident Commander, Communications Lead and Legal Liaison roles active · someone on call every UTC day of the next 14 · required Stakeholder matrix rules for High and Critical · a backup under 26 h old and not failing · an audit-chain anchor that verified · a Data Protection Officer role · an out-of-band contact for everyone on call in the next 14 days.',
-            '**Warnings:** Ransomware and Data-breach playbooks updated within 12 months · a threat-intel API key and every enabled feed pulled within 24 h · email configured · at least one validated tool · an audit-chain anchor that is missing or over 26 h old · the six key contacts in the Contacts directory, each verified within 90 days ([[co-contacts]]).',
+            '**Warnings:** Ransomware and Data-breach playbooks marked reviewed within 12 months ([[iw-playbook]]) · a threat-intel API key and every enabled feed pulled within 24 h · email configured · at least one validated tool · an audit-chain anchor that is missing or over 26 h old · the six key contacts in the Contacts directory, each verified within 90 days ([[co-contacts]]).',
             '**Unknown** means Fenrir could not check it (for example, the backup directory is not mounted). It never counts as a pass.',
           ] },
           { type: 'section', title: 'Where else it appears', items: [
@@ -165,7 +196,7 @@ const CATEGORIES = [
           { type: 'table', headers: ['Phase', 'What happens'], rows: [
             ['**Preparation**', 'Readiness before any incident: rosters, playbooks, drills. An incident can\'t be moved to it.'],
             ['**Detection & Analysis**', 'Triage, IOC collection, timeline reconstruction, threat actor identification.'],
-            ['**Containment, Eradication & Recovery**', 'Isolate affected systems. Log responder actions in **Respond**. Eradicate and recover. Avoid destroying evidence.'],
+            ['**Containment, Eradication & Recovery**', 'Isolate affected systems. Log responder actions in **Respond**. Eradicate and recover; track each system\'s restore and validation on **Recovery** ([[iw-recovery]]). Avoid destroying evidence.'],
             ['**Post-Incident**', 'Closure checklist, lessons learned, report. Cost tracking.'],
           ] },
           { type: 'p', text: 'Each phase has a **symbol** and a **colour** on the stepper, the **Incidents** list and the **Dashboard**. The colour follows the phase\'s NIST CSF 2.0 function and is softer than the severity badges, so the two never read alike.' },
@@ -176,16 +207,24 @@ const CATEGORIES = [
             'Moving **back** to an earlier phase needs a reason of at least 10 characters. It goes into the audit log.',
             'Moving **into Post-Incident** — from the stepper or with **Resolve** — checks **Gate 1** first.',
           ] },
-          { type: 'section', title: 'Gate 1: C/E/R → Post-Incident', items: [
+          { type: 'p', text: 'Every gate check is either **blocking** or a **warning**. Blocking checks are the legal and integrity ones: they stop the move until they are met or the incident lead overrides them. Warnings are hygiene: the dialog shows them and the audit log records them with the move, but they never stop it.' },
+          { type: 'section', title: 'Gate 1: C/E/R → Post-Incident — blocking', items: [
             '**Contained**, **Eradicated** and **Recovered** times are declared.',
             'No containment, eradication or recovery action on **Respond** is Open or In progress. Done or Deferred both count.',
             'Every mandatory legal deadline that is due, or has a window of 72 h or less, is Completed or Waived on **Legal**. Longer ones, such as the NIS2 final report, are carried forward and listed.',
-            'Maps to NIST SP 800-61 R3 / CSF 2.0 `RS.MI-01`, `RS.MI-02` (contained, eradicated) and, **partially**, `RC.RP-01`–`RC.RP-06` (recovery done, verified and declared): v1 checks the declared times and that no action is open, not that restores were verified.',
+            'Every system in scope on **Recovery** is Validated or Not required ([[iw-recovery]]).',
+            'Every required stakeholder notification on **Comms → Notifications** is Notified or Not required.',
+            'For a **personal-data breach** (type Data Breach, information impact Privacy, or the tag `personal-data`): at least one GDPR or NIS2 obligation is recorded on **Legal**; and when one was waived as not required, the **DPO** signs off Gate 1.',
           ] },
+          { type: 'section', title: 'Gate 1 — warnings', items: [
+            'A deferred containment, eradication or recovery action has no defer reason (add it with **Edit** on **Respond**).',
+            'No system is in scope at all: confirm that nothing needed restoring.',
+          ] },
+          { type: 'p', text: 'Maps to NIST SP 800-61 R3 / CSF 2.0 `RS.MI-01`, `RS.MI-02` (contained, eradicated), `RC.RP-01`–`RC.RP-05` (recovery done and verified per system) and `RS.CO-02` (stakeholders notified).' },
           { type: 'steps', items: [
-            'When Gate 1 is unmet, the confirmation lists each missing item with a link to where you fix it.',
-            'Fix them and try again — or, as the incident lead (Incident Commander / Deputy, [[gs-roles]]) or an admin, tick **Override** and write a justification of at least 10 characters.',
-            'An override goes into the audit log (`incident_gate_override`, with the missing items) and onto the **Timeline** as **Gate overridden**.',
+            'The confirmation lists the blocking items, then the warnings, each with a link to where you fix it.',
+            'Fix the blocking items and try again — or, as the incident lead (Incident Commander / Deputy, [[gs-roles]]) or an admin, tick **Override** and write a justification of at least 10 characters.',
+            'An override goes into the audit log (`incident_gate_override`, with the blocking items and the warnings) and onto the **Timeline** as **Gate overridden**. Warnings alone never need an override.',
           ] },
           { type: 'section', title: 'Response milestones', items: [
             'Changing phase sets no time. Declare each milestone in the incident header: **Declare contained** → **Declare eradicated** → **Declare recovered** (only the next one not yet set shows; Observers and closed incidents see none).',
@@ -196,7 +235,7 @@ const CATEGORIES = [
           ] },
           { type: 'note', text: 'Incidents that entered C/E/R before 2026-10-02 may carry a **Contained** time that was stamped automatically on phase entry. FENRIR can\'t tell those from times entered by hand, so none were changed — check them on **Details**.' },
           { type: 'note', text: 'Post-Incident keeps the incident open for the lessons-learned review, the checklist and reports. Closing is a separate step with its own gate — see [[inc-closing]].' },
-          { type: 'note', text: 'The same checks come from the API: `GET /api/incidents/{id}/gates` returns both gates and what each is missing.' },
+          { type: 'note', text: 'The same checks come from the API: `GET /api/incidents/{id}/gates` returns both gates, every check with its level (`block` or `warn`) and status, and the sign-offs each gate needs.' },
         ],
       },
       {
@@ -229,7 +268,7 @@ const CATEGORIES = [
       {
         id: 'inc-closing',
         title: 'Resolving, Closing & Reopening',
-        tags: ['resolve', 'close', 'closed', 'sign-off', 'reopen', 're-open', 'false positive', 'benign positive', 'lock', 'gate', 'override'],
+        tags: ['resolve', 'close', 'closed', 'sign-off', 'reopen', 're-open', 'false positive', 'benign positive', 'lock', 'gate', 'override', 'warning', 'dpo', 'legal hold', 'blocking'],
         body: [
           { type: 'p', text: '**Resolve** and **Close** are two steps, each with a gate. Resolve moves the incident to Post-Incident and keeps it open; Close signs it off and makes it read-only.' },
           { type: 'steps', items: [
@@ -237,19 +276,33 @@ const CATEGORIES = [
             'Work through what **Gate 2** asks for (below) and generate the final **Report**. The **Close** dialog shows what is still missing at any time.',
             'Click **Close**, write a sign-off statement (at least 10 characters) and confirm.',
           ] },
-          { type: 'section', title: 'Gate 2: Post-Incident → Closed', items: [
+          { type: 'section', title: 'Gate 2: Post-Incident → Closed — blocking', items: [
             '**Resolution summary** on **Details** — what happened, root cause, recommendations.',
             '**Lessons Learned** (Post-Incident tab) set to **Final**, with **Date conducted**, **Participants**, and an **Owner** and **Due date** on every action item.',
-            '**Closure Checklist** opened, with every item checked except **Incident formally closed** — Close ticks that one.',
-            'No **Playbook** task Open or In progress. Done, or Skipped with a reason.',
+            '**Closure Checklist** opened, with every item checked or marked **N/A**, except **Incident formally closed** — Close ticks that one.',
+            'No **Playbook** task Open or In progress, apart from Preparation-phase tasks (a warning). Done, or Skipped with a reason.',
             'Every legal deadline already due is Completed or Waived on **Legal**. Deadlines still ahead, such as the NIS2 final report, are carried forward and listed; they don\'t block.',
             'At least one cost entry, or a filled-in business impact, on **Post-Incident → Reports**.',
-            'Maps to NIST SP 800-61 R3 / CSF 2.0 `ID.IM-03`, `ID.IM-04` (improvements from lessons learned) and `RC.RP-06` (incident documentation completed) and the CISA IR playbook\'s post-incident activity.',
+            '**Evidence**: every exhibit still held has a custodian and is on **legal hold** (otherwise record its disposition: archive, return or destroy); no working-copy download is issued or in progress; every **LE package** is acknowledged by its recipient.',
+            'The **Incident Commander\'s sign-off**, and for a personal-data breach the **DPO\'s sign-off**.',
+          ] },
+          { type: 'section', title: 'Gate 2 — warnings', items: [
+            'A checklist item marked **N/A** has no reason.',
+            'A skipped playbook task has no reason.',
+            'A **Preparation**-phase playbook task is still open (readiness work: it never blocks a close).',
+            'The **executive** and **full** reports were not generated and saved after the last change to the incident.',
+          ] },
+          { type: 'p', text: 'Maps to NIST SP 800-61 R3 / CSF 2.0 `ID.IM-03`, `ID.IM-04` (improvements from lessons learned) and `RC.RP-06` (incident documentation completed) and the CISA IR playbook\'s post-incident activity.' },
+          { type: 'section', title: 'Sign-offs', items: [
+            'The gate panel in the **Close** dialog (and in the **Resolve** dialog when Gate 1 needs the DPO) shows each sign-off the gate needs, with a **Sign off** button for whoever may give it.',
+            '**Incident Commander**: the analyst assigned Incident Commander or Deputy on this incident, or an admin. **DPO**: the analyst assigned Data Protection Officer on this incident, or an admin.',
+            'A sign-off records your name, the time, your statement and a SHA-256 of the gate\'s blocking checks as they were. It can\'t be edited or deleted; signing again adds a new one. The panel says when the checks have changed since.',
+            'Only sign-offs made since the incident was last re-opened count. All of them appear in the report\'s **Approval & Sign-off** section and in the LE package (`13_Sign_Offs`).',
           ] },
           { type: 'section', title: 'When Gate 2 is unmet', items: [
-            'The **Close** dialog lists each missing item with a link to where you fix it.',
+            'The **Close** dialog lists each blocking item, then each warning, with a link to where you fix it.',
             'To close anyway, the incident lead (Incident Commander / Deputy) or an admin ticks **Override**. The sign-off statement is the justification.',
-            'The override goes into the audit log (`incident_gate_override`, with the missing items) and onto the **Timeline** as **Gate overridden**.',
+            'The override goes into the audit log (`incident_gate_override`, with the blocking items and the warnings) and onto the **Timeline** as **Gate overridden**. Warnings alone never need an override; the close audit row lists them.',
           ] },
           { type: 'section', title: 'What Close does', items: [
             'Records you as the closer, with the close time.',
@@ -875,9 +928,9 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: '**Situation** is the landing tab, a read-only one-screen summary of the incident; **Details** is the full record and where you edit it.' },
           { type: 'section', title: 'Situation board', items: [
-            '**Stakeholder Matrix banner** — required notifications for this severity ([[co-matrix]]).',
+            '**Stakeholder notifications banner** — the notification tracker in one line: x of y required notified, overdue ones, and a chip per stakeholder ([[iw-notifications]]).',
             '**Classification strip** — Type · Severity · TLP · Triage · How detected · Reporter · Teams · Tags on one line. **Edit details** opens Details in edit mode (analysts and admins, while the incident is open).',
-            '**Clocks** — Occurred · Detected · Declared (opened in FENRIR) · Contained · Eradicated · Recovered, the time elapsed since detection, and the nearest open legal deadline. **NOT CONTAINED** shows in red when Contained is not declared in Containment, Eradication & Recovery or later.',
+            '**Clocks** — Occurred · Detected · Declared (opened in FENRIR) · Contained · Eradicated · Recovered, the time elapsed since detection, the nearest open legal deadline, and **Stakeholder notifications** (x of y, overdue or next due). **NOT CONTAINED** shows in red when Contained is not declared in Containment, Eradication & Recovery or later.',
             '**Next gate** — Gate 1 (into Post-Incident) or Gate 2 (close), as the server evaluates it now: met, or how many items are missing with links to where each is fixed ([[inc-phases]]).',
             '**Open response actions** — open and in-progress actions from Respond, with their target, its containment state, owner and age ([[iw-respond]]).',
             '**Scope** — compromised entities with their containment state, plus entity and IOC counts.',
@@ -916,18 +969,25 @@ const CATEGORIES = [
       {
         id: 'iw-playbook',
         title: 'Playbook',
-        tags: ['playbook', 'task', 'template', 'progress', 'phase'],
+        tags: ['playbook', 'task', 'template', 'progress', 'phase', 'append', 'replace', 'due', 'skip', 'overdue', 'review', 'suggested'],
         body: [
-          { type: 'p', text: 'Response tasks grouped by 800-61 R3 phase. Apply a template (CISA Federal IR Playbook, Vulnerability Response Playbook, etc.) or build tasks ad-hoc.' },
-          { type: 'section', title: 'Per phase', items: [
-            'A progress bar with % complete and counts (done · in-progress · open · skipped).',
-            'Each task row: title, description, status dropdown, assignee, completion timestamp.',
+          { type: 'p', text: 'The incident\'s response plan: tasks in NIST SP 800-61 R3 phase order (Preparation → Detection & Analysis → Containment, Eradication & Recovery → Post-Incident). Start from a template (CISA Federal IR, Vulnerability Response, Ransomware …) or add your own tasks.' },
+          { type: 'section', title: 'Each task', items: [
+            '**Status** — Open · In progress · Done · Skipped. Skipping asks **why**; the reason is kept on the task.',
+            '**Assignee** — anyone who can see the incident.',
+            '**Due** — date and time in your timezone, stored in UTC. Past due and not finished shows **! Overdue**.',
           ] },
-          { type: 'section', title: 'Toolbar', items: [
-            '**Apply template** — opens a modal listing playbook templates; applying seeds tasks across all 4 phases.',
-            '**+ Add task** — custom task for this incident only.',
-            '**Reassign / Status** — inline edits per row.',
+          { type: 'section', title: 'Apply a template', items: [
+            '**Suggested for …** — templates made for the incident\'s type, shown above the plan. Clicking one opens **Apply template**; nothing is applied until you confirm. **New incident** names the same suggestions.',
+            '**Add to the plan** (default, any analyst) — adds the template\'s tasks. Tasks from that template already in the plan are skipped, so applying twice adds nothing twice.',
+            '**Replace the plan** — the incident lead (Incident Commander or Deputy) or an admin only, with a reason. Done and Skipped tasks move to **History** (read-only, with the reason); Open and In-progress tasks are removed. Audited.',
+            '**Playbooks** page **Execute** always adds to the plan.',
           ] },
+          { type: 'section', title: 'Templates (Prepare → Playbooks)', items: [
+            '**Suggested for** — the incident types a template is offered for. Admins set it on system templates; analysts on custom ones.',
+            '**Mark reviewed** — records that you reviewed the template today (who and when). Editing a template is not a review. Readiness warns until the Ransomware and Data-breach playbooks are marked reviewed within 12 months ([[gs-readiness]]).',
+          ] },
+          { type: 'note', text: 'Gate 2 (closing) needs every task Done or Skipped. Preparation-phase tasks count too.' },
         ],
       },
       {
@@ -960,8 +1020,9 @@ const CATEGORIES = [
             ['**Comments**', 'Threaded @-mention discussion. Mentions deliver notifications.'],
             ['**OOB**',      'Out-of-band log + passphrase generator. Use when the platform may be compromised — see [[co-comments]].'],
             ['**Stakeholders**', 'Per-incident contact list — see [[co-stakeholders]]. CSV bulk import supported.'],
+            ['**Notifications**', 'Who the stakeholder matrix says must be told, by when, and whether it was done — see [[iw-notifications]].'],
           ] },
-          { type: 'note', text: 'The Stakeholder Matrix banner (required notifications for this severity) appears above the sub-tabs and on the Situation board.' },
+          { type: 'note', text: 'The stakeholder notifications banner (the tracker\'s summary) appears above the sub-tabs and on the Situation board.' },
         ],
       },
       {
@@ -1201,6 +1262,7 @@ const CATEGORIES = [
             'Title, description, target, assignee, occurrence + completion timestamps. A target not linked to an entity or IOC shows **(unlinked target)**.',
             '**Done** — stamps the completion time and adds a system event to the **Timeline** (at the occurrence time if set, else the completion time). Logging an action straight as Done does the same.',
             '**Revert** — marks the action **Reverted** (rolled back), records the reason and adds a Timeline event.',
+            '**Deferred** — give the reason in **Edit** (*Why is it deferred?*). Gate 1 warns about a deferred action without one.',
             'Edit / Delete inline.',
           ] },
           { type: 'section', title: 'Target and containment state', items: [
@@ -1216,6 +1278,58 @@ const CATEGORIES = [
           { type: 'section', title: 'Toolbar', items: [
             '**Action templates** — pick from a built-in library (isolate host, reset credentials, block IOC, etc.) to pre-fill.',
           ] },
+        ],
+      },
+      {
+        id: 'iw-recovery',
+        title: 'Recovery',
+        tags: ['recovery', 'restore', 'backup', 'restore point', 'validate', 'validation', 'validator', 'monitoring', 'not required', 'declare recovered', 'rc.rp'],
+        body: [
+          { type: 'p', text: 'One row per system in scope: every **compromised** host, service or network range from **Entities**. Track its restore from backup, who checked it clean, and how long it stays under watch. Maps to NIST CSF 2.0 `RC.RP-02`, `RC.RP-03` and `RC.RP-05`.' },
+          { type: 'section', title: 'States', items: [
+            '**Not started** → **Restoring** → **Restored** → **Validated**. Or **Not required**, with a reason, for a system that needs no restore.',
+            'Each row shows only the next steps allowed. You can\'t skip a step.',
+            '**Restore again** (from Restored or Validated) and **Reset** (back to Not started) need a reason. They clear the later sign-offs; the reason goes into the audit log.',
+          ] },
+          { type: 'section', title: 'What each step records', items: [
+            '**Mark restored** needs the **restore point**: the backup id, snapshot or image. Add its time if you know it. **Restored at** defaults to now, and you are recorded as the person who restored it.',
+            '**Validate** needs the **validation method**, for example an EDR scan or a hash comparison with the gold image. Add an optional checklist. You are recorded as the validator.',
+            'If you validate a system you restored yourself, FENRIR allows it but flags **same person**. A second responder should confirm.',
+            '**Monitoring from / until** is the heightened-monitoring window after the restore. Until can\'t be before From.',
+            'Times can\'t be in the future. The restore point can\'t be after the restore, and validation can\'t be before it.',
+            '**Edit** changes the restore point, method, checklist, window and notes without changing the state.',
+          ] },
+          { type: 'section', title: 'Declare recovered', items: [
+            'When every system is **Validated** or **Not required**, the page offers **Declare recovered**. It sets the incident\'s **Recovered** time, the same as the header button (see [[inc-phases]]). Nothing is set automatically.',
+            'The rail and the **Situation** board show **Recovery x/y validated**; systems marked Not required are left out of y.',
+          ] },
+          { type: 'note', text: 'Clearing a system\'s **Compromised** flag takes it off this list; its record is kept. An entity with a recovery record can\'t be deleted. Observers can read the tracker; a closed incident is read-only.' },
+          { type: 'note', text: 'The **Full Technical Report** has a **Recovery Validation** section, and the LE package has `11_Recovery/Recovery.csv`. From the API: `GET /api/incidents/{id}/recovery` and `PATCH /api/incidents/{id}/recovery/{entity_id}`.' },
+        ],
+      },
+      {
+        id: 'iw-notifications',
+        title: 'Stakeholder notifications',
+        tags: ['notifications', 'stakeholder', 'matrix', 'notify', 'countdown', 'overdue', 'sla', 'escalation', 'severity', 'ciso', 'dpo', 'rs.co-02'],
+        body: [
+          { type: 'p', text: '**Comms › Notifications** turns the stakeholder matrix ([[co-matrix]]) into a checklist with countdowns: who must be told about this incident, by when, and whether it was done. Maps to NIST CSF 2.0 `RS.CO-02` (stakeholders are notified of incidents).' },
+          { type: 'section', title: 'Where the rows come from', items: [
+            'One row per matrix rule for the incident\'s **current severity** whose incident types are empty or include the incident\'s type.',
+            'The **countdown starts when the incident first reached that severity**. The opening severity counts from **Detected** (or the time the incident was opened, if Detected is empty). An escalation counts from the moment of the change. Each severity reached is recorded and audited; the page lists them under **Severity reached**.',
+            'When the severity or type changes, new rows appear. Rows whose rule no longer applies stay, marked **superseded**, and no longer count. If the incident returns to that severity, the row comes back with its original due time.',
+            '**Required** rules count towards **x of y** and are reminded once overdue. **Advisory** rules are listed but not counted.',
+          ] },
+          { type: 'section', title: 'Recording', items: [
+            'FENRIR **never sends** these notifications. Tell the stakeholder yourself (phone, email, in person, out-of-band), then click **Record notified**.',
+            '**Record notified** asks when (defaults to now; not in the future) and the channel. You can link the stakeholder record and the out-of-band log entry, and add a note. You are recorded as the person who notified them; a notification after the due time is marked **late**.',
+            '**Not required** needs a reason; the row then leaves y. **Undo** and **Correct** need a reason; it goes to the audit log.',
+            'After the incident is **closed** you can still record a pending notification; nothing else changes.',
+          ] },
+          { type: 'section', title: 'Where it shows', items: [
+            'The header chip **Notifications x of y** (red when one is overdue), the Comms rail count, the **Situation** board clock line, and the banner above the Comms tabs.',
+            'An overdue required notification sends one **in-app** reminder to the incident\'s assignees (everyone with access if none). No email is sent.',
+          ] },
+          { type: 'note', text: 'The **Full Technical Report** lists them in **Communications & Notification Log**, and the LE package has `12_Notifications/Stakeholder_Notifications.csv`. From the API: `GET /api/incidents/{id}/stakeholder-notifications` and `PATCH …/stakeholder-notifications/{notification_id}`. Observers can read the tracker.' },
         ],
       },
       {
@@ -1619,10 +1733,11 @@ const CATEGORIES = [
             'Settings → **Stakeholder Matrix** (admin-only). Per-severity tables with role / notify-within / category / required-vs-advisory.',
           ] },
           { type: 'section', title: 'Where it shows up', items: [
-            '**Incident Details** — banner at the top lists required notifications for that incident\'s severity.',
-            '**Comms tab** — same banner, above the sub-tabs.',
+            'Each rule that matches an incident\'s severity becomes a **notification with a countdown** on that incident: **Comms › Notifications** ([[iw-notifications]]), the header chip, the Situation board and the banner above the Comms tabs.',
+            'A rule can be limited to **incident types** (tick them in the rule; none ticked = every type).',
+            'Adding, changing or deleting a rule updates every **open** incident. Notifications already created keep the role, SLA and required flag they were created with. Closed incidents are never changed.',
           ] },
-          { type: 'note', text: 'Only rules marked **Required** appear in the banner. Advisory rules are visible only in the Matrix page.' },
+          { type: 'note', text: '**Required** rules count towards "x of y" and get an overdue reminder. **Advisory** rules are listed too, but not counted.' },
         ],
       },
       {
@@ -1676,7 +1791,11 @@ const CATEGORIES = [
             '**+ Add item** at the top adds a custom checklist row.',
             'The trash button (✕) on any row deletes it. Defaults that you delete won\'t reappear — they\'re soft-deleted per-incident.',
           ] },
-          { type: 'note', text: 'All add / delete / toggle / assign actions are audit-logged.' },
+          { type: 'section', title: 'Not applicable', items: [
+            '**N/A** on a row marks the item not applicable, with a reason. Gate 2 counts it as done; an N/A item without a reason is a warning.',
+            '**Clear N/A** makes it apply again; checking an N/A item clears N/A. **Incident formally closed** can\'t be N/A.',
+          ] },
+          { type: 'note', text: 'All add / delete / toggle / N/A / assign actions are audit-logged.' },
           { type: 'note', text: '**Close** ticks **Incident formally closed** and **Re-open** unticks it. A closed incident\'s checklist is read-only.' },
         ],
       },
@@ -1896,7 +2015,7 @@ const FAQS = [
   },
   {
     q: 'Where does the Stakeholder Matrix banner come from?',
-    a: 'It pulls the global rules from Settings → Stakeholder Matrix and filters by the current incident\'s severity AND `required = true`. Add or edit rules in Settings (admin only). The banner shows on both Incident Details and the Comms tab.',
+    a: 'It summarises the incident\'s stakeholder notification tracker, which is built from the rules in Settings → Stakeholder Matrix that match the incident\'s severity (and type, if the rule names types). Add or edit rules in Settings (admin only). The banner shows on the Situation board and above the Comms tabs; record notifications on Comms › Notifications.',
     tags: ['matrix', 'banner', 'stakeholder', 'notification', 'severity'],
   },
   {

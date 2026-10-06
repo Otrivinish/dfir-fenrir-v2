@@ -1,64 +1,60 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../api/client.js'
+import { formatLocal } from '../lib/datetime.js'
+import { span } from './ClockChips.jsx'
+import { CHANNEL_LABEL, dueChip } from '../pages/incident/comms/Notifications.jsx'
 
-function formatMinutes(mins) {
-  if (mins < 60)   return `${mins}m`
-  if (mins < 1440) return `${Math.round(mins / 60 * 10) / 10}h`
-  return `${Math.round(mins / 1440 * 10) / 10}d`
-}
-
-// Banner showing required Stakeholder Matrix rules that match the current
-// incident's severity. Used on Incident Details and Comms tab.
-export default function StakeholderMatrixBanner({ severity }) {
-  const [rules,  setRules]  = useState([])
-  const [loaded, setLoaded] = useState(false)
+// I2: the summary of the incident's stakeholder notification tracker (it replaced the plain list
+// of matching matrix rules): "x of y required notified", how many are overdue, and one chip per
+// active obligation (countdown while pending). Used on the Situation board and above the Comms
+// tabs; `to` is the relative link to Comms › Notifications. Renders nothing when no matrix rule
+// applies to the incident. `rev` changes after a write so the banner re-reads.
+export default function StakeholderMatrixBanner({ incidentId, rev, to = 'notifications' }) {
+  const [data, setData] = useState(null)
+  const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
-    if (!severity) return
-    api.listStakeholderMatrix()
-      .then(d => setRules(d.items || []))
-      .catch(() => setRules([]))
-      .finally(() => setLoaded(true))
-  }, [severity])
+    if (!incidentId) return undefined
+    let alive = true
+    api.listStakeholderNotifications(incidentId, { active: true, limit: 100 })
+      .then(d => { if (alive) setData(d) })
+      .catch(() => { if (alive) setData(null) })
+    return () => { alive = false }
+  }, [incidentId, rev])
 
-  if (!loaded || !severity) return null
-  const matching = rules.filter(r => r.severity === severity && r.required)
-  if (matching.length === 0) return null
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 60_000)
+    return () => clearInterval(t)
+  }, [])
 
+  if (!data?.items?.length) return null
+  const s = data.summary
   return (
-    <div role="status" style={{
-      marginBottom: 'var(--space-3)',
-      padding: 'var(--space-3)',
-      border: '1px solid color-mix(in srgb, var(--accent) 35%, transparent)',
-      background: 'color-mix(in srgb, var(--accent) 8%, transparent)',
-      borderLeft: '3px solid var(--accent)',
-      borderRadius: 'var(--radius)',
-    }}>
-      <div style={{
-        fontSize: 12, fontWeight: 700, letterSpacing: '0.06em',
-        textTransform: 'uppercase', color: 'var(--accent)',
-        marginBottom: 6,
-      }}>
-        ★ Required notifications for {severity} incidents
+    <div role="status" className={`sn-banner${s.overdue > 0 ? ' overdue' : ''}`} data-sn-banner>
+      <div className="sn-banner-head">
+        <span>★ Stakeholder notifications</span>
+        <span className="sn-banner-count">
+          {s.notified} of {s.required_total} required notified
+          {s.overdue > 0 && <> · {s.overdue} overdue</>}
+          {s.not_required > 0 && <> · {s.not_required} not required</>}
+        </span>
+        <Link to={to} className="sn-banner-link">Open tracker</Link>
       </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-        {matching.map(r => (
-          <span key={r.id} style={{
-            fontSize: 12, padding: '4px 10px',
-            background: 'var(--surface)',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-sm)',
-            display: 'inline-flex', alignItems: 'center', gap: 6,
-          }}>
-            <strong style={{ color: 'var(--text)' }}>{r.role}</strong>
-            <span style={{ color: 'var(--muted)' }}>· within {formatMinutes(r.notify_within_minutes)}</span>
-            <span style={{
-              fontSize: 10, padding: '1px 6px', borderRadius: 'var(--radius-sm)',
-              background: 'var(--surface-2)', color: 'var(--muted)',
-              textTransform: 'capitalize',
-            }}>{r.category}</span>
-          </span>
-        ))}
+      <div className="sn-banner-items">
+        {data.items.map(x => {
+          const chip = dueChip(x, now)
+          return (
+            <span key={x.id} className="sn-banner-item" data-status={x.status}
+                  title={`Due ${formatLocal(x.due_at)} (within ${span(x.notify_within_minutes * 60_000)} of reaching ${x.severity})`}>
+              <strong>{x.role}</strong>
+              {!x.required && <span className="sn-dim">advisory</span>}
+              {x.status === 'notified' && <span className="sn-done">✓ {CHANNEL_LABEL[x.channel] || x.channel}</span>}
+              {x.status === 'not_required' && <span className="sn-dim">not required</span>}
+              {chip && <span className={`clock-chip ${chip.cls}`}><span className="clock-chip-left">{chip.text}</span></span>}
+            </span>
+          )
+        })}
       </div>
     </div>
   )
