@@ -152,6 +152,11 @@ def render_readme(
     07_Communications/                  Comments, OOB log, stakeholders
     08_Audit/                           This incident's audit-log rows (hash-chained) + per-row verifier output
     09_Legal/                           Chain-of-custody SOP + tool provenance + TLP handling
+    10_Case_Notes/                      Append-only case notes (CSV), each with its content SHA-256 (present if any).
+                                        Recompute: SHA-256 of UTF-8 JSON, keys sorted, separators "," ":",
+                                        {{v:1, id, incident_id, author_id, created_at (as in the CSV), body,
+                                        corrects_id, source_scratchpad_id (null if empty), evidence_ids,
+                                        entity_ids, ioc_ids, timeline_event_ids (sorted lists)}}
 
 ## How to open this package
 

@@ -6,6 +6,7 @@ read-only mount of /quarantine, dropped capabilities, and noexec /tmp.
 import hashlib
 import hmac
 import io
+import json
 import math
 import os
 import re
@@ -13,12 +14,13 @@ import socket
 import struct
 import subprocess
 import tempfile
+from contextvars import ContextVar
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Optional
 
 import magic as libmagic
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -571,7 +573,15 @@ class ArtifactPathRequest(BaseModel):
     length: Optional[int] = 512
 
 
+# H1: the quarantine is encrypted at rest, so the backend decrypts an artifact and sends its bytes (TLS) to
+# /analyze/upload/{tool}; the tool then reads them from here instead of the (ciphertext) /quarantine file.
+_UPLOADED: ContextVar[Optional[bytes]] = ContextVar("fenrir_worker_uploaded", default=None)
+
+
 def _read_artifact(path: str) -> bytes:
+    raw = _UPLOADED.get()
+    if raw is not None:
+        return raw
     p = Path(path).resolve()
     root = Path("/quarantine").resolve()
     # Containment by path components, not string prefix ("/quarantine-x" would pass that).
@@ -1138,3 +1148,39 @@ def analyze_yara_inline(req: YaraInlineRequest):
             errors.append(f"{rule.name}: {e}")
 
     return {"matches": matches, "errors": errors}
+
+
+# ── Uploaded artifacts (H1) ──────────────────────────────────────────────────
+# The backend sends the decrypted bytes as multipart (`file`; hexdump `offset`/`length`; yara-inline a
+# `rules` JSON part). `path` given to the tool is the original file name only (its extension is used by
+# file-type, exif and the macro parser). Nothing is written here beyond the tools' own /tmp copies (tmpfs).
+
+_UPLOAD_TOOLS = {
+    "file-type": analyze_file_type, "hashes": analyze_hashes, "entropy": analyze_entropy,
+    "strings": analyze_strings, "ioc-extract": analyze_ioc_extract, "pe": analyze_pe,
+    "office": analyze_office, "pdf": analyze_pdf, "exif": analyze_exif, "hexdump": analyze_hexdump,
+    "yara": analyze_yara, "yara-inline": analyze_yara_inline,
+}
+
+
+@app.post("/analyze/upload/{tool}")
+def analyze_upload(tool: str, file: UploadFile = File(...), offset: int = Form(0), length: int = Form(512),
+                   rules: Optional[UploadFile] = File(None)):
+    fn = _UPLOAD_TOOLS.get(tool)
+    if fn is None:
+        raise HTTPException(404, "Unknown tool")
+    raw = file.file.read(MAX_INPUT_BYTES + 1)
+    if len(raw) > MAX_INPUT_BYTES:
+        raise HTTPException(413, "Artifact exceeds the 500 MiB analysis limit")
+    name = Path(file.filename or "artifact.bin").name or "artifact.bin"
+    token = _UPLOADED.set(raw)
+    try:
+        if tool == "yara-inline":
+            try:
+                parsed = json.loads(rules.file.read(8 * 1024 * 1024 + 1)) if rules is not None else []
+            except ValueError:
+                raise HTTPException(400, "rules must be a JSON list") from None
+            return fn(YaraInlineRequest(path=name, rules=parsed))
+        return fn(ArtifactPathRequest(path=name, offset=offset, length=length))
+    finally:
+        _UPLOADED.reset(token)

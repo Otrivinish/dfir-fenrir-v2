@@ -37,7 +37,7 @@ const CATEGORIES = [
             'At the bottom: **Help** and **Account**.',
           ] },
           { type: 'section', title: 'Inside an incident', items: [
-            'Open any incident to enter the workspace. It opens on the **Situation** board. The left rail follows NIST SP 800-61 R3 and shows live counts: **Situation** · **Details** · **Command**: Team · Playbook · Shift handoffs · **Notify**: Comms & stakeholders · Legal & regulatory · **Detection & Analysis**: Evidence · Supporting documents · Examine · Timeline · Entities · IOCs · ATT&CK & attribution · Notes · **Containment, Eradication & Recovery**: Respond · **Post-Incident Activity**: Post-Incident · **Record**: Audit log (admins and the incident lead only).',
+            'Open any incident to enter the workspace. It opens on the **Situation** board. The left rail follows NIST SP 800-61 R3 and shows live counts: **Situation** · **Details** · **Command**: Team · Playbook · Shift handoffs · **Notify**: Comms & stakeholders · Legal & regulatory · **Detection & Analysis**: Evidence · Supporting documents · Examine · Timeline · Entities · IOCs · ATT&CK & attribution · Case notes · **Containment, Eradication & Recovery**: Respond · **Post-Incident Activity**: Post-Incident · **Record**: Audit log (admins and the incident lead only).',
             'For a tab-by-tab walk-through (including the 11 Examine sub-tabs, the 5 Evidence sub-tabs, and the 5 Post-Incident sub-tabs), see the **Incident Workspace** category.',
             'For the full evidence lifecycle — collection, acquisition, examination, custody, and law-enforcement handoff — see the **Evidence & Chain of Custody** category.',
           ] },
@@ -202,7 +202,7 @@ const CATEGORIES = [
       {
         id: 'inc-severity-tlp',
         title: 'Severity, TLP & Triage State',
-        tags: ['severity', 'tlp', 'triage', 'critical', 'high', 'medium', 'low', 'false positive', 'benign positive'],
+        tags: ['severity', 'tlp', 'triage', 'critical', 'high', 'medium', 'low', 'false positive', 'benign positive', 'tlp:red', 'outbound'],
         body: [
           { type: 'p', text: 'Three classification fields you set when you open an incident and revise on **Details** as the investigation firms up.' },
           { type: 'section', title: 'Severity (impact)', items: [
@@ -216,6 +216,12 @@ const CATEGORIES = [
             '**Confirmed** — verified malicious activity.',
             '**False Positive** — the signal was wrong; nothing malicious happened.',
             '**Benign Positive** — the activity was real but authorised or harmless (e.g. a pen test or an admin task).',
+          ] },
+          { type: 'section', title: 'TLP (sharing)', items: [
+            '**TLP:RED** blocks every automatic outbound channel, the same as Dark Operation: Teams and Slack webhooks and the alert email (SMTP or Microsoft Graph) for new incident, phase change, severity change and closed, and the automatic DNS checks (SPF, DKIM, DMARC) of an analyzed email\'s sender domain. Each blocked send or check is listed in the incident audit log (`outbound_notification_suppressed` / `outbound_lookup_suppressed`, reason `tlp_red`) and is not sent later.',
+            'On a TLP:RED incident, OSINT lookups, IOC enrichment and the email **Domain auth check** still run, but only after you confirm a warning. Each one is listed in the audit log as `outbound_manual_lookup`.',
+            'The header shows **Automatic outbound suppressed (TLP:RED)**. In-app notifications and syslog audit forwarding (actions and IDs only) stay on.',
+            '**AMBER+STRICT**, **AMBER**, **GREEN** and **CLEAR** change nothing about outbound sends.',
           ] },
           { type: 'note', text: 'Severity is *impact*; triage is *confidence*. They are distinct dimensions — a Suspected/Critical incident is a real thing.' },
         ],
@@ -436,20 +442,26 @@ const CATEGORIES = [
       {
         id: 'ee-artifacts',
         title: 'Quarantine Artifacts',
-        tags: ['artifact', 'quarantine', 'sandbox', 'analysis', 'hash', 'zip', 'infected'],
+        tags: ['artifact', 'quarantine', 'sandbox', 'analysis', 'hash', 'zip', 'infected', 'encrypted', 'ioc', 'delete'],
         body: [
-          { type: 'p', text: 'Upload binary samples for analysis. Files land on an air-gapped quarantine volume (read-only from the analysis worker; no internet access).' },
+          { type: 'p', text: 'Upload binary samples for analysis. Files are stored **encrypted at rest** (AES-256-GCM, the same format as evidence) on the quarantine volume. For analysis, FENRIR decrypts a copy in memory and sends it over TLS to the isolated analysis worker, which has no internet access.' },
           { type: 'section', title: 'On upload', items: [
-            'MD5 / SHA-1 / SHA-256 / SHA-512 computed in one streaming pass.',
+            'MD5 / SHA-256 / SHA-512 computed in the same streaming pass that encrypts the file.',
             'MIME type detected via libmagic.',
-            'Two IOC records auto-created (SHA-256 + MD5) for immediate enrichment.',
-            'Path-traversal guard applied to every file access.',
+            'No IOCs are created unless you tick **Also create SHA-256 + MD5 IOCs** — only for a malicious sample. A ransom note or a screenshot is context, not an indicator.',
+            'Later, **Promote hashes to IOCs** on the artifact row creates them (ones the incident already has are skipped).',
           ] },
           { type: 'section', title: 'On download', items: [
             'Files download as AES-256 password-protected ZIP. Password: `infected`.',
             'Standard malware-analyst convention — prevents AV auto-execution.',
+            'A stored file that fails its integrity check is not downloaded (**integrity failed**).',
           ] },
-          { type: 'note', text: 'Analysis tools available: file-type · hashes · entropy · strings · IOC extract · PE · Office · PDF · EXIF · hexdump. Run from the artifact row.' },
+          { type: 'section', title: 'Deleting an artifact', items: [
+            'You must give a reason (at least 10 characters). The audit log keeps it with the file\'s hashes.',
+            'Its YARA matches are deleted with it.',
+            'An artifact another record still uses can\'t be deleted: the source of an email analysis or an extracted attachment, a browser-history upload, a collection\'s output, a Defender import or a timeline import.',
+          ] },
+          { type: 'note', text: 'Analysis tools available: file-type · hashes · entropy · strings · IOC extract · PE · Office · PDF · EXIF · hexdump · YARA. Run from the artifact row. Artifacts uploaded before encryption at rest show **plaintext (awaiting migration)** until an admin runs the one-off migration.' },
         ],
       },
     ],
@@ -953,6 +965,36 @@ const CATEGORIES = [
         ],
       },
       {
+        id: 'iw-case-notes',
+        title: 'Case notes',
+        tags: ['case notes', 'notes', 'scratchpad', 'append-only', 'correction', 'contemporaneous', 'exhibit', 'sha-256'],
+        body: [
+          { type: 'p', text: 'Shared notes made at the time: what you did, saw or decided, and why. Everyone who can see the incident reads them; analysts and admins add them. Open **Detection & Analysis → Case notes**.' },
+          { type: 'steps', items: [
+            'Write the note under **New case note** (markdown).',
+            'Optionally link it with **+ Link an item…** to exhibits, entities, IOCs or timeline events of this incident.',
+            'Click **Post note**. The server sets the time; you can’t type one in.',
+          ] },
+          { type: 'section', title: 'Append-only', items: [
+            'A posted note can’t be edited or deleted by anyone, admins included. The database refuses it.',
+            'To fix a mistake, click **Correct** on the entry and post the correction. The original stays as written, struck through, with a link to the correction.',
+            'Only the entry’s author or an admin can correct it. An entry is corrected once; to change a correction, correct the correction.',
+          ] },
+          { type: 'section', title: 'Where else they show', items: [
+            '**Evidence** item detail, an expanded **Timeline** event or **IOC**, and the **Entities** drawer list the notes linked to that item. **+ Add note** there posts a note already linked to it.',
+            'The **LE package** has them in `10_Case_Notes/Case_Notes.csv`; the **Full Technical Report** has a **Case Notes** appendix. Both include each entry’s SHA-256.',
+          ] },
+          { type: 'note', text: 'Each entry shows `#` and the start of its SHA-256. The hash is written to the hash-chained audit log when the entry is posted, so a changed note would no longer match.' },
+          { type: 'note', text: 'On a closed incident case notes are read-only, like comments. Re-open the incident to add one.' },
+          { type: 'section', title: 'Your old scratchpad', items: [
+            'Case notes replace the private scratchpad. Existing scratchpads are kept read-only under **Legacy scratchpads** and are never published for you.',
+            'Click **Post as case note** to share yours: its current text becomes a new case note, dated now and marked **from scratchpad**.',
+            'Scratchpads can no longer be edited or deleted.',
+          ] },
+          { type: 'note', text: 'MCP: `fenrir_comms_list(view="case_notes")`, `fenrir_comms_write(action="case_note_add", data={body, evidence_ids?, entity_ids?, ioc_ids?, timeline_event_ids?, corrects_id?})` · API: `/api/incidents/{id}/case-notes`.' },
+        ],
+      },
+      {
         id: 'iw-legal',
         title: 'Legal & Regulatory',
         tags: ['legal', 'gdpr', 'nis2', 'dora', 'pci', 'hipaa', 'ccpa', 'deadline', 'countdown', 'waive', 'breach', 'anchor', 're-anchor', 'reminder', 'clock'],
@@ -1008,17 +1050,32 @@ const CATEGORIES = [
       {
         id: 'iw-files',
         title: 'Supporting Documents',
-        tags: ['files', 'supporting documents', 'screenshot', 'upload', 'attachment', 'link entity', 'include in report', 'report figure', 'caption'],
+        tags: ['files', 'supporting documents', 'screenshot', 'upload', 'attachment', 'link entity', 'include in report', 'report figure', 'caption', 'sha-256', 'hash', 'rename', 'delete', 'reason', 'register as exhibit', 'exhibit'],
         body: [
-          { type: 'p', text: 'A working store for non-malicious supporting material: screenshots, exported logs, notes. Encrypted at rest.' },
+          { type: 'p', text: 'A working store for non-malicious supporting material: screenshots, exported logs, notes. Encrypted at rest. Files attached to an entity (**Entities → Collected Files**) live in the same store.' },
           { type: 'section', title: 'On the page', items: [
             '**+ Upload files** — add one or more files.',
-            'Per file: name · type · size · added · added by · linked entity.',
+            'Per file: name · type · size · **SHA-256** (hover for SHA-1 and MD5) · added · added by · linked entity · report · exhibit.',
             '**Download** · **Link** / **Re-link** to an entity · **Rename** · **Delete**.',
             '**Report → Include** (PNG, JPEG, GIF or WebP only) — makes the screenshot a numbered figure in generated reports, with an optional caption (**Caption** to change it) and its SHA-256. See [[pi-reports]].',
+            '**Register as exhibit** — makes the file an exhibit with chain of custody (below). Once registered, the column shows the exhibit (**⛁ DOC-…**, **Draft · unsealed** until it is sealed).',
+          ] },
+          { type: 'section', title: 'What is hashed', items: [
+            'The server computes the SHA-256, SHA-1 and MD5 of every file as it encrypts the upload, and records them with the file and in the audit log. Files uploaded before this were hashed once afterwards by an admin tool, and the audit log says so.',
+            'Renaming never changes the stored bytes or their hashes.',
+          ] },
+          { type: 'section', title: 'Rename and delete', items: [
+            'Both ask for a **reason** (at least 10 characters). The audit log keeps the old and new name, or the deleted file\'s hashes, with your reason.',
+            'Delete is refused while something relies on the file, and the message says what: it is a report figure (untick **Include**), a saved report shows it, a case note cites it, it is registered as an exhibit, or it is attached to an entity (unlink it first; from the entity\'s own **Collected Files** you remove the attachment itself). Exhibits and case notes are permanent records, so a file they rely on stays.',
+          ] },
+          { type: 'section', title: 'When to register as exhibit', items: [
+            'When the file itself may be needed as evidence — shown to a court, a regulator or law enforcement, or relied on for a finding — rather than only illustrating the work.',
+            'The file is decrypted, re-encrypted into the evidence store with a new key, and its SHA-256 checked against the one recorded at upload; if they differ nothing is registered and the attempt is audited.',
+            'The result is an **unsealed draft exhibit** collected by you and in your custody (audited as a collection, with the file as its source). Complete its acquisition record and seal it in **Evidence → Items** ([[iw-evidence]]).',
+            'If the incident already holds an exhibit with the same SHA-256, that exhibit is linked instead (no second copy). Registering again just shows the exhibit. The file stays here as a supporting document.',
           ] },
           { type: 'note', text: 'Screenshots can show personal data or TLP:RED material, and an included image goes into every report for the incident. Check it first; upload a cropped or redacted copy if needed.' },
-          { type: 'note', text: 'Not chain-of-custody evidence, and not for suspected-malicious samples: register those in **Evidence** ([[iw-evidence]]) or quarantine them in **Examine → Malware quarantine** ([[fo-artifacts]]).' },
+          { type: 'note', text: 'Not for suspected-malicious samples: quarantine those in **Examine → Malware quarantine** ([[fo-artifacts]]). Material collected as evidence from the start goes straight to **Evidence** ([[iw-evidence]]).' },
         ],
       },
       {
@@ -1314,7 +1371,7 @@ const CATEGORIES = [
             '**Extract → Artifact** — the message is re-read from the exhibit (re-hashed first) and the attachment goes to **Malware quarantine**.',
             '**Register as exhibit** — only on analyses made before uploads were registered first.',
           ] },
-          { type: 'note', text: 'Live SPF / DKIM / DMARC checks query the claimed sender domain; they are skipped under Dark Operation. Nothing in the message is fetched or executed.' },
+          { type: 'note', text: 'Live SPF / DKIM / DMARC checks query the claimed sender domain; they are skipped under Dark Operation or TLP:RED. Nothing in the message is fetched or executed.' },
         ],
       },
       {
@@ -1507,7 +1564,9 @@ const CATEGORIES = [
             'For incidents where the platform itself may be compromised. Switch the incident to **Dark Operation** mode — banner appears, communication blackout in effect. To start dark, tick **Open as Dark Operation** when you create the incident.',
             'Blocked while dark: every Teams, Slack and alert-mailbox message about the incident. Each one is listed in the incident audit log as `outbound_notification_suppressed` and is not sent later.',
             'Also blocked: the automatic DNS checks (SPF, DKIM, DMARC) of an analyzed email\'s sender domain. Each skipped check is listed in the incident audit log as `outbound_lookup_suppressed`, and the analysis shows **Live DNS checks skipped — Dark Operation**.',
-            'Still on: in-app notifications to people who can see the incident, syslog audit forwarding (actions and IDs only), OSINT lookups you start, the email **Domain auth check** (only when you click it), and admin test messages.',
+            'TLP:RED blocks the same automatic channels, with reason `tlp_red`; the header then shows **Automatic outbound suppressed (TLP:RED)**.',
+            'Manual lookups — OSINT, IOC enrichment, the email **Domain auth check** — still run under Dark Operation or TLP:RED, but only after you confirm a warning. Each one is listed in the audit log as `outbound_manual_lookup`.',
+            'Still on: in-app notifications to people who can see the incident, syslog audit forwarding (actions and IDs only), and admin test messages.',
             'Each OOB passphrase generation is logged. Use it on the external channel agreed with stakeholders.',
             'OOB log records what was communicated and through which channel.',
           ] },
@@ -1867,7 +1926,7 @@ const FAQS = [
   },
   {
     q: 'What is "Dark Operation" mode?',
-    a: 'A flag set on the incident header that signals "the platform may be compromised — switch to OOB". While it is on, nothing about the incident goes to Teams, Slack or the alert mailbox, and email analysis skips its automatic DNS checks (SPF, DKIM, DMARC) of the sender\'s domain; each blocked message or check is listed in the incident audit log and is not sent or run later. In-app notifications still reach people who can see the incident, and the email **Domain auth check** still runs when you click it. The UI shows a red banner across every tab and the theme is locked to Mission Control. Turn it on in Comms → **OOB**, or tick **Open as Dark Operation** when you create the incident. Use OOB → Passphrase + Log to coordinate over external channels.',
+    a: 'A flag set on the incident header that signals "the platform may be compromised — switch to OOB". While it is on, nothing about the incident goes to Teams, Slack or the alert mailbox, and email analysis skips its automatic DNS checks (SPF, DKIM, DMARC) of the sender\'s domain; each blocked message or check is listed in the incident audit log and is not sent or run later. TLP:RED blocks the same channels. In-app notifications still reach people who can see the incident; OSINT lookups, IOC enrichment and the email **Domain auth check** run only after you confirm a warning, and are audited. The UI shows a red banner across every tab and the theme is locked to Mission Control. Turn it on in Comms → **OOB**, or tick **Open as Dark Operation** when you create the incident. Use OOB → Passphrase + Log to coordinate over external channels.',
     tags: ['dark operation', 'oob', 'compromise', 'teams', 'slack', 'email', 'dns', 'suppressed'],
   },
   {

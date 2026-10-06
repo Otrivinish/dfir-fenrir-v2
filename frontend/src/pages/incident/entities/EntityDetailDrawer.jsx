@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
+import LinkedCaseNotes from '../../../components/LinkedCaseNotes.jsx'
+import { ExhibitPill, FileHash, FileReasonModal, RegisterExhibitModal, fileRefsMessage } from '../../../components/SupportingFile.jsx'
 
 const ENTITY_TYPES = [
   { value: 'host',          label: 'Host'          },
@@ -116,16 +118,24 @@ export default function EntityDetailDrawer({
     }
   }
 
-  const deleteFile = async (ef) => {
-    if (!window.confirm(`Delete file "${ef.original_name}"?`)) return
-    setFilesError(null)
+  // H4: delete asks for a reason (dialog); a file another record relies on is refused (409 file_referenced).
+  const [deletingFile, setDeletingFile] = useState(null)
+  const [registeringFile, setRegisteringFile] = useState(null)
+  const confirmDeleteFile = async (ef, reason) => {
     try {
-      await api.deleteEntityFile(incidentId, entity.id, ef.id)
-      await loadFiles()
-      onEntityUpdated()
+      await api.deleteEntityFile(incidentId, entity.id, ef.id, reason)
     } catch (e) {
-      setFilesError(e.message || 'Could not delete file')
+      if (e.code === 'file_referenced') throw new Error(fileRefsMessage(e.data?.references))
+      throw e
     }
+    setDeletingFile(null)
+    await loadFiles()
+    onEntityUpdated()
+  }
+  const confirmRegisterFile = async (ef) => {
+    const out = await api.registerFileExhibit(incidentId, ef.id)
+    await loadFiles()
+    return out
   }
 
   const handleDrop = (e) => {
@@ -137,10 +147,11 @@ export default function EntityDetailDrawer({
 
   // Close on Escape
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    // An open file dialog (H4) takes its own Esc (and marks it handled).
+    const onKey = (e) => { if (e.key === 'Escape' && !e.defaultPrevented && !deletingFile && !registeringFile) onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, deletingFile, registeringFile])
 
   const myRelations = relations.filter(
     (r) => r.from_entity_id === entity.id || r.to_entity_id === entity.id
@@ -457,6 +468,16 @@ export default function EntityDetailDrawer({
                     <span style={{ fontSize: 10, color: 'var(--dim)', flexShrink: 0 }}>
                       {(ef.file_size / 1024).toFixed(0)} KB
                     </span>
+                    <FileHash file={ef} />
+                    {ef.evidence_id ? <ExhibitPill file={ef} /> : !isClosed && (
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        style={{ padding: '1px 5px', fontSize: 11, flexShrink: 0 }}
+                        onClick={() => setRegisteringFile(ef)}
+                        title="Register as exhibit (draft, chain of custody)"
+                      >⛁</button>
+                    )}
                     <a
                       href={api.entityFileDownloadUrl(incidentId, entity.id, ef.id)}
                       download={ef.original_name}
@@ -468,7 +489,7 @@ export default function EntityDetailDrawer({
                         type="button"
                         className="btn ghost"
                         style={{ padding: '1px 5px', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}
-                        onClick={() => deleteFile(ef)}
+                        onClick={() => setDeletingFile(ef)}
                         title="Delete file"
                       >✕</button>
                     )}
@@ -477,6 +498,15 @@ export default function EntityDetailDrawer({
               </div>
             )}
           </div>
+
+          {deletingFile && (
+            <FileReasonModal file={deletingFile} onClose={() => setDeletingFile(null)}
+                             onConfirm={(reason) => confirmDeleteFile(deletingFile, reason)} />
+          )}
+          {registeringFile && (
+            <RegisterExhibitModal file={registeringFile} onClose={() => setRegisteringFile(null)}
+                                  onConfirm={() => confirmRegisterFile(registeringFile)} />
+          )}
 
           {/* Asset Log */}
           <div className="entity-drawer-section">
@@ -578,6 +608,10 @@ export default function EntityDetailDrawer({
                 </div>
               </form>
             )}
+          </div>
+
+          <div className="entity-drawer-section">
+            <LinkedCaseNotes incidentId={incidentId} kind="entity" targetId={entity.id} isClosed={isClosed} />
           </div>
 
           {/* Meta */}

@@ -3,6 +3,7 @@ import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { useAuth } from '../../../hooks/useAuth.jsx'
 import { formatLocal } from '../../../lib/datetime.js'
+import { useOutboundConfirm } from '../../../components/OutboundConfirm.jsx'
 
 // ─── Extraction regexes ───────────────────────────────────────────────────────
 
@@ -266,6 +267,7 @@ function downloadReport(extracted, results, sources, inc, user) {
 
 export default function OSINTLookup() {
   const { inc, viewer } = useOutletContext()
+  const { withConfirm, dialog: outboundDialog } = useOutboundConfirm()
   const { user } = useAuth()
   const isClosed = inc?.status === 'closed'
   // G-fix FE-L12: viewers get the closed-incident view of the write controls (the API refuses them).
@@ -345,23 +347,31 @@ export default function OSINTLookup() {
 
   // ── Enrichment ─────────────────────────────────────────────────────────────
 
-  async function enrichOne(item) {
+  // Returns whether outbound was confirmed (H3), or null when the analyst cancelled the warning.
+  async function enrichOne(item, confirmed = false) {
     const applicableSources = [...enabledSources].filter(sid => {
       const src = sources.find(s => s.id === sid)
       return src && src.available && src.supported_types.includes(item.type)
     })
-    if (!applicableSources.length) return
+    if (!applicableSources.length) return confirmed
 
     setEnriching(prev => new Set([...prev, item.id]))
     let itemResults
+    let used = confirmed
     try {
-      const res = await api.osintEnrich({
-        indicator: item.value,
-        ioc_type: item.type,
-        sources: applicableSources,
+      const res = await withConfirm(c => {
+        used = used || c
+        return api.osintEnrich({
+          indicator: item.value,
+          ioc_type: item.type,
+          sources: applicableSources,
+          incident_id: inc.id,
+          ...(used ? { confirm_outbound: true } : {}),
+        })
       })
       itemResults = res.results
     } catch (e) {
+      if (e.cancelled) return null
       itemResults = applicableSources.map(s => ({
         source: s, available: true, from_cache: false, data: null, error: e.message,
       }))
@@ -375,12 +385,18 @@ export default function OSINTLookup() {
       }
       return updated
     })
+    return used
   }
 
   async function enrichAll() {
     const toEnrich = visible.filter(item => !enriching.has(item.id))
     // Sequential to avoid hammering rate limits
-    for (const item of toEnrich) await enrichOne(item)
+    // One warning covers the whole run; Cancel stops it.
+    let confirmed = false
+    for (const item of toEnrich) {
+      confirmed = await enrichOne(item, confirmed)
+      if (confirmed === null) break
+    }
   }
 
   function loadSession(s) {
@@ -420,6 +436,7 @@ export default function OSINTLookup() {
 
   return (
     <section className="panel">
+      {outboundDialog}
       <div className="panel-toolbar">
         <h2 className="panel-h">OSINT Lookup</h2>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>

@@ -811,4 +811,74 @@ _INPLACE_MIGRATIONS: list[str] = [
     _add_check_if_missing("timeline_events", "ck_timeline_events_one_run_gfixb",
                           "num_nonnulls(forensic_import_id, defender_import_id, pcap_analysis_id, "
                           "browser_history_upload_id, email_analysis_id) <= 1"),
+
+    # H1 (R06) — the quarantine is encrypted at rest. Additive and nullable: artifacts.nonce_hex holds the
+    # v2 nonce prefix (14 lower-case hex, the CHECK) and NULL marks a legacy plaintext file, which every row
+    # made before H1 is until `python -m artifacts.encrypt_quarantine --apply` migrates it (no backfill here:
+    # the tool encrypts the file and sets the column in one transaction). forensic_imports.source_artifact_id
+    # names the artifact a from-artifact import parsed (the delete guard's reference); it is backfilled once,
+    # when the column is created, from the forensic_import_create audit rows (details.source_artifact) of
+    # the same incident. Tiny tables (2026-10-05: 94 artifacts, a handful of imports): the ADD COLUMN and
+    # CHECK validation take milliseconds under the 5 s lock_timeout.
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS nonce_hex VARCHAR(24)",
+    _add_check_if_missing("artifacts", "ck_artifacts_nonce_hex_h1", "nonce_hex IS NULL OR nonce_hex ~ '^[0-9a-f]{14}$'"),
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'forensic_imports' AND column_name = 'source_artifact_id'
+        ) THEN
+            ALTER TABLE forensic_imports
+                ADD COLUMN source_artifact_id UUID REFERENCES artifacts(id) ON DELETE SET NULL;
+            UPDATE forensic_imports f SET source_artifact_id = a.id
+              FROM audit_logs l
+              JOIN artifacts a ON a.id::text = l.details->>'source_artifact'
+             WHERE l.action = 'forensic_import_create'
+               AND l.resource_id = f.id::text
+               AND a.incident_id = f.incident_id;
+        END IF;
+    END $$
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_forensic_imports_source_artifact_id ON forensic_imports(source_artifact_id) "
+    "WHERE source_artifact_id IS NOT NULL",
+
+    # H2 (R05) — case notes are append-only in the DB, not only in the app: any UPDATE or DELETE of a
+    # case_notes row raises (corrections are new rows). The table itself comes from create_all (new, empty
+    # on first run). CREATE OR REPLACE FUNCTION takes no table lock; the trigger is created only while
+    # pg_trigger lacks it, so a re-run takes no lock on case_notes at all. TRUNCATE is not granted to
+    # fenrir_app. A DB owner can still drop the trigger -- a separate, privileged act (as GS-8).
+    """CREATE OR REPLACE FUNCTION fenrir_case_notes_append_only() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+       BEGIN
+         RAISE EXCEPTION 'case_notes is append-only (H2): % blocked', TG_OP
+           USING ERRCODE = 'insufficient_privilege';
+       END; $$""",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger
+                       WHERE tgrelid = 'case_notes'::regclass AND tgname = 'trg_case_notes_append_only') THEN
+            CREATE TRIGGER trg_case_notes_append_only
+                BEFORE UPDATE OR DELETE ON case_notes
+                FOR EACH ROW EXECUTE FUNCTION fenrir_case_notes_append_only();
+        END IF;
+    END $$
+    """,
+
+    # H4 (R10) — supporting documents (entity_files) carry the server's hashes of the original and the exhibit
+    # they were registered as. Additive and nullable, NO backfill here: new uploads get the hashes from the
+    # writer's single pass; existing rows are hashed once by `python -m files.backfill_hashes --apply` (it
+    # decrypts each file). evidence_id is SET NULL (the file outlives its exhibit row; evidence rows are never
+    # deleted in practice). Lower-case hex CHECKs; tiny table (2026-10-05: 16 rows / 120 kB), so the ADD COLUMNs
+    # and CHECK validation take milliseconds under the 5 s lock_timeout; the index name is create_all's.
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS sha256 VARCHAR(64)",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS sha1 VARCHAR(40)",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS md5 VARCHAR(32)",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS evidence_id UUID REFERENCES evidence(id) ON DELETE SET NULL",
+    "CREATE INDEX IF NOT EXISTS ix_entity_files_evidence_id ON entity_files(evidence_id)",
+    _add_check_if_missing("entity_files", "ck_entity_files_hashes_h4",
+                          "(sha256 IS NULL OR sha256 ~ '^[0-9a-f]{64}$') AND (sha1 IS NULL OR sha1 ~ '^[0-9a-f]{40}$') "
+                          "AND (md5 IS NULL OR md5 ~ '^[0-9a-f]{32}$')"),
 ]

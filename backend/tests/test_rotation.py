@@ -39,10 +39,11 @@ from core.config import settings
 from evidence import codec
 from evidence import crypto
 from evidence import rotation as rot
-from models import AuditLog, CollectionPackage, EntityFile, Evidence, Incident
+from models import Artifact, AuditLog, CollectionPackage, EntityFile, Evidence, Incident
 
 logging.getLogger("fenrir.evidence.crypto").setLevel(logging.ERROR)   # expected wrong_kek alarms
 EVID, LOGS = Path(settings.evidence_path), Path(settings.logs_path)
+QUAR = Path(settings.quarantine_path)                                  # H1: the quarantine consumer
 OLD, NEW, NEW2 = bytes.fromhex("a1" * 32), bytes.fromhex("b2" * 32), bytes.fromhex("c3" * 32)
 KEYDIR = Path("/tmp/rt-keys")
 MiB = 1024 * 1024
@@ -316,7 +317,7 @@ def lock_path() -> Path:
 
 
 def wipe_stores():
-    for root in (EVID, LOGS):
+    for root in (EVID, LOGS, QUAR):
         for p in list(root.iterdir()):
             if p.is_dir() and not p.is_symlink():
                 shutil.rmtree(p)
@@ -1232,3 +1233,81 @@ class GfixA(Base):
         self.assertEqual(code, rot.EXIT_DO_NOT_SWAP, out)
         self.assertEqual([i["path"] for i in rep["do_not_swap"]], [v0["rel"]])
         self.assertEqual(rep["items"][0]["reason"], "size_mismatch")
+
+
+# ─── H1: the quarantine store (artifacts, /quarantine) ────────────────────────────────────────
+
+async def _add_artifacts(S, incident, rows):
+    async with S() as db, db.begin():
+        for r in rows:
+            db.add(Artifact(incident_id=incident, original_filename="rt", analysis_status="pending",
+                            analysis_results={}, **r))
+
+
+class H1Quarantine(Base):
+    """A v2 artifact is re-wrapped / re-encrypted like any v2 file (row nonce_hex updated on a breach
+    rewrite); a legacy plaintext artifact row (nonce_hex NULL) is refused with "migrate first"."""
+
+    def corpus(self):
+        c = Corpus().save()
+        self.v2data, self.plain = payload(MiB + 9, "q2"), payload(300, "qp")
+        self.v2id, self.plid = uuid.uuid4(), uuid.uuid4()
+        v2name, plname = f"{self.v2id}_s.exe.enc", f"{self.plid}_note.txt"
+        self.v2rel, self.plrel = f"{c.incident}/{v2name}", f"{c.incident}/{plname}"
+        nonce = write_v2(self.v2rel, self.v2data, root=str(QUAR))
+        (QUAR / self.plrel).write_bytes(self.plain)
+        arun(_add_artifacts, c.incident, [
+            dict(id=self.v2id, stored_filename=v2name, file_size=len(self.v2data), nonce_hex=nonce,
+                 sha256_hash=hashlib.sha256(self.v2data).hexdigest()),
+            dict(id=self.plid, stored_filename=plname, file_size=len(self.plain), nonce_hex=None,
+                 sha256_hash=hashlib.sha256(self.plain).hexdigest())])
+        return c
+
+    def nonce(self, aid):
+        async def get(S):
+            async with S() as db:
+                return (await db.get(Artifact, aid)).nonce_hex
+        return arun(get)
+
+    def read(self, kek):
+        with mock.patch.object(settings, "evidence_kek", kek.hex()):
+            return crypto.read_decrypted(self.v2rel, self.nonce(self.v2id), len(self.v2data), root=str(QUAR))
+
+    def test_artifacts_rotate_and_plain_rows_are_refused(self):
+        self.corpus()
+        code, out, rep = tool("plan", *K())
+        items = {i["id"]: i for i in rep["items"]}
+        self.assertEqual(code, rot.EXIT_ATTENTION, out)
+        self.assertEqual((items[str(self.v2id)]["action"], items[str(self.v2id)]["store"]), ("rewrap", "quarantine"))
+        self.assertEqual(items[str(self.plid)]["action"], "failed")
+        self.assertIn("migrate first", items[str(self.plid)]["reason"])
+        self.assertIn("quarantine artifacts", out)
+        nonce0 = self.nonce(self.v2id)
+        code, out, rep = tool("rotate", *K(), *APPLY)
+        self.assertEqual(code, rot.EXIT_ATTENTION, out)                    # the plain row needs attention
+        res = {i["id"]: i["result"] for i in rep["items"]}
+        self.assertEqual(res[str(self.v2id)], "rewrap")
+        self.assertEqual(res[str(self.plid)], "failed")
+        self.assertEqual(self.read(NEW), self.v2data)
+        self.assertEqual(self.nonce(self.v2id), nonce0, "a re-wrap leaves the row alone")
+        with self.assertRaises(crypto.EvidenceCryptoError) as cm:
+            self.read(OLD)
+        self.assertEqual(cm.exception.reason, "wrong_kek")
+        self.assertEqual((QUAR / self.plrel).read_bytes(), self.plain, "the plaintext file was touched")
+        rows = rekey_rows([str(self.v2id)])
+        self.assertEqual([(r.action, r.resource_type) for r in rows], [("artifact_storage_rekeyed", "artifact")])
+        self.assertEqual(rekey_rows([str(self.plid)]), [])
+        self.assertClean()
+        # breach: a fresh data key, the row's nonce prefix follows (commit_rewrite for "artifact")
+        code, out, rep = tool("rotate", "--breach", *K(NEW, NEW2), *APPLY)
+        self.assertEqual(code, rot.EXIT_ATTENTION, out)
+        self.assertEqual({i["id"]: i["result"] for i in rep["items"]}[str(self.v2id)], "reencrypt")
+        self.assertNotEqual(self.nonce(self.v2id), nonce0)
+        self.assertEqual(self.read(NEW2), self.v2data)
+        self.assertClean()
+        code, out, rep = tool("verify", *K(None, NEW2))
+        ver = {i["id"]: i for i in rep["items"]}
+        self.assertEqual(ver[str(self.v2id)]["result"], "done")
+        self.assertIn("migrate first", ver[str(self.plid)]["reason"])
+        self.assertEqual(code, rot.EXIT_ATTENTION, out)
+

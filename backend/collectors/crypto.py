@@ -75,27 +75,31 @@ def _unwrap_private_key(wrapped: str):
         raise CollectionDecryptError(f"Could not unwrap the package private key: {e}") from e
 
 
-def decrypt_collection_to(container_path: str, wrapped_private_key: str | None, out_path: str) -> bool:
-    """Decrypt an X.509 Velociraptor container → inner plaintext ZIP at out_path.
+def decrypt_collection_to(container, wrapped_private_key: str | None, out) -> bool:
+    """Decrypt an X.509 Velociraptor container → inner plaintext ZIP written to `out`.
 
+    `container` is a seekable binary file object (H1: the upload's RAM spool) and `out` a writable one
+    (H1: the quarantine's encrypting staging writer), so no plaintext reaches a disk here.
     If the upload isn't an X.509-encrypted container (e.g. plaintext collection),
     it's copied through unchanged. Returns True if decryption happened.
     Streams the (potentially large) data.zip member — no whole-file-in-memory.
     """
-    with pyzipper.AESZipFile(container_path) as zf:
+    def passthrough() -> bool:
+        container.seek(0)
+        shutil.copyfileobj(container, out, length=1024 * 1024)
+        return False
+
+    with pyzipper.AESZipFile(container) as zf:
         names = set(zf.namelist())
         if "metadata.json" not in names or "data.zip" not in names:
-            shutil.copyfile(container_path, out_path)
-            return False
+            return passthrough()
         try:
             meta = json.loads(zf.read("metadata.json").decode())
             meta0 = meta[0] if isinstance(meta, list) else meta
         except Exception:
-            shutil.copyfile(container_path, out_path)
-            return False
+            return passthrough()
         if meta0.get("Scheme") != "X509":
-            shutil.copyfile(container_path, out_path)
-            return False
+            return passthrough()
 
         if not wrapped_private_key:
             raise CollectionDecryptError(
@@ -113,6 +117,6 @@ def decrypt_collection_to(container_path: str, wrapped_private_key: str | None, 
                 f"corrupt container: {e}"
             ) from e
         zf.setpassword(password)
-        with zf.open("data.zip") as src, open(out_path, "wb") as dst:
-            shutil.copyfileobj(src, dst, length=1024 * 1024)
+        with zf.open("data.zip") as src:
+            shutil.copyfileobj(src, out, length=1024 * 1024)
     return True

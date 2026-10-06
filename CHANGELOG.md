@@ -485,6 +485,25 @@ Built from the IR-expert workflow audit of 2026-10-01: 21 approved pieces (A1–
 - The wave review found no Critical issues; regression found no real regressions.
 - Rotation was tested only in an isolated environment.
 
+### Backlog wave H (2026-10-05)
+
+- ⚠ **Quarantine encrypted at rest** (the same v2 format as evidence). Migrate existing files once with `python -m artifacts.encrypt_quarantine --apply`; there is no downgrade afterwards. (H1)
+- ⚠ **Artifact DELETE** needs a `{reason}`, and returns 409 `artifact_referenced` while another record uses the artifact. (H1)
+- ⚠ **Uploads no longer create hash IOCs;** use `create_hash_iocs` or `POST …/artifacts/{id}/hash-iocs`. (H1)
+- ⚠ **The worker receives decrypted bytes over TLS;** rebuild analysis-worker together with the backend. Key rotation covers quarantine files. (H1)
+- ⚠ **Shared append-only case notes** (`/api/incidents/{id}/case-notes`) replace the private scratchpad (writes now 410).
+  - Notes link to exhibits, IOCs, entities and events, and are corrected by appending.
+  - They appear in the LE package and the full report. (H2)
+- ⚠ **MCP:** the scratchpad tools are removed; `case_note_add` is added. (H2)
+- **TLP:RED blocks automatic outbound** like Dark Operation: Teams/Slack, alert email and automatic email DNS checks. Suppressions are audited. (H3)
+- ⚠ **Manual enrich, OSINT and domain checks** on RED or dark incidents need `confirm_outbound=true` (else 409 `outbound_confirmation_required`). They are audited, and MCP tools take the flag. (H3)
+- **Supporting documents** get server hashes at upload, with a backfill tool for older files. (H4)
+  - ⚠ Rename and delete need a `reason`.
+  - ⚠ Delete returns 409 `file_referenced` while a file is in use.
+  - ⚠ New `POST …/files/{id}/register-exhibit`.
+  - MCP follows these changes.
+- **Security:** entity-file download and delete are confined to the incident in the URL. (H4)
+
 ### Upgrade notes
 
 - **Wave G:**

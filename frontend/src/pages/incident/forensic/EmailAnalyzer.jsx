@@ -6,6 +6,7 @@ import ExhibitPicker, { DraftBadge } from '../../../components/ExhibitPicker.jsx
 import RunRecord from '../../../components/RunRecord.jsx'
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 import UploadProgress, { useChunkedUpload } from '../../../components/UploadProgress.jsx'
+import { useOutboundConfirm } from '../../../components/OutboundConfirm.jsx'
 
 // U8.1 — Email analyzer (phishing triage). One input control: paste raw headers, pick a
 // single .eml/.msg, pick several, or a single .zip of them (multi/zip silently routes to
@@ -146,7 +147,7 @@ export default function EmailAnalyzer() {
           Paste raw headers/source, or choose one or more <code>.eml</code>/<code>.msg</code> files — or a single{' '}
           <code>.zip</code> of them to analyze as a batch. Parsing, header inspection, and Safelink decoding all
           happen locally — no URL from the message is ever fetched and no attachment is executed. SPF/DMARC/DKIM
-          are additionally checked live against the claimed sender domain's own DNS (skipped under Dark Operation).
+          are additionally checked live against the claimed sender domain's own DNS (skipped under Dark Operation or TLP:RED).
         </p>
         {isClosed ? (
           <div style={{ fontSize: 12, color: 'var(--muted)' }} data-email-closed>
@@ -590,6 +591,7 @@ function DomainAuthCheck({ incidentId, defaultDomain, defaultSelector }) {
   const [busy,   setBusy]   = useState(false)
   const [error,  setError]  = useState(null)
   const [result, setResult] = useState(null)
+  const { withConfirm, dialog } = useOutboundConfirm()
 
   useEffect(() => { if (defaultDomain) setDomain(defaultDomain) }, [defaultDomain])
   useEffect(() => { if (defaultSelector) setSelector(defaultSelector) }, [defaultSelector])
@@ -598,9 +600,9 @@ function DomainAuthCheck({ incidentId, defaultDomain, defaultSelector }) {
     if (!domain.trim()) return
     setBusy(true); setError(null); setResult(null)
     try {
-      setResult(await api.checkEmailDomain(incidentId, domain.trim(), selector.trim() || undefined))
+      setResult(await withConfirm(c => api.checkEmailDomain(incidentId, domain.trim(), selector.trim() || undefined, c)))
     } catch (e) {
-      setError(e.message || 'Check failed')
+      if (!e.cancelled) setError(e.message || 'Check failed')
     } finally {
       setBusy(false)
     }
@@ -608,6 +610,7 @@ function DomainAuthCheck({ incidentId, defaultDomain, defaultSelector }) {
 
   return (
     <div className="panel" style={{ padding: 'var(--space-3)', marginTop: 'var(--space-4)' }}>
+      {dialog}
       <h4 className="panel-h" style={{ marginTop: 0 }}>Domain auth check <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· live SPF/DMARC, manual mode</span></h4>
       <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
         <input className="input" style={{ maxWidth: 220 }} placeholder="domain.com"

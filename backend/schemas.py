@@ -3,9 +3,10 @@ from datetime import datetime
 from typing import Annotated, Literal, Optional, Union
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, field_validator, model_validator
 
 from core.config import settings
+from core.outbound_policy import outbound_block_reasons
 
 
 # ─── Auth ───────────────────────────────────────────────────────────────────
@@ -354,6 +355,13 @@ class IncidentOut(BaseModel):
     teams:            list[TeamRef] = []
     tags:             list[str]      = Field(default_factory=list)
 
+    @computed_field(description="Why automatic outbound (Teams/Slack webhooks, alert email, automatic DNS "
+                                "lookups) is suppressed for this incident; [] = it is not. Manual OSINT / "
+                                "enrichment lookups then need confirm_outbound=true (H3).")
+    @property
+    def outbound_suppressed_by(self) -> list[Literal["dark_operation", "tlp_red"]]:
+        return outbound_block_reasons(self)
+
     class Config:
         from_attributes = True
 
@@ -676,6 +684,14 @@ class EntityFileOut(BaseModel):
     # E4: picked as a figure for generated reports, and the caption printed under it.
     include_in_report: bool          = False
     report_caption:    Optional[str] = None
+    # H4: the server's hashes of the original (lower-case hex; null = not hashed yet, see
+    # `python -m files.backfill_hashes`), and the exhibit it was registered as (null = none).
+    sha256:            Optional[str]  = None
+    sha1:              Optional[str]  = None
+    md5:               Optional[str]  = None
+    evidence_id:       Optional[UUID] = None
+    evidence_identifier: Optional[str]  = None   # filled at query time
+    evidence_sealed:     Optional[bool] = None   # false = still an unsealed draft
 
     class Config:
         from_attributes = True
@@ -694,6 +710,33 @@ class IncidentFileUpdate(BaseModel):
     entity_id:         Optional[UUID] = None
     include_in_report: Optional[bool] = None
     report_caption:    Optional[str]  = Field(default=None, max_length=512)
+    reason:            Optional[str]  = Field(default=None, max_length=2000,
+                                              description="H4: required with a rename (original_name that changes the "
+                                                          "name): " + _REASON_DOC + " Audited with the old and new "
+                                                          "name; ignored otherwise.")
+
+
+class FileDelete(BaseModel):
+    """H4: the JSON body of a supporting-document delete."""
+    reason: Optional[str] = Field(default=None, max_length=2000,
+                                  description="Why the file is deleted, " + _REASON_DOC)
+
+
+class FileReference(BaseModel):
+    type:  str            = Field(description="report_figure | generated_report | case_note | exhibit | entity")
+    id:    Optional[str]  = None
+    label: Optional[str]  = None
+
+
+class FileRegisterExhibitOut(BaseModel):
+    """H4: the exhibit a supporting document is registered as."""
+    evidence_id:         UUID
+    evidence_identifier: str
+    evidence_sealed:     bool
+    exhibit_link:        str = Field(description="registered (a new unsealed draft exhibit) | sha256_match (the "
+                                                 "incident's active exhibit with the same SHA-256, linked) | "
+                                                 "already_registered (an earlier call registered or linked it)")
+    file:                EntityFileOut
 
 
 class EntityFileList(BaseModel):
@@ -1982,11 +2025,6 @@ class NoteOut(BaseModel):
         from_attributes = True
 
 
-class NoteCreate(BaseModel):
-    body:       str  = Field(min_length=1, max_length=8192)
-    is_private: bool = True
-
-
 class NoteList(BaseModel):
     items: list[NoteOut]
 
@@ -2003,6 +2041,59 @@ class NoteVersionOut(BaseModel):
 
 class NoteVersionList(BaseModel):
     items: list[NoteVersionOut]
+
+
+# ─── Case notes (H2, R05: shared, append-only) ─────────────────────────────
+
+CASE_NOTE_MAX_CHARS = 16384
+CASE_NOTE_MAX_LINKS = 50    # per link kind
+
+
+class CaseNoteCreate(BaseModel):
+    """A new case-note entry. Give `body`, or `source_scratchpad_id` (your own legacy scratchpad,
+    whose current text becomes the body) -- exactly one. Links must belong to the same incident.
+    `corrects_id` names an earlier entry this one corrects (the original is never changed)."""
+    model_config = ConfigDict(extra="forbid")
+
+    body:                 Optional[str] = Field(default=None, min_length=1, max_length=CASE_NOTE_MAX_CHARS)
+    source_scratchpad_id: Optional[UUID] = None
+    corrects_id:          Optional[UUID] = None
+    evidence_ids:         list[UUID] = Field(default_factory=list, max_length=CASE_NOTE_MAX_LINKS)
+    entity_ids:           list[UUID] = Field(default_factory=list, max_length=CASE_NOTE_MAX_LINKS)
+    ioc_ids:              list[UUID] = Field(default_factory=list, max_length=CASE_NOTE_MAX_LINKS)
+    timeline_event_ids:   list[UUID] = Field(default_factory=list, max_length=CASE_NOTE_MAX_LINKS)
+
+    @model_validator(mode="after")
+    def _one_source(self):
+        if (self.body is None) == (self.source_scratchpad_id is None):
+            raise ValueError("give exactly one of body or source_scratchpad_id")
+        if self.body is not None and not self.body.strip():
+            raise ValueError("body must not be blank")
+        return self
+
+
+class CaseNoteOut(BaseModel):
+    id:                   UUID
+    incident_id:          UUID
+    author_id:            UUID
+    author_username:      Optional[str] = None
+    created_at:           datetime
+    body:                 str
+    corrects_id:          Optional[UUID] = None
+    corrected_by_id:      Optional[UUID] = None   # the entry that corrects this one, if any
+    source_scratchpad_id: Optional[UUID] = None
+    evidence_ids:         list[UUID]
+    entity_ids:           list[UUID]
+    ioc_ids:              list[UUID]
+    timeline_event_ids:   list[UUID]
+    content_sha256:       str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CaseNoteList(BaseModel):
+    items:       list[CaseNoteOut]
+    next_cursor: Optional[str] = None
 
 
 class PassphraseOut(BaseModel):
@@ -2807,6 +2898,11 @@ class EnrichRequest(BaseModel):
     indicator: str       = Field(min_length=1, max_length=512)
     ioc_type:  str       = Field(min_length=1, max_length=64)
     sources:   list[str] = Field(min_length=1, max_length=10)
+    incident_id: Optional[UUID] = Field(default=None, description="The incident this lookup is for "
+                                             "(access-checked; its outbound policy applies).")
+    confirm_outbound: bool = Field(default=False, description="Required (true) when the incident -- given, or "
+                                   "one you can see holding this indicator as an IOC -- is Dark Operation or "
+                                   "TLP:RED: the lookup leaves the platform. Audited.")
 
 
 class EnrichResultItem(BaseModel):
@@ -2989,6 +3085,8 @@ class ApiKeysResponse(BaseModel):
 
 class IocEnrichAllRequest(BaseModel):
     sources: Optional[list[str]] = None  # None = all available
+    confirm_outbound: bool = Field(default=False, description="Required (true) on a Dark Operation or TLP:RED "
+                                   "incident: the lookups leave the platform. Audited.")
 
 
 class IocEnrichAllResponse(BaseModel):

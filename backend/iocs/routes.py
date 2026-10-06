@@ -20,6 +20,7 @@ from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
+from core.outbound_policy import require_outbound_confirmation
 from incidents.access import get_accessible_incident
 import lolbins.service as lol_svc
 from models import IOC, Entity, Evidence, Incident, IocTimelineLink, RespondAction, ThreatIntelIOC, TimelineEvent, User
@@ -399,11 +400,16 @@ async def scan_ti(
 # ─── Batch enrichment ────────────────────────────────────────────────────────
 # Literal path — must be declared before /{ioc_id} routes so FastAPI matches it first.
 
+_OUTBOUND_409 = {409: {"model": ApiErrorBody, "description": "outbound_confirmation_required (Dark Operation or "
+                                                               "TLP:RED incident; body has `reason`)"}}
+
+
 @router.post("/{incident_id}/iocs/enrich-all", response_model=IocEnrichAllResponse,
-             summary="Enrich all incident IOCs via OSINT")
+             summary="Enrich all incident IOCs via OSINT", responses=_OUTBOUND_409)
 async def enrich_all_iocs(
     incident_id: uuid.UUID,
     req: IocEnrichAllRequest,
+    request: Request,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> IocEnrichAllResponse:
@@ -415,8 +421,11 @@ async def enrich_all_iocs(
     external rate limits. Results are cached in EnrichmentCache. Requires an
     authenticated user with access to the incident. Returns an
     `IocEnrichAllResponse` with counts and per-IOC enrichment results.
+    On a Dark Operation or TLP:RED incident: 409 outbound_confirmation_required
+    unless `confirm_outbound` is true; a confirmed run is audited first as
+    `outbound_manual_lookup` (sources, IOC types, count; no values).
     """
-    await _get_incident(db, incident_id, user)
+    inc = await _get_incident(db, incident_id, user)
 
     rows = (await db.execute(
         select(IOC)
@@ -431,6 +440,13 @@ async def enrich_all_iocs(
         sid for sid in requested
         if await source_available(sid, db)
     ]
+
+    reachable = [i for i in rows if any(i.type in SOURCES[sid]["supported_types"] for sid in available_sources)]
+    if reachable:
+        await require_outbound_confirmation(
+            db, inc, confirm=req.confirm_outbound, kind="ioc_enrich_all", user=user, request=request,
+            providers=available_sources, ioc_type=",".join(sorted({i.type for i in reachable})),
+            count=len(reachable))
 
     results: dict[str, list[EnrichResultItem]] = {}
     enriched = 0
@@ -473,10 +489,13 @@ async def enrich_all_iocs(
 # FastAPI matches the longer path segment first.
 
 @router.post("/{incident_id}/iocs/{ioc_id}/enrich",
-             summary="Enrich a single IOC via OSINT")
+             summary="Enrich a single IOC via OSINT", responses=_OUTBOUND_409)
 async def enrich_single_ioc(
     incident_id: uuid.UUID,
     ioc_id: uuid.UUID,
+    request: Request,
+    confirm_outbound: bool = Query(default=False, description="Required (true) on a Dark Operation "
+                                   "or TLP:RED incident: the lookup leaves the platform. Audited."),
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[EnrichResultItem]:
@@ -484,8 +503,11 @@ async def enrich_single_ioc(
     type (cached where possible). Returns 404 if the IOC is not found on the
     incident. Requires an authenticated user with access to the incident.
     Returns a list of `EnrichResultItem`, one per source (empty if none apply).
+    On a Dark Operation or TLP:RED incident: 409 outbound_confirmation_required
+    unless `confirm_outbound=true`; a confirmed lookup is audited first as
+    `outbound_manual_lookup` (sources, IOC type; no value).
     """
-    await _get_incident(db, incident_id, user)
+    inc = await _get_incident(db, incident_id, user)
 
     ioc = (await db.execute(
         select(IOC).where(IOC.id == ioc_id, IOC.incident_id == incident_id)
@@ -500,6 +522,8 @@ async def enrich_single_ioc(
     ]
     if not applicable:
         return []
+    await require_outbound_confirmation(db, inc, confirm=confirm_outbound, kind="ioc_enrich", user=user,
+                                        request=request, providers=applicable, ioc_type=ioc.type)
 
     raw_list = await asyncio.gather(
         *[enrich_one(db, ioc.value, ioc.type, sid) for sid in applicable],

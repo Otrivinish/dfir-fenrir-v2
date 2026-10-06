@@ -143,7 +143,9 @@ def _safe_target(relative_path: str, root: Optional[str] = None) -> Path:
 
 
 def _store_name(root: Optional[str]) -> str:
-    return "evidence" if root is None or _base(root) == _base(None) else "files"
+    if root is None or _base(root) == _base(None):
+        return "evidence"
+    return "quarantine" if _base(root) == Path(settings.quarantine_path).resolve() else "files"   # H1
 
 
 # ─── Read alarms (§4.2: every "cannot read" is loud; F-10: kek_id mismatch warning) ──────────

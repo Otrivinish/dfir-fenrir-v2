@@ -39,7 +39,7 @@ from audit.context import get_audit_context
 from audit.service import write_audit
 from core.database import SessionLocal
 from evidence import crypto
-from models import EntityFile, Evidence, Incident
+from models import Artifact, EntityFile, Evidence, Incident
 from notifications.service import notify_stored_file_unreadable
 
 log = logging.getLogger("fenrir.evidence.read_alarms")
@@ -122,6 +122,15 @@ async def _resource(db: AsyncSession, store: str, path: str) -> tuple[str, uuid.
             if eid is not None:
                 row = (await db.execute(select(Evidence.id, Evidence.incident_id).where(Evidence.id == eid))).first()
         return ("evidence", *(row or (None, None)))
+    if store == "quarantine":                                       # H1: "<incident id>/<stored name>"
+        inc, _, name = path.partition("/")
+        try:
+            inc_id = uuid.UUID(inc)
+        except ValueError:
+            return ("artifact", None, None)
+        row = (await db.execute(select(Artifact.id, Artifact.incident_id).where(
+            Artifact.incident_id == inc_id, Artifact.stored_filename == name).limit(1))).first()
+        return ("artifact", *(row or (None, None)))
     row = (await db.execute(select(EntityFile.id, EntityFile.incident_id)
                             .where(EntityFile.file_path == path).limit(1))).first()
     kind = "entity_file" if path.startswith("entity-files/") else "incident_file"
@@ -133,7 +142,7 @@ async def record_in(db: AsyncSession, event: dict, ctx: dict) -> None:
     store, path, reason = event["store"], event["relative_path"], event["reason"]
     failed = event["event"] == "read_failed"
     rtype, rid, incident_id = await _resource(db, store, path)
-    prefix = "evidence" if store == "evidence" else "file"
+    prefix = {"evidence": "evidence", "quarantine": "artifact"}.get(store, "file")
     await write_audit(
         db, f"{prefix}_read_failed" if failed else f"{prefix}_kek_id_mismatch",
         user_id=ctx.get("user_id"), username=ctx.get("username"), role_at_time=ctx.get("role_at_time"),
@@ -153,4 +162,5 @@ async def record_in(db: AsyncSession, event: dict, ctx: dict) -> None:
     if incident_id is not None:
         ref = (await db.execute(select(Incident.ref).where(Incident.id == incident_id))).scalar_one_or_none()
     await notify_stored_file_unreadable(db, incident_id, ref,
-                                        "An evidence file" if store == "evidence" else "A stored file", reason)
+                                        {"evidence": "An evidence file", "quarantine": "A quarantine artifact"}
+                                        .get(store, "A stored file"), reason)

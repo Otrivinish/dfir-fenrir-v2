@@ -33,7 +33,8 @@ from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
-from evidence.crypto import awrite_encrypted
+from artifacts import store as artifact_store
+from evidence.crypto import EvidenceCryptoError, awrite_encrypted
 from evidence.hashing import ahashes_of
 from evidence.streaming import require_free_space
 from evidence.register import (EXAMINED_MASTER, EXAMINED_MATCH, EXAMINED_UPLOAD, UPLOAD_ID_DOC, ExhibitInput,
@@ -105,11 +106,14 @@ def _store_quarantine(incident_id: uuid.UUID, filename: str, data: bytes) -> tup
     return aid, stored
 
 
-def _read_quarantine(incident_id: uuid.UUID, stored_filename: str) -> bytes:
-    p = _resolve_in_quarantine(incident_id, stored_filename)
-    if not p.exists():
-        raise HTTPException(status.HTTP_410_GONE, "Source file no longer in quarantine")
-    return p.read_bytes()
+def _read_quarantine(src: Artifact) -> bytes:
+    """A pre-G3 upload's quarantined history DB (H1: either row format, ≤ the upload cap). 410 when the
+    file is gone, 409 artifact_integrity_failed / 503 artifact_read_error (artifacts/store.py)."""
+    try:
+        return artifact_store.read_all(src, MAX_UPLOAD_BYTES)
+    except EvidenceCryptoError as e:
+        raise artifact_store.read_error(e, missing_status=status.HTTP_410_GONE,
+                                        missing_detail="Source file no longer in quarantine") from None
 
 
 # ─── Cursor helpers (same convention as correlations/routes.py) ────────────
@@ -699,7 +703,7 @@ async def mint_evidence(
     src = (await db.execute(select(Artifact).where(Artifact.id == upload.source_artifact_id))).scalar_one_or_none()
     if not src:
         raise HTTPException(status.HTTP_410_GONE, "Source artifact missing")
-    raw = await asyncio.to_thread(_read_quarantine, incident_id, src.stored_filename)
+    raw = await asyncio.to_thread(_read_quarantine, src)
     sha256, sha1, md5 = await ahashes_of(raw)
     # C3 — the quarantined copy must still be the bytes hashed at upload.
     if sha256 != (src.sha256_hash or "").lower():

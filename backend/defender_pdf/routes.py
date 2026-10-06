@@ -24,7 +24,6 @@ who / when (uploaded_by / uploaded_at).
 """
 import asyncio
 import hashlib
-import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +38,7 @@ from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
+from artifacts import store as artifact_store
 from evidence.crypto import EvidenceIntegrityError
 from evidence.streaming import require_free_space
 from forensic.parser import apply_clock_offset
@@ -65,41 +65,7 @@ _TIME_BASES_STORED = {"explicit", "assumed_tz", "inferred_year"}
 _PROMOTE_CHUNK = 500            # rows per INSERT (≤ 29 binds/row; asyncpg caps a statement at 32767)
 
 
-# ─── Quarantine helpers (same hardened pattern as webhistory/routes.py) ─────
-
-def _safe_filename(name: str) -> str:
-    base = re.sub(r"[^A-Za-z0-9._-]", "_", (name or "file").strip()) or "file"
-    return base[:200]
-
-
-def _resolve_in_quarantine(incident_id: uuid.UUID, stored_filename: str) -> Path:
-    """Resolve a stored filename to an absolute path and verify it is
-    actually contained within this incident's quarantine directory --
-    belt-and-suspenders against path traversal, not reliant on
-    `_safe_filename`'s regex alone. `incident_id` is re-validated as a
-    canonical UUID rather than trusted from its type hint (a caller could
-    pass a raw string), and containment is checked with `relative_to`
-    rather than a `.parents` scan -- CodeQL's path-injection query
-    recognizes `relative_to` as a real sanitizer boundary, not just the
-    parents-membership check this used before."""
-    root = Path(settings.quarantine_path).resolve()
-    incident_dir = str(uuid.UUID(str(incident_id)))
-    p = (root / incident_dir / stored_filename).resolve()
-    try:
-        p.relative_to(root)
-    except ValueError:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid path")
-    return p
-
-
-def _store_quarantine(incident_id: uuid.UUID, filename: str, data: bytes) -> tuple[uuid.UUID, str]:
-    aid = uuid.uuid4()
-    stored = f"{aid}_{_safe_filename(filename)}"
-    target = _resolve_in_quarantine(incident_id, stored)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
-    return aid, stored
-
+# ─── Upload helpers ─────────────────────────────────────────────────────────
 
 def _hashes(data: bytes) -> tuple[str, str, str]:
     """(md5, sha256, sha512) of the upload. CPU-bound over up to 25 MB: call via asyncio.to_thread."""
@@ -293,17 +259,22 @@ async def create_defender_pdf_import(
 
     parsed = await _parse(content)
     apply_clock_offset(parsed["candidates"], clock_offset)
-    require_free_space(len(content), "this report", root=settings.quarantine_path)   # L2: 507, nothing stored
-    art_id, stored = await asyncio.to_thread(_store_quarantine, incident_id, filename, content)
-
-    db.add(Artifact(
-        id=art_id, incident_id=incident_id,
-        original_filename=filename, stored_filename=stored,
-        file_size=len(content), mime_type="application/pdf",
-        md5_hash=md5, sha256_hash=sha256, sha512_hash=sha512,
-        description="Microsoft Defender incident PDF",
-        uploaded_by_id=user.id, uploaded_by=user.username,
-    ))
+    art_id = None
+    if exhibit is None:
+        # L27 (H1): a PDF that IS an exhibit (same SHA-256) is already stored, encrypted, with its custody
+        # log: no second (quarantine) copy. Otherwise the raw PDF is quarantined, encrypted at rest.
+        require_free_space(len(content), "this report", root=settings.quarantine_path)   # L2: 507, nothing stored
+        art_id = uuid.uuid4()
+        stored = artifact_store.stored_name(art_id, filename)
+        sf, _tap = await artifact_store.awrite(content, incident_id, stored)
+        db.add(Artifact(
+            id=art_id, incident_id=incident_id,
+            original_filename=filename, stored_filename=stored,
+            file_size=sf.size, mime_type="application/pdf", nonce_hex=sf.nonce_hex,
+            md5_hash=md5, sha256_hash=sha256, sha512_hash=sha512,
+            description="Microsoft Defender incident PDF",
+            uploaded_by_id=user.id, uploaded_by=user.username,
+        ))
 
     row = _new_import(incident_id, filename=filename, size=len(content), sha256=sha256, artifact_id=art_id,
                       exhibit=exhibit, clock_offset=clock_offset, parsed=parsed, user=user)

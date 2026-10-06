@@ -591,7 +591,8 @@ export const api = {
 
   // Entity files
   listEntityFiles:   (incidentId, entityId)            => request('GET',    `/api/incidents/${incidentId}/entities/${entityId}/files`),
-  deleteEntityFile:  (incidentId, entityId, fileId)    => request('DELETE', `/api/incidents/${incidentId}/entities/${entityId}/files/${fileId}`),
+  // H4: a reason is required (JSON body, never the query string); 409 file_referenced lists what relies on it.
+  deleteEntityFile:  (incidentId, entityId, fileId, reason) => request('DELETE', `/api/incidents/${incidentId}/entities/${entityId}/files/${fileId}`, { reason }),
   entityFileDownloadUrl: (incidentId, entityId, fileId) =>
     `/api/incidents/${incidentId}/entities/${entityId}/files/${fileId}/download`,
 
@@ -619,7 +620,8 @@ export const api = {
   // Incident file store ("Files") — unified with entity files
   listIncidentFiles:   (incidentId)             => request('GET',    `/api/incidents/${incidentId}/files`),
   updateIncidentFile:  (incidentId, fileId, payload) => request('PATCH', `/api/incidents/${incidentId}/files/${fileId}`, payload),
-  deleteIncidentFile:  (incidentId, fileId)     => request('DELETE', `/api/incidents/${incidentId}/files/${fileId}`),
+  deleteIncidentFile:  (incidentId, fileId, reason) => request('DELETE', `/api/incidents/${incidentId}/files/${fileId}`, { reason }),
+  registerFileExhibit: (incidentId, fileId)     => request('POST',   `/api/incidents/${incidentId}/files/${fileId}/register-exhibit`),
   incidentFileDownloadUrl: (incidentId, fileId) => `/api/incidents/${incidentId}/files/${fileId}/download`,
 
   uploadIncidentFile: async (incidentId, file, entityId = null) => {
@@ -743,9 +745,10 @@ export const api = {
   extractEmailAttachment: (incidentId, aid, idx) => request('POST', `/api/incidents/${incidentId}/email/${aid}/attachments/${idx}/extract`),
   importEmailHops:     (incidentId, aid)   => request('POST', `/api/incidents/${incidentId}/email/${aid}/import-hops`),
   mintEmailEvidence:   (incidentId, aid)   => request('POST', `/api/incidents/${incidentId}/email/${aid}/mint-evidence`),
-  checkEmailDomain:    (incidentId, domain, selector) => {
+  checkEmailDomain:    (incidentId, domain, selector, confirmOutbound = false) => {
     const qs = new URLSearchParams({ domain })
     if (selector) qs.set('selector', selector)
+    if (confirmOutbound) qs.set('confirm_outbound', 'true')
     return request('GET', `/api/incidents/${incidentId}/email/domain-check?${qs.toString()}`)
   },
 
@@ -909,11 +912,20 @@ export const api = {
   updateComment:   (incidentId, commentId, payload)   => request('PATCH',  `/api/incidents/${incidentId}/comments/${commentId}`, payload),
   deleteComment:   (incidentId, commentId)            => request('DELETE', `/api/incidents/${incidentId}/comments/${commentId}`),
 
-  // Notes (per-incident; one per analyst, markdown, optionally private)
+  // Legacy scratchpads (read-only since H2: one per analyst, markdown, optionally private)
   listNotes:        (incidentId)          => request('GET',    `/api/incidents/${incidentId}/notes`),
-  saveNote:          (incidentId, payload) => request('POST',   `/api/incidents/${incidentId}/notes`, payload),
-  deleteNote:        (incidentId, noteId)  => request('DELETE', `/api/incidents/${incidentId}/notes/${noteId}`),
   listNoteVersions:  (incidentId, noteId)  => request('GET',    `/api/incidents/${incidentId}/notes/${noteId}/versions`),
+
+  // Case notes (H2): shared, append-only; filters author_id / evidence_id / entity_id / ioc_id / timeline_event_id
+  listCaseNotes: (incidentId, params = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    }
+    const s = qs.toString()
+    return request('GET', `/api/incidents/${incidentId}/case-notes${s ? '?' + s : ''}`)
+  },
+  createCaseNote: (incidentId, payload) => request('POST', `/api/incidents/${incidentId}/case-notes`, payload),
 
   // Comms — OOB passphrase + dark operation
   getPassphrase:        (incidentId)          => request('GET',   `/api/incidents/${incidentId}/oob/passphrase`),
@@ -1026,11 +1038,15 @@ export const api = {
   // Quarantine artifacts (per-incident)
   listArtifacts:    (incidentId) => request('GET', `/api/incidents/${incidentId}/artifacts`),
   getArtifact:      (incidentId, artifactId) => request('GET', `/api/incidents/${incidentId}/artifacts/${artifactId}`),
-  deleteArtifact:   (incidentId, artifactId) => request('DELETE', `/api/incidents/${incidentId}/artifacts/${artifactId}`),
-  uploadArtifact:   async (incidentId, file, description) => {
+  // H1: a reason (10–2000 chars) in the JSON body; 409 artifact_referenced carries err.data.references
+  deleteArtifact:   (incidentId, artifactId, reason) => request('DELETE', `/api/incidents/${incidentId}/artifacts/${artifactId}`, { reason }),
+  promoteArtifactHashIocs: (incidentId, artifactId) =>
+    request('POST', `/api/incidents/${incidentId}/artifacts/${artifactId}/hash-iocs`),
+  uploadArtifact:   async (incidentId, file, description, createHashIocs = false) => {
     const form = new FormData()
     form.append('file', file)
     if (description) form.append('description', description)
+    if (createHashIocs) form.append('create_hash_iocs', 'true')
     const res = await fetch(`/api/incidents/${incidentId}/artifacts`, {
       method: 'POST',
       credentials: 'same-origin',
@@ -1087,7 +1103,8 @@ export const api = {
 
   // IOC enrichment — batch (all IOCs) and per-IOC
   enrichAllIocs: (incidentId, payload) => request('POST', `/api/incidents/${incidentId}/iocs/enrich-all`, payload),
-  enrichIoc:     (incidentId, iocId)   => request('POST', `/api/incidents/${incidentId}/iocs/${iocId}/enrich`),
+  enrichIoc:     (incidentId, iocId, confirmOutbound = false) =>
+    request('POST', `/api/incidents/${incidentId}/iocs/${iocId}/enrich${confirmOutbound ? '?confirm_outbound=true' : ''}`),
 
   // Platform settings — API keys (admin)
   listApiKeyServices: ()               => request('GET',    '/api/settings/api-keys'),

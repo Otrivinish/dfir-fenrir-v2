@@ -162,11 +162,17 @@ export default function OOB() {
           message about it (new incident, phase change, severity change, closed). It also skips
           the automatic DNS checks (SPF, DKIM, DMARC) of an analyzed email's sender domain. Each
           blocked message or check is listed in the incident audit log and is not sent or run
-          later. Still on: in-app notifications to people who can see this incident, syslog audit
-          forwarding (actions and IDs only), OSINT lookups you start, the email Domain auth check
-          (only when you click it), and admin test messages. Verify all callers using the
-          passphrase below.
+          later. TLP:RED blocks the same automatic channels. Still on: in-app notifications to
+          people who can see this incident, syslog audit forwarding (actions and IDs only), and
+          admin test messages. OSINT lookups, IOC enrichment and the email Domain auth check run
+          only when you start them and confirm a warning; each is listed in the audit log as
+          outbound_manual_lookup. Verify all callers using the passphrase below.
         </p>
+        {inc.outbound_suppressed_by?.includes('tlp_red') && (
+          <p data-outbound-status style={{ fontSize: 13, fontWeight: 600, color: 'var(--crit)', marginTop: 'var(--space-2)' }}>
+            Automatic outbound suppressed (TLP:RED)
+          </p>
+        )}
       </section>
 
       {/* ── Passphrase ─────────────────────────────────────────────────── */}

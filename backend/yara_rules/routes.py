@@ -4,23 +4,23 @@ Global rules: mounted at prefix="/api/yara".
 Incident scan: mounted at prefix="/api/incidents".
 """
 import asyncio
+import json
 import logging
 import re
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from artifacts.routes import worker_upload
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
-from core.worker_client import WORKER_URL, worker_client, worker_headers
-from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
+from evidence.crypto import EvidenceCryptoError, EvidenceIntegrityError
 from incidents.access import get_accessible_incident
 from models import Artifact, Incident, TimelineEvent, IOC, User, YaraMatch, YaraRule
 from schemas import (
@@ -257,61 +257,58 @@ async def _run_scan(incident_id: uuid.UUID) -> YaraScanResult:
             return YaraScanResult(artifacts_scanned=0, matches_found=0,
                                   errors=["No artifacts for this incident"])
 
-        inline_rules = [{"name": r.name, "content": r.rule_content} for r in rules]
+        inline_rules = json.dumps([{"name": r.name, "content": r.rule_content} for r in rules]).encode()
         rule_map     = {r.name: r for r in rules}
-        quarantine   = Path(settings.quarantine_path)
 
         matches_found = 0
         errors:  list[str] = []
         now = datetime.now(timezone.utc)
 
-        async with worker_client(timeout=60) as client:
-            for artifact in artifacts:
-                art_path = str(quarantine / str(incident_id) / artifact.stored_filename)
-                try:
-                    resp = await client.post(
-                        f"{WORKER_URL}/analyze/yara-inline",
-                        json={"path": art_path, "rules": inline_rules},
-                        headers=worker_headers(),
-                    )
-                    resp.raise_for_status()
-                    result = resp.json()
-                except Exception as e:
-                    errors.append(f"[{artifact.original_filename}] worker error: {e}")
-                    continue
+        for artifact in artifacts:
+            # H1: the quarantine is encrypted at rest; the worker gets the decrypted bytes (TLS).
+            try:
+                resp = await worker_upload(artifact, "yara-inline", timeout=60, rules=inline_rules)
+                result = resp.json()
+            except EvidenceCryptoError as e:
+                errors.append(f"[{artifact.original_filename}] could not be read "
+                              f"({'integrity check failed' if isinstance(e, EvidenceIntegrityError) else e.reason or 'error'})")
+                continue
+            except Exception as e:
+                errors.append(f"[{artifact.original_filename}] worker error: {e}")
+                continue
 
-                for err in result.get("errors", []):
-                    errors.append(f"[{artifact.original_filename}] {err}")
+            for err in result.get("errors", []):
+                errors.append(f"[{artifact.original_filename}] {err}")
 
-                for match in result.get("matches", []):
-                    rule_name = match["rule_name"]
-                    rule_obj  = rule_map.get(rule_name)
+            for match in result.get("matches", []):
+                rule_name = match["rule_name"]
+                rule_obj  = rule_map.get(rule_name)
 
-                    # Dedup: skip if already recorded
-                    if rule_obj:
-                        existing = (await db.execute(
-                            select(YaraMatch).where(
-                                YaraMatch.rule_id    == rule_obj.id,
-                                YaraMatch.artifact_id == artifact.id,
-                            )
-                        )).scalar_one_or_none()
-                        if existing:
-                            continue
+                # Dedup: skip if already recorded
+                if rule_obj:
+                    existing = (await db.execute(
+                        select(YaraMatch).where(
+                            YaraMatch.rule_id    == rule_obj.id,
+                            YaraMatch.artifact_id == artifact.id,
+                        )
+                    )).scalar_one_or_none()
+                    if existing:
+                        continue
 
-                    ym = YaraMatch(
-                        id=uuid.uuid4(),
-                        rule_id=rule_obj.id if rule_obj else None,
-                        rule_name=rule_name,
-                        incident_id=incident_id,
-                        artifact_id=artifact.id,
-                        artifact_name=artifact.original_filename,
-                        matched_strings=match.get("strings", [])[:50],
-                    )
-                    db.add(ym)
-                    if rule_obj:
-                        rule_obj.match_count     = (rule_obj.match_count or 0) + 1
-                        rule_obj.last_matched_at = now
-                    matches_found += 1
+                ym = YaraMatch(
+                    id=uuid.uuid4(),
+                    rule_id=rule_obj.id if rule_obj else None,
+                    rule_name=rule_name,
+                    incident_id=incident_id,
+                    artifact_id=artifact.id,
+                    artifact_name=artifact.original_filename,
+                    matched_strings=match.get("strings", [])[:50],
+                )
+                db.add(ym)
+                if rule_obj:
+                    rule_obj.match_count     = (rule_obj.match_count or 0) + 1
+                    rule_obj.last_matched_at = now
+                matches_found += 1
 
         await db.commit()
         return YaraScanResult(
