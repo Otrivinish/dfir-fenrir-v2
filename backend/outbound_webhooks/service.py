@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
+from core.outbound_policy import outbound_allowed
 from core.security import decrypt_secret
 from models import Incident, PlatformSetting
 
@@ -32,17 +33,19 @@ _EVENT_EMOJI = {
 }
 
 
-async def suppressed_by_dark_operation(db: AsyncSession, event: str, inc: Incident) -> bool:
-    """Fail-closed Dark Operation guard for outbound incident sends (Teams/Slack
-    webhooks and the admin alert email).
+async def suppressed_by_outbound_policy(db: AsyncSession, event: str, inc: Incident) -> bool:
+    """Fail-closed guard for outbound incident sends (Teams/Slack webhooks and the
+    admin alert email, SMTP or Graph), decided by `core.outbound_policy` (H3):
+    blocked under Dark Operation or TLP:RED.
 
-    Returns False (send allowed) only when `inc.dark_operation` is exactly
-    False. Otherwise the send is blocked: an `outbound_notification_suppressed`
-    audit row records `{event, reason}` — never the title or description — and
-    True is returned. Never raises; any error still blocks the send.
+    Returns False (send allowed) only when the policy allows it. Otherwise the
+    send is blocked: an `outbound_notification_suppressed` audit row records
+    `{event, reason}` (reason `dark_operation` or `tlp_red`) — never the title
+    or description — and True is returned. Never raises; any error still blocks.
     """
     try:
-        if inc.dark_operation is False:
+        allowed, reason = outbound_allowed(inc)
+        if allowed:
             return False
         # Savepoint: a failed audit write must not poison the caller's session.
         async with db.begin_nested():
@@ -50,13 +53,13 @@ async def suppressed_by_dark_operation(db: AsyncSession, event: str, inc: Incide
                 db, "outbound_notification_suppressed",
                 outcome="success",
                 resource_type="incident", resource_id=str(inc.id), resource_label=inc.ref,
-                details={"event": event, "reason": "dark_operation"},
+                details={"event": event, "reason": reason},
             )
         await db.commit()
-        log.info("Dark Operation: outbound %s suppressed for incident %s", event, inc.id)
+        log.info("Outbound policy (%s): %s suppressed for incident %s", reason, event, inc.id)
     except Exception as exc:  # noqa: BLE001 — fail closed: block, never raise
-        log.warning("Dark Operation: outbound %s blocked for incident %s; audit row not written (%s)",
-                    event, inc.id, type(exc).__name__)
+        log.warning("Outbound policy: %s blocked for incident %s; audit row not written (%s)",
+                    event, getattr(inc, "id", "?"), type(exc).__name__)
     return True
 
 

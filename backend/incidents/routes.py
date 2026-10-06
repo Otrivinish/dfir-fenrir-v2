@@ -31,7 +31,7 @@ from models import (ClosureChecklistItem, Entity, EntityFile, Evidence, IOC, Inc
                     IncidentAssignment, IncidentHandoff, PlaybookTask, RespondAction, Team,
                     TimelineEvent, User, incident_teams, user_team, utcnow)
 from notifications.service import notify_incident_created, notify_phase_changed
-from outbound_webhooks.service import suppressed_by_dark_operation
+from outbound_webhooks.service import suppressed_by_outbound_policy
 from schemas import (GateResult, GateUnmetBody, IncidentAccess, IncidentClose, IncidentCreate, IncidentGates, IncidentList,
                      IncidentOut, IncidentReopen, IncidentSnapshot, IncidentUpdate, IncidentState, Phase,
                      Severity, Tlp)
@@ -41,8 +41,8 @@ router = APIRouter()
 
 async def _fire_hooks(db, event: str, inc: Incident, extra_facts=None) -> None:
     """Dispatch outbound webhooks + email alert. Best-effort; never raises.
-    Blocked (and audited) unless Dark Operation is off — fail closed."""
-    if await suppressed_by_dark_operation(db, event, inc):
+    Blocked (and audited) under Dark Operation or TLP:RED (H3) — fail closed."""
+    if await suppressed_by_outbound_policy(db, event, inc):
         return
     try:
         from outbound_webhooks.service import dispatch_incident_event

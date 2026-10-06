@@ -117,6 +117,7 @@ const SECTION_BY_KEY = Object.fromEntries(REPORT_SECTIONS.map(s => [s.key, s]))
 const APPENDIX_CSF = {
   'Affected Systems':  ['RS.AN-08', 'ID.AM-05'],
   'Incident Timeline': ['RS.AN-03', 'RS.AN-06'],
+  'Case Notes':        ['RS.AN-06', 'RS.AN-07'],
 }
 // NCISS severity label (the server maps internal severity → NCISS: incident.nciss_severity).
 // It is a fixed mapping, not an NCISS scoring, so every place it is shown says so.
@@ -489,6 +490,30 @@ function _proTimelineAppendix(evs) {
   return `<div class="atl-wrap"><div class="atl-spine">${rows.join('\n')}</div></div>`
 }
 
+// H2 — case notes as written (plain text, never re-rendered as markdown): a corrected entry is struck
+// through and names its correction; each row carries the entry's SHA-256 (also in the audit log).
+function _proCaseNotesAppendix(notes) {
+  if (!notes.length) return '<div class="placeholder-box"><strong>[ NO CASE NOTES ]</strong></div>'
+  const pos = Object.fromEntries(notes.map((n, i) => [n.id, i + 1]))
+  const linkText = l => [['evidence', 'exhibit'], ['entities', 'entity'], ['iocs', 'IOC'], ['timeline_events', 'event']]
+    .filter(([k]) => l && l[k]).map(([k, w]) => `${l[k]} ${w}${l[k] !== 1 ? 's' : ''}`).join(', ') || '—'
+  return `<p class="small" style="color:var(--text-muted);margin-bottom:16px">${notes.length} entr${notes.length !== 1 ? 'ies' : 'y'} · chronological · append-only: entries are never edited; a correction is a new entry.</p>
+  <div class="table-wrap"><table class="table-fixed">
+    <colgroup><col style="width:5%"><col style="width:17%"><col style="width:12%"><col style="width:40%"><col style="width:10%"><col style="width:16%"></colgroup>
+    <thead><tr><th>#</th><th>Time</th><th>Author</th><th>Note</th><th>Links</th><th>SHA-256</th></tr></thead>
+    <tbody>${notes.map((n, i) => `<tr>
+      <td class="mono small">${i + 1}</td>
+      <td class="mono small">${esc(fmtTs(n.created_at))}</td>
+      <td class="small">${esc(n.author_username || '—')}</td>
+      <td><div style="white-space:pre-wrap;${n.corrected_by_id ? 'text-decoration:line-through;opacity:.7' : ''}">${esc(n.body)}</div>
+        ${n.corrects_id ? `<div class="tiny" style="color:var(--text-muted)">Correction of entry #${pos[n.corrects_id] || '?'}</div>` : ''}
+        ${n.corrected_by_id ? `<div class="tiny" style="color:var(--text-muted)">Corrected by entry #${pos[n.corrected_by_id] || '?'}</div>` : ''}</td>
+      <td class="small">${esc(linkText(n.links))}</td>
+      <td class="mono tiny" style="word-break:break-all">${esc(n.content_sha256 || '')}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`
+}
+
 // Main pro renderer. Emits the full HTML with v1's structure + v2's data.
 function generateProReport(data, opts = {}) {
   const {
@@ -534,6 +559,7 @@ function generateProReport(data, opts = {}) {
   const oobLog      = data.oob_log || []
   const closure     = data.closure || {}
   const signOffs    = data.sign_offs || []
+  const caseNotes   = data.case_notes || []
   // Figures: images prepared by the Reports page (fetched, hashed, embedded); without
   // them (e.g. a caller that only has the data) every figure is listed, not embedded.
   const figures = preparedFigures
@@ -1009,6 +1035,8 @@ function generateProReport(data, opts = {}) {
     includeTimelineAppendix && { title: 'Incident Timeline', body: `
   <p style="font-size:12px;color:var(--text-muted);margin-bottom:24px">${evs.length} event${evs.length !== 1 ? 's' : ''} · chronological · all phases</p>
   ${_proTimelineAppendix(evs)}` },
+    // H2: the append-only case notes, full report only, after the existing appendices.
+    !isExec && { title: 'Case Notes', body: _proCaseNotesAppendix(caseNotes) },
   ].filter(Boolean)
 
   const appendicesHtml = appendices.map((a, i) => {
@@ -1398,6 +1426,10 @@ function _skeletonAppendices(opts) {
     { letter: 'B', title: 'Incident Timeline', included: !!opts.includeTimelineAppendix,
       hint: 'Optional — tick "Appendix B — Timeline" under Advanced options → Appendix.', items: [
       `Zig-zag timeline of every event: ${ph('timeline_events[*]', 'auto')} ${where('Timeline tab')}`,
+    ]},
+    { letter: opts.includeTimelineAppendix ? 'C' : 'B', title: 'Case Notes', included: (opts.mode || 'full') !== 'executive',
+      hint: 'Full Technical Report only. Lettered after the Timeline appendix when that is included.', items: [
+      `Table: ${ph('case_notes[*] (time, author, note as written — struck through when corrected, links, SHA-256)', 'auto')} ${where('Case notes')}`,
     ]},
   ]
 }

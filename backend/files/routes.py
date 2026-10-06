@@ -9,6 +9,12 @@ the AES-256-GCM-encrypted `/asset_logs` directory). A file may be incident-level
 (no entity) or linked to an entity; the entity drawer shows the per-entity
 subset, this router shows the whole incident.
 
+H4 (R10): the server hashes every upload (SHA-256 / SHA-1 / MD5, from the writer's single pass; rows from
+before H4: `python -m files.backfill_hashes`). Rename and delete need a reason (422 reason_required) and are
+audited (old/new name; the hashes); delete is refused while a record relies on the file (409 file_referenced,
+`file_references`). POST …/files/{id}/register-exhibit copies a file into the evidence store as an unsealed
+draft exhibit (G3 semantics); the file stays a supporting document and records the exhibit.
+
 Mounted at prefix="/api/incidents".
 """
 import asyncio
@@ -16,12 +22,13 @@ import hashlib
 import re
 import struct
 import uuid
+from datetime import timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
@@ -29,16 +36,20 @@ from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
-from evidence.crypto import (EvidenceCryptoError, EvidenceIntegrityError, awrite_encrypted, read_decrypted,
-                             stored_size)
+from evidence import codec
+from evidence.crypto import (EvidenceCryptoError, EvidenceIntegrityError, StoredFile, adelete_encrypted,
+                             asha256_decrypted, awrite_encrypted, read_decrypted, read_decrypted_stream, stored_size,
+                             write_encrypted_stream)
 from evidence.streaming import SMALL_FILE_BYTES, decrypted_download, require_free_space
 from incidents.access import get_accessible_incident
-from models import Entity, EntityFile, Incident, User
-from schemas import EntityFileList, EntityFileOut, IncidentFileUpdate
+from models import CaseNote, Entity, EntityFile, Evidence, GeneratedReport, Incident, User
+from schemas import (EntityFileList, EntityFileOut, FileDelete, FileReference, FileRegisterExhibitOut,
+                     IncidentFileUpdate)
 
 router = APIRouter()
 
 _FILE_MAX_BYTES = 50 * 1024 * 1024  # 50 MB — mirrors the entity-file limit
+REASON_MIN, REASON_MAX = 10, 2000   # H4: rename / delete reason (as H1's artifact delete)
 
 
 def sniff_report_image(head: bytes) -> Optional[str]:
@@ -221,10 +232,108 @@ async def _entity_name_map(db: AsyncSession, entity_ids) -> dict[uuid.UUID, str]
     return {eid: (name or value) for eid, name, value in rows}
 
 
-def _decorate(out: EntityFileOut, umap: dict, emap: dict) -> EntityFileOut:
+async def _exhibit_map(db: AsyncSession, evidence_ids) -> dict[uuid.UUID, tuple[str, bool]]:
+    ids = {i for i in evidence_ids if i}
+    if not ids:
+        return {}
+    rows = (await db.execute(select(Evidence.id, Evidence.identifier, Evidence.coc_sealed)
+                             .where(Evidence.id.in_(ids)))).all()
+    return {r[0]: (r[1], bool(r[2])) for r in rows}
+
+
+def _decorate(out: EntityFileOut, umap: dict, emap: dict, xmap: Optional[dict] = None) -> EntityFileOut:
     out.uploaded_by_username = umap.get(out.uploaded_by_id)
     out.entity_name = emap.get(out.entity_id) if out.entity_id else None
+    if out.evidence_id and xmap and out.evidence_id in xmap:
+        out.evidence_identifier, out.evidence_sealed = xmap[out.evidence_id]
     return out
+
+
+async def decorated_files(db: AsyncSession, rows) -> list[EntityFileOut]:
+    """Rows as EntityFileOut with the uploader's username, the entity's name and the exhibit's identifier and
+    seal state (H4) filled in. Shared with the entity drawer's list (entities/routes.py)."""
+    umap = await _username_map(db, [r.uploaded_by_id for r in rows])
+    emap = await _entity_name_map(db, [r.entity_id for r in rows])
+    xmap = await _exhibit_map(db, [r.evidence_id for r in rows])
+    return [_decorate(EntityFileOut.model_validate(r), umap, emap, xmap) for r in rows]
+
+
+# ─── H4: reason, references, hash for the audit ───────────────────────────────
+
+def required_reason(reason: Optional[str], what: str) -> str:
+    """The trimmed reason, or 422 reason_required (REASON_MIN–REASON_MAX characters)."""
+    why = (reason or "").strip()
+    if not (REASON_MIN <= len(why) <= REASON_MAX):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "reason_required",
+                       f"A reason of {REASON_MIN}–{REASON_MAX} characters is required to {what}.")
+    return why
+
+
+def _z(dt) -> Optional[str]:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
+
+
+async def file_references(db: AsyncSession, ef: EntityFile, *, via_entity: bool = False) -> list[dict]:
+    """H4 delete guard: the records that rely on this supporting document ({type, id, label}).
+
+      report_figure     it is picked as a report figure (Include in report)
+      generated_report  a saved report of the incident prints its SHA-256 (it was a figure when generated)
+      case_note         a case note of the incident cites its id or SHA-256 (case notes are append-only)
+      exhibit           it was registered as an exhibit (evidence_id)
+      entity            it is attached to an entity — not counted when deleting through that entity's own
+                        attachment route (`via_entity`), which is the act of removing the attachment."""
+    refs: list[dict] = []
+    if ef.include_in_report:
+        refs.append({"type": "report_figure", "id": str(ef.id), "label": "picked as a report figure"})
+    hashes = sorted({h.lower() for h in (ef.sha256, ef.report_sha256) if h})
+    if hashes:
+        for rid, kind, at in (await db.execute(
+            select(GeneratedReport.id, GeneratedReport.report_type, GeneratedReport.generated_at)
+            .where(GeneratedReport.incident_id == ef.incident_id,
+                   or_(*[func.strpos(GeneratedReport.html_content, h) > 0 for h in hashes]))
+            .order_by(GeneratedReport.generated_at)
+        )).all():
+            refs.append({"type": "generated_report", "id": str(rid), "label": f"{kind} report generated {_z(at)}"})
+    needles = [str(ef.id), *hashes]
+    for nid, at in (await db.execute(
+        select(CaseNote.id, CaseNote.created_at)
+        .where(CaseNote.incident_id == ef.incident_id,
+               or_(*[func.strpos(func.lower(CaseNote.body), n) > 0 for n in needles]))
+        .order_by(CaseNote.created_at)
+    )).all():
+        refs.append({"type": "case_note", "id": str(nid), "label": f"case note of {_z(at)}"})
+    if ef.evidence_id is not None:
+        ident = (await db.execute(select(Evidence.identifier).where(Evidence.id == ef.evidence_id))).scalar()
+        refs.append({"type": "exhibit", "id": str(ef.evidence_id), "label": f"registered as exhibit {ident}"})
+    if ef.entity_id is not None and not via_entity:
+        name = (await _entity_name_map(db, [ef.entity_id])).get(ef.entity_id)
+        refs.append({"type": "entity", "id": str(ef.entity_id), "label": f"attached to entity {name}"})
+    return refs
+
+
+def referenced_error(refs: list[dict]) -> ApiError:
+    return ApiError(status.HTTP_409_CONFLICT, "file_referenced",
+                    f"{len(refs)} record(s) rely on this file (report figure, saved report, case note, exhibit or "
+                    "entity); it can't be deleted while they do.",
+                    extra={"references": [FileReference(**r).model_dump() for r in refs]})
+
+
+async def delete_hashes(ef: EntityFile) -> dict:
+    """The hashes a delete audit keeps: the recorded ones, or (a row not yet hashed) a SHA-256 computed now,
+    streaming; an unreadable file records why instead of failing the delete."""
+    if ef.sha256:
+        return {"sha256": ef.sha256, "sha1": ef.sha1, "md5": ef.md5, "sha256_source": "recorded"}
+    try:
+        sha = await asha256_decrypted(ef.file_path, ef.nonce_hex, ef.file_size, root=settings.logs_path)
+        return {"sha256": sha, "sha256_source": "computed_at_delete"}
+    except EvidenceCryptoError as e:        # EvidenceIntegrityError included
+        return {"sha256": ef.report_sha256, "sha256_source": f"unreadable ({e.reason or type(e).__name__})"}
+
+
+async def locked_file(db: AsyncSession, file_id: uuid.UUID, **where) -> Optional[EntityFile]:
+    """The file row (of `where`: incident_id or entity_id) under a row lock until commit."""
+    q = select(EntityFile).where(EntityFile.id == file_id, *[getattr(EntityFile, k) == v for k, v in where.items()])
+    return (await db.execute(q.with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
 
 
 # ─── List ──────────────────────────────────────────────────────────────────────
@@ -247,11 +356,7 @@ async def list_incident_files(
         .where(EntityFile.incident_id == incident_id)
         .order_by(EntityFile.uploaded_at.desc())
     )).scalars().all()
-
-    umap = await _username_map(db, [r.uploaded_by_id for r in rows])
-    emap = await _entity_name_map(db, [r.entity_id for r in rows])
-    items = [_decorate(EntityFileOut.model_validate(r), umap, emap) for r in rows]
-    return EntityFileList(items=items)
+    return EntityFileList(items=await decorated_files(db, rows))
 
 
 # ─── Upload ──────────────────────────────────────────────────────────────────
@@ -268,7 +373,8 @@ async def upload_incident_file(
     user: User = Depends(require_analyst),
     db:   AsyncSession = Depends(get_db),
 ) -> EntityFileOut:
-    """Upload a non-malicious supporting file; bytes are encrypted at rest.
+    """Upload a non-malicious supporting file; bytes are encrypted at rest and hashed by the
+    server in the same pass (SHA-256 / SHA-1 / MD5, returned and audited).
 
     Optionally link it to an entity via `entity_id` (must belong to the incident).
     Returns 409 if the incident is closed, 404 if the entity is unknown, and 413
@@ -316,6 +422,7 @@ async def upload_incident_file(
         content_type=file.content_type,
         file_path=safe_rel_path,
         nonce_hex=stored.nonce_hex,
+        sha256=stored.sha256, sha1=stored.sha1, md5=stored.md5,
         uploaded_by_id=user.id,
     )
     db.add(ef)
@@ -324,7 +431,7 @@ async def upload_incident_file(
         user_id=user.id, username=user.username,
         resource_type="incident_file", resource_id=str(file_id),
         details={"incident_id": str(incident_id), "entity_id": str(entity_id) if entity_id else None,
-                 "filename": original_name, "size": len(raw)},
+                 "filename": original_name, "size": len(raw), "sha256": stored.sha256},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -400,7 +507,8 @@ async def download_incident_file(
                                "description": "unsupported_report_image (include_in_report on a file "
                                              "that is not a PNG, JPEG, GIF or WebP image, or whose "
                                              "dimensions can't be read from its header) or "
-                                             "image_too_large (over 16384 px per side or 50 megapixels)"},
+                                             "image_too_large (over 16384 px per side or 50 megapixels), or "
+                                             "reason_required (a rename without a 10–2000 character reason)"},
                          409: {"model": ApiErrorBody,
                                "description": "incident closed, or file_integrity_failed (include_in_report "
                                              "on a file whose stored bytes fail decryption / authentication)"},
@@ -419,6 +527,10 @@ async def update_incident_file(
     """Rename a stored file and/or (un)link it to an entity. `entity_id` is
     tri-state — an explicit null unlinks. Returns 409 if the incident is closed,
     404 if the file or target entity is unknown. Requires the analyst role.
+
+    H4: a rename (an `original_name` that changes the name) needs `reason` (10–2000 characters after
+    trimming, else 422 code reason_required, nothing changed); the `file_update` audit row records
+    `changes.original_name` = {from, to} and the reason. The stored bytes and their hashes don't change.
 
     `include_in_report=true` makes the file a numbered figure in generated reports.
     Only a PNG, JPEG, GIF or WebP image qualifies, checked on the decrypted bytes,
@@ -444,9 +556,12 @@ async def update_incident_file(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
 
     changed: dict[str, object] = {}
-    if req.original_name is not None and req.original_name.strip() and req.original_name != ef.original_name:
-        ef.original_name = req.original_name.strip()
-        changed["original_name"] = ef.original_name
+    reason: Optional[str] = None
+    new_name = (req.original_name or "").strip()
+    if new_name and new_name != ef.original_name:
+        reason = required_reason(req.reason, "rename a file")          # H4: before anything changes
+        changed["original_name"] = {"from": ef.original_name, "to": new_name}
+        ef.original_name = new_name
     if "entity_id" in req.model_fields_set and req.entity_id != ef.entity_id:
         if req.entity_id is not None:
             ent = (await db.execute(
@@ -497,65 +612,213 @@ async def update_incident_file(
             db, "file_update",
             user_id=user.id, username=user.username,
             resource_type="incident_file", resource_id=str(file_id),
-            details={"incident_id": str(incident_id), "changes": changed},
+            details={"incident_id": str(incident_id), "changes": changed,
+                     **({"reason": reason} if reason else {})},
             ip_address=request.client.host if request.client else None,
         )
     await db.commit()
-
-    out = EntityFileOut.model_validate(ef)
-    umap = await _username_map(db, [ef.uploaded_by_id])
-    emap = await _entity_name_map(db, [ef.entity_id])
-    return _decorate(out, umap, emap)
+    return (await decorated_files(db, [ef]))[0]
 
 
 # ─── Delete ──────────────────────────────────────────────────────────────────
 
-@router.delete("/{incident_id}/files/{file_id}", summary="Delete a stored file")
+_DELETE_RESPONSES = {
+    409: {"model": ApiErrorBody, "description": "incident closed, or file_referenced (a record relies on the file; "
+                                                "`references` lists them as {type, id, label})"},
+    422: {"model": ApiErrorBody, "description": "reason_required"},
+}
+
+
+async def delete_file_row(db: AsyncSession, ef: EntityFile, *, why: str, user: User, request: Request,
+                          action: str, resource_type: str, details: dict) -> None:
+    """H4: audit (reason + hashes), delete the row, commit, THEN remove the stored file (a failure there
+    leaves an unreferenced file, never a dangling row; it is audited). The caller checked access, state,
+    reason and references under the row lock."""
+    ip = request.client.host if request.client else None
+    hashes = await delete_hashes(ef)
+    rel, fid = ef.file_path, str(ef.id)
+    await write_audit(db, action, user_id=user.id, username=user.username,
+                      resource_type=resource_type, resource_id=fid,
+                      details={**details, "filename": ef.original_name, "size": ef.file_size, "reason": why,
+                               **{k: v for k, v in hashes.items() if v}},
+                      ip_address=ip)
+    await db.delete(ef)
+    await db.commit()
+    base_dir = Path(settings.logs_path).resolve()
+    path = (base_dir / rel).resolve()
+    try:
+        path.relative_to(base_dir)
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+    except (ValueError, OSError) as exc:
+        await write_audit(db, f"{action}_unlink_failed", user_id=user.id, username=user.username,
+                          resource_type=resource_type, resource_id=fid,
+                          details={**details, "path": rel, "error": str(exc)[:300]}, ip_address=ip)
+        await db.commit()
+
+
+@router.delete("/{incident_id}/files/{file_id}", summary="Delete a stored file", responses=_DELETE_RESPONSES)
 async def delete_incident_file(
+    incident_id: uuid.UUID,
+    file_id:     uuid.UUID,
+    request:     Request,
+    body:        Optional[FileDelete] = None,
+    user: User = Depends(require_analyst),
+    db:   AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete a stored file (record + on-disk data). 409 if the incident is
+    closed, 404 if not found. Requires the analyst role and access.
+
+    H4: a reason is required — JSON body `{"reason": "…"}` (10–2000 characters, else 422 code
+    reason_required). Refused with 409 code file_referenced while a record relies on the file: it is
+    picked as a report figure, a saved report prints its SHA-256, a case note cites its id or SHA-256,
+    it was registered as an exhibit, or it is attached to an entity; `references` lists them
+    ({type, id, label}). The `file_delete` audit row keeps the reason and the hashes."""
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+
+    ef = await locked_file(db, file_id, incident_id=incident_id)
+    if not ef:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    why = required_reason(body.reason if body else None, "delete a file")
+    refs = await file_references(db, ef)
+    if refs:
+        raise referenced_error(refs)
+    await delete_file_row(db, ef, why=why, user=user, request=request, action="file_delete",
+                          resource_type="incident_file",
+                          details={"incident_id": str(incident_id),
+                                   "entity_id": str(ef.entity_id) if ef.entity_id else None})
+    return {"status": "ok"}
+
+
+# ─── H4: Register as exhibit ─────────────────────────────────────────────────
+
+class _HashMismatch(Exception):
+    def __init__(self, computed: str):
+        self.computed = computed
+
+
+def _hash_mismatch() -> ApiError:
+    return ApiError(status.HTTP_409_CONFLICT, "file_hash_mismatch",
+                    "The stored file no longer matches the SHA-256 recorded at upload. Nothing was registered; "
+                    "the attempt was audited.")
+
+
+@router.post("/{incident_id}/files/{file_id}/register-exhibit", response_model=FileRegisterExhibitOut,
+             summary="Register a supporting document as an exhibit",
+             responses={409: {"model": ApiErrorBody,
+                              "description": "incident_closed, file_hash_unrecorded (no SHA-256 recorded yet: run "
+                                             "`python -m files.backfill_hashes --apply`), file_hash_mismatch (the "
+                                             "stored bytes no longer hash to the recorded SHA-256; nothing "
+                                             "registered, audited) or file_integrity_failed (tampered / corrupt)"},
+                        503: {"model": ApiErrorBody,
+                              "description": "file_read_error (storage error or wrong EVIDENCE_KEK)"},
+                        507: {"model": ApiErrorBody, "description": "insufficient_storage (evidence volume)"}})
+async def register_file_as_exhibit(
     incident_id: uuid.UUID,
     file_id:     uuid.UUID,
     request:     Request,
     user: User = Depends(require_analyst),
     db:   AsyncSession = Depends(get_db),
-) -> dict:
-    """Delete a stored file (record + on-disk data). 409 if the incident is
-    closed, 404 if not found. Requires the analyst role and access."""
+) -> FileRegisterExhibitOut:
+    """Register a supporting document as an exhibit with full chain of custody. The file stays a
+    supporting document and records the exhibit (`evidence_id`).
+
+    The stored file is decrypted as a stream, re-encrypted into the evidence store with a new key
+    (FENRGCM v2) and its SHA-256 checked against the one recorded at upload before anything is kept.
+    Same rules as an analyser upload (G3): when the SHA-256 equals an active digital exhibit of the
+    incident (the oldest, if several), that exhibit is linked (`exhibit_link` sha256_match, no second
+    copy; the file is re-hashed first); otherwise a new UNSEALED DRAFT exhibit is created (`DOC-…`,
+    collected by and in the custody of the caller, acquired_at unknown), audited `evidence_collect`
+    (method and source `supporting_document`, `file_id`) — complete its acquisition record and seal it
+    on the Evidence page as for any draft. Idempotent: a file already registered returns its exhibit
+    (`already_registered`). Analyst role, incident access, open incident (409 incident_closed)."""
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
-
-    ef = (await db.execute(
-        select(EntityFile).where(EntityFile.id == file_id, EntityFile.incident_id == incident_id)
-    )).scalar_one_or_none()
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
+    ef = await locked_file(db, file_id, incident_id=incident_id)       # serialises calls for this file
     if not ef:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    ip = request.client.host if request.client else None
 
-    base_dir = Path(settings.logs_path).resolve()
-    path = (base_dir / ef.file_path).resolve()
-    try:
-        path.relative_to(base_dir)
-    except ValueError:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid file path")
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as exc:
-        # Best-effort filesystem cleanup: keep API idempotency, but record the failure.
-        await write_audit(
-            db, "file_delete_unlink_failed",
-            user_id=user.id, username=user.username,
-            resource_type="incident_file", resource_id=str(file_id),
-            details={"incident_id": str(incident_id), "filename": ef.original_name,
-                     "path": str(path), "error": str(exc)},
-            ip_address=request.client.host if request.client else None,
-        )
+    async def out(ev: Evidence, link: str) -> FileRegisterExhibitOut:
+        return FileRegisterExhibitOut(evidence_id=ev.id, evidence_identifier=ev.identifier,
+                                      evidence_sealed=bool(ev.coc_sealed), exhibit_link=link,
+                                      file=(await decorated_files(db, [ef]))[0])
 
-    await write_audit(
-        db, "file_delete",
-        user_id=user.id, username=user.username,
-        resource_type="incident_file", resource_id=str(file_id),
-        details={"incident_id": str(incident_id), "filename": ef.original_name},
-        ip_address=request.client.host if request.client else None,
-    )
-    await db.delete(ef)
-    await db.commit()
-    return {"status": "ok"}
+    if ef.evidence_id is not None:
+        ev = await db.get(Evidence, ef.evidence_id)
+        if ev is not None:
+            return await out(ev, "already_registered")
+    if not ef.sha256:
+        raise ApiError(status.HTTP_409_CONFLICT, "file_hash_unrecorded",
+                       "This file has no SHA-256 recorded yet (uploaded before hashing was added). An admin runs "
+                       "`python -m files.backfill_hashes --apply` first.")
+    from evidence.register import draft_storage_path, lock_upload_sha256, register_draft, unique_sha256_match
+
+    async def audit(link: str, ev: Optional[Evidence], outcome: str = "success", **extra) -> None:
+        await write_audit(db, "file_register_exhibit", user_id=user.id, username=user.username,
+                          resource_type="incident_file", resource_id=str(ef.id), outcome=outcome,
+                          details={"incident_id": str(incident_id), "filename": ef.original_name,
+                                   "sha256": ef.sha256, "exhibit_link": link,
+                                   **({"evidence_id": str(ev.id), "evidence_identifier": ev.identifier} if ev else {}),
+                                   **extra},
+                          ip_address=ip)
+
+    async def mismatch(computed: Optional[str]) -> ApiError:
+        await audit("none", None, outcome="failure", result="hash_mismatch", sha256_recomputed=computed)
+        await db.commit()
+        return _hash_mismatch()
+
+    def read_error(e: EvidenceCryptoError) -> HTTPException:
+        if isinstance(e, EvidenceIntegrityError):
+            return _integrity_failed()
+        if e.reason in ("file_missing", "invalid_path"):
+            return HTTPException(status.HTTP_404_NOT_FOUND, "File data missing on disk")
+        return _read_failed()
+
+    await lock_upload_sha256(db, incident_id, ef.sha256)          # M8: one exhibit per bytes, until commit
+    match = await unique_sha256_match(db, incident_id, ef.sha256, oldest=True)
+    if match is not None:
+        try:
+            computed = await asha256_decrypted(ef.file_path, ef.nonce_hex, ef.file_size, root=settings.logs_path)
+        except EvidenceCryptoError as e:
+            raise read_error(e) from None
+        if computed != ef.sha256:
+            raise await mismatch(computed)
+        ef.evidence_id = match.id
+        await audit("sha256_match", match)
+        await db.commit()
+        return await out(match, "sha256_match")
+
+    require_free_space(codec.container_size(ef.file_size), "this exhibit")   # evidence volume; 507, nothing stored
+    ev_id = uuid.uuid4()
+    filename, rel = draft_storage_path(incident_id, ev_id, ef.original_name)
+
+    def accept(stored: StoredFile) -> None:                       # before the copy is moved into place
+        if stored.sha256 != ef.sha256 or stored.size != ef.file_size:
+            raise _HashMismatch(stored.sha256)
+
+    try:
+        stored = await write_encrypted_stream(
+            read_decrypted_stream(ef.file_path, ef.nonce_hex, ef.file_size, root=settings.logs_path),
+            rel, accept=accept)                                   # F-12: complete only if the stream ended cleanly
+    except _HashMismatch as m:
+        raise await mismatch(m.computed) from None
+    except EvidenceCryptoError as e:
+        raise read_error(e) from None
+    try:
+        ev = await register_draft(
+            db, incident_id=incident_id, user=user, ev_id=ev_id, filename=filename, stored=stored,
+            mime_type=ef.content_type, prefix="DOC", name=f"Supporting document: {ef.original_name}",
+            method="supporting_document", analyser_label="Supporting documents", ip=ip,
+            extra={"source": "supporting_document", "file_id": str(ef.id)})
+        ev.description = (f"Draft exhibit registered from the supporting document {ef.original_name} "
+                          f"(file {ef.id}, uploaded {_z(ef.uploaded_at)}). Complete the acquisition record and seal it.")
+        ef.evidence_id = ev.id
+        await audit("registered", ev)
+        await db.commit()
+    except BaseException:
+        await adelete_encrypted(rel)                              # no row, so no copy left behind
+        raise
+    return await out(ev, "registered")

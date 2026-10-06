@@ -25,7 +25,7 @@ from core.database import get_db
 from files.routes import report_file_present, report_image_digest
 from incidents.access import get_accessible_incident
 from models import (
-    AuditLog, BusinessImpact, ClosureChecklistItem, Decision, Entity, EntityFile, EntityRelation,
+    AuditLog, BusinessImpact, CaseNote, ClosureChecklistItem, Decision, Entity, EntityFile, EntityRelation,
     Evidence, GeneratedReport, Incident, IncidentAssignment, IncidentAttribution,
     IncidentCost, IncidentStakeholder, IOC, LessonsLearned, OOBLog, OperationalRole,
     PlaybookTask, RegulatoryDeadline, ReportAccess, RespondAction, ThreatActor,
@@ -121,6 +121,9 @@ async def get_report_data(
       with a Z suffix.
     - `sign_offs[]`: Incident Commander, Deputy, Legal Liaison and DPO, each with the
       users assigned to that role on this incident ({username, name}; empty if none).
+    - `case_notes[]` (H2): the append-only case notes, oldest first: {id, created_at (UTC Z),
+      author_username, body (current OOB passphrase shown as "[passphrase]"), corrects_id,
+      corrected_by_id, links (counts per kind), content_sha256}.
     """
     # Access gate — returns 404 (not 403) for incidents the caller can't see,
     # matching the rest of the per-incident routers. Without this any analyst
@@ -234,6 +237,9 @@ async def get_report_data(
     oob_log = (await db.execute(
         select(OOBLog).where(OOBLog.incident_id == incident_id).order_by(OOBLog.created_at)
     )).scalars().all()
+    case_notes = (await db.execute(
+        select(CaseNote).where(CaseNote.incident_id == incident_id).order_by(CaseNote.created_at, CaseNote.id)
+    )).scalars().all()
 
     sign_off_roles = {key: (rid, label) for rid, key, label in (await db.execute(
         select(OperationalRole.id, OperationalRole.key, OperationalRole.label)
@@ -298,6 +304,7 @@ async def get_report_data(
     # E4: OOB log authors, the closer and the assignees (sign-off names).
     assignee_ids |= {o.created_by_id for o in oob_log if o.created_by_id}
     assignee_ids |= {a.user_id for a in assignments if a.user_id}
+    assignee_ids |= {n.author_id for n in case_notes}
     if inc.closed_by_id:
         assignee_ids.add(inc.closed_by_id)
     username_map = {}
@@ -390,6 +397,23 @@ async def get_report_data(
         for o in oob_log
     ]
 
+    # H2: append-only case notes, oldest first, with each entry's content hash (passphrase redacted).
+    case_note_fixes = {n.corrects_id: str(n.id) for n in case_notes if n.corrects_id}
+    case_notes_out = [
+        {
+            "id":              str(n.id),
+            "created_at":      _utc_z(n.created_at),
+            "author_username": username_map.get(str(n.author_id)),
+            "body":            redact(n.body),
+            "corrects_id":     str(n.corrects_id) if n.corrects_id else None,
+            "corrected_by_id": case_note_fixes.get(n.id),
+            "links":           {"evidence": len(n.evidence_ids), "entities": len(n.entity_ids),
+                                "iocs": len(n.ioc_ids), "timeline_events": len(n.timeline_event_ids)},
+            "content_sha256":  n.content_sha256,
+        }
+        for n in case_notes
+    ]
+
     # Close sign-off: the reason from the latest incident_close audit row. Only close_incident writes
     # that row and audit_logs is append-only, so a client can't forge it (a timeline event can be).
     close_reason = None
@@ -453,6 +477,7 @@ async def get_report_data(
         "oob_log":          oob_log_out,
         "closure":          closure,
         "sign_offs":        sign_offs,
+        "case_notes":       case_notes_out,
     }
 
 

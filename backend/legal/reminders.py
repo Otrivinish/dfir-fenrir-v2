@@ -7,7 +7,9 @@ stage they have reached, and sends ONE in-app notification per deadline for the 
 stage reached — to the incident's assignees who can still see it, else to everyone with
 access. Closed incidents are included (obligations outlive closure), and so are Dark
 Operation incidents: in-app notifications stay on under Dark Operation (A1). Nothing leaves
-the platform: no email, no webhooks.
+the platform: no email, no webhooks. A future reminder email (J2) must ask
+`core.outbound_policy.outbound_allowed(inc)` first and skip + audit it under Dark Operation or
+TLP:RED (H3), like `outbound_webhooks.service.suppressed_by_outbound_policy`.
 
 Each deadline is claimed with a conditional UPDATE (… WHERE reminder_stage = <old>, the status
 still open and deadline_at unchanged) and committed with its notifications, so a stage is sent at

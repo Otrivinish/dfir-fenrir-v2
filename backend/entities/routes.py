@@ -21,9 +21,10 @@ from evidence.crypto import EvidenceCryptoError, awrite_encrypted
 from evidence.streaming import decrypted_download, require_free_space
 from incidents.access import get_accessible_incident
 from models import Entity, EntityEvent, EntityFile, EntityRelation, Incident, RespondAction, User, utcnow
+from files.routes import decorated_files, delete_file_row, file_references, locked_file, referenced_error, required_reason
 from respond.containment import containment_map
 from schemas import (Criticality, EntityCreate, EntityEventCreate,
-                     EntityEventList, EntityEventOut, EntityFileList, EntityFileOut,
+                     EntityEventList, EntityEventOut, EntityFileList, EntityFileOut, FileDelete,
                      EntityList, EntityOut,
                      EntityRelationCreate, EntityRelationList,
                      EntityRelationOut, EntityType, EntityUpdate)
@@ -454,7 +455,7 @@ async def list_entity_files(
         .where(EntityFile.entity_id == entity_id)
         .order_by(EntityFile.uploaded_at.asc())
     )).scalars().all()
-    return EntityFileList(items=[EntityFileOut.model_validate(r) for r in rows])
+    return EntityFileList(items=await decorated_files(db, rows))
 
 
 @router.post("/{incident_id}/entities/{entity_id}/files",
@@ -470,8 +471,8 @@ async def upload_entity_file(
     user: User = Depends(require_analyst),
     db:   AsyncSession = Depends(get_db),
 ) -> EntityFileOut:
-    """Upload a file attachment for an entity; the bytes are encrypted at rest.
-    Returns 409 if the incident is closed, 404 if the entity is not found, and
+    """Upload a file attachment for an entity; the bytes are encrypted at rest and
+    hashed by the server in the same pass (SHA-256 / SHA-1 / MD5). Returns 409 if the incident is closed, 404 if the entity is not found, and
     413 if the file exceeds the 50 MB limit. Requires the analyst role and access
     to the incident. Returns the created `EntityFileOut`.
     """
@@ -509,6 +510,7 @@ async def upload_entity_file(
         content_type=file.content_type,
         file_path=rel_path,
         nonce_hex=stored.nonce_hex,
+        sha256=stored.sha256, sha1=stored.sha1, md5=stored.md5,
         uploaded_by_id=user.id,
     )
     db.add(ef)
@@ -517,7 +519,7 @@ async def upload_entity_file(
         user_id=user.id, username=user.username,
         resource_type="entity_file", resource_id=str(file_id),
         details={"entity_id": str(entity_id), "incident_id": str(incident_id),
-                 "filename": original_name, "size": len(raw)},
+                 "filename": original_name, "size": len(raw), "sha256": stored.sha256},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -551,6 +553,7 @@ async def download_entity_file(
         select(EntityFile).where(
             EntityFile.id == file_id,
             EntityFile.entity_id == entity_id,
+            EntityFile.incident_id == incident_id,       # H4: only a file of the incident checked above
         )
     )).scalar_one_or_none()
     if not ef:
@@ -569,12 +572,16 @@ async def download_entity_file(
 
 
 @router.delete("/{incident_id}/entities/{entity_id}/files/{file_id}",
-               summary="Delete an entity file")
+               summary="Delete an entity file",
+               responses={409: {"model": ApiErrorBody, "description": "incident_closed, or file_referenced (a record "
+                                "relies on the file; `references` lists them)"},
+                          422: {"model": ApiErrorBody, "description": "reason_required"}})
 async def delete_entity_file(
     incident_id: uuid.UUID,
     entity_id:   uuid.UUID,
     file_id:     uuid.UUID,
     request:     Request,
+    body:        Optional[FileDelete] = None,
     user: User = Depends(require_analyst),
     db:   AsyncSession = Depends(get_db),
 ) -> dict:
@@ -582,36 +589,26 @@ async def delete_entity_file(
     on-disk data. Returns 409 if the incident is closed and 404 if the file is
     not found. Requires the analyst role and access to the incident. Returns
     `{"status": "ok"}` on success.
+
+    H4: a reason is required — JSON body `{"reason": "…"}` (10–2000 characters, else 422 code
+    reason_required). Refused with 409 code file_referenced while another record relies on the file
+    (report figure, saved report, case note, exhibit — as for incident Files; this entity's own
+    attachment is what is being removed, so it doesn't count). The audit keeps the reason and hashes.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
-    ef = (await db.execute(
-        select(EntityFile).where(
-            EntityFile.id == file_id,
-            EntityFile.entity_id == entity_id,
-        )
-    )).scalar_one_or_none()
+    ef = await locked_file(db, file_id, entity_id=entity_id, incident_id=incident_id)
     if not ef:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
-
-    path = Path(settings.logs_path) / ef.file_path
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-    await write_audit(
-        db, "entity_file_delete",
-        user_id=user.id, username=user.username,
-        resource_type="entity_file", resource_id=str(file_id),
-        details={"entity_id": str(entity_id), "incident_id": str(incident_id),
-                 "filename": ef.original_name},
-        ip_address=request.client.host if request.client else None,
-    )
-    await db.delete(ef)
-    await db.commit()
+    why = required_reason(body.reason if body else None, "delete a file")
+    refs = await file_references(db, ef, via_entity=True)
+    if refs:
+        raise referenced_error(refs)
+    await delete_file_row(db, ef, why=why, user=user, request=request, action="entity_file_delete",
+                          resource_type="entity_file",
+                          details={"entity_id": str(entity_id), "incident_id": str(incident_id)})
     return {"status": "ok"}
 
 

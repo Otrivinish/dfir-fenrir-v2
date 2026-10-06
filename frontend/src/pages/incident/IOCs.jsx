@@ -7,6 +7,8 @@ import TagChip from '../../components/TagChip.jsx'
 import TagInput, { normalizeTags } from '../../components/TagInput.jsx'
 import { SEV_PALETTE } from '../../components/SevBadge.jsx'
 import ContainmentBadge from '../../components/ContainmentBadge.jsx'
+import LinkedCaseNotes from '../../components/LinkedCaseNotes.jsx'
+import { useOutboundConfirm } from '../../components/OutboundConfirm.jsx'
 
 // Reuse the canonical severity palette so the IOC status badges read with the
 // same bright red/green as the "critical" badge in the incident header.
@@ -81,6 +83,7 @@ export default function IOCs() {
   const [enriching, setEnriching]           = useState(false)
   const [enrichingId, setEnrichingId]       = useState(null) // ioc_id being enriched individually
   const [enrichError, setEnrichError]       = useState(null)
+  const { withConfirm, dialog: outboundDialog } = useOutboundConfirm()
   const [expandedId, setExpandedId]         = useState(null)
 
   // Source picker — collapsible menu attached to the Scan IOCs button.
@@ -218,13 +221,13 @@ export default function IOCs() {
       const picked = selectedSources ? [...selectedSources] : allIds
       const narrowed = picked.length !== allIds.length
       const payload = narrowed ? { sources: picked } : {}
-      const res = await api.enrichAllIocs(inc.id, payload)
+      const res = await withConfirm(c => api.enrichAllIocs(inc.id, c ? { ...payload, confirm_outbound: true } : payload))
       setEnrichResults(res.results || {})
       if (res.enriched_count === 0) {
         setEnrichError('No IOCs could be enriched — configure API keys in Settings → API Keys.')
       }
     } catch (e) {
-      setEnrichError(e.message || 'Enrichment failed')
+      if (!e.cancelled) setEnrichError(e.message || 'Enrichment failed')
     } finally {
       setEnriching(false)
     }
@@ -249,11 +252,11 @@ export default function IOCs() {
   const enrichOne = async (i) => {
     setEnrichingId(i.id)
     try {
-      const results = await api.enrichIoc(inc.id, i.id)
+      const results = await withConfirm(c => api.enrichIoc(inc.id, i.id, c))
       setEnrichResults(prev => ({ ...prev, [i.id]: results }))
       setExpandedId(i.id)
     } catch (e) {
-      setEnrichError(e.message || 'Enrichment failed')
+      if (!e.cancelled) setEnrichError(e.message || 'Enrichment failed')
     } finally {
       setEnrichingId(null)
     }
@@ -294,6 +297,7 @@ export default function IOCs() {
 
   return (
     <section className="panel">
+      {outboundDialog}
       <div className="panel-toolbar">
         <h2 className="panel-h">Indicators of Compromise</h2>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
@@ -751,6 +755,8 @@ export default function IOCs() {
 
                         {/* Linked timeline events */}
                         <IocTimelineLinks incidentId={inc.id} ioc={i} isClosed={isClosed} />
+
+                        <LinkedCaseNotes incidentId={inc.id} kind="ioc" targetId={i.id} isClosed={isClosed} />
 
                         {/* Provenance — when & who added this IOC */}
                         <div style={{ fontSize: 11, color: 'var(--dim)' }}>

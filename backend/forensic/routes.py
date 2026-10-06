@@ -42,10 +42,10 @@ from sqlalchemy.orm import defer
 
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
-from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
-from evidence.crypto import EvidenceIntegrityError, iter_decrypted
+from artifacts import store as artifact_store
+from evidence.crypto import EvidenceCryptoError, EvidenceIntegrityError, iter_decrypted
 from evidence.hashing import sha256_chunked
 from incidents.access import get_accessible_incident
 from models import Artifact, CollectionPackage, Evidence, ForensicImport, TimelineEvent, User, utcnow
@@ -304,12 +304,6 @@ async def import_from_artifact(
     if not artifact:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Artifact not found")
 
-    # Resolve + path-traversal guard, mirroring the artifacts module.
-    path = (Path(settings.quarantine_path) / str(incident_id) / artifact.stored_filename).resolve()
-    root = Path(settings.quarantine_path).resolve()
-    if not str(path).startswith(str(root)) or not path.is_file():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Artifact file is no longer available")
-
     # G4 — the collection's run record: the exhibit its container matched at ingest (still active).
     pkg = (await db.execute(
         select(CollectionPackage).where(CollectionPackage.result_artifact_id == artifact_id,
@@ -323,22 +317,24 @@ async def import_from_artifact(
     clock_offset = exhibit.system_time_offset_seconds if exhibit is not None else None
 
     def _parse() -> tuple[list[ParsedEventOut], list[dict], bool, int, str]:
-        # M9: the ZIP is hashed through the same open file that is then parsed (no second open by name),
-        # so the SHA-256 compared with the ingest record is the one of the bytes parsed.
-        with open(path, "rb") as f:
-            h = hashlib.sha256()
-            for block in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(block)
-            f.seek(0)
-            raw, truncated, total_seen = parse_velociraptor_collection(f, source_tz="UTC")
+        # M9 + H1: the stored ZIP (encrypted at rest) is decrypted to a private file on the RAM tmpfs and
+        # hashed on the same pass; that file is what is parsed, so the SHA-256 compared with the ingest
+        # record is the one of the bytes parsed.
+        path, sha = artifact_store.materialise(artifact)
+        try:
+            raw, truncated, total_seen = parse_velociraptor_collection(path, source_tz="UTC")
+        finally:
+            artifact_store.discard(path)
         evs = _events_from_raw(apply_clock_offset(raw, clock_offset))
-        return evs, [e.model_dump() for e in evs], truncated, total_seen, h.hexdigest()
+        return evs, [e.model_dump() for e in evs], truncated, total_seen, sha
 
     try:
         events, stored, truncated, total_seen, sha256_parsed = await asyncio.to_thread(_parse)
+    except EvidenceCryptoError as exc:
+        raise artifact_store.read_error(exc, missing_detail="Artifact file is no longer available") from exc
     except Exception as exc:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "parse_failed",
-                       f"Failed to parse collection: {exc}") from exc
+        raise scratch_full(exc) or ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "parse_failed",
+                                            f"Failed to parse collection: {exc}") from exc
     if sha256_parsed != artifact.sha256_hash:
         # M9: the quarantined ZIP is no longer the one ingested: nothing is stored or linked (audited).
         ip = request.client.host if request.client else None
@@ -379,6 +375,7 @@ async def import_from_artifact(
         truncated        = truncated,
         total_seen       = total_seen,
         parsed_events    = stored,
+        source_artifact_id = artifact.id,
         uploaded_by_id   = user.id,
         uploaded_by      = user.username,
     )

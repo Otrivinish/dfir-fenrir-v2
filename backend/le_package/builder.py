@@ -44,13 +44,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import verify_row_hash
-from evidence.crypto import EvidenceIntegrityError, iter_decrypted
+from artifacts import store as artifact_store
+from evidence.crypto import EvidenceCryptoError, EvidenceIntegrityError, iter_decrypted
 from evidence.streaming import StagedOutput
 from evidence.timestamping import timestamp_sha256
 from le_package.manifest import Manifest, hmac_manifest
 from le_package.readme import render_readme
 from le_package.sop import CHAIN_OF_CUSTODY_SOP
-from models import (Artifact, AuditLog, BrowserHistoryUpload, Comment, CustodyExport, DefenderPdfImport,
+from case_notes.hashing import LINK_FIELDS, content_sha256, created_at_text
+from models import (Artifact, AuditLog, BrowserHistoryUpload, CaseNote, Comment, CustodyExport, DefenderPdfImport,
                     EmailAnalysis, Evidence, ForensicImport, IOC, Incident, IncidentStakeholder, LessonsLearned,
                     OOBLog, PCAPAnalysis, TimelineEvent, User, YaraMatch,
                     ClosureChecklistItem)
@@ -166,20 +168,44 @@ def _stream_evidence_file(zf: zipfile.ZipFile, manifest: Manifest, ev: Evidence,
                                mime=mime, source=source)
 
 
-def _artifacts_zip(inc_dir: Path, files: list[tuple[str, str]]) -> bytes:
-    """The quarantined files [(stored_filename, arcname)] in an `infected`-password AES ZIP;
-    files missing from disk are skipped."""
+def _artifacts_zip(arts: list) -> tuple[bytes, dict[str, str]]:
+    """The quarantined files in an `infected`-password AES ZIP (arcname = original name), each read through
+    the quarantine's dual-format reader (H1: encrypted at rest, or a legacy plaintext row) in two bounded
+    passes: the first authenticates the whole stored file and checks its SHA-256 against the row, the second
+    writes it. A file that is missing, can't be read or fails a check is left out; its status — included,
+    missing, unreadable:<reason>, integrity_failed:<reason> — goes in the inventory. A failure in the second
+    pass (the file changed during the build) raises: the whole package is abandoned (F-12).
+    Returns (ZIP bytes or b"" when nothing was included, {artifact id: status})."""
+    statuses: dict[str, str] = {}
     inner = io.BytesIO()
     with pyzipper.AESZipFile(inner, "w",
                              compression=pyzipper.ZIP_DEFLATED,
                              encryption=pyzipper.WZ_AES) as iz:
         iz.setpassword(b"infected")
-        for stored, arcname in files:
-            src = inc_dir / stored
-            if not src.exists():
+        for a in arts:
+            try:
+                h = hashlib.sha256()
+                for part in artifact_store.iter_plaintext(a):
+                    h.update(part)
+            except EvidenceIntegrityError as e:
+                statuses[str(a.id)] = f"integrity_failed:{e.reason or 'integrity'}"
                 continue
-            iz.write(str(src), arcname=arcname)
-    return inner.getvalue()
+            except EvidenceCryptoError as e:
+                statuses[str(a.id)] = "missing" if e.reason == "file_missing" else f"unreadable:{e.reason or 'error'}"
+                continue
+            if a.sha256_hash and h.hexdigest() != a.sha256_hash.lower():
+                statuses[str(a.id)] = "integrity_failed:hash_mismatch"
+                continue
+            zinfo = getattr(iz, "zipinfo_cls", zipfile.ZipInfo)(a.original_filename or a.stored_filename,
+                                                               date_time=time.localtime(time.time())[:6])
+            zinfo.compress_type = iz.compression
+            zinfo.external_attr = 0o600 << 16
+            zinfo.file_size = a.file_size or 0
+            with iz.open(zinfo, "w") as dest:
+                for part in artifact_store.iter_plaintext(a):
+                    dest.write(part)
+            statuses[str(a.id)] = "included"
+    return (inner.getvalue() if "included" in statuses.values() else b""), statuses
 
 
 # ── The outer envelope (G2: streamed into a staging file) ──
@@ -580,31 +606,30 @@ async def _section_artifacts(
         select(Artifact).where(Artifact.incident_id == inc_id)
     )).scalars().all()
 
+    # The artifact files themselves — wrapped in an `infected`-password ZIP per
+    # malware-analyst convention. Skipped if there is no quarantine volume.
+    quar = Path(settings_quarantine_path)
+    blob, statuses = b"", {}
+    if quar.exists() and arts:
+        blob, statuses = await asyncio.to_thread(_artifacts_zip, arts)
+
+    # H1: file_status (appended last) — whether the file is in Files.zip, or why not.
     header = ["id", "original_filename", "stored_filename", "file_size",
               "mime_type", "md5", "sha256", "sha512", "description",
-              "analysis_status"]
+              "analysis_status", "file_status"]
     rows = [[
         str(a.id), a.original_filename, a.stored_filename, a.file_size,
         a.mime_type or "", a.md5_hash or "", a.sha256_hash or "", a.sha512_hash or "",
-        a.description or "", a.analysis_status,
+        a.description or "", a.analysis_status, statuses.get(str(a.id), "not_packaged"),
     ] for a in arts]
     data = _csv_bytes(header, rows)
     zf.writestr("05_Artifacts/Artifacts_Inventory.csv", data)
     manifest.add(path="05_Artifacts/Artifacts_Inventory.csv", data=data,
                  mime="text/csv", source="artifacts table")
-
-    # The artifact files themselves — wrapped in an `infected`-password ZIP per
-    # malware-analyst convention. Skip silently if no quarantine volume.
-    quar = Path(settings_quarantine_path)
-    if not quar.exists() or not arts:
-        return
-    blob = await asyncio.to_thread(
-        _artifacts_zip, quar / str(inc_id),
-        [(a.stored_filename, a.original_filename or a.stored_filename) for a in arts])
     if blob:
         await asyncio.to_thread(
             _add_file, zf, manifest, "05_Artifacts/Files.zip", blob,
-            "application/zip", f"quarantine volume @ {settings_quarantine_path}")
+            "application/zip", f"quarantine volume @ {settings_quarantine_path} (decrypted)")
 
 
 async def _section_forensic(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
@@ -688,6 +713,28 @@ async def _section_comms(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest
         zf.writestr("07_Communications/Stakeholders.csv", data)
         manifest.add(path="07_Communications/Stakeholders.csv", data=data,
                      mime="text/csv", source="incident_stakeholders table")
+
+
+async def _section_case_notes(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
+    """H2: the incident's append-only case notes, oldest first, each with its stored content hash and
+    whether it still matches the entry (recomputed now; recipe in case_notes/hashing.py and README)."""
+    notes = (await db.execute(
+        select(CaseNote).where(CaseNote.incident_id == inc_id).order_by(CaseNote.created_at.asc(), CaseNote.id.asc())
+    )).scalars().all()
+    if not notes:
+        return
+    names = dict((await db.execute(
+        select(User.id, User.username).where(User.id.in_({n.author_id for n in notes}))
+    )).all())
+    fixed_by = {n.corrects_id: n.id for n in notes if n.corrects_id}
+    header = ["id", "incident_id", "created_at_utc", "author_id", "author_username", "body", "corrects_id", "corrected_by_id",
+              "source_scratchpad_id", *LINK_FIELDS, "content_sha256", "content_sha256_verified"]
+    rows = [[str(n.id), str(n.incident_id), created_at_text(n), str(n.author_id), names.get(n.author_id, ""), n.body,
+             str(n.corrects_id) if n.corrects_id else "", str(fixed_by[n.id]) if n.id in fixed_by else "",
+             str(n.source_scratchpad_id) if n.source_scratchpad_id else "",
+             *[";".join(sorted(str(x) for x in getattr(n, f) or [])) for f in LINK_FIELDS],
+             n.content_sha256, "yes" if content_sha256(n) == n.content_sha256 else "NO"] for n in notes]
+    _add_file(zf, manifest, "10_Case_Notes/Case_Notes.csv", _csv_bytes(header, rows), "text/csv", "case_notes table")
 
 
 async def _section_audit(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest,
@@ -946,6 +993,7 @@ async def _build_into(entry, staged: StagedOutput, oz, *, db: AsyncSession, inc:
         await _section_comms(db, inc.id, manifest, zf)
         audit_row_count, _ = await _section_audit(db, inc.id, manifest, zf)
         _section_legal(manifest, zf, tlp=inc.tlp)
+        await _section_case_notes(db, inc.id, manifest, zf)
 
         # Manifest, integrity, README — written LAST so all sections are accounted for.
         manifest_json = _json_bytes(manifest.to_json())

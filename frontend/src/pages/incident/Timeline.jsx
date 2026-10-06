@@ -7,6 +7,7 @@ import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 import { labelOf } from '../../lib/incidentVocab.js'
 import { matchEntity } from '../../lib/entityMatch.js'
 import { OffsetMark, fmtOffset } from '../../components/ClockOffset.jsx'
+import LinkedCaseNotes from '../../components/LinkedCaseNotes.jsx'
 
 // Maps 800-61 R3 phase keys to display labels.
 const IR_PHASE_LABELS = {
@@ -431,6 +432,7 @@ export default function Timeline() {
         </div>
       ) : (
         <TimelineSpine
+          incidentId={inc.id}
           events={events}
           expandedId={expandedId}
           onToggle={toggle}
@@ -482,7 +484,7 @@ export default function Timeline() {
 
 // ─── Vertical spine ───────────────────────────────────────────────────────────
 
-function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClosed, busy, lolbinHitIds, lolbinHitMap }) {
+function TimelineSpine({ incidentId, events, expandedId, onToggle, onEdit, onDelete, isClosed, busy, lolbinHitIds, lolbinHitMap }) {
   // Group events by date so we can insert date separators.
   const groups = []
   let currentDate = null
@@ -798,6 +800,7 @@ function TimelineSpine({ events, expandedId, onToggle, onEdit, onDelete, isClose
                     </button>
                   </div>
                   )}
+                  <LinkedCaseNotes incidentId={incidentId} kind="timeline_event" targetId={ev.id} isClosed={isClosed} />
                 </div>
               )}
             </div>

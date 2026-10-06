@@ -2,10 +2,10 @@
 import uuid
 from datetime import date, datetime, timezone
 
-from sqlalchemy import (BigInteger, Boolean, Column, Date, DateTime, Float, ForeignKey,
-                        Integer, JSON, Numeric, SmallInteger, String, Table, Text,
-                        UniqueConstraint)
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import (BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, Float, ForeignKey,
+                        Index, Integer, JSON, Numeric, SmallInteger, String, Table, Text,
+                        UniqueConstraint, text)
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import relationship
 
 from core.database import Base
@@ -521,6 +521,14 @@ class EntityFile(Base):
     # before these columns existed (report data then hashes it on the fly).
     report_sha256     = Column(String(64))
     report_mime       = Column(String(16))
+    # H4 (R10): the server's hashes of the original, from the writer's single pass at upload (rows from
+    # before H4: `python -m files.backfill_hashes`). NULL = not hashed yet.
+    sha256            = Column(String(64))
+    sha1              = Column(String(40))
+    md5               = Column(String(32))
+    # H4: the exhibit this supporting document was registered as ("Register as exhibit"); the file stays.
+    evidence_id       = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"),
+                               nullable=True, index=True)
 
 
 # ─── Evidence (chain of custody) ─────────────────────────────────────────────
@@ -1151,6 +1159,45 @@ class NoteVersion(Base):
     created_at  = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
 
 
+# ─── Case notes (H2, R05: shared, append-only, linked to exhibits) ──────────
+# Contemporaneous notes, one row per entry, visible to everyone who can see the incident. They
+# replace the private scratchpad above (kept read-only for its author: legacy). Rows are never
+# updated or deleted: a BEFORE UPDATE OR DELETE trigger raises (core/database.py), and FKs are
+# RESTRICT so no cascade can reach them. A correction is a NEW entry naming the one it corrects
+# (`corrects_id`; at most one correction per entry). `created_at` is server time, set by the route.
+# `content_sha256` = SHA-256 of the canonical entry (case_notes/hashing.py), also in its audit row.
+# Links are id arrays validated to the same incident at write time (no FK: a link to an IOC,
+# entity or event deleted later stays as it was recorded).
+
+class CaseNote(Base):
+    __tablename__ = "case_notes"
+    __table_args__ = (
+        CheckConstraint("char_length(body) BETWEEN 1 AND 16384", name="ck_case_notes_body_len"),
+        CheckConstraint("content_sha256 ~ '^[0-9a-f]{64}$'", name="ck_case_notes_sha256"),
+        CheckConstraint("corrects_id IS NULL OR corrects_id <> id", name="ck_case_notes_not_self"),
+        Index("uq_case_notes_corrects_id", "corrects_id", unique=True,
+              postgresql_where=text("corrects_id IS NOT NULL")),
+        Index("ix_case_notes_incident_created", "incident_id", "created_at", "id"),
+        Index("ix_case_notes_evidence_ids", "evidence_ids", postgresql_using="gin"),
+        Index("ix_case_notes_entity_ids", "entity_ids", postgresql_using="gin"),
+        Index("ix_case_notes_ioc_ids", "ioc_ids", postgresql_using="gin"),
+        Index("ix_case_notes_timeline_event_ids", "timeline_event_ids", postgresql_using="gin"),
+    )
+
+    id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_id = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="RESTRICT"), nullable=False)
+    author_id   = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    created_at  = Column(DateTime(timezone=True), nullable=False)
+    body        = Column(Text, nullable=False)
+    corrects_id = Column(UUID(as_uuid=True), ForeignKey("case_notes.id", ondelete="RESTRICT"), nullable=True)
+    source_scratchpad_id = Column(UUID(as_uuid=True), ForeignKey("notes.id", ondelete="RESTRICT"), nullable=True)
+    evidence_ids       = Column(ARRAY(UUID(as_uuid=True)), nullable=False, server_default=text("'{}'"))
+    entity_ids         = Column(ARRAY(UUID(as_uuid=True)), nullable=False, server_default=text("'{}'"))
+    ioc_ids            = Column(ARRAY(UUID(as_uuid=True)), nullable=False, server_default=text("'{}'"))
+    timeline_event_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=False, server_default=text("'{}'"))
+    content_sha256     = Column(String(64), nullable=False)
+
+
 # ─── OOB communications log (per-incident) ───────────────────────────────────
 # Records out-of-band contact events. Channel list matches old Fenrir:
 # personal_mobile / signal / whatsapp / personal_email / in_person /
@@ -1342,9 +1389,11 @@ class PCAPAnalysis(Base):
 
 
 # ─── Quarantine artifacts ─────────────────────────────────────────────────────
-# Malware samples and suspicious files collected during an investigation.
-# Stored plaintext on the air-gapped /quarantine volume (read-only for the
-# analysis worker). Downloads are wrapped in a "infected"-password ZIP per the
+# Malware samples and suspicious files collected during an investigation, on the
+# /quarantine volume. H1 (R06): stored encrypted at rest (FENRGCM v2, artifacts/store.py);
+# rows from before H1 with nonce_hex NULL are plaintext until `python -m
+# artifacts.encrypt_quarantine --apply` migrates them. The analysis worker gets the bytes from
+# the backend (TLS). Downloads are wrapped in a "infected"-password ZIP per the
 # standard malware-analyst convention to prevent AV auto-execution.
 
 class Artifact(Base):
@@ -1360,8 +1409,11 @@ class Artifact(Base):
     # UUID-prefixed name used on disk — prevents collisions and path traversal.
     stored_filename   = Column(String(512), nullable=False)
 
-    file_size         = Column(Integer,     nullable=False)  # bytes
+    file_size         = Column(Integer,     nullable=False)  # bytes (plaintext)
     mime_type         = Column(String(128))
+    # H1: the v2 nonce prefix (14 hex), checked against the file header on every read; NULL = a
+    # legacy plaintext file (read as-is until migrated).
+    nonce_hex         = Column(String(24))
 
     # Cryptographic hashes computed on upload in a single streaming pass.
     md5_hash          = Column(String(32))
@@ -1600,6 +1652,9 @@ class ForensicImport(Base):
     # MAX_EVENTS (2 000) × ~2 KB raw_log ≈ ~4 MiB JSON per row, comfortably
     # within Postgres jsonb limits.
     parsed_events     = Column(JSON, nullable=False, default=list)
+    # H1 — the quarantine artifact parsed by from-artifact (a reference: it can't be deleted while this
+    # import names it). Backfilled from the forensic_import_create audit rows.
+    source_artifact_id = Column(UUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
 
     uploaded_by_id    = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     uploaded_by       = Column(String(64))                  # denormalised username

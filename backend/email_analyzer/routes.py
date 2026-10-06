@@ -15,7 +15,6 @@ the legacy "Register as exhibit" (mint-evidence).
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import io
 import logging
 import re
@@ -37,11 +36,13 @@ from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
+from core.outbound_policy import outbound_allowed, require_outbound_confirmation
 from email_analyzer.domain_check import check_dkim, check_spf_dmarc, evaluate_source_ip, fetch_domain_auth
 from email_analyzer.parser import (PARSER_NAME, PARSER_VERSION, attachment_bytes, is_msg, msg_to_eml_bytes,
                                    parse_email, repair_wrapped_export)
 from email_analyzer.scoring import score as score_email
-from evidence.crypto import awrite_encrypted
+from artifacts import store as artifact_store
+from evidence.crypto import EvidenceCryptoError, awrite_encrypted
 from evidence.hashing import ahashes_of, asha256_of
 from evidence.streaming import require_free_space
 from evidence.register import (EXAMINED_MASTER, EXAMINED_MATCH, EXAMINED_UPLOAD, UPLOAD_ID_DOC, ExhibitInput,
@@ -62,15 +63,6 @@ MAX_BULK_TOTAL_BYTES = 250 * 1024 * 1024
 AUTH_VALIDATE_TIMEOUT = 8.0     # per distinct domain -- a slow/unreachable DNS
                                 # server must never block or fail the analysis
 _AUTH_CONCURRENCY = 5           # cap concurrent live-DNS lookups within a batch
-
-
-def _quarantine_dir(incident_id: uuid.UUID) -> Path:
-    return Path(settings.quarantine_path) / str(incident_id)
-
-
-def _safe_filename(name: str) -> str:
-    base = re.sub(r"[^A-Za-z0-9._-]", "_", (name or "file").strip()) or "file"
-    return base[:200]
 
 
 async def _read_capped(file: UploadFile, cap: int) -> bytes:
@@ -195,26 +187,21 @@ async def _auto_verify_auth(parsed: dict) -> Optional[dict]:
     return result
 
 
-def _dark_operation_on(inc) -> bool:
-    """Fail closed, like the outbound-notification guard: the automatic
-    SPF/DKIM/DMARC lookups run only when `dark_operation` is exactly False."""
-    try:
-        return inc.dark_operation is not False
-    except Exception:  # noqa: BLE001 -- fail closed
-        return True
+_SKIP_LABEL = {"dark_operation": "Dark Operation", "tlp_red": "TLP:RED"}
 
 
-def _lookup_skipped(domain: str) -> dict:
-    """`auth_verified` for an automatic lookup skipped under Dark Operation.
-    `error` makes the scorer and the live badges treat it as unavailable, like
-    a DNS timeout; `skipped` says why."""
-    return {"domain": domain, "skipped": "dark_operation",
-            "error": "Live DNS checks skipped — Dark Operation."}
+def _lookup_skipped(domain: str, reason: str) -> dict:
+    """`auth_verified` for an automatic lookup skipped by the outbound policy (H3:
+    Dark Operation or TLP:RED). `error` makes the scorer and the live badges treat
+    it as unavailable, like a DNS timeout; `skipped` says why."""
+    return {"domain": domain, "skipped": reason,
+            "error": f"Live DNS checks skipped — {_SKIP_LABEL.get(reason, reason)}."}
 
 
-async def _audit_lookups_suppressed(db: AsyncSession, inc, user: User, request: Request, n: int) -> None:
-    """One `outbound_lookup_suppressed` audit row per automatic lookup skipped
-    under Dark Operation: {kind, reason} only -- never the domain or message
+async def _audit_lookups_suppressed(db: AsyncSession, inc, user: User, request: Request, n: int,
+                                    reason: str) -> None:
+    """One `outbound_lookup_suppressed` audit row per automatic lookup skipped by
+    the outbound policy: {kind, reason} only -- never the domain or message
     content. Never raises; a failed write is logged and the lookup stays skipped."""
     try:
         # Savepoint: a failed audit write must not poison the request's transaction.
@@ -223,11 +210,11 @@ async def _audit_lookups_suppressed(db: AsyncSession, inc, user: User, request: 
                 await write_audit(
                     db, "outbound_lookup_suppressed", user_id=user.id, username=user.username,
                     resource_type="incident", resource_id=str(inc.id), resource_label=inc.ref,
-                    outcome="success", details={"kind": "email_auth_dns", "reason": "dark_operation"},
+                    outcome="success", details={"kind": "email_auth_dns", "reason": reason},
                     ip_address=request.client.host if request.client else None,
                 )
     except Exception as exc:  # noqa: BLE001 -- never raise
-        log.warning("Dark Operation: email DNS lookups skipped for incident %s; audit row not written (%s)",
+        log.warning("Outbound policy: email DNS lookups skipped for incident %s; audit row not written (%s)",
                     getattr(inc, "id", "?"), type(exc).__name__)
 
 
@@ -377,23 +364,14 @@ async def _audit_examined(db, x: ExhibitInput, analysis: EmailAnalysis, base: di
     })
 
 
-def _store_quarantine(incident_id: uuid.UUID, filename: str, data: bytes) -> tuple[uuid.UUID, str]:
-    aid = uuid.uuid4()
-    stored = f"{aid}_{_safe_filename(filename)}"
-    out_dir = _quarantine_dir(incident_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / stored).write_bytes(data)
-    return aid, stored
-
-
-def _read_quarantine(incident_id: uuid.UUID, stored_filename: str) -> bytes:
-    p = (_quarantine_dir(incident_id) / stored_filename).resolve()
-    root = Path(settings.quarantine_path).resolve()
-    if root not in p.parents:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid path")
-    if not p.exists():
-        raise HTTPException(status.HTTP_410_GONE, "Source message no longer in quarantine")
-    return p.read_bytes()
+def _read_quarantine(src: Artifact) -> bytes:
+    """A pre-G3 analysis's quarantined message (H1: either row format, ≤ the 25 MB email cap). 410 when
+    the file is gone, 409 artifact_integrity_failed / 503 artifact_read_error (artifacts/store.py)."""
+    try:
+        return artifact_store.read_all(src, MAX_EMAIL_BYTES)
+    except EvidenceCryptoError as e:
+        raise artifact_store.read_error(e, missing_status=status.HTTP_410_GONE,
+                                        missing_detail="Source message no longer in quarantine") from None
 
 
 _ANALYZE_RESPONSES = {
@@ -407,11 +385,12 @@ _ANALYZE_RESPONSES = {
 
 
 async def _verify_auth_single(db, inc, parsed: dict, user, request) -> Optional[dict]:
-    if _dark_operation_on(inc):
+    allowed, reason = outbound_allowed(inc)
+    if not allowed:
         domain = _auth_check_domain(parsed)
-        auth_verified = _lookup_skipped(domain) if domain else None
+        auth_verified = _lookup_skipped(domain, reason) if domain else None
         if auth_verified:
-            await _audit_lookups_suppressed(db, inc, user, request, 1)
+            await _audit_lookups_suppressed(db, inc, user, request, 1, reason)
         return auth_verified
     return await _auto_verify_auth(parsed)
 
@@ -419,7 +398,7 @@ async def _verify_auth_single(db, inc, parsed: dict, user, request) -> Optional[
 async def _analyse_one(db, inc, x: ExhibitInput, src_name: str, user, request,
                        chunked: tuple = (None, None)) -> EmailAnalysis:
     """Analyse one exhibit (already registered / linked / re-verified): parse in a thread, the live
-    SPF/DMARC/DKIM cross-check (skipped + audited under Dark Operation), score, store the analysis
+    SPF/DMARC/DKIM cross-check (skipped + audited under Dark Operation or TLP:RED), score, store the analysis
     with its run record and write the examination to the exhibit's custody log. `chunked` = (upload_id,
     its link) of the chunked upload the exhibit came from (R93; from-evidence only)."""
     upload_id, upload_link = chunked
@@ -481,7 +460,7 @@ async def analyze_email(
 
     No quarantine copy is made. Outlook .msg is converted to RFC-822 in memory (the exhibit keeps the
     original bytes). The analysis extracts headers, hops, auth results, URLs and attachments and scores
-    them; under Dark Operation the automatic live SPF/DMARC/DKIM lookup is skipped
+    them; under Dark Operation or TLP:RED the automatic live SPF/DMARC/DKIM lookup is skipped
     (`auth_verified.skipped`) and audited. The run record (`evidence_id`, `input_sha256`,
     `analyser_name` / `analyser_version`, `exhibit_link`) is on the analysis and the examination is
     in the exhibit's custody log (`evidence_examine`). A message that can't be parsed stays registered:
@@ -685,9 +664,10 @@ async def analyze_email_bulk(
                 result = {"domain": domain, "error": "Live DNS validation timed out or failed."}
             return domain, result
 
-    dark = _dark_operation_on(inc)
+    allowed, reason = outbound_allowed(inc)
+    dark = not allowed
     if dark:
-        domain_cache = {d: _lookup_skipped(d) for d in domains}
+        domain_cache = {d: _lookup_skipped(d, reason) for d in domains}
     else:
         domain_cache = dict(await asyncio.gather(*(_fetch(d) for d in domains))) if domains else {}
 
@@ -708,7 +688,7 @@ async def analyze_email_bulk(
         created.append(analysis)
 
     if dark and domains:
-        await _audit_lookups_suppressed(db, inc, user, request, len(domains))
+        await _audit_lookups_suppressed(db, inc, user, request, len(domains), reason)
     await write_audit(
         db, "email_analyze_bulk", user_id=user.id, username=user.username,
         resource_type="email_analysis", resource_id=str(batch_id), outcome="success",
@@ -759,12 +739,16 @@ async def list_email_analyses(
 # router already has a comment about, for the same underlying reason.
 
 @router.get("/{incident_id}/email/domain-check", response_model=DomainCheckOut,
-            summary="Live SPF/DMARC check for a domain, optional DKIM selector")
+            summary="Live SPF/DMARC check for a domain, optional DKIM selector",
+            responses={409: {"model": ApiErrorBody, "description": "outbound_confirmation_required "
+                             "(Dark Operation or TLP:RED incident; body has `reason`)"}})
 async def domain_check(
     incident_id: uuid.UUID,
     request: Request,
     domain: str = Query(..., min_length=1, max_length=253),
     selector: Optional[str] = Query(default=None, max_length=63),
+    confirm_outbound: bool = Query(default=False, description="Required (true) on a Dark Operation "
+                                   "or TLP:RED incident: the lookup leaves the platform. Audited."),
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DomainCheckOut:
@@ -773,9 +757,14 @@ async def domain_check(
     discovered from a bare domain, so manual mode requires one rather than
     guessing. Read-only: works on a closed incident. Audited (domain +
     whether a selector was checked, not the DNS response content).
+    On a Dark Operation or TLP:RED incident: 409 outbound_confirmation_required
+    unless `confirm_outbound=true`; a confirmed check is also audited as
+    `outbound_manual_lookup` (no domain in that row).
     """
-    await _incident(db, incident_id, user, writable=False)
+    inc = await _incident(db, incident_id, user, writable=False)
     domain = domain.strip().lower().lstrip("*.")
+    await require_outbound_confirmation(db, inc, confirm=confirm_outbound, kind="email_domain_check",
+                                        user=user, request=request, providers=["dns.google"], ioc_type="domain")
 
     try:
         result = await check_spf_dmarc(domain)
@@ -903,7 +892,7 @@ async def extract_attachment(
         src = (await db.execute(select(Artifact).where(Artifact.id == analysis.source_artifact_id))).scalar_one_or_none()
         if not src:
             raise HTTPException(status.HTTP_410_GONE, "Source message artifact missing")
-        raw = await asyncio.to_thread(_read_quarantine, incident_id, src.stored_filename)
+        raw = await asyncio.to_thread(_read_quarantine, src)
     try:
         filename, _declared, data = await asyncio.to_thread(attachment_bytes, raw, idx)
     except IndexError:
@@ -913,12 +902,14 @@ async def extract_attachment(
         await recheck_exhibit(db, incident_id=incident_id, evidence_id=analysis.evidence_id, user=user,
                               ip=ip, base=base)
 
-    art_id, stored = await asyncio.to_thread(_store_quarantine, incident_id, filename, data)
-    md5, sha256, sha512 = await asyncio.to_thread(
-        lambda b: (hashlib.md5(b).hexdigest(), hashlib.sha256(b).hexdigest(), hashlib.sha512(b).hexdigest()), data)
+    art_id = uuid.uuid4()
+    stored = artifact_store.stored_name(art_id, filename)
+    require_free_space(len(data), "this attachment", root=settings.quarantine_path)   # 507, nothing stored
+    sf, tap = await artifact_store.awrite(data, incident_id, stored)    # H1: encrypted at rest
+    md5, sha256, sha512 = sf.md5, sf.sha256, tap.sha512.hexdigest()
     db.add(Artifact(
         id=art_id, incident_id=incident_id, original_filename=filename, stored_filename=stored,
-        file_size=len(data), mime_type=magic.from_buffer(data[:2048], mime=True),
+        file_size=sf.size, mime_type=magic.from_buffer(tap.head, mime=True), nonce_hex=sf.nonce_hex,
         md5_hash=md5, sha256_hash=sha256, sha512_hash=sha512,
         description=f"Email attachment from analysis {aid}",
         analysis_status="pending", analysis_results={},
@@ -1057,7 +1048,7 @@ async def mint_evidence(
     src = (await db.execute(select(Artifact).where(Artifact.id == analysis.source_artifact_id))).scalar_one_or_none()
     if not src:
         raise HTTPException(status.HTTP_410_GONE, "Source message artifact missing")
-    raw = await asyncio.to_thread(_read_quarantine, incident_id, src.stored_filename)
+    raw = await asyncio.to_thread(_read_quarantine, src)
     sha256, sha1, md5 = await ahashes_of(raw)
     # C3 — the quarantined copy must still be the bytes hashed at upload.
     if sha256 != (src.sha256_hash or "").lower():

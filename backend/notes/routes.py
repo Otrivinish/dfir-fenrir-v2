@@ -3,6 +3,14 @@ per incident (GitHub-README style), separate from the Comments thread.
 
 Mounted at prefix="/api/incidents".
 
+LEGACY, READ-ONLY since H2 (owner decision 2026-10-03): shared, append-only case
+notes (case_notes/routes.py) replace the scratchpad. Saving returns 410
+use_case_notes and deleting returns 410 scratchpad_read_only, so existing text can
+no longer be changed or destroyed. Nothing is published automatically: a private
+scratchpad stays visible to its author only, who can post it as a case note
+(`POST .../case-notes` with `source_scratchpad_id`). Reads and version history
+below are unchanged. The rest of this docstring describes the rules as built.
+
 A note marked private (`is_private=True`, the default) is visible only to
 its author -- never to other analysts, and never to admins either. The list
 query enforces this for every caller, with no admin bypass. Saving is an
@@ -25,18 +33,17 @@ history, but a version that was private when authored stays private even
 if the note is shared later.
 """
 import uuid
-from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
+from core.errors import ApiError, ApiErrorBody
 from incidents.access import get_accessible_incident
 from models import Incident, Note, NoteVersion, User
-from schemas import NoteCreate, NoteList, NoteOut, NoteVersionList, NoteVersionOut
+from schemas import NoteList, NoteOut, NoteVersionList, NoteVersionOut
 
 router = APIRouter()
 
@@ -92,68 +99,21 @@ async def list_notes(
     return NoteList(items=items)
 
 
-@router.post("/{incident_id}/notes", response_model=NoteOut, summary="Save your note")
+@router.post("/{incident_id}/notes", status_code=status.HTTP_410_GONE, deprecated=True,
+             summary="Save your note (retired: use case notes)",
+             responses={410: {"model": ApiErrorBody, "description": "use_case_notes"}})
 async def save_note(
     incident_id: uuid.UUID,
-    req: NoteCreate,
-    request: Request,
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
-) -> NoteOut:
-    """Create or update the caller's own note on this incident (upsert --
-    one per analyst per incident). Requires the analyst role. Rejected if
-    the incident is closed. Every actual change snapshots a new
-    NoteVersion and records an audit entry (metadata only, never the note
-    body).
-    """
-    inc = await _get_incident(db, incident_id, user)
-    if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
-
-    body = req.body.strip()
-    n = (await db.execute(
-        select(Note).where(Note.incident_id == incident_id, Note.author_id == user.id)
-    )).scalar_one_or_none()
-
-    if n is None:
-        n = Note(
-            id=uuid.uuid4(), incident_id=incident_id, author_id=user.id,
-            body=body, is_private=req.is_private, version=1,
-        )
-        db.add(n)
-        await db.flush()
-        db.add(NoteVersion(
-            id=uuid.uuid4(), note_id=n.id, version_number=1,
-            body=n.body, is_private=n.is_private,
-        ))
-        await write_audit(
-            db, "note_create",
-            user_id=user.id, username=user.username,
-            resource_type="note", resource_id=str(n.id),
-            details={"incident_id": str(incident_id), "is_private": n.is_private, "version": n.version},
-            ip_address=request.client.host if request.client else None,
-        )
-    elif body != n.body or req.is_private != n.is_private:
-        if n.edited_at is None:
-            n.edited_at = datetime.now(timezone.utc)
-        n.body = body
-        n.is_private = req.is_private
-        n.version += 1
-        await db.flush()
-        db.add(NoteVersion(
-            id=uuid.uuid4(), note_id=n.id, version_number=n.version,
-            body=n.body, is_private=n.is_private,
-        ))
-        await write_audit(
-            db, "note_update",
-            user_id=user.id, username=user.username,
-            resource_type="note", resource_id=str(n.id),
-            details={"incident_id": str(incident_id), "is_private": n.is_private, "version": n.version},
-            ip_address=request.client.host if request.client else None,
-        )
-
-    await db.commit()
-    return NoteOut.model_validate(n).model_copy(update={"author_username": user.username})
+) -> None:
+    """Retired by H2: always 410 use_case_notes (after the access check). Add a shared,
+    append-only entry with `POST /api/incidents/{id}/case-notes` instead; post your existing
+    scratchpad there with `source_scratchpad_id`."""
+    await _get_incident(db, incident_id, user)
+    raise ApiError(status.HTTP_410_GONE, "use_case_notes",
+                   "The private scratchpad is read-only. Add a case note instead "
+                   "(POST /api/incidents/{id}/case-notes).")
 
 
 @router.get("/{incident_id}/notes/{note_id}/versions", response_model=NoteVersionList,
@@ -182,35 +142,18 @@ async def list_note_versions(
     return NoteVersionList(items=[NoteVersionOut.model_validate(r) for r in rows])
 
 
-@router.delete("/{incident_id}/notes/{note_id}", summary="Delete a note")
+@router.delete("/{incident_id}/notes/{note_id}", status_code=status.HTTP_410_GONE, deprecated=True,
+               summary="Delete a note (retired)",
+               responses={410: {"model": ApiErrorBody, "description": "scratchpad_read_only"}})
 async def delete_note(
     incident_id: uuid.UUID,
     note_id:     uuid.UUID,
-    request: Request,
     user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
-) -> dict:
-    """Delete a note (and its version history). Requires the analyst role;
-    only the original author or an admin may delete (a private note not
-    owned by the caller 404s, same as everywhere else here). Rejected if
-    the incident is closed. The deletion is audited. Returns
-    `{"status": "ok"}`.
-    """
-    inc = await _get_incident(db, incident_id, user)
-    if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
-
-    n = await _get_visible_note(db, incident_id, note_id, user)
-    if n.author_id != user.id and user.role != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your note")
-
-    await write_audit(
-        db, "note_delete",
-        user_id=user.id, username=user.username,
-        resource_type="note", resource_id=str(n.id),
-        details={"incident_id": str(incident_id), "is_private": n.is_private},
-        ip_address=request.client.host if request.client else None,
-    )
-    await db.delete(n)
-    await db.commit()
-    return {"status": "ok"}
+) -> None:
+    """Retired by H2: legacy scratchpads can no longer be destroyed. 404 when the note isn't
+    visible to the caller, else always 410 scratchpad_read_only."""
+    await _get_incident(db, incident_id, user)
+    await _get_visible_note(db, incident_id, note_id, user)
+    raise ApiError(status.HTTP_410_GONE, "scratchpad_read_only",
+                   "Scratchpads are read-only legacy records and can't be deleted.")

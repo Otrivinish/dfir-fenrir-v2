@@ -81,7 +81,7 @@ const NAV_GROUPS = [
       { to: 'entities', label: 'Entities',             count: s => badge(s.entities, `${s.entities} entities`) },
       { to: 'iocs',     label: 'IOCs',                 count: s => badge(s.iocs, `${s.iocs} IOCs`) },
       { to: 'mitre',    label: 'ATT&CK & attribution' },
-      { to: 'notes',    label: 'Notes' },
+      { to: 'notes',    label: 'Case notes' },
     ],
   },
   {
@@ -589,6 +589,12 @@ export default function IncidentDetail() {
       {inc.dark_operation && (
         <div className="dark-op-banner" role="alert">
           ⬛ Dark Operation Active — communication blackout in effect
+        </div>
+      )}
+      {/* H3: the API says why automatic outbound is off (dark_operation / tlp_red). */}
+      {inc.outbound_suppressed_by?.includes('tlp_red') && (
+        <div className="dark-op-banner" role="status" data-outbound-banner>
+          ■ Automatic outbound suppressed (TLP:RED)
         </div>
       )}
 

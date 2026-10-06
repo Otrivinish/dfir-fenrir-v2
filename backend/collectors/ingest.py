@@ -2,14 +2,15 @@
 
 The responder ran the package's collector on the target host and brings back the
 Velociraptor output container. Flow:
-  1. stream the upload to a temp file on the quarantine volume (GBs → never
-     whole-file-in-memory), hashing the container exactly as received (G4: SHA-256
-     + size, the run record's input hash) in the same pass,
+  1. hash the container exactly as received (G4: SHA-256 + size, the run record's
+     input hash) straight from the upload's RAM spool (never copied to a disk),
   2. DECRYPT it with the package's wrapped private key — the collector output is
      X.509-encrypted (encrypted on the responder's media; only FENRIR can read
      it). Non-encrypted uploads pass through unchanged,
   3. register the plaintext collection as a first-class Artifact (existing
-     analysis tools + the U1.3 timeline-import parser operate on it).
+     analysis tools + the U1.3 timeline-import parser operate on it). H1: the
+     decrypted ZIP is streamed straight into the quarantine's encrypting writer
+     (FENRGCM v2, artifacts/store.py); its plaintext never reaches a disk.
 
 Returns the Artifact and the received container's SHA-256 + size so the route can
 anchor both in the audit chain and record them on the package.
@@ -18,73 +19,43 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 import uuid
-from pathlib import Path
 
 import magic
 from fastapi import HTTPException, UploadFile, status
 
+from artifacts import store as artifact_store
 from collectors.crypto import CollectionDecryptError, decrypt_collection_to
 from core.config import settings
+from evidence.crypto import EncryptedStagingWriter
 from models import Artifact
 
 _CHUNK = 1024 * 1024   # 1 MiB
 _ZIP_MAGIC = b"PK\x03\x04"
 
 
-def _safe_name(name: str) -> str:
-    stem = Path(name).stem
-    ext  = Path(name).suffix
-    safe = re.sub(r"[^\w\-.]", "_", stem)[:200 - len(ext)]
-    return (safe or "collection") + ext
-
-
-def _quarantine_dir(incident_id: uuid.UUID) -> Path:
-    return Path(settings.quarantine_path) / str(incident_id)
-
-
-def _stream_upload(src, dst: Path) -> tuple[bytes, str, int]:
-    """Sync: stream `src` to `dst` with the size cap, hashing it on the way (G4). Returns the
-    first bytes (for ZIP-magic validation), the SHA-256 and the size of the container as received.
-    Caller runs this in an executor."""
+def _hash_container(src) -> tuple[bytes, str, int]:
+    """Sync: hash the upload as received (G4), enforcing the size cap. Returns the first bytes (for
+    ZIP-magic validation), the SHA-256 and the size. Caller runs this in an executor."""
     size = 0
     head = b""
     h256 = hashlib.sha256()
     cap = settings.collection_output_max_bytes
-    with dst.open("wb") as f:
-        while True:
-            chunk = src.read(_CHUNK)
-            if not chunk:
-                break
-            size += len(chunk)
-            h256.update(chunk)
-            if size > cap:
-                f.close()
-                dst.unlink(missing_ok=True)
-                raise HTTPException(
-                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    f"Collection output exceeds {cap} bytes",
-                )
-            f.write(chunk)
-            if len(head) < 8:
-                head += chunk[: 8 - len(head)]
+    src.seek(0)
+    while True:
+        chunk = src.read(_CHUNK)
+        if not chunk:
+            break
+        size += len(chunk)
+        h256.update(chunk)
+        if size > cap:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                f"Collection output exceeds {cap} bytes",
+            )
+        if len(head) < 8:
+            head += chunk[: 8 - len(head)]
     return head, h256.hexdigest(), size
-
-
-def _hash_file(path: Path) -> tuple[str, str, str, bytes, int]:
-    """Sync streaming hash of the final plaintext. Returns
-    (sha256, sha512, md5, head2k, size)."""
-    h256, h512, hmd5 = hashlib.sha256(), hashlib.sha512(), hashlib.md5()
-    size = 0
-    head = b""
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(_CHUNK), b""):
-            size += len(chunk)
-            h256.update(chunk); h512.update(chunk); hmd5.update(chunk)
-            if len(head) < 2048:
-                head += chunk[: 2048 - len(head)]
-    return h256.hexdigest(), h512.hexdigest(), hmd5.hexdigest(), head, size
 
 
 async def register_collection_output(
@@ -93,15 +64,8 @@ async def register_collection_output(
 ) -> tuple[Artifact, str, int]:
     """Stream (+ hash the container as received) → decrypt → register the plaintext collection
     as an Artifact. Returns (artifact, container_sha256, container_size)."""
-    loop = asyncio.get_event_loop()
-    out_dir = _quarantine_dir(incident_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    tmp_path = out_dir / f".ingest-{uuid.uuid4()}.tmp"
-    head, container_sha256, container_size = await loop.run_in_executor(
-        None, lambda: _stream_upload(upload.file, tmp_path))
+    head, container_sha256, container_size = await asyncio.to_thread(_hash_container, upload.file)
     if head[:4] != _ZIP_MAGIC:
-        tmp_path.unlink(missing_ok=True)
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Upload is not a ZIP — expected the collector's encrypted output container.",
@@ -109,37 +73,34 @@ async def register_collection_output(
 
     original = upload.filename or "collection.zip"
     artifact_id = uuid.uuid4()
-    stored = f"{artifact_id}_{_safe_name(original)}"
-    final_path = out_dir / stored
+    stored = artifact_store.stored_name(artifact_id, original)
 
-    # Decrypt the X.509 container → plaintext inner collection ZIP (or pass
-    # through if it wasn't encrypted).
+    # Decrypt the X.509 container → plaintext inner collection ZIP (or pass it through if it wasn't
+    # encrypted), streamed into the encrypting staging writer; renamed into place only when complete.
+    writer = await EncryptedStagingWriter.aopen(artifact_store.root())
+    tap = artifact_store.Tap(writer)
     try:
-        await loop.run_in_executor(
-            None, lambda: decrypt_collection_to(str(tmp_path), wrapped_private_key, str(final_path))
-        )
+        await asyncio.to_thread(decrypt_collection_to, upload.file, wrapped_private_key, tap)
+        sf = await writer.acommit(artifact_store.rel_path(incident_id, stored))
     except CollectionDecryptError as e:
-        tmp_path.unlink(missing_ok=True)
-        final_path.unlink(missing_ok=True)
+        await writer.aabort()
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-    sha256, sha512, md5, head2k, size = await loop.run_in_executor(
-        None, lambda: _hash_file(final_path)
-    )
-    mime_type = magic.from_buffer(head2k[:2048], mime=True) if head2k else None
+    except BaseException:
+        await writer.aabort()
+        raise
+    mime_type = magic.from_buffer(tap.head[:2048], mime=True) if tap.head else None
 
     artifact = Artifact(
         id=artifact_id,
         incident_id=incident_id,
         original_filename=original,
         stored_filename=stored,
-        file_size=size,
+        file_size=sf.size,
         mime_type=mime_type,
-        md5_hash=md5,
-        sha256_hash=sha256,
-        sha512_hash=sha512,
+        nonce_hex=sf.nonce_hex,
+        md5_hash=sf.md5,
+        sha256_hash=sf.sha256,
+        sha512_hash=tap.sha512.hexdigest(),
         description=f"Collection output: {package_name}",
         analysis_status="pending",
         analysis_results={},

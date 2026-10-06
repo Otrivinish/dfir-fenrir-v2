@@ -18,7 +18,7 @@ from core.database import get_db
 from core.security import decrypt_secret
 from incidents.reference import assign as assign_reference
 from models import Incident, PlatformSetting
-from outbound_webhooks.service import suppressed_by_dark_operation
+from outbound_webhooks.service import suppressed_by_outbound_policy
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -133,8 +133,8 @@ async def _create_incident(
 
 async def _post_hooks(db: AsyncSession, inc: Incident) -> None:
     """Fire outbound webhooks + email alert. Best-effort — errors are swallowed.
-    Blocked (and audited) unless Dark Operation is off — fail closed."""
-    if await suppressed_by_dark_operation(db, "incident_created", inc):
+    Blocked (and audited) under Dark Operation or TLP:RED (H3) — fail closed."""
+    if await suppressed_by_outbound_policy(db, "incident_created", inc):
         return
     try:
         from outbound_webhooks.service import dispatch_incident_event

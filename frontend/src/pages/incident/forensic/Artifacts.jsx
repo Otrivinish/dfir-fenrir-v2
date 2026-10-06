@@ -30,6 +30,21 @@ function truncHash(h) {
   return h ? `${h.slice(0, 8)}…${h.slice(-8)}` : '—'
 }
 
+const REASON_MIN = 10
+const REF_LABELS = {
+  email_analysis: 'an email analysis',
+  browser_history_upload: 'a browser-history upload',
+  collection_package: 'a collection package',
+  defender_pdf_import: 'a Defender import',
+  timeline_import: 'a timeline import',
+}
+
+function refsMessage(refs) {
+  const kinds = [...new Set((refs || []).map(r => REF_LABELS[r.type] || r.type))]
+  return `This artifact can't be deleted: ${kinds.join(', ') || 'another record'} still uses it. ` +
+    'Delete or keep that record first.'
+}
+
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export default function Artifacts() {
@@ -44,6 +59,9 @@ export default function Artifacts() {
   const [uploading, setUploading] = useState(false)
   const [dragOver,  setDragOver]  = useState(false)
   const [selected,  setSelected]  = useState(null)   // artifact being analysed
+  const [createIocs, setCreateIocs] = useState(false) // H1: hash IOCs only when asked
+  const [deleting,  setDeleting]  = useState(null)   // artifact in the delete-reason dialog
+  const [notice,    setNotice]    = useState(null)
   const fileRef = useRef(null)
 
   const load = useCallback(async () => {
@@ -64,7 +82,7 @@ export default function Artifacts() {
     if (!file) return
     setUploading(true); setError(null)
     try {
-      await api.uploadArtifact(inc.id, file, null)
+      await api.uploadArtifact(inc.id, file, null, createIocs)
       await load()
     } catch (e) {
       setError(e.message || 'Upload failed')
@@ -86,14 +104,27 @@ export default function Artifacts() {
     if (f) handleUpload(f)
   }
 
-  const onDelete = async (artifact) => {
-    if (!window.confirm(`Delete artifact "${artifact.original_filename}"?\n\nThis permanently removes the file.`)) return
+  // Throws on failure so the dialog can show why (409 artifact_referenced lists the records).
+  const confirmDelete = async (artifact, reason) => {
     try {
-      await api.deleteArtifact(inc.id, artifact.id)
-      if (selected?.id === artifact.id) setSelected(null)
-      await load()
+      await api.deleteArtifact(inc.id, artifact.id, reason)
     } catch (e) {
-      setError(e.message || 'Delete failed')
+      if (e.code === 'artifact_referenced') throw new Error(refsMessage(e.data?.references))
+      throw e
+    }
+    setDeleting(null)
+    if (selected?.id === artifact.id) setSelected(null)
+    await load()
+  }
+
+  const onPromote = async (artifact) => {
+    setError(null); setNotice(null)
+    try {
+      const r = await api.promoteArtifactHashIocs(inc.id, artifact.id)
+      setNotice(`${artifact.original_filename}: ${r.created.length} IOC(s) created` +
+        (r.existing.length ? `, ${r.existing.length} already in the incident` : '') + '.')
+    } catch (e) {
+      setError(e.message || 'Could not create the IOCs')
     }
   }
 
@@ -104,6 +135,11 @@ export default function Artifacts() {
       {error && (
         <div className="alert error" role="alert" style={{ marginBottom: 'var(--space-3)' }}>
           <span className="alert-icon">!</span><span>{error}</span>
+        </div>
+      )}
+      {notice && (
+        <div className="alert info" role="status" style={{ marginBottom: 'var(--space-3)' }}>
+          <span>{notice}</span>
         </div>
       )}
 
@@ -132,10 +168,18 @@ export default function Artifacts() {
           </div>
           {!uploading && (
             <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 6 }}>
-              SHA-256, SHA-512 &amp; MD5 hashed on ingest · MIME detected · IOCs auto-extracted
+              Encrypted at rest (AES-256-GCM) · SHA-256, SHA-512 &amp; MD5 hashed on ingest · MIME detected
             </div>
           )}
         </div>
+      )}
+      {!ro && (
+        <label style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center',
+                                                 fontSize: 12, color: 'var(--muted)', marginBottom: 'var(--space-4)' }}>
+          <input type="checkbox" checked={createIocs} onChange={e => setCreateIocs(e.target.checked)} disabled={uploading} />
+          Also create SHA-256 + MD5 IOCs for the uploaded file (only for a malicious sample — not for ransom notes,
+          screenshots or other context files)
+        </label>
       )}
 
       {artifacts.length === 0 ? (
@@ -153,7 +197,8 @@ export default function Artifacts() {
               isClosed={ro}
               isSelected={selected?.id === a.id}
               onSelect={() => setSelected(prev => prev?.id === a.id ? null : a)}
-              onDelete={() => onDelete(a)}
+              onDelete={() => setDeleting(a)}
+              onPromote={() => onPromote(a)}
               onAnalysisResult={(updated) => {
                 setArtifacts(prev => prev.map(x => x.id === updated.id ? updated : x))
                 setSelected(updated)
@@ -162,13 +207,84 @@ export default function Artifacts() {
           ))}
         </div>
       )}
+      {deleting && (
+        <DeleteArtifactModal artifact={deleting} onConfirm={(reason) => confirmDelete(deleting, reason)}
+                             onClose={() => setDeleting(null)} />
+      )}
+    </div>
+  )
+}
+
+// ─── Delete dialog (H1: a reason is required; a referenced artifact is refused) ─
+
+function DeleteArtifactModal({ artifact, onConfirm, onClose }) {
+  const [text, setText]   = useState('')
+  const [busy, setBusy]   = useState(false)
+  const [error, setError] = useState(null)
+  const n = text.trim().length
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [busy, onClose])
+
+  const submit = async (e) => {
+    e.preventDefault()
+    setError(null); setBusy(true)
+    try {
+      await onConfirm(text.trim())
+    } catch (err) {
+      setError(err.message || 'Delete failed.')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="artifact-delete-title">
+        <div className="modal-head">
+          <h2 id="artifact-delete-title">Delete artifact</h2>
+          <button type="button" className="modal-close" onClick={onClose} disabled={busy} aria-label="Close">×</button>
+        </div>
+        <form onSubmit={submit}>
+          <div className="modal-body">
+            <div className="form">
+              <p style={{ margin: 0, color: 'var(--text)', fontSize: 14, lineHeight: 1.6, wordBreak: 'break-all' }}>
+                <b>{artifact.original_filename}</b> — the file and its record are removed permanently, with its
+                YARA matches. The audit log keeps the hashes and your reason.
+              </p>
+              <div className="field">
+                <label className="field-label" htmlFor="artifact-delete-reason">Reason</label>
+                <textarea id="artifact-delete-reason" className="input" rows={3} maxLength={2000} required autoFocus
+                          placeholder="e.g. Duplicate upload of the same sample"
+                          value={text} onChange={e => setText(e.target.value)} />
+                <span className="field-hint">
+                  {n < REASON_MIN ? `At least ${REASON_MIN} characters (${n} so far).` : 'Recorded in the audit log.'}
+                </span>
+              </div>
+              {error && (
+                <div className="alert error" role="alert">
+                  <span className="alert-icon">!</span><span>{error}</span>
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="modal-foot">
+            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn primary" disabled={busy || n < REASON_MIN}>
+              {busy ? 'Deleting…' : 'Delete artifact'}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   )
 }
 
 // ─── Artifact card ───────────────────────────────────────────────────────────
 
-function ArtifactCard({ artifact, incidentId, isClosed, isSelected, onSelect, onDelete, onAnalysisResult }) {
+function ArtifactCard({ artifact, incidentId, isClosed, isSelected, onSelect, onDelete, onPromote, onAnalysisResult }) {
   const mimeIcon = (mime) => {
     if (!mime) return '📄'
     if (mime.includes('pdf'))         return '📕'
@@ -218,6 +334,9 @@ function ArtifactCard({ artifact, incidentId, isClosed, isSelected, onSelect, on
             </span>
             <span style={{ color: 'var(--dim)' }}>{artifact.uploaded_by}</span>
             <span style={{ color: 'var(--dim)' }}>{artifact.uploaded_at ? formatLocal(artifact.uploaded_at) : ''}</span>
+            {artifact.encrypted_at_rest
+              ? <span style={{ color: 'var(--ok)' }} title="Stored encrypted (AES-256-GCM); decrypted only in memory">encrypted at rest</span>
+              : <span style={{ color: 'var(--med)' }} title="Stored before encryption at rest; an admin migration encrypts it">plaintext (awaiting migration)</span>}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)', flexShrink: 0, alignItems: 'center' }}>
@@ -231,6 +350,17 @@ function ArtifactCard({ artifact, incidentId, isClosed, isSelected, onSelect, on
           >
             Download
           </a>
+          {!isClosed && (
+            <button
+              type="button"
+              className="btn ghost"
+              style={{ fontSize: 11 }}
+              title="Create SHA-256 + MD5 IOCs for this file (skips ones the incident already has)"
+              onClick={(e) => { e.stopPropagation(); onPromote() }}
+            >
+              Promote hashes to IOCs
+            </button>
+          )}
           {!isClosed && (
             <button
               type="button"

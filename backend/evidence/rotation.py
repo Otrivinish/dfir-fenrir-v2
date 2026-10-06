@@ -3,8 +3,9 @@
 v2 → v2 re-encrypt). Operator procedure: docs/evidence-kek-rotation.md.
 
 Covers every consumer of EVIDENCE_KEK: evidence files and evidence photos (/evidence), entity and
-incident "Files" (entity_files, /asset_logs), and the collector RSA private keys in
-collection_packages. Run it as a one-off container from the backend image while backend,
+incident "Files" (entity_files, /asset_logs), quarantine artifacts (artifacts, /quarantine; H1 — a legacy
+plaintext artifact row is refused with "migrate first": python -m artifacts.encrypt_quarantine --apply),
+and the collector RSA private keys in collection_packages. Run it as a one-off container from the backend image while backend,
 analysis-worker and backup are stopped:
 
     docker compose run --rm --no-deps -v ./secrets/evidence_kek.new:/run/kek/new:ro backend \\
@@ -61,7 +62,7 @@ from audit.service import write_audit
 from core.config import settings
 from evidence import codec
 from evidence import crypto as store
-from models import AuditLog, CollectionPackage, EntityFile, Evidence
+from models import Artifact, AuditLog, CollectionPackage, EntityFile, Evidence
 
 LOCK_NAME = store.ROTATION_LOCK                    # <evidence_path>/.kek-rotation.lock
 KEYSLOT = ".keyslot"                               # §6.4 journal: <file>.keyslot
@@ -74,8 +75,9 @@ STAGE_RE = re.compile(r"rot-[0-9a-f]{32}\.partial")  # this tool's staging files
 BACKUP_ROLE = "fenrir_backup"                      # the backup sidecar's DB role (docker-compose.yml)
 OPERATOR_RE = re.compile(r"[A-Za-z0-9._@-]{1,48}")
 REKEY_ACTIONS = {"evidence": "evidence_storage_rekeyed", "photo": "evidence_storage_rekeyed",
-                 "file": "file_storage_rekeyed", "collector": "collector_key_rekeyed"}
-RESOURCE_TYPE = {"evidence": "evidence", "photo": "evidence", "file": "entity_file",
+                 "file": "file_storage_rekeyed", "artifact": "artifact_storage_rekeyed",
+                 "collector": "collector_key_rekeyed"}
+RESOURCE_TYPE = {"evidence": "evidence", "photo": "evidence", "file": "entity_file", "artifact": "artifact",
                  "collector": "collection_package"}
 EXIT_OK, EXIT_ATTENTION, EXIT_REFUSED, EXIT_MANUAL, EXIT_DO_NOT_SWAP = 0, 1, 2, 3, 4
 COLUMNS = ("rewrap", "migrate", "reencrypt", "record", "done", "attention", "failed")
@@ -292,7 +294,7 @@ def _decrypt_v0(path: Path, kek: bytes, nonce_hex: str, size: Optional[int]) -> 
 
 @dataclass
 class Item:
-    consumer: str                     # evidence | photo | file
+    consumer: str                     # evidence | photo | file | artifact
     row_id: str
     photo_id: Optional[str]
     incident_id: Optional[str]
@@ -311,11 +313,17 @@ class Item:
 
     @property
     def store(self) -> str:
-        return "files" if self.consumer == "file" else "evidence"
+        return {"file": "files", "artifact": "quarantine"}.get(self.consumer, "evidence")
 
     @property
     def root(self) -> Path:
-        return Path(settings.logs_path if self.consumer == "file" else settings.evidence_path)
+        return Path({"file": settings.logs_path, "artifact": settings.quarantine_path}
+                    .get(self.consumer, settings.evidence_path))
+
+    @property
+    def plain(self) -> bool:
+        """H1: a legacy plaintext quarantine artifact (nonce_hex NULL): no KEK involved; refused."""
+        return self.consumer == "artifact" and self.nonce_hex is None
 
     @property
     def key(self) -> tuple:
@@ -352,6 +360,11 @@ class KeyRow:
                 "action": self.action, "result": self.result, "reason": self.reason, "at": self.at}
 
 
+CONSUMERS = ("evidence", "photo", "file", "artifact")
+PLAIN_REASON = ("plain: a legacy plaintext quarantine file, under no KEK; migrate first "
+                "(python -m artifacts.encrypt_quarantine --apply)")
+
+
 def _s(v) -> Optional[str]:
     return None if v is None else str(v)
 
@@ -376,7 +389,11 @@ async def load_items(db) -> list[Item]:
                                       EntityFile.report_sha256))).all():
         items.append(Item("file", str(r.id), None, _s(r.incident_id), r.file_path, r.nonce_hex,
                           r.file_size, r.report_sha256, entity_id=_s(r.entity_id)))
-    items.sort(key=lambda i: (("evidence", "photo", "file").index(i.consumer), i.rel, i.row_id))
+    for r in (await db.execute(select(Artifact.id, Artifact.incident_id, Artifact.stored_filename,
+                                      Artifact.nonce_hex, Artifact.file_size, Artifact.sha256_hash))).all():
+        items.append(Item("artifact", str(r.id), None, _s(r.incident_id), f"{r.incident_id}/{r.stored_filename}",
+                          r.nonce_hex, r.file_size, r.sha256_hash))
+    items.sort(key=lambda i: (CONSUMERS.index(i.consumer), i.rel, i.row_id))
     return items
 
 
@@ -413,7 +430,8 @@ def scan_orphans(items: list[Item]) -> list[str]:
     under OLD. Reported, never touched. Journals are skipped by content (journal_class), not by name."""
     known = {(i.store, str(Path(i.rel))) for i in items}
     out = []
-    for name, root in (("evidence", Path(settings.evidence_path)), ("files", Path(settings.logs_path))):
+    for name, root in (("evidence", Path(settings.evidence_path)), ("files", Path(settings.logs_path)),
+                       ("quarantine", Path(settings.quarantine_path))):
         if not root.is_dir():
             continue
         for dirpath, dirs, files in os.walk(root):
@@ -453,6 +471,9 @@ class Keys:
 def classify(item: Item, keys: Keys, ledger) -> None:
     """Set item.action (+ reason / warnings). Reads at most the header and first segment of v2."""
     item.warnings = []
+    if item.plain:
+        item.action, item.reason = "failed", PLAIN_REASON
+        return
     if item.fmt is None:
         item.action, item.reason = "failed", "malformed_row: nonce_hex is not 14 or 24 hex"
         return
@@ -673,7 +694,7 @@ def parse_rewrite_journal(data: bytes) -> Optional[dict]:
         return None
     if not isinstance(fields, dict) or set(fields) != _RWJ_FIELDS or fields["v"] != 1:
         return None
-    if (fields["consumer"] not in ("evidence", "photo", "file") or not STAGE_RE.fullmatch(str(fields["staging"]))
+    if (fields["consumer"] not in CONSUMERS or not STAGE_RE.fullmatch(str(fields["staging"]))
             or store.row_format(fields["new_prefix"]) != 2 or store.row_format(fields["old_marker"]) is None):
         return None
     return fields
@@ -762,6 +783,9 @@ async def commit_rewrite(sessions, item: Item, old_marker: str, new_prefix: str,
         if item.consumer == "file":
             row = await db.get(EntityFile, uuid.UUID(item.row_id), with_for_update=True)
             current, path = (row.nonce_hex, row.file_path) if row else (None, None)
+        elif item.consumer == "artifact":
+            row = await db.get(Artifact, uuid.UUID(item.row_id), with_for_update=True)
+            current, path = (row.nonce_hex, f"{row.incident_id}/{row.stored_filename}") if row else (None, None)
         else:
             row = await db.get(Evidence, uuid.UUID(item.row_id), with_for_update=True)
             if row is None:
@@ -778,7 +802,7 @@ async def commit_rewrite(sessions, item: Item, old_marker: str, new_prefix: str,
         if current != old_marker:
             raise ManualStop(f"{item.consumer} {item.row_id}: the row's nonce_hex is neither the old marker nor "
                              "the new prefix; journal kept")
-        if item.consumer == "file":
+        if item.consumer in ("file", "artifact"):
             row.nonce_hex = new_prefix
         elif item.consumer == "evidence":
             row.nonce_hex = new_prefix
@@ -841,6 +865,11 @@ async def _load_row_for(sessions, consumer: str, row_id: str, photo_id: Optional
             r = await db.get(EntityFile, uuid.UUID(row_id))
             return None if r is None else Item("file", row_id, None, _s(r.incident_id), r.file_path, r.nonce_hex,
                                                r.file_size, r.report_sha256, entity_id=_s(r.entity_id))
+        if consumer == "artifact":
+            r = await db.get(Artifact, uuid.UUID(row_id))
+            return None if r is None else Item("artifact", row_id, None, _s(r.incident_id),
+                                               f"{r.incident_id}/{r.stored_filename}", r.nonce_hex, r.file_size,
+                                               r.sha256_hash)
         r = await db.get(Evidence, uuid.UUID(row_id))
         if r is None:
             return None
@@ -917,7 +946,7 @@ async def recover_rewrite(sessions, journal: Path, root: Path, keys: Keys, run: 
 # ─── Journal discovery and the recovery pass ──────────────────────────────────────────────────
 
 def roots() -> list[Path]:
-    return [Path(settings.evidence_path), Path(settings.logs_path)]
+    return [Path(settings.evidence_path), Path(settings.logs_path), Path(settings.quarantine_path)]
 
 
 # Journal-named files, longest suffix first (a ".keyslot.tmp" is a temporary journal, not a journal).
@@ -957,6 +986,9 @@ async def referenced_paths(sessions) -> frozenset[str]:
         for (rel,) in (await db.execute(select(EntityFile.file_path))).all():
             if rel:
                 out.add(os.path.realpath(logs / rel))
+        quar = Path(settings.quarantine_path)
+        for inc, name in (await db.execute(select(Artifact.incident_id, Artifact.stored_filename))).all():
+            out.add(os.path.realpath(quar / str(inc) / name))
     return frozenset(out)
 
 
@@ -1202,6 +1234,7 @@ def table(items: list[Item], keyrows: list[KeyRow], field_name: str) -> str:
     for name, group in (("evidence files", [i for i in items if i.consumer == "evidence"]),
                         ("evidence photos", [i for i in items if i.consumer == "photo"]),
                         ("entity/incident files", [i for i in items if i.consumer == "file"]),
+                        ("quarantine artifacts", [i for i in items if i.consumer == "artifact"]),
                         ("collector keys", keyrows)):
         c = Counter(getattr(i, field_name) for i in group)
         warn = sum(1 for i in group if getattr(i, "warnings", None))
@@ -1566,7 +1599,9 @@ async def cmd_verify(args, sessions) -> int:
     v0_stuck = []                          # ROT-M2: v0 files NEW does not open (still under OLD or corrupt)
     for i in items:
         i.at = now()
-        if i.fmt is None:
+        if i.plain:
+            i.result, i.reason = "failed", PLAIN_REASON
+        elif i.fmt is None:
             i.result, i.reason = "failed", "malformed_row"
         elif i.fmt == 0:
             try:

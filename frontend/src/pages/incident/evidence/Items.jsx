@@ -13,6 +13,7 @@ import { DraftBadge } from '../../../components/ExhibitPicker.jsx'
 import UploadProgress, { useChunkedUpload, useRetainedUpload } from '../../../components/UploadProgress.jsx'
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 import { CUSTODY_ACTION_COLOR, CUSTODY_ACTION_LABEL } from '../../../lib/custodyLabels.js'
+import LinkedCaseNotes from '../../../components/LinkedCaseNotes.jsx'
 
 const KIND_LABEL = { digital_file: 'Digital file', physical_item: 'Physical item' }
 const STATUS_LABEL = {
@@ -1278,6 +1279,8 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
 
           <WorkingCopiesPanel incidentId={incidentId} item={item}
             usernameOf={usernameOf} canWrite={canWrite} onChanged={reload} />
+
+          <LinkedCaseNotes incidentId={incidentId} kind="evidence" targetId={item.id} isClosed={isClosed} />
         </div>
 
         <div className="modal-foot" style={{ flexWrap: 'wrap', gap: 'var(--space-2)' }}>

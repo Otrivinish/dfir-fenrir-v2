@@ -3,6 +3,7 @@ import { useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { useDialogFocus } from '../../hooks/useDialogFocus.js'
 import { formatLocal } from '../../lib/datetime.js'
+import { ExhibitPill, FileHash, FileReasonModal, RegisterExhibitModal, fileRefsMessage } from '../../components/SupportingFile.jsx'
 
 // Incident "Files" store — a working area for NON-malicious supporting material
 // (screenshots, raw logs, notes). Shares one encrypted store with entity files;
@@ -41,6 +42,9 @@ export default function Files() {
   const [linkTarget, setLinkTarget] = useState(null) // file being (un)linked
   const [figureTarget, setFigureTarget] = useState(null) // file being included in the report / re-captioned
   const [figureError, setFigureError]   = useState(null)
+  const [renaming, setRenaming] = useState(null)   // H4: file in the rename dialog (reason required)
+  const [deleting, setDeleting] = useState(null)   // H4: file in the delete dialog (reason required)
+  const [registering, setRegistering] = useState(null) // H4: file in the Register-as-exhibit dialog
   const fileInputRef = useRef(null)
 
   const load = useCallback(async () => {
@@ -79,33 +83,28 @@ export default function Files() {
     }
   }
 
-  const onRename = async (f) => {
-    const next = window.prompt('Rename file', f.original_name)
-    if (next == null) return
-    const name = next.trim()
-    if (!name || name === f.original_name) return
-    setBusy(true); setError(null)
-    try {
-      await api.updateIncidentFile(inc.id, f.id, { original_name: name })
-      await reload()
-    } catch (err) {
-      setError(err.message || 'Could not rename')
-    } finally {
-      setBusy(false)
-    }
+  // H4: rename / delete go through dialogs that ask for the reason; they throw so the dialog shows why.
+  const confirmRename = async (f, reason, name) => {
+    await api.updateIncidentFile(inc.id, f.id, { original_name: name, reason })
+    setRenaming(null)
+    await reload()
   }
 
-  const onDelete = async (f) => {
-    if (!window.confirm(`Delete this file?\n\n${f.original_name}`)) return
-    setBusy(true); setError(null)
+  const confirmDelete = async (f, reason) => {
     try {
-      await api.deleteIncidentFile(inc.id, f.id)
-      await reload()
-    } catch (err) {
-      setError(err.message || 'Could not delete file')
-    } finally {
-      setBusy(false)
+      await api.deleteIncidentFile(inc.id, f.id, reason)
+    } catch (e) {
+      if (e.code === 'file_referenced') throw new Error(fileRefsMessage(e.data?.references))
+      throw e
     }
+    setDeleting(null)
+    await reload()
+  }
+
+  const confirmRegister = async (f) => {
+    const out = await api.registerFileExhibit(inc.id, f.id)
+    await reload()
+    return out
   }
 
   const onSaveLink = async (f, entityId) => {
@@ -171,8 +170,10 @@ export default function Files() {
       </div>
 
       <p style={{ fontSize: 12, color: 'var(--dim)', marginBottom: 'var(--space-3)' }}>
-        Working store for non-malicious supporting material. Encrypted at rest. Not chain-of-custody evidence
-        and not for suspected-malicious samples — use Evidence or Artifacts for those.
+        Working store for non-malicious supporting material. Encrypted at rest and hashed (SHA-256) on upload.
+        Not chain-of-custody evidence — use <b>Register as exhibit</b> when a file must become one — and not for
+        suspected-malicious samples (Artifacts). Rename and delete ask for a reason; a file a report, case note,
+        exhibit or entity relies on can't be deleted.
       </p>
 
       {error && (
@@ -191,16 +192,18 @@ export default function Files() {
         </div>
       ) : (
         <div className="table-scroll">
-        <table className="settings-table">
+        <table className="settings-table compact">
           <thead>
             <tr>
-              <th>Name</th>
+              <th style={{ minWidth: 180 }}>Name</th>
               <th style={{ width: 80 }}>Type</th>
               <th style={{ width: 90 }}>Size</th>
+              <th style={{ width: 110 }}>SHA-256</th>
               <th style={{ width: 150 }}>Added</th>
               <th style={{ width: 130 }}>Added by</th>
               <th style={{ width: 150 }}>Entity</th>
               <th style={{ width: 120 }}>Report</th>
+              <th style={{ width: 130 }}>Exhibit</th>
               <th className="actions">Actions</th>
             </tr>
           </thead>
@@ -212,6 +215,7 @@ export default function Files() {
                 </td>
                 <td><span className="pill" style={{ fontSize: 10 }}>{fileType(f)}</span></td>
                 <td style={{ fontSize: 12, color: 'var(--muted)', fontFamily: 'var(--font-mono)' }}>{fmtSize(f.file_size)}</td>
+                <td><FileHash file={f} /></td>
                 <td
                   title={formatLocal(f.uploaded_at)}
                   style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--muted)' }}
@@ -254,6 +258,14 @@ export default function Files() {
                     <span style={{ color: 'var(--dim)', fontSize: 12 }} title="Only PNG, JPEG, GIF or WebP images can go in a report">—</span>
                   )}
                 </td>
+                <td>
+                  {f.evidence_id ? <ExhibitPill file={f} /> : canEdit ? (
+                    <button type="button" className="btn ghost" onClick={() => setRegistering(f)} disabled={isClosed || busy}
+                            style={{ fontSize: 11, whiteSpace: 'nowrap' }} title="Copy this file into Evidence as a draft exhibit with chain of custody">
+                      Register as exhibit
+                    </button>
+                  ) : <span style={{ color: 'var(--dim)', fontSize: 12 }}>—</span>}
+                </td>
                 <td className="actions">
                   <a
                     className="btn ghost"
@@ -266,10 +278,10 @@ export default function Files() {
                   <button type="button" className="btn ghost" onClick={() => setLinkTarget(f)} disabled={isClosed} style={{ fontSize: 11 }}>
                     {f.entity_id ? 'Re-link' : 'Link'}
                   </button>
-                  <button type="button" className="btn ghost" onClick={() => onRename(f)} disabled={isClosed || busy} style={{ fontSize: 11 }}>
+                  <button type="button" className="btn ghost" onClick={() => setRenaming(f)} disabled={isClosed || busy} style={{ fontSize: 11 }}>
                     Rename
                   </button>
-                  <button type="button" className="btn ghost" onClick={() => onDelete(f)} disabled={isClosed || busy}>
+                  <button type="button" className="btn ghost" onClick={() => setDeleting(f)} disabled={isClosed || busy}>
                     Delete
                   </button>
                 </td>
@@ -288,6 +300,19 @@ export default function Files() {
           busy={busy}
           error={figureError}
         />
+      )}
+
+      {renaming && (
+        <FileReasonModal file={renaming} rename onClose={() => setRenaming(null)}
+                         onConfirm={(reason, name) => confirmRename(renaming, reason, name)} />
+      )}
+      {deleting && (
+        <FileReasonModal file={deleting} onClose={() => setDeleting(null)}
+                         onConfirm={(reason) => confirmDelete(deleting, reason)} />
+      )}
+      {registering && (
+        <RegisterExhibitModal file={registering} onClose={() => setRegistering(null)}
+                              onConfirm={() => confirmRegister(registering)} />
       )}
 
       {linkTarget && (

@@ -34,6 +34,7 @@ from core.errors import ApiError, api_error_handler
 from entities.routes import router as entities_router
 from files.routes import router as files_router
 from notes.routes import router as notes_router
+from case_notes.routes import router as case_notes_router
 from webhistory.routes import router as webhistory_router
 from evidence.crypto import STALE_PARTIAL_MINUTES, assert_kek_configured, check_storage_gate, sweep_staging
 from evidence.download import router as exports_download_router
@@ -188,7 +189,7 @@ async def lifespan(app: FastAPI):
     # Stored files (G1 stage 3a, docs/streaming-aes-gcm-format.md §6.4, §4.4): refuse to start while
     # a KEK rotation or a v2 rewrite may have left a file half done; then drop the staging files a
     # crash left behind (they never had a row).
-    stores = (settings.evidence_path, settings.logs_path)
+    stores = (settings.evidence_path, settings.logs_path, settings.quarantine_path)   # H1: + the quarantine
     check_storage_gate(stores)
     stale = {root: sweep_staging(root) for root in stores}
     if any(stale.values()):
@@ -380,6 +381,7 @@ app.include_router(iocs_router,                  prefix="/api/incidents", tags=[
 app.include_router(entities_router,  prefix="/api/incidents",          tags=["Entities"])
 app.include_router(files_router,     prefix="/api/incidents",          tags=["Files"])
 app.include_router(notes_router,     prefix="/api/incidents",          tags=["Notes"])
+app.include_router(case_notes_router, prefix="/api/incidents",         tags=["Case notes"])
 app.include_router(webhistory_router, prefix="/api/incidents",         tags=["Browser History"])
 app.include_router(evidence_router,  prefix="/api/incidents",          tags=["Evidence"])
 app.include_router(uploads_router,   prefix="/api/incidents",          tags=["Uploads"])

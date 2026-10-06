@@ -819,7 +819,7 @@ async def _reap_loop() -> None:
                 if n:
                     log.info("upload reaper: aborted %d idle upload session(s)", n)
                 stale = {root: await asyncio.to_thread(crypto.sweep_staging, root)
-                         for root in (settings.evidence_path, settings.logs_path)}
+                         for root in (settings.evidence_path, settings.logs_path, settings.quarantine_path)}
                 if any(stale.values()):
                     log.warning("upload reaper: removed stale staging files (idle > %d min): %s",
                                 crypto.STALE_PARTIAL_MINUTES, stale)
