@@ -427,3 +427,19 @@ async def notify_comment(
                 incident_id=incident_id,
             )
     await commit_and_push(db)
+
+
+async def notify_api_token_revoked(db: AsyncSession, owner_id: uuid.UUID, token_name: str, admin: User):
+    """R144: tell a token's owner that an admin revoked it (never when they revoked their own).
+    The token name and the admin only. In-app only. Commits, then pushes."""
+    if owner_id == admin.id:
+        return
+    await _create_and_push(
+        db,
+        owner_id,
+        type="api_token_revoked",
+        title=f"An admin revoked your API token “{token_name}”",
+        body=f"Revoked by {admin.username}. Calls made with it now get 401; issue a new token under "
+             "Settings → Account → API tokens if you still need one.",
+        incident_id=None,
+    )

@@ -110,9 +110,8 @@ async def _resolve_bearer(request: Request, db: AsyncSession) -> Optional[User]:
         session_id=None,
     )
     # Mark request so handlers can distinguish if needed (e.g. block password
-    # change endpoints from API tokens). last_used_at update is on tok; flush
-    # by the request-scoped db dep at commit time would persist it — but most
-    # GET-only endpoints don't commit. Stale by minutes is acceptable.
+    # change endpoints from API tokens). resolve_token commits last_used_at
+    # itself, at most once a minute per token (R144).
     request.state.auth_method = "api_token"
     request.state.api_token_id = tok.id
     return user

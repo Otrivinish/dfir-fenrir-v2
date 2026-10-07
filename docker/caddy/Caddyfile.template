@@ -95,14 +95,26 @@
 	header @notdocs Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self'; worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests"
 
 	# Request-size ceilings at the edge (the backend still enforces per-route caps).
-	# Every large upload is multipart (evidence 1 GiB, collection output 2 GiB,
-	# artifacts/PCAP 500 MiB) — anything else is JSON and never needs more than 10 MiB.
+	# Non-multipart: JSON, and the upload-session chunks (raw application/octet-stream,
+	# at most 8 MiB each; evidence/uploads.py CHUNK_SIZE) — 10 MiB.
+	# Multipart: the largest app cap is 512 MiB (legacy evidence + photo multipart,
+	# collection output, the web-history file pair; artifacts/PCAP/forensic 500 MiB);
+	# 520 MiB leaves 8 MiB for multipart framing and form fields (OD-4, was 2200 MiB).
 	@not_multipart not header Content-Type multipart/form-data*
 	request_body @not_multipart {
 		max_size 10MiB
 	}
 	request_body {
-		max_size 2200MiB
+		max_size 520MiB
+	}
+
+	# An over-limit body gets the API's JSON error shape instead of an empty 413
+	# (OD-4 / R141). The CSP set above carries over; the baseline block is deferred
+	# (it deletes Server), so it doesn't reach an error response: re-add it.
+	handle_errors 413 {
+		import security_baseline
+		header Content-Type "application/json"
+		respond `{"detail":"Request body too large","code":"file_too_large"}` 413
 	}
 
 	handle /api/docs* {

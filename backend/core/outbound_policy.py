@@ -40,6 +40,19 @@ def outbound_block_reasons(inc) -> list[str]:
         return [DARK_OPERATION]
 
 
+# R112 (OD-2): the placeholder that replaces an indicator in a SIEM-forwarded audit line.
+SIEM_REDACTED = {DARK_OPERATION: "redacted:dark-op", TLP_RED: "redacted:tlp-red"}
+
+
+def siem_redaction(inc) -> Optional[str]:
+    """For an audit row that names an indicator (IOC, domain, URL) of `inc`: the placeholder the
+    syslog forwarder sends instead of it, or None to forward the row as stored. Same rule and
+    fail-closed reading as automatic outbound (an unreadable incident or unknown TLP redacts).
+    FENRIR's own audit row is never changed."""
+    reasons = outbound_block_reasons(inc)
+    return SIEM_REDACTED[reasons[0]] if reasons else None
+
+
 def outbound_allowed(inc) -> tuple[bool, Optional[str]]:
     """The policy point for every automatic outbound channel: (True, None), or (False, reason)."""
     reasons = outbound_block_reasons(inc)

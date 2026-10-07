@@ -381,6 +381,13 @@ export const api = {
   listAdminSessions:  ()   => request('GET',    '/api/admin/sessions'),
   adminRevokeSession: (id) => request('DELETE', `/api/admin/sessions/${id}`),
 
+  // API tokens (R144) — own, and admin (all users)
+  listApiTokens:       ()        => request('GET',    '/api/tokens'),
+  createApiToken:      (payload) => request('POST',   '/api/tokens', payload),
+  revokeApiToken:      (id)      => request('DELETE', `/api/tokens/${id}`),
+  listAllApiTokens:    ()        => request('GET',    '/api/admin/tokens'),
+  adminRevokeApiToken: (id)      => request('DELETE', `/api/admin/tokens/${id}`),
+
   // teams (admin)
   listTeams:        ()              => request('GET',    '/api/teams'),
   createTeam:       (payload)       => request('POST',   '/api/teams', payload),

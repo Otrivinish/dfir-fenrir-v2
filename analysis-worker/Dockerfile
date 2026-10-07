@@ -26,12 +26,13 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 COPY worker.py .
 
 # Non-root, no capabilities — same uid as v1 so the air-gapped network
-# /tmp:noexec mount and quarantine read-only volume keep the same posture.
+# and /tmp:noexec mount keep the same posture. No /quarantine (OD-3): artifact
+# bytes arrive over TLS from the backend.
 # The code stays root-owned: the process that parses hostile files must not be
 # able to rewrite worker.py (the rootfs is read-only in compose as well).
 RUN useradd -m -u 1002 analyst \
-    && mkdir -p /quarantine /yara-rules \
-    && chown analyst:analyst /quarantine /yara-rules
+    && mkdir -p /yara-rules \
+    && chown analyst:analyst /yara-rules
 USER 1002:1002
 
 EXPOSE 8001

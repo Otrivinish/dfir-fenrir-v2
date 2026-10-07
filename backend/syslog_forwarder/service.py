@@ -493,10 +493,16 @@ forwarder = SyslogForwarder()
 
 def forward_audit_row(*, action: str, username: Optional[str], resource_type: Optional[str],
                       resource_id: Optional[str], outcome: Optional[str], ip_address: Optional[str],
-                      timestamp: datetime, user_agent: Optional[str] = None) -> None:
-    """Push an audit-log row onto the forwarder queue (non-blocking)."""
+                      timestamp: datetime, user_agent: Optional[str] = None,
+                      redact: Optional[str] = None) -> None:
+    """Push an audit-log row onto the forwarder queue (non-blocking).
+    `redact` (R112): the caller's placeholder for an indicator held in resource_id on a TLP:RED
+    or Dark Operation incident; it replaces resource_id in the line. The policy is decided at
+    the call site, so this hot path does no lookup. resource_label and details are never sent."""
     if not forwarder.is_enabled():
         return
+    if redact:
+        resource_id = redact
     cfg = forwarder._cfg
     severity = 4 if (outcome or "").lower() in ("failure", "denied") else 6
     frame = build_rfc5424(

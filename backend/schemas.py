@@ -4096,10 +4096,14 @@ class CoverageList(BaseModel):
 
 # ─── API tokens (Bearer auth) ───────────────────────────────────────────────
 
+API_TOKEN_MAX_DAYS = 90
+
+
 class ApiTokenCreate(BaseModel):
     name:        str = Field(min_length=1, max_length=128)
     role:        Literal["admin", "analyst", "viewer"] = "analyst"
-    expires_in_days: Optional[int] = Field(default=None, ge=1, le=3650)
+    expires_in_days: int = Field(ge=1, le=API_TOKEN_MAX_DAYS,
+                                 description="Required (R144): every new token expires, after 1 to 90 days.")
 
 
 class ApiTokenOut(BaseModel):
@@ -4108,13 +4112,22 @@ class ApiTokenOut(BaseModel):
     token_prefix: str
     role:         str
     created_at:   datetime
-    last_used_at: Optional[datetime] = None
-    expires_at:   Optional[datetime] = None
+    last_used_at: Optional[datetime] = Field(default=None, description="Updated at most once a minute per token.")
+    expires_at:   Optional[datetime] = Field(default=None, description="Null only on a token issued before R144.")
     revoked_at:   Optional[datetime] = None
     revoke_reason: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+    @computed_field(description="active | expired | revoked, evaluated now; only an active token authenticates.")
+    @property
+    def status(self) -> Literal["active", "expired", "revoked"]:
+        if self.revoked_at is not None:
+            return "revoked"
+        if self.expires_at is not None and self.expires_at <= datetime.now(timezone.utc):
+            return "expired"
+        return "active"
 
 
 class ApiTokenIssued(ApiTokenOut):

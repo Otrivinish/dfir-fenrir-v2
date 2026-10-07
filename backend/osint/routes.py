@@ -14,7 +14,7 @@ from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.errors import ApiErrorBody
-from core.outbound_policy import OPEN_TLP, require_outbound_confirmation
+from core.outbound_policy import OPEN_TLP, require_outbound_confirmation, siem_redaction
 from incidents.access import accessible_filter, get_accessible_incident
 from models import IOC, Incident, User
 from schemas import EnrichRequest, EnrichResponse, EnrichResultItem, OsintSourceOut, OsintSourcesResponse
@@ -112,6 +112,7 @@ async def enrich_indicator(
         resource_type="osint_indicator", resource_id=req.indicator,
         details={"ioc_type": req.ioc_type, "sources": sources},
         ip_address=request.client.host if request.client else None,
+        siem_redact=siem_redaction(inc) if inc is not None else None,
     )
     await db.commit()
 

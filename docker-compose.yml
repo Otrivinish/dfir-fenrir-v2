@@ -352,7 +352,6 @@ services:
       - YARA_RULES_DIR=/yara-rules   # the only setting worker.py reads
       - HOME=/tmp                    # tools that look for ~/.config get the tmpfs
     volumes:
-      - quarantine-data:/quarantine:ro   # read-only mount of hostile samples
       - yara-rules-data:/yara-rules:ro
     networks:
       - fenrir-analysis  # No internet access
