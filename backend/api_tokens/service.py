@@ -66,11 +66,18 @@ async def issue_token(
     return plain, row
 
 
+# R144: `last_used_at` is written at most once per this interval per token, so a busy
+# token does not add a DB write to every request.
+LAST_USED_WRITE_INTERVAL = timedelta(seconds=60)
+
+
 async def resolve_token(db: AsyncSession, plain: str) -> Optional[Tuple[User, ApiToken]]:
     """Resolve a Bearer token to (user, token). None if invalid/expired/revoked.
 
-    Caller is responsible for committing the `last_used_at` update if it cares
-    about that audit field — we mutate it on the loaded row but don't flush.
+    Revocation and expiry are read from the DB on every call, so they take effect on the
+    next request. When `last_used_at` is older than LAST_USED_WRITE_INTERVAL (or unset)
+    it is updated and committed at once (R144): a GET-only request never commits, and
+    otherwise the update would ride on every write request's commit.
     """
     if not plain or not plain.startswith(TOKEN_PREFIX):
         return None
@@ -89,7 +96,9 @@ async def resolve_token(db: AsyncSession, plain: str) -> Optional[Tuple[User, Ap
     if not user or not user.is_active:
         return None
 
-    tok.last_used_at = now
+    if tok.last_used_at is None or now - tok.last_used_at >= LAST_USED_WRITE_INTERVAL:
+        tok.last_used_at = now
+        await db.commit()   # nothing else is pending yet: this runs while authenticating
     return user, tok
 
 

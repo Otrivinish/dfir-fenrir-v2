@@ -34,6 +34,7 @@ import GlobalAuditLog from './pages/admin/GlobalAuditLog.jsx'
 import AuditExports from './pages/admin/AuditExports.jsx'
 import AdminStorage from './pages/admin/Storage.jsx'
 import AdminSessions from './pages/admin/Sessions.jsx'
+import AdminApiTokens from './pages/admin/ApiTokens.jsx'
 import AdminAPIDocs from './pages/admin/APIDocs.jsx'
 import Situation from './pages/incident/Situation.jsx'
 import Recovery from './pages/incident/Recovery.jsx'
@@ -253,6 +254,7 @@ export default function App() {
                 <Route path="audit-log"     element={<GlobalAuditLog />} />
                 <Route path="audit-exports" element={<AuditExports />} />
                 <Route path="sessions"      element={<AdminSessions />} />
+                <Route path="api-tokens"    element={<AdminApiTokens />} />
                 <Route path="storage"    element={<AdminStorage />} />
                 <Route path="backup"     element={<Backup />} />
                 <Route path="api-docs"   element={<AdminAPIDocs />} />

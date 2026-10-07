@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../../hooks/useAuth.jsx'
 import { api } from '../../api/client.js'
 import PasswordField from '../../components/PasswordField.jsx'
 import StrengthMeter from '../../components/StrengthMeter.jsx'
+import ApiTokenTable from '../../components/ApiTokenTable.jsx'
 import { formatLocal } from '../../lib/datetime.js'
 import { getStoredTz, setStoredTz, getBrowserTz, TIMEZONE_GROUPS } from '../../lib/timezone.js'
 
@@ -16,6 +17,7 @@ export default function Account() {
       <TimezonePanel />
       <ChangePasswordPanel />
       <TotpPanel user={user} policy={policy} onChanged={refresh} />
+      <ApiTokensPanel user={user} />
     </div>
   )
 }
@@ -278,6 +280,138 @@ function TotpPanel({ user, policy, onChanged }) {
             </button>
           </div>
         </form>
+      )}
+    </section>
+  )
+}
+
+// R144: the caller's own Bearer tokens. The server caps the role at yours and the expiry at 90 days.
+const TOKEN_ROLES = ['viewer', 'analyst', 'admin']
+const TOKEN_DAYS = [1, 7, 30, 90]
+
+function ApiTokensPanel({ user }) {
+  const [tokens, setTokens]   = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError]     = useState(null)
+  const [busy, setBusy]       = useState(false)
+  const [showForm, setShowForm] = useState(false)
+  const [name, setName]       = useState('')
+  const [role, setRole]       = useState('viewer')
+  const [days, setDays]       = useState('30')
+  const [issued, setIssued]   = useState(null)
+  const [copied, setCopied]   = useState(false)
+
+  const roles = TOKEN_ROLES.slice(0, TOKEN_ROLES.indexOf(user?.role) + 1)
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.listApiTokens()
+      setTokens(r.items || [])
+    } catch (e) {
+      setError(e.message || 'Could not load API tokens')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const onCreate = async (e) => {
+    e.preventDefault()
+    setError(null); setBusy(true)
+    try {
+      const r = await api.createApiToken({ name: name.trim(), role, expires_in_days: Number(days) })
+      setIssued(r); setCopied(false)
+      setShowForm(false); setName('')
+      await load()
+    } catch (err) {
+      setError(err.message || 'Could not create the token')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onRevoke = async (t) => {
+    setError(null); setBusy(true)
+    try {
+      await api.revokeApiToken(t.id)
+      await load()
+    } catch (err) {
+      setError(err.message || 'Could not revoke the token')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(issued.token); setCopied(true) } catch { /* select it by hand */ }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-toolbar">
+        <div>
+          <h2 className="panel-h">API tokens</h2>
+          <div className="token-sub">Bearer tokens for scripts and the MCP server. They act as you, at the role you pick.</div>
+        </div>
+        <div className="token-controls">
+          <button type="button" className="btn primary" disabled={busy || showForm} onClick={() => setShowForm(true)}>+ New token</button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="alert error" role="alert">
+          <span className="alert-icon">!</span>
+          <span>{error}</span>
+        </div>
+      )}
+
+      {issued && (
+        <div className="token-issued">
+          <div className="alert warn" role="status">
+            <span className="alert-icon">!</span>
+            <span>Copy this token now. FENRIR keeps only its hash and will never show it again.</span>
+          </div>
+          <code className="token-secret" aria-label={`Secret of token ${issued.name}`}>{issued.token}</code>
+          <div className="settings-form-actions">
+            <button type="button" className="btn primary" onClick={copy}>{copied ? 'Copied ✓' : 'Copy token'}</button>
+            <button type="button" className="btn ghost" onClick={() => setIssued(null)}>Done</button>
+          </div>
+        </div>
+      )}
+
+      {showForm && (
+        <form onSubmit={onCreate} className="settings-form token-form">
+          <div className="field">
+            <label className="field-label" htmlFor="tok-name">Name</label>
+            <input id="tok-name" className="input" value={name} maxLength={128} required
+                   placeholder="e.g. nightly-export script" onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="tok-role">Role</label>
+            <select id="tok-role" className="input" value={role} onChange={(e) => setRole(e.target.value)}>
+              {roles.map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+            <div className="field-hint">Pick the lowest role the script needs. It can never exceed yours.</div>
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="tok-days">Expires after</label>
+            <select id="tok-days" className="input" value={days} onChange={(e) => setDays(e.target.value)}>
+              {TOKEN_DAYS.map(d => <option key={d} value={d}>{d} day{d > 1 ? 's' : ''}</option>)}
+            </select>
+          </div>
+          <div className="settings-form-actions">
+            <button type="button" className="btn ghost" disabled={busy} onClick={() => setShowForm(false)}>Cancel</button>
+            <button type="submit" className="btn primary" disabled={busy || !name.trim()}>{busy ? 'Creating…' : 'Create token'}</button>
+          </div>
+        </form>
+      )}
+
+      {loading ? (
+        <div className="panel-empty"><div>Loading…</div></div>
+      ) : tokens.length === 0 ? (
+        <div className="panel-empty"><div>No API tokens yet.</div></div>
+      ) : (
+        <ApiTokenTable tokens={tokens} onRevoke={onRevoke} busy={busy} />
       )}
     </section>
   )

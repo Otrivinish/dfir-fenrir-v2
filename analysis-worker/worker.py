@@ -1,7 +1,8 @@
 """DFIR-FENRIR v2 — analysis worker.
 
 Runs on the air-gapped fenrir-analysis network with no internet access,
-read-only mount of /quarantine, dropped capabilities, and noexec /tmp.
+no sample volume (OD-3: the backend sends artifact bytes over TLS), dropped
+capabilities, and noexec /tmp.
 """
 import hashlib
 import hmac
@@ -536,8 +537,8 @@ def _find_suspicious(result: dict) -> None:
 
 
 # ── Artifact Analysis ─────────────────────────────────────────────────────────
-# All artifact endpoints accept {"path": "/quarantine/..."}
-# The quarantine volume is mounted read-only at /quarantine.
+# The tools below are reached only through /analyze/upload/{tool} (H1); OD-3 removed their
+# path-based routes and the /quarantine mount. `path` is the original file name only.
 
 YARA_RULES_DIR = os.environ.get("YARA_RULES_DIR", "/yara-rules")
 
@@ -574,31 +575,19 @@ class ArtifactPathRequest(BaseModel):
 
 
 # H1: the quarantine is encrypted at rest, so the backend decrypts an artifact and sends its bytes (TLS) to
-# /analyze/upload/{tool}; the tool then reads them from here instead of the (ciphertext) /quarantine file.
+# /analyze/upload/{tool}; the tool then reads them from here (the worker has no /quarantine mount since OD-3).
 _UPLOADED: ContextVar[Optional[bytes]] = ContextVar("fenrir_worker_uploaded", default=None)
 
 
 def _read_artifact(path: str) -> bytes:
     raw = _UPLOADED.get()
-    if raw is not None:
-        return raw
-    p = Path(path).resolve()
-    root = Path("/quarantine").resolve()
-    # Containment by path components, not string prefix ("/quarantine-x" would pass that).
-    if not p.is_relative_to(root):
-        raise HTTPException(400, "Path outside quarantine")
-    if not p.exists():
-        raise HTTPException(404, "File not found")
-    if not p.is_file():
-        raise HTTPException(400, "Path must reference a regular file")
-    if p.stat().st_size > MAX_INPUT_BYTES:
-        raise HTTPException(413, "Artifact exceeds the 500 MiB analysis limit")
-    return p.read_bytes()
+    if raw is None:  # fail closed: there is no file system fallback (OD-3)
+        raise HTTPException(400, "No artifact bytes uploaded")
+    return raw
 
 
 # ── 1. File type ─────────────────────────────────────────────────────────────
 
-@app.post("/analyze/file-type")
 def analyze_file_type(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     p   = Path(req.path)
@@ -640,7 +629,6 @@ def analyze_file_type(req: ArtifactPathRequest):
 
 # ── 2. Hashes ────────────────────────────────────────────────────────────────
 
-@app.post("/analyze/hashes")
 def analyze_hashes(req: ArtifactPathRequest):
     raw  = _read_artifact(req.path)
     h1   = hashlib.sha1(raw).hexdigest()
@@ -668,7 +656,6 @@ def analyze_hashes(req: ArtifactPathRequest):
 
 # ── 3. Entropy ───────────────────────────────────────────────────────────────
 
-@app.post("/analyze/entropy")
 def analyze_entropy(req: ArtifactPathRequest):
     raw       = _read_artifact(req.path)
     n         = len(raw)
@@ -709,7 +696,6 @@ def analyze_entropy(req: ArtifactPathRequest):
 
 # ── 4. Strings ───────────────────────────────────────────────────────────────
 
-@app.post("/analyze/strings")
 def analyze_strings(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     result: dict[str, Any] = {
@@ -763,7 +749,6 @@ def analyze_strings(req: ArtifactPathRequest):
 
 # ── 5. IOC Extract ───────────────────────────────────────────────────────────
 
-@app.post("/analyze/ioc-extract")
 def analyze_ioc_extract(req: ArtifactPathRequest):
     raw  = _read_artifact(req.path)
     text = raw.decode("utf-8", errors="replace")
@@ -799,7 +784,6 @@ def analyze_ioc_extract(req: ArtifactPathRequest):
 
 # ── 6. PE Analysis ───────────────────────────────────────────────────────────
 
-@app.post("/analyze/pe")
 def analyze_pe(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     try:
@@ -887,7 +871,6 @@ def analyze_pe(req: ArtifactPathRequest):
 
 # ── 7. Office / Macro Analysis ───────────────────────────────────────────────
 
-@app.post("/analyze/office")
 def analyze_office(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     try:
@@ -939,7 +922,6 @@ def analyze_office(req: ArtifactPathRequest):
 
 # ── 8. PDF Analysis ──────────────────────────────────────────────────────────
 
-@app.post("/analyze/pdf")
 def analyze_pdf(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     if not raw.startswith(b"%PDF"):
@@ -985,7 +967,6 @@ def analyze_pdf(req: ArtifactPathRequest):
 
 # ── 9. EXIF / Metadata ───────────────────────────────────────────────────────
 
-@app.post("/analyze/exif")
 def analyze_exif(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     result: dict[str, Any] = {"fields": {}, "sensitive_fields": [], "tool": None}
@@ -1032,7 +1013,6 @@ def analyze_exif(req: ArtifactPathRequest):
 
 # ── 10. Hex Dump ─────────────────────────────────────────────────────────────
 
-@app.post("/analyze/hexdump")
 def analyze_hexdump(req: ArtifactPathRequest):
     raw    = _read_artifact(req.path)
     offset = min(req.offset or 0, len(raw))
@@ -1059,7 +1039,6 @@ def analyze_hexdump(req: ArtifactPathRequest):
 
 # ── 11. YARA ─────────────────────────────────────────────────────────────────
 
-@app.post("/analyze/yara")
 def analyze_yara(req: ArtifactPathRequest):
     raw = _read_artifact(req.path)
     try:
@@ -1109,7 +1088,6 @@ class YaraInlineRequest(BaseModel):
     path: str
     rules: list[YaraInlineRule]
 
-@app.post("/analyze/yara-inline")
 def analyze_yara_inline(req: YaraInlineRequest):
     """Run caller-supplied YARA rules (as text) against a quarantine artifact."""
     raw = _read_artifact(req.path)

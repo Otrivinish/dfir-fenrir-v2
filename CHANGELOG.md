@@ -588,6 +588,18 @@ Built from the IR-expert workflow audit of 2026-10-01: 21 approved pieces (A1–
 - **Help rewritten** to match the current app: roles, tabs, reports, disclosure packages and tokens. New topics include an end-to-end "Running an Incident from Intake to Closure" workflow. Help renders `[[topic]]` links, `code` and *italics*, and a link check before every build fails on a dangling link. (L5)
 - **Docs:** `reports.md`, `audit-integrity.md` §4, the CoC procedure and the Help style guide now cover Ed25519-signed disclosure packages and spreadsheet-safe CSV. (L5)
 
+### Post-backlog owner items (2026-10-07)
+
+- **API tokens screens:** Settings → Account → API tokens and Admin → API Tokens. List tokens, create one with an expiry (the secret is shown once), and revoke in the row; an admin revoke notifies the owner. New `fenrir-mcp tokens list|revoke`. (OD-1)
+- ⚠ **`POST /api/tokens` requires `expires_in_days`** (1–90; it was optional, up to 3650). Existing tokens keep their expiry. Token objects gain `status`, and errors carry `token_role_exceeds_user` / `token_not_found`. (OD-1)
+- **SIEM forwarding:** for TLP:RED and Dark Operation incidents, forwarded audit lines replace the indicator with `redacted:tlp-red` / `redacted:dark-op`. The stored audit row and its hash are unchanged. (OD-2)
+- ⚠ **Edge limits:** Caddy refuses multipart bodies over 520 MiB (was 2,200 MiB) and other bodies over 10 MiB. It answers with a JSON 413 `{"detail":"Request body too large","code":"file_too_large"}` instead of an empty body. (OD-4)
+- **Analysis worker:** the `/quarantine` mount and the 12 path-based `/analyze/{tool}` routes are removed. Artifacts reach the worker only as bytes over TLS. This is an internal API, so no client change. (OD-3)
+- ⚠ **`POST /api/tokens` needs an interactive login** (password + TOTP). A request with an API token gets 403 `token_create_requires_session`, and the refusal is audited. Listing and revoking with a token still work, and `fenrir-mcp login` is unaffected. (R146)
+- ⚠ **MCP `fenrir_api` refuses credential endpoints** whatever the path encoding: tokens, sessions, user credential and role writes, and SIEM and service keys. Use the GUI or `fenrir-mcp tokens list|revoke` instead. (R146)
+- ⚠ **MCP never receives a secret or grants access:** it no longer creates users, changes roles, resets passwords, adds team members, generates the SIEM key, or sets service keys or SMTP/webhook/syslog config. These actions are removed from the tool schemas and their endpoints are hard-denied on every path; use the FENRIR GUI. Revoke, unlock, delete and reads stay. (R150/R151)
+- **Fixed MCP denylist bypass:** the query and fragment are now cut before percent-decoding, so `%3F`/`%23` can no longer hide a `/../` route to a denied endpoint. (R150)
+
 ### Upgrade notes
 
 - **Wave G:**

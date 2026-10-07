@@ -161,7 +161,7 @@ if [ -n "$be_c" ]; then  # the worker must authenticate its caller, not trust th
   code="$(docker exec "$be_c" python -c "
 import ssl, urllib.request as u
 c = ssl.create_default_context(cafile='/run/secrets/tls_ca_crt')
-try: print(u.urlopen(u.Request('https://analysis-worker:8001/analyze/hashes', data=b'{}', headers={'Content-Type': 'application/json'}), timeout=5, context=c).status)
+try: print(u.urlopen(u.Request('https://analysis-worker:8001/analyze/upload/hashes', data=b'', headers={'Content-Type': 'application/octet-stream'}), timeout=5, context=c).status)
 except Exception as e: print(getattr(e, 'code', e))" 2>&1)"
   [ "$code" = "401" ] && pass "analysis-worker rejects unauthenticated calls (401)" || fail "analysis-worker answered an unauthenticated call with $code"
 fi

@@ -396,7 +396,7 @@ const CATEGORIES = [
           { type: 'section', title: 'TLP (sharing)', items: [
             '**TLP:RED** blocks every automatic outbound channel, the same as Dark Operation: Teams and Slack webhooks, the alert email (SMTP or Microsoft Graph) for new incident, phase change, severity change and closed, the deadline-reminder email ([[iw-legal]]), and the automatic DNS checks (SPF, DKIM, DMARC) of an analyzed email\'s sender domain. Each blocked send or check is listed in the incident audit log (`outbound_notification_suppressed` / `outbound_lookup_suppressed`, reason `tlp_red`) and is not sent later.',
             'On a TLP:RED incident, OSINT lookups, IOC enrichment and the email **Domain auth check** still run, but only after you confirm a warning. Each one is listed in the audit log as `outbound_manual_lookup`.',
-            'The header shows **Automatic outbound suppressed (TLP:RED)**. In-app notifications and syslog audit forwarding (actions and IDs only) stay on.',
+            'The header shows **Automatic outbound suppressed (TLP:RED)**. In-app notifications and syslog audit forwarding stay on; in a forwarded audit line, the indicator of an OSINT lookup or email domain check is replaced by `redacted:tlp-red` ([[set-integrations]]).',
             '**AMBER+STRICT**, **AMBER**, **GREEN** and **CLEAR** change nothing about outbound sends.',
           ] },
           { type: 'note', text: 'Severity is *impact*; triage is *confidence*. They are distinct dimensions — a Suspected/Critical incident is a real thing.' },
@@ -1893,7 +1893,7 @@ const CATEGORIES = [
             'Also blocked: the automatic DNS checks (SPF, DKIM, DMARC) of an analyzed email\'s sender domain. Each skipped check is listed in the incident audit log as `outbound_lookup_suppressed`, and the analysis shows **Live DNS checks skipped — Dark Operation**.',
             'TLP:RED blocks the same automatic channels, with reason `tlp_red`; the header then shows **Automatic outbound suppressed (TLP:RED)**.',
             'Manual lookups — OSINT, IOC enrichment, the email **Domain auth check** — still run under Dark Operation or TLP:RED, but only after you confirm a warning. Each one is listed in the audit log as `outbound_manual_lookup`.',
-            'Still on: in-app notifications to people who can see the incident, syslog audit forwarding (actions and IDs only), and admin test messages.',
+            'Still on: in-app notifications to people who can see the incident, syslog audit forwarding (the indicator of an OSINT lookup or email domain check replaced by `redacted:dark-op`), and admin test messages.',
             'Each OOB passphrase generation is logged. Use it on the external channel agreed with stakeholders.',
             'OOB log records what was communicated and through which channel.',
           ] },
@@ -2189,22 +2189,28 @@ const CATEGORIES = [
       {
         id: 'st-tokens',
         title: 'API Tokens',
-        tags: ['api', 'token', 'bearer', 'mcp', 'integration', 'script', 'fenrir-mcp', 'login', 'revoke'],
+        tags: ['api', 'token', 'bearer', 'mcp', 'integration', 'script', 'fenrir-mcp', 'login', 'revoke', 'expiry', 'last used'],
         body: [
-          { type: 'p', text: 'A Bearer token lets the MCP server, a script or an integration call the API as you, under the same rules as your browser session.' },
+          { type: 'p', text: 'A Bearer token lets the MCP server, a script or an integration call the API as you, under the same rules as your browser session, at the role you chose for it (yours or lower).' },
           { type: 'steps', items: [
-            'For the MCP server, run `fenrir-mcp login` in a terminal. It signs you in with your password and TOTP and stores a token for the MCP; it is the only way the MCP gets one.',
-            'For a script, call `POST /api/tokens` while signed in, with a `name`, a `role` (yours or lower) and optionally `expires_in_days`.',
-            'Copy the token at once: it appears only in that response.',
+            'Open **Settings → Account → API tokens** and click **+ New token**.',
+            'Enter a **Name**, pick the lowest **Role** the script needs, and choose when it **Expires** (1, 7, 30 or 90 days). Every new token expires; 90 days is the maximum.',
+            'Click **Create token**, then **Copy token** at once: FENRIR keeps only a hash of it and never shows it again.',
             'Send it as `Authorization: Bearer <token>` to any `/api/...` endpoint.',
           ] },
           { type: 'section', title: 'Managing tokens', items: [
-            '`GET /api/tokens` lists your tokens (never their values); `DELETE /api/tokens/{id}` revokes one.',
-            'Admins list and revoke anyone\'s: `GET /api/admin/tokens` and `DELETE /api/admin/tokens/{id}`.',
+            'The table shows each token\'s name, prefix (`fnr_v1_…`), role, created, expires, last used and status (**active**, **expired** or **revoked**), in your timezone. **Last used** is updated at most once a minute.',
+            '**Revoke** asks you to confirm in the row. The token stops working on its next request.',
+            'Admins see every user\'s tokens under **Admin → API Tokens** and can revoke any of them; the owner then gets an in-app notification. Viewers and analysts manage only their own.',
+            'Creating and revoking are audited (`api_token_issue`, `api_token_revoke`); calls made with a token appear in the audit log like any other.',
             'A token capped at **Viewer** never gets lead rights, even when you are the incident lead ([[gs-roles]]).',
-            'Issuing a token is audited (`api_token_issue`); calls made with it appear in the audit log like any other.',
+            'Tokens issued before expiry became required show **Never** under Expires. Revoke them when no longer needed.',
           ] },
-          { type: 'note', text: 'Tokens have no page in FENRIR yet. **Settings → API Keys** holds the IOC-enrichment service keys (VirusTotal, AbuseIPDB …), not Bearer tokens ([[ioc-enrichment]]).' },
+          { type: 'section', title: 'MCP server and API', items: [
+            'For the MCP server, run `fenrir-mcp login` in a terminal: it signs you in with your password and TOTP and stores a token (8 h in the MCP, 1 day on the server). `fenrir-mcp tokens list` lists your tokens and `fenrir-mcp tokens revoke <id>` revokes one. No MCP tool can create a token, and the MCP\'s generic API call refuses every token, session, password and user-account endpoint.',
+            'API: `POST /api/tokens` (`name`, `role`, `expires_in_days` 1–90, required), `GET /api/tokens`, `DELETE /api/tokens/{id}`; admins `GET /api/admin/tokens` and `DELETE /api/admin/tokens/{id}`. Only the create response contains the token. Creating one needs a browser login (password and TOTP): a request signed with an API token gets 403 `token_create_requires_session`, so a token can never mint another. A token can still list and revoke your tokens.',
+          ] },
+          { type: 'note', text: '**Settings → API Keys** holds the IOC-enrichment service keys (VirusTotal, AbuseIPDB …), not Bearer tokens ([[ioc-enrichment]]).' },
         ],
       },
       {
@@ -2255,7 +2261,7 @@ const CATEGORIES = [
             ['**Integrations → Email (SMTP / M365)**', 'The mail transport for admin alerts and **Email deadline reminders** ([[iw-legal]]). The reminders are on by default once a mail transport is set; untick to stop them.'],
             ['**Integrations → Outbound webhooks**', 'Teams and Slack messages about incidents. Never sent under Dark Operation or TLP:RED ([[inc-severity-tlp]]).'],
             ['**Integrations → SIEM inbound webhooks**', 'Splunk, Microsoft Sentinel and Elastic alerts that open incidents ([[set-siem-intake]]).'],
-            ['**Integrations → Syslog forwarding**', 'Audit rows forwarded to your SIEM over TLS: actions and IDs only.'],
+            ['**Integrations → Syslog forwarding**', 'Audit rows forwarded to your SIEM over TLS: action, user, resource type and ID, outcome, IP and user agent. An OSINT lookup or email domain check puts the indicator in the resource ID; for a Dark Operation or TLP:RED incident (or one whose policy cannot be read) the forwarded line carries `redacted:dark-op` or `redacted:tlp-red` instead. FENRIR\'s own audit row keeps the real value.'],
           ] },
         ],
       },
@@ -2343,7 +2349,7 @@ const FAQS = [
   },
   {
     q: 'How do I connect the FENRIR MCP server?',
-    a: 'Run `fenrir-mcp login` in a terminal: it signs you in with your password and TOTP and stores a Bearer token for the MCP server. Scripts can request their own token with `POST /api/tokens` — see [[st-tokens]]. Every feature is in the API (`/api/openapi.json`); none is browser-only.',
+    a: 'Run `fenrir-mcp login` in a terminal: it signs you in with your password and TOTP and stores a Bearer token for the MCP server. For a script, create a token under **Settings → Account → API tokens** — see [[st-tokens]]. Every feature is in the API (`/api/openapi.json`); none is browser-only.',
     tags: ['mcp', 'api', 'token', 'bearer', 'openapi', 'fenrir-mcp', 'login'],
   },
   {

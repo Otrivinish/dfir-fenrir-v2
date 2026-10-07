@@ -108,8 +108,13 @@ async def write_audit(
     request_id:     Optional[str] = None,
     request_method: Optional[str] = None,
     request_path:   Optional[str] = None,
+    # R112: a placeholder ("redacted:tlp-red" / "redacted:dark-op", from
+    # core.outbound_policy.siem_redaction) for the SIEM-forwarded copy only.
+    siem_redact:    Optional[str] = None,
 ) -> AuditLog:
-    """Append one audit row, transactionally chained to the previous row."""
+    """Append one audit row, transactionally chained to the previous row.
+    `siem_redact` replaces resource_id in the syslog-forwarded line; the stored row and its
+    hash keep the real value."""
     ctx = get_audit_context()
     # Fall through to context for anything the caller didn't override.
     user_id        = user_id        if user_id        is not None else ctx.get("user_id")
@@ -181,7 +186,7 @@ async def write_audit(
         forward_audit_row(
             action=action, username=username, resource_type=resource_type,
             resource_id=resource_id, outcome=outcome, ip_address=ip_address,
-            user_agent=user_agent, timestamp=now,
+            user_agent=user_agent, timestamp=now, redact=siem_redact,
         )
     except Exception:  # noqa: BLE001 — never let forwarding break audit writes
         pass

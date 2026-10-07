@@ -22,6 +22,7 @@ const TYPE_LABEL = {
   disclosure:       'Disclosure',
   stakeholder_notification: 'Stakeholders',
   stored_file_unreadable:   'Storage',
+  api_token_revoked:        'API Token',
 }
 
 export default function NotificationBell() {

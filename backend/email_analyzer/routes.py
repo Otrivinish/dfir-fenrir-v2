@@ -36,7 +36,7 @@ from auth.deps import current_user, require_analyst
 from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
-from core.outbound_policy import outbound_allowed, require_outbound_confirmation
+from core.outbound_policy import outbound_allowed, require_outbound_confirmation, siem_redaction
 from email_analyzer.domain_check import check_dkim, check_spf_dmarc, evaluate_source_ip, fetch_domain_auth
 from email_analyzer.parser import (PARSER_NAME, PARSER_VERSION, attachment_bytes, is_msg, msg_to_eml_bytes,
                                    parse_email, repair_wrapped_export)
@@ -786,6 +786,7 @@ async def domain_check(
         resource_type="domain", resource_id=domain,
         details={"incident_id": str(incident_id), "selector_checked": bool(selector)},
         ip_address=request.client.host if request.client else None,
+        siem_redact=siem_redaction(inc),
     )
     await db.commit()
 
