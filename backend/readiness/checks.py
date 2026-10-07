@@ -139,7 +139,7 @@ async def _on_call(db: AsyncSession, now: datetime):
 
 
 @check("matrix_high_critical", "Stakeholder matrix has required rules for High and Critical", "blocker",
-       ["RS.CO-02"], "/settings/stakeholder-matrix")
+       ["RS.CO-02"], "/stakeholder-matrix")
 async def _matrix(db: AsyncSession, now: datetime):
     rows = dict((await db.execute(select(StakeholderMatrixRule.severity, func.count())
                                   .where(StakeholderMatrixRule.required.is_(True),
@@ -215,7 +215,7 @@ async def _smtp(db: AsyncSession, now: datetime):
     return "fail", "Email is off, so admin alerts can't be sent by email."
 
 
-@check("validated_tools", "At least one active validated tool", "warning", ["ISO/IEC 27041"], "/settings/validated-tools")
+@check("validated_tools", "At least one active validated tool", "warning", ["ISO/IEC 27041"], "/validated-tools")
 async def _validated_tools(db: AsyncSession, now: datetime):
     n = (await db.execute(select(func.count()).select_from(ValidatedTool)
                           .where(ValidatedTool.is_active.is_(True)))).scalar_one()

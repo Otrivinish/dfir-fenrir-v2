@@ -80,11 +80,17 @@ export default function StakeholderMatrix() {
   }))
 
   return (
+    <div className="page-wrap">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Stakeholder matrix</h1>
+          <div className="page-sub">Who must be notified, and how fast, per incident severity</div>
+        </div>
+      </div>
     <section className="panel" style={{ padding: 'var(--space-4)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-3)' }}>
         <div style={{ flex: 1 }}>
-          <h2 className="panel-h" style={{ margin: 0 }}>Stakeholder Matrix</h2>
-          <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--muted)' }}>
+          <p style={{ margin: 0, fontSize: 12, color: 'var(--muted)' }}>
             Define who must be notified per incident severity (optionally only for some incident types), and within
             what timeframe. Each matching rule becomes a notification with a countdown on the incident (Comms ›
             Notifications), counted from when the incident first reached that severity. Changes apply to open incidents.
@@ -193,6 +199,7 @@ export default function StakeholderMatrix() {
         </div>
       ))}
     </section>
+    </div>
   )
 }
 

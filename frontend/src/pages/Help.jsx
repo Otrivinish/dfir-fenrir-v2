@@ -31,9 +31,9 @@ const CATEGORIES = [
             '**Operate** — **Dashboard** (the live view of all incidents; admins and analysts — viewers start on **Incidents**) · **Incidents** (the list; open one to enter its workspace) · **Shift handoffs** · **On-call**.',
             '**Investigate** — **Correlations** · **ATT&CK coverage**.',
             '**Intel** — **Threat intel** (admins and analysts) · **Threat actors**: reference databases.',
-            '**Prepare** — **Readiness** (admins and analysts) · **Playbooks** (playbook templates and tasks) · **IR roster** · **Contacts** (admins and analysts), plus **Stakeholder matrix** · **Validated tools** for admins.',
+            '**Prepare** — **Readiness** (admins and analysts) · **Playbooks** (playbook templates and tasks) · **IR roster** · **Contacts** (admins and analysts), plus **Stakeholder matrix** · **Validated tools**: their own pages, for admins.',
             '**Report** — **Metrics**: cross-incident analytics (admins and analysts).',
-            '**Admin** — **Admin** (admins only: Audit Log, Audit Exports, Sessions, Storage, Backup, API Docs — [[set-admin]]) · **Settings**: your **Account**, plus for admins Users, Teams, Operational Roles, Stakeholder Matrix, Validated Tools, Feeds, Integrations, API Keys and Incident Reference.',
+            '**Admin** — **Admin** (admins only: Audit Log, Audit Exports, Sessions, Storage, Backup, API Docs — [[set-admin]]) · **Settings**: your **Account**, plus for admins Users, Teams, Operational Roles, Feeds, Integrations, API Keys and Incident Reference.',
             'At the bottom: **Help** and **Account**.',
           ] },
           { type: 'section', title: 'Inside an incident', items: [
@@ -850,7 +850,7 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'A governed catalog of validated forensic tools and methods (`ISO/IEC 27041`), so "the tool was validated" is a record rather than a free-text claim.' },
           { type: 'section', title: 'Using it', items: [
-            'Admins manage it under **Settings → Validated Tools** (tool, version, validation ref / scope / date, validator).',
+            'Admins manage it under **Prepare → Validated tools** in the sidebar (tool, version, validation ref / scope / date, validator).',
             'The acquisition and examination wizards **pick from it** and auto-fill the validation fields.',
             'Using an unlisted tool is allowed but flagged unvalidated in the provenance score.',
           ] },
@@ -1943,7 +1943,7 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'Org-wide rules: "for incidents of severity X, role Y must be notified within Z minutes." Distinct from the per-incident Stakeholder Registry — this is policy, applied to every incident.' },
           { type: 'section', title: 'Where to manage', items: [
-            'Settings → **Stakeholder Matrix** (admin-only). Per-severity tables with role / notify-within / category / required-vs-advisory.',
+            '**Prepare → Stakeholder matrix** in the sidebar (admin-only). Per-severity tables with role / notify-within / category / required-vs-advisory.',
           ] },
           { type: 'section', title: 'Where it shows up', items: [
             'Each rule that matches an incident\'s severity becomes a **notification with a countdown** on that incident: **Comms › Notifications** ([[iw-notifications]]), the header chip, the Situation board and the banner above the Comms tabs.',
@@ -2324,7 +2324,7 @@ const FAQS = [
   },
   {
     q: 'Where does the Stakeholder Matrix banner come from?',
-    a: 'It summarises the incident\'s stakeholder notification tracker, which is built from the rules in Settings → Stakeholder Matrix that match the incident\'s severity (and type, if the rule names types). Add or edit rules in Settings (admin only). The banner shows on the Situation board and above the Comms tabs; record notifications on Comms › Notifications.',
+    a: 'It summarises the incident\'s stakeholder notification tracker, which is built from the rules on the **Stakeholder matrix** page (sidebar → Prepare) that match the incident\'s severity (and type, if the rule names types). Admins add or edit the rules there. The banner shows on the Situation board and above the Comms tabs; record notifications on Comms › Notifications.',
     tags: ['matrix', 'banner', 'stakeholder', 'notification', 'severity'],
   },
   {
