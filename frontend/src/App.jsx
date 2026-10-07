@@ -264,6 +264,8 @@ export default function App() {
               <Route path="/metrics"           element={<RequireAnalyst><Metrics /></RequireAnalyst>} />
               <Route path="/readiness"         element={<RequireAnalyst><Readiness /></RequireAnalyst>} />
               <Route path="/contacts"          element={<RequireAnalyst><Contacts /></RequireAnalyst>} />
+              <Route path="/stakeholder-matrix" element={<RequireAdmin><StakeholderMatrix /></RequireAdmin>} />
+              <Route path="/validated-tools"   element={<RequireAdmin><ValidatedTools /></RequireAdmin>} />
               <Route path="/on-call"           element={<OnCall />} />
               <Route path="/handoffs"          element={<Handoffs />} />
               <Route path="/roster"            element={<Roster />} />
@@ -273,13 +275,14 @@ export default function App() {
                 <Route path="account"           element={<Account />} />
                 <Route path="teams"             element={<RequireAdmin><Teams /></RequireAdmin>} />
                 <Route path="operational-roles" element={<RequireAdmin><OperationalRoles /></RequireAdmin>} />
-                <Route path="stakeholder-matrix" element={<RequireAdmin><StakeholderMatrix /></RequireAdmin>} />
+                {/* Own pages under Prepare since 2026-10-07; old bookmarks redirect. */}
+                <Route path="stakeholder-matrix" element={<Navigate to="/stakeholder-matrix" replace />} />
                 <Route path="api-keys"          element={<RequireAdmin><APIKeys /></RequireAdmin>} />
                 <Route path="incident-reference" element={<RequireAdmin><IncidentReference /></RequireAdmin>} />
                 <Route path="threat-intel"      element={<RequireAdmin><ThreatIntel /></RequireAdmin>} />
                 <Route path="integrations"      element={<RequireAdmin><Integrations /></RequireAdmin>} />
                 <Route path="users"             element={<RequireAdmin><Users /></RequireAdmin>} />
-                <Route path="validated-tools"   element={<RequireAdmin><ValidatedTools /></RequireAdmin>} />
+                <Route path="validated-tools"   element={<Navigate to="/validated-tools" replace />} />
               </Route>
             </Route>
 

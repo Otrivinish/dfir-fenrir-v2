@@ -599,6 +599,7 @@ Built from the IR-expert workflow audit of 2026-10-01: 21 approved pieces (A1–
 - ⚠ **MCP `fenrir_api` refuses credential endpoints** whatever the path encoding: tokens, sessions, user credential and role writes, and SIEM and service keys. Use the GUI or `fenrir-mcp tokens list|revoke` instead. (R146)
 - ⚠ **MCP never receives a secret or grants access:** it no longer creates users, changes roles, resets passwords, adds team members, generates the SIEM key, or sets service keys or SMTP/webhook/syslog config. These actions are removed from the tool schemas and their endpoints are hard-denied on every path; use the FENRIR GUI. Revoke, unlock, delete and reads stay. (R150/R151)
 - **Fixed MCP denylist bypass:** the query and fragment are now cut before percent-decoding, so `%3F`/`%23` can no longer hide a `/../` route to a denied endpoint. (R150)
+- **Stakeholder matrix and Validated tools are their own pages** under Prepare in the sidebar (`/stakeholder-matrix`, `/validated-tools`, admin only) and are no longer inside Settings. Old `/settings/...` links redirect. Readiness "fix" links point to the new pages. (owner request)
 
 ### Upgrade notes
 

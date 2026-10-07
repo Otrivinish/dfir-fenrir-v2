@@ -28,8 +28,8 @@ const NAV_GROUPS = [
     { to: '/playbooks',    label: 'Playbooks',       icon: '▤' },
     { to: '/roster',       label: 'IR roster',       icon: '◈' },
     { to: '/contacts',     label: 'Contacts',        icon: '☎', roles: ANALYST },
-    { to: '/settings/stakeholder-matrix', label: 'Stakeholder matrix', icon: '⊞', roles: ADMIN },
-    { to: '/settings/validated-tools',    label: 'Validated tools',    icon: '✓', roles: ADMIN },
+    { to: '/stakeholder-matrix', label: 'Stakeholder matrix', icon: '⊞', roles: ADMIN },
+    { to: '/validated-tools',    label: 'Validated tools',    icon: '✓', roles: ADMIN },
   ] },
   { label: 'Report', items: [
     { to: '/metrics',      label: 'Metrics',         icon: '▥', roles: ANALYST },

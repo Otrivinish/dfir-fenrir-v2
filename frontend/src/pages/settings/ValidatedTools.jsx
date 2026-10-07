@@ -66,10 +66,14 @@ export default function ValidatedTools() {
   }
 
   return (
-    <section className="panel">
-      <div className="panel-toolbar">
-        <h2 className="panel-h">Validated tools <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· ISO/IEC 27041 registry</span></h2>
+    <div className="page-wrap">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Validated tools</h1>
+          <div className="page-sub">ISO/IEC 27041 registry of validated forensic tools and methods</div>
+        </div>
       </div>
+    <section className="panel">
       <p style={{ color: 'var(--muted)', fontSize: 13, margin: '0 0 var(--space-3)' }}>
         A governed catalog of validated forensic tools/methods. The acquisition and
         examination wizards let analysts pick from this list — picking a registered
@@ -157,5 +161,6 @@ export default function ValidatedTools() {
         </table>
       )}
     </section>
+    </div>
   )
 }
