@@ -173,9 +173,10 @@
 .topbar {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  height: 52px;
-  padding: 0 var(--space-4);
+  flex-wrap: wrap;           /* L1 (R45): a narrow screen wraps the bar into rows, never widens the page */
+  gap: var(--space-2) var(--space-3);
+  min-height: 52px;
+  padding: var(--space-2) var(--space-4);
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
@@ -211,6 +212,7 @@
 
 .search {
   flex: 1;
+  min-width: 0;
   max-width: 380px;
   margin-left: auto;
 }
@@ -320,7 +322,7 @@
   padding: 0 1px;
 }
 
-.topbar-right { display: flex; align-items: center; gap: var(--space-2); }
+.topbar-right { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); min-width: 0; }
 
 .icon-btn {
   background: transparent;
@@ -341,16 +343,22 @@
 .app-content {
   flex: 1;
   padding: var(--space-5);
-  overflow: auto;
+  /* L1 (R44/R45): clip, not auto. An auto-overflow box is a scroll container, so the sticky
+     incident rail stuck to it (it never scrolls) instead of the viewport. Wide content must
+     wrap or sit in .table-scroll; it never scrolls the page sideways. */
+  overflow-x: clip;
 }
+@media (max-width: 699px) { .app-content { padding: var(--space-3); } }
 
 .page-head {
   display: flex;
+  flex-wrap: wrap;           /* L1 (R45): the action row drops below the title when it can't fit */
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
   margin-bottom: var(--space-4);
 }
+.page-head > :first-child { flex: 1 1 240px; min-width: 0; }
 .page-title {
   font-family: var(--font-heading);
   font-size: 18px;
@@ -367,7 +375,9 @@
   margin-top: 2px;
 }
 
-.panel {
+/* R138 (L3): .settings-section is an alias (Settings → Threat intel) */
+.panel,
+.settings-section {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);

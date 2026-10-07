@@ -98,12 +98,18 @@ export default function LocalDateTimePicker({
       if (wrapRef.current?.contains(e.target) || popupRef.current?.contains(e.target)) return
       setOpen(false)
     }
-    const onKey = (e) => { if (e.key === 'Escape') { setOpen(false); focusTrigger() } }
+    // L1 (R44): capture phase on window + stopPropagation, so Escape closes only the picker and
+    // never also the modal or drawer around it (their Escape listeners sit on document).
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation(); e.preventDefault()
+      setOpen(false); focusTrigger()
+    }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
+      window.removeEventListener('keydown', onKey, true)
     }
   }, [open])
 

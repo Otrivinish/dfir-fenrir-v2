@@ -16,7 +16,7 @@ export default function APIDocs() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', height: '100%' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)' }}>
         <div>
           <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>API Docs</h2>
           <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 2 }}>
@@ -28,7 +28,7 @@ export default function APIDocs() {
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', alignItems: 'center' }}>
           <div role="tablist" aria-label="Docs renderer" style={{ display: 'flex', gap: 4 }}>
             {VIEWS.map(v => (
               <button
@@ -38,12 +38,9 @@ export default function APIDocs() {
                 aria-selected={view === v.key}
                 onClick={() => setView(v.key)}
                 className="btn"
-                style={{
-                  padding: '4px 10px', fontSize: 12,
-                  background: view === v.key ? 'var(--accent-soft)' : 'var(--surface)',
+                style={{ background: view === v.key ? 'var(--accent-soft)' : 'var(--surface)',
                   borderColor: view === v.key ? 'var(--accent)' : 'var(--border)',
-                  color: view === v.key ? 'var(--accent)' : 'var(--text)',
-                }}
+                  color: view === v.key ? 'var(--accent)' : 'var(--text)' }}
               >
                 {v.label}
               </button>
@@ -54,7 +51,7 @@ export default function APIDocs() {
             target="_blank"
             rel="noreferrer"
             className="btn"
-            style={{ padding: '4px 10px', fontSize: 12, textDecoration: 'none' }}
+            style={{ textDecoration: 'none' }}
             title="Open in a new tab"
           >
             Open ↗

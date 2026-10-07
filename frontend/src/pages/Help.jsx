@@ -22,46 +22,176 @@ const CATEGORIES = [
           { type: 'section', title: 'Core concepts', items: [
             '**Incidents** are the top-level container. Timeline events, IOCs, entities, evidence, and communications all belong to an incident.',
             '**Phases** follow 800-61 R3: Preparation → Detection & Analysis → Containment, Eradication & Recovery → Post-Incident.',
-            '**Severity** is internal Low / Medium / High / Critical (CVSS-style bands). Federal handoff reports derive NCISS from this.',
-            '**TLP** (Traffic Light Protocol) controls information sharing. RED = named recipients, AMBER = org-internal, GREEN = community, WHITE = public.',
-            '**Roles** (Admin / Analyst / Responder / Observer) gate what each user can see and do.',
+            '**Severity** is internal Low / Medium / High / Critical (CVSS-style bands). Reports also show the NCISS level mapped from it ([[pi-reports]]).',
+            '**TLP** (`TLP 2.0`) controls sharing: **TLP:RED** (named recipients only; also stops automatic outbound sends) · **AMBER+STRICT** · **AMBER** · **GREEN** · **CLEAR** ([[inc-severity-tlp]]).',
+            '**Roles** — your platform role (**Admin** / **Analyst** / **Viewer**) decides what you can do; operational roles (**Incident Commander**, **Communications Lead** …) decide who does what on one incident ([[gs-roles]]).',
           ] },
           { type: 'section', title: 'Top-level sections', items: [
             'The sidebar groups them; you see only the sections your role can use.',
-            '**Operate** — **Dashboard** (your live operational view of all incidents) · **Incidents** (the list; open one to enter the per-incident workspace) · **Shift handoffs** · **On-call**.',
+            '**Operate** — **Dashboard** (the live view of all incidents; admins and analysts — viewers start on **Incidents**) · **Incidents** (the list; open one to enter its workspace) · **Shift handoffs** · **On-call**.',
             '**Investigate** — **Correlations** · **ATT&CK coverage**.',
-            '**Intel** — **Threat intel** · **Threat actors**: reference databases.',
+            '**Intel** — **Threat intel** (admins and analysts) · **Threat actors**: reference databases.',
             '**Prepare** — **Readiness** (admins and analysts) · **Playbooks** (playbook templates and tasks) · **IR roster** · **Contacts** (admins and analysts), plus **Stakeholder matrix** · **Validated tools** for admins.',
             '**Report** — **Metrics**: cross-incident analytics (admins and analysts).',
-            '**Admin** — **Admin** (admins only) · **Settings**: your account, plus admin sections (Users / Teams / Roles / Stakeholder Matrix / Feeds / Integrations / API Keys).',
+            '**Admin** — **Admin** (admins only: Audit Log, Audit Exports, Sessions, Storage, Backup, API Docs — [[set-admin]]) · **Settings**: your **Account**, plus for admins Users, Teams, Operational Roles, Stakeholder Matrix, Validated Tools, Feeds, Integrations, API Keys and Incident Reference.',
             'At the bottom: **Help** and **Account**.',
           ] },
           { type: 'section', title: 'Inside an incident', items: [
-            'Open any incident to enter the workspace. It opens on the **Situation** board. The left rail follows NIST SP 800-61 R3 and shows live counts: **Situation** · **Details** · **Command**: Team · Playbook · Shift handoffs · **Notify**: Comms & stakeholders · Legal & regulatory · **Detection & Analysis**: Evidence · Supporting documents · Examine · Timeline · Entities · IOCs · ATT&CK & attribution · Case notes · **Containment, Eradication & Recovery**: Respond · **Post-Incident Activity**: Post-Incident · **Record**: Audit log (admins and the incident lead only).',
-            'For a tab-by-tab walk-through (including the 11 Examine sub-tabs, the 5 Evidence sub-tabs, and the 5 Post-Incident sub-tabs), see the **Incident Workspace** category.',
+            'Open any incident to enter the workspace. It opens on the **Situation** board. The left rail follows NIST SP 800-61 R3 and shows live counts: **Situation** · **Details** · **Command**: Team · Playbook · Shift handoffs · **Notify**: Comms & stakeholders · Legal & regulatory · **Detection & Analysis**: Evidence (with Supporting documents) · Examine · Timeline · Scope · IOCs · ATT&CK & attribution · Case notes · **Containment, Eradication & Recovery**: Containment · Eradication & Recovery · Recovery tracker · Decisions · **Post-Incident Activity**: Post-Incident · **Record**: Audit log (admins and the incident lead only).',
+            'For a tab-by-tab walk-through (including the 11 Examine sub-tabs, the 7 Evidence sub-tabs and the 5 Post-Incident sub-tabs), see the **Incident Workspace** category. For the whole flow, intake to closure, see [[gs-workflow]].',
             'For the full evidence lifecycle — collection, acquisition, examination, custody, and law-enforcement handoff — see the **Evidence & Chain of Custody** category.',
           ] },
         ],
       },
       {
+        id: 'gs-workflow',
+        title: 'Running an Incident from Intake to Closure',
+        tags: ['workflow', 'end to end', 'process', 'sop', 'raci', 'how to', 'lifecycle', 'intake', 'closure', '800-61', 'who does what', 'exceptions', 'metrics', 'checklist'],
+        body: [
+          { type: 'p', text: 'One incident from detection to sign-off, in NIST SP 800-61 R3 phase order: who does what, when, where in FENRIR, and what it leaves on record. Each step links to the topic with the details.' },
+          { type: 'section', title: 'Scope', items: [
+            'Starts when something is detected — an alert, a report, a hunt finding — and ends when the incident is closed and signed off.',
+            'Preparation is organisation-wide and comes before any incident.',
+            'Roles are the operational roles on the incident\'s **Team** page ([[gs-roles]]). One person can hold several; the **Recorder** keeps case notes and key timeline events at every step.',
+          ] },
+          { type: 'table', headers: ['Step', 'Responsible', 'Accountable', 'Consulted', 'Informed'], rows: [
+            ['1 Prepare', 'Admins, analysts', 'Admin', 'Legal Liaison, DPO', 'On-call responders'],
+            ['2 Open the incident', 'On-call analyst (or the SIEM)', 'Incident Commander', '—', 'Admins, on-call'],
+            ['3 Take command', 'Incident Commander', 'Incident Commander', 'Deputy', 'Assigned team'],
+            ['4 Triage and classify', 'Lead Investigator', 'Incident Commander', 'DPO, Legal Liaison', 'Communications Lead'],
+            ['5 Preserve evidence', 'Lead Investigator', 'Incident Commander', 'Legal Liaison', 'Recorder'],
+            ['6 Analyse', 'Lead Investigator, analysts', 'Incident Commander', '—', 'Recorder'],
+            ['7 Notify', 'Communications Lead, Legal Liaison', 'Incident Commander', 'DPO', 'Stakeholders, authorities'],
+            ['8 Contain', 'Analysts', 'Incident Commander', 'Lead Investigator', 'Communications Lead'],
+            ['9 Eradicate and recover', 'Analysts', 'Incident Commander', 'Lead Investigator', 'Communications Lead'],
+            ['10 Resolve (Gate 1)', 'Incident Commander', 'Incident Commander', 'Legal Liaison, DPO', 'Assigned team'],
+            ['11 Learn', 'Incident Commander, Recorder', 'Incident Commander', 'Everyone involved', 'Management'],
+            ['12 Close (Gate 2)', 'Incident Commander', 'Incident Commander', 'DPO, Legal Liaison', 'Admins, stakeholders'],
+          ] },
+          { type: 'section', title: '1 · Prepare — Preparation', items: [
+            '**Who:** admins and analysts.',
+            '**When:** before the next incident, and whenever **Readiness** shows a blocker.',
+            '**How:** clear the **Readiness** blockers ([[gs-readiness]]): on-call cover with out-of-band contacts ([[gs-staffing]]), the stakeholder matrix ([[co-matrix]]), verified key contacts ([[co-contacts]]), reviewed playbooks ([[iw-playbook]]).',
+            '**Output:** **Readiness** with no failing blocker. CSF 2.0 `GV`, `ID`, `PR`.',
+          ] },
+          { type: 'section', title: '2 · Open the Incident — Detection & Analysis', items: [
+            '**Who:** the on-call analyst, or a SIEM webhook ([[set-siem-intake]]).',
+            '**When:** as soon as something is detected. The start checks fall due 60 minutes after the incident is opened.',
+            '**How:** **+ New incident** — title, type, severity, TLP, how detected and the **Detected** time ([[gs-first-incident]]). Tick **Open as Dark Operation** if the attacker may be reading email or chat.',
+            '**Output:** an incident reference such as `INC-2026-00001`, the **Situation** board and the start checks ([[inc-start-checks]]). `DE.AE-08`.',
+          ] },
+          { type: 'section', title: '3 · Take Command', items: [
+            '**Who:** the Incident Commander. While the incident has no lead, its creator or today\'s on-call analyst assigns one.',
+            '**When:** within the first hour.',
+            '**How:** **Team → + Assign** an Incident Commander, Communications Lead and Legal Liaison, plus a Deputy, Lead Investigator, Recorder and DPO as needed ([[iw-assignments]]). Decide Dark Operation on **Comms → OOB** ([[co-comments]]). Apply a playbook ([[iw-playbook]]).',
+            '**Output:** the start checks met; **Role Coverage** shows who holds each seat. `GV.RR-02`, `RS.MA-01`.',
+          ] },
+          { type: 'section', title: '4 · Triage and Classify', items: [
+            '**Who:** the Lead Investigator proposes, the Incident Commander decides, the DPO joins when personal data may be involved.',
+            '**When:** in the first hour, then whenever the picture changes.',
+            '**How:** set **Triage state**, **Severity**, the impact fields and **Why this severity** on **Details** ([[inc-severity-tlp]]). For personal data, set **Information impact: Privacy breach** (or tag `personal-data`) and initialise the deadlines on **Legal** ([[iw-legal]]).',
+            '**Output:** the classification on record; notification countdowns ([[iw-notifications]]) and legal deadlines running. `RS.MA-02`, `RS.MA-03`.',
+          ] },
+          { type: 'section', title: '5 · Preserve Evidence', items: [
+            '**Who:** the Lead Investigator, as DEFR or DES ([[coc-roles]]).',
+            '**When:** before analysing anything that may be needed as evidence.',
+            '**How:** register each exhibit on **Evidence › Register** and seal it ([[coc-acquisition]]). Uploads to Email, Network capture and Browser history register a draft exhibit first ([[coc-draft-exhibits]]). Examine working copies, never the master ([[coc-working-copies]]).',
+            '**Output:** hashed, sealed exhibits with a custody log. `RS.AN-07`, `ISO/IEC 27037`.',
+          ] },
+          { type: 'section', title: '6 · Analyse', items: [
+            '**Who:** the Lead Investigator and analysts.',
+            '**When:** throughout Detection & Analysis, and whenever new data arrives.',
+            '**How:** run the **Examine** tools ([[iw-forensic]]); put events on the **Timeline** with key events flagged and ATT&CK tags ([[tl-events]], [[iw-mitre]]); record hosts and accounts in **Scope** ([[iw-entities]]) and indicators in **IOCs** ([[iw-iocs]]); write your reasoning in **Case notes** ([[iw-case-notes]]).',
+            '**Output:** a timeline, scope and IOC list that explain what happened. `DE.AE-02`, `DE.AE-03`, `RS.AN-03`.',
+          ] },
+          { type: 'section', title: '7 · Notify and Communicate', items: [
+            '**Who:** the Communications Lead for stakeholders, the Legal Liaison for authorities; the Incident Commander approves.',
+            '**When:** by each countdown on **Comms › Notifications** and **Legal** — for example GDPR Art. 33 within 72 h, the NIS2 early warning within 24 h.',
+            '**How:** tell the stakeholder yourself, then click **Record notified** ([[iw-notifications]]); complete or waive each deadline on **Legal** ([[iw-legal]]); log out-of-band contact in the **OOB** log ([[co-comments]]).',
+            '**Output:** every required notification **Notified** or **Not required**, every due deadline **Completed** or **Waived**. `RS.CO-02`, `RS.CO-03`.',
+          ] },
+          { type: 'section', title: '8 · Contain — Containment, Eradication & Recovery', items: [
+            '**Who:** analysts carry it out; the Incident Commander decides.',
+            '**When:** as soon as the scope allows. Move the incident to **Containment, Eradication & Recovery** on the stepper.',
+            '**How:** record the decision on **Decisions** and each action on **Containment**; **Isolate**, **Disable** or **Block** on **Scope** or **IOCs** pre-fills one ([[iw-respond]]). Click **Declare contained** in the header when containment holds ([[inc-phases]]).',
+            '**Output:** containment actions **Done**, containment badges on their targets, the **Contained** time. `RS.MI-01`.',
+          ] },
+          { type: 'section', title: '9 · Eradicate and Recover', items: [
+            '**Who:** analysts; a second responder validates each restored system.',
+            '**When:** once contained.',
+            '**How:** log actions on **Eradication & Recovery**. On the **Recovery tracker**, take each system in scope from restore point to **Restored** to **Validated**, with a monitoring window ([[iw-recovery]]). **Declare eradicated**, then **Declare recovered**.',
+            '**Output:** every system **Validated** or **Not required**; the Eradicated and Recovered times. `RS.MI-02`, `RC.RP-01`–`RC.RP-05`.',
+          ] },
+          { type: 'section', title: '10 · Resolve — Gate 1', items: [
+            '**Who:** the Incident Commander; the DPO signs off when a personal-data obligation was waived.',
+            '**When:** when containment, eradication and recovery are done.',
+            '**How:** **Resolve** in the header. The dialog lists what Gate 1 still needs, each item with a link to where you fix it ([[inc-phases]]).',
+            '**Output:** the incident in **Post-Incident**, still open. Legal deadlines further out are carried forward.',
+          ] },
+          { type: 'section', title: '11 · Learn — Post-Incident Activity', items: [
+            '**Who:** the Incident Commander runs the review, the Recorder takes the minutes, everyone involved takes part.',
+            '**When:** within days of Resolve, while memories are fresh.',
+            '**How:** on **Post-Incident → Lessons Learned**, write the narrative (**Insert key timeline events**), root cause and recommendations, give every action item an owner and a due date, and set **Final** ([[pi-lessons]]). Enter costs or business impact ([[pi-costs]]), work through the **Closure Checklist** ([[pi-closure]]), generate and save the executive and full reports ([[pi-reports]]), and get a receipt for every disclosure package ([[pi-le-package]]).',
+            '**Output:** Gate 2 met. `ID.IM-03`, `ID.IM-04`, `RC.RP-06`.',
+          ] },
+          { type: 'section', title: '12 · Close — Gate 2', items: [
+            '**Who:** the Incident Commander (or an admin) signs off; for a personal-data breach the DPO signs off too.',
+            '**When:** when Gate 2 is met.',
+            '**How:** **Close**, with a sign-off statement ([[inc-closing]]).',
+            '**Output:** a read-only incident with the closer, close time and sign-offs on record. Action items, costs and open legal deadlines stay workable.',
+          ] },
+          { type: 'table', headers: ['Exception', 'What to do'], rows: [
+            ['Email or chat may be compromised', 'Turn on **Dark Operation** (or set **TLP:RED**): automatic Teams, Slack and email sends stop. Coordinate out of band with the **OOB** passphrase and log; reach responders on their out-of-band numbers on **On-call** ([[co-comments]], [[gs-staffing]]).'],
+            ['No Incident Commander available at 03:00', 'While the incident has no lead, its creator or today\'s on-call analyst can assign an IC; an admin always counts as lead. Hand over later with a **Shift handoff** that transfers IC on acknowledgement ([[iw-handoffs]]).'],
+            ['Personal data is involved', 'Set **Information impact: Privacy breach** or tag `personal-data`, assign the **DPO**, initialise GDPR or NIS2 on **Legal**. Gate 1 then needs one of those obligations recorded (and the DPO\'s sign-off if one was waived); closing needs the DPO\'s sign-off ([[inc-closing]]).'],
+            ['It was a false alarm', 'Set **Triage state** to **False Positive** or **Benign Positive**; **Close** then works from any phase without Gate 2 ([[inc-closing]]).'],
+            ['A gate item can\'t be met yet', 'The incident lead or an admin ticks **Override** with a justification. It is audited and shown on the **Timeline** as **Gate overridden**.'],
+            ['Law enforcement or a regulator asks after closure', 'Build a **disclosure package** — it works on a closed incident — and record the receipt. Legal hold, working copies and custody also keep working ([[pi-le-package]], [[coc-legal-hold]]). Re-open only if the record itself must change.'],
+            ['The same alert fires again', 'Within 24 h of its last firing, and while the incident is open, it is attached to that incident as **Alert re-fired** ([[set-siem-intake]]).'],
+          ] },
+          { type: 'table', headers: ['Metric', 'Target', 'Where'], rows: [
+            ['**MTTD**, **MTTC**, **MTTR**', 'Your organisation\'s targets', '**Dashboard**, **Metrics**, Post-Incident **Analytics** ([[pi-analytics]])'],
+            ['Start checks met', 'All within 60 minutes of opening', 'Header chip, **Situation** board'],
+            ['Required notifications on time', 'None marked **late**', '**Comms › Notifications**'],
+            ['Legal deadlines met', 'None overdue', '**Legal**, header clock chips'],
+            ['Gate overrides', 'Each one justified', 'Audit log (`incident_gate_override`), **Timeline**'],
+            ['Lessons-learned action items', 'Each with an owner and due date, done by then', '**Post-Incident → Lessons Learned**'],
+          ] },
+          { type: 'note', text: 'FENRIR records, checks and reminds. It never notifies stakeholders or authorities for you.' },
+        ],
+      },
+      {
         id: 'gs-roles',
         title: 'User Roles & Permissions',
-        tags: ['roles', 'permissions', 'admin', 'analyst', 'responder', 'observer', 'lead', 'incident commander', 'deputy'],
+        tags: ['roles', 'permissions', 'rbac', 'admin', 'analyst', 'viewer', 'lead', 'incident commander', 'deputy', 'operational role', 'teams', 'visibility', 'dpo', 'data protection officer', 'recorder', 'lead investigator', 'legal liaison', 'communications lead'],
         body: [
-          { type: 'p', text: 'Role-based access control. Most write actions require Analyst or above; admin-only sections (Users, Audit Log, Stakeholder Matrix, API Keys, Operational Roles) are hidden from non-admins even when the URL is opened directly.' },
-          { type: 'table', headers: ['Role', 'Can do'], rows: [
-            ['**Admin**', 'Full access. Manage users, teams, audit log, regulatory tabs, system settings.'],
-            ['**Analyst**', 'Create + update incidents, timeline, IOCs, evidence. Run YARA scans. Full investigation access.'],
-            ['**Responder**', 'View all incident data. Post War Room messages and comments. Cannot create incidents.'],
-            ['**Observer**', 'Read-only access to incidents the operator has assigned them to.'],
+          { type: 'p', text: 'Your platform role decides what you can do in FENRIR; operational roles decide who does what on one incident; teams decide which incidents you can see.' },
+          { type: 'table', headers: ['Platform role', 'Can do'], rows: [
+            ['**Admin**', 'Everything an analyst can, on every incident (teams never hide one from an admin), and always counts as incident lead. Manages users, teams, operational roles, the stakeholder matrix, validated tools, feeds, integrations, API keys and the incident reference, plus the **Admin** pages ([[set-admin]]).'],
+            ['**Analyst**', 'Opens and works incidents: timeline, scope, IOCs, evidence, Examine tools, response actions, comms, legal and post-incident. Runs outbound lookups (enrichment, OSINT). Sees **Dashboard**, **Readiness**, **Contacts**, **Metrics** and **Threat intel**. Gains lead rights when assigned Incident Commander or Deputy.'],
+            ['**Viewer**', 'Reads the incidents their teams can see and changes nothing: no comments or War Room messages, no outbound lookups, no out-of-band phone numbers. Can generate and download a report, but not save it to **Report History**. Starts on **Incidents**.'],
           ] },
-          { type: 'note', text: 'Two auth mechanisms map to the same RBAC: browser **cookies** (login) and **API tokens** (`Authorization: Bearer …`) for MCP clients, scripts, and integrations. Both resolve to the same User.' },
+          { type: 'section', title: 'Who can see an incident', items: [
+            'An incident with no team is open to everyone. An incident with teams is visible to their members and to admins ([[st-users]]).',
+            'Anyone else gets *not found*, so the incident\'s existence doesn\'t leak.',
+            'An assignment does not let anyone see an incident: assign people who can already see it.',
+          ] },
+          { type: 'table', headers: ['Operational role', 'Holds'], rows: [
+            ['**Incident Commander**', 'Coordination, authority and decisions. Incident lead; signs off the close ([[inc-closing]]).'],
+            ['**Deputy Incident Commander**', 'Backs up the IC and takes over at a handoff. Incident lead.'],
+            ['**Lead Investigator**', 'Technical lead: directs the investigation, evidence collection and analysis.'],
+            ['**Communications Lead**', 'Internal and external communications, including stakeholder updates.'],
+            ['**Legal Liaison**', 'Legal counsel, regulators and law enforcement. Gets the deadline reminder emails, with the IC ([[iw-legal]]).'],
+            ['**Recorder**', 'The record made at the time: decisions, actions and timeline.'],
+            ['**Data Protection Officer**', 'Personal-data impact and GDPR breach notification. Signs off the gates of a personal-data breach.'],
+          ] },
+          { type: 'note', text: 'Assign operational roles on the incident\'s **Team** page ([[iw-assignments]]). Admins add, deactivate or delete custom roles under **Settings → Operational Roles**; the seven above can be deactivated, not deleted.' },
           { type: 'section', title: 'Incident lead (Incident Commander / Deputy)', items: [
             'An **analyst** assigned as **Incident Commander** or **Deputy Incident Commander** on an incident is its **incident lead**, on that incident only. An admin always counts as a lead.',
-            "The lead can read the incident's **Audit Log** (a lead's read is itself audited), build **LE packages** (the admins get a notification), set the incident's **teams** (only an admin can make a restricted incident visible to everyone), **override** a phase gate, and remove anyone's assignment.",
+            "The lead can read the incident's **Audit Log** (a lead's read is itself audited), build **disclosure packages** (the other admins get a notification), set the incident's **teams** (only an admin can make a restricted incident visible to everyone), **override** a phase gate, and remove anyone's assignment.",
             'The rights end as soon as the assignment is removed. A viewer gains nothing from an assignment, and an API token capped at viewer is never a lead.',
-            'An assignment does not let anyone see an incident: the teams decide who can see it.',
           ] },
+          { type: 'note', text: 'Browser sessions and API tokens (`Authorization: Bearer …`) resolve to the same user and the same rules. A token\'s role can be lower than yours, never higher ([[st-tokens]]).' },
         ],
       },
       {
@@ -71,7 +201,7 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'Open an incident the moment something is detected, so its first-hour facts are on record from the start.' },
           { type: 'steps', items: [
-            'Sidebar → **Incidents** (or the **Dashboard**) → **+ New Incident**.',
+            'Sidebar → **Incidents** (or the **Dashboard**) → **+ New incident**.',
             'Enter a title, choose the **Incident type** and **Severity** (Low / Medium / High / Critical), and set **TLP**.',
             'Pick the starting **Phase** — **Detection & Analysis**, or **Containment, Eradication & Recovery** if containment is already under way. An incident cannot start in Preparation or Post-Incident.',
             'Choose **How detected** and the **Triage state** (default **Suspected**).',
@@ -79,7 +209,7 @@ const CATEGORIES = [
             'Optionally fill in what you already know: the **Incident Commander**, the impact, why this severity, the alert reference, and the first host and IOC ([[inc-start-checks]]).',
             'The incident opens on its **Situation** board ([[iw-details]]): start checks, classification, clocks, the next gate, open response actions, team gaps and the newest events on one screen.',
             'Work through the **Start checks** it lists — each has a **Fix →** link — then move through phases using the phase stepper at the top.',
-            'Start collecting data in **Examine**, **Timeline**, **Entities** and **IOCs**.',
+            'Start collecting in **Evidence**, **Examine**, **Timeline**, **Scope** and **IOCs**. The whole flow, step by step: [[gs-workflow]].',
           ] },
           { type: 'note', text: 'Severity and TLP are editable at any time. When in doubt, start higher and revise downward.' },
           { type: 'note', text: 'Title, type, severity, how detected and Detected are required; the rest can wait.' },
@@ -88,7 +218,7 @@ const CATEGORIES = [
       },
       {
         id: 'inc-start-checks',
-        title: 'Intake fields and start checks',
+        title: 'Intake Fields and Start Checks',
         tags: ['intake', 'start checks', 'incident commander', 'impact', 'severity rationale', 'alert reference', 'first host', 'first ioc', 'dark operation', 'overdue'],
         body: [
           { type: 'p', text: 'Start checks list what should be in place within the first hour of an incident. They warn; they never block anything.' },
@@ -119,24 +249,29 @@ const CATEGORIES = [
       {
         id: 'gs-dashboard',
         title: 'Dashboard',
-        tags: ['dashboard', 'overview', 'metrics', 'home'],
+        tags: ['dashboard', 'overview', 'metrics', 'home', 'mttd', 'mttc', 'mttr', 'workload', 'trend'],
         body: [
-          { type: 'p', text: 'Your live operational view across all incidents — open the **Dashboard** from the sidebar.' },
+          { type: 'p', text: 'The live view across all open incidents, for admins and analysts — **Operate → Dashboard**. Viewers start on **Incidents** instead.' },
           { type: 'section', title: 'What it shows', items: [
-            'Active incidents by phase and severity, with quick entry to each workspace.',
-            'At-a-glance counts and recent activity so you can triage where to look first.',
+            'Counts: **Open**, **Critical + High**, **Opened 30d**, **Closed 30d**, and the **MTTD**, **MTTC** and **MTTR** averages ([[pi-analytics]]).',
+            '**Active Phase** (with the phase symbols — [[inc-phases]]), **Active Severity** and **Incident Type** of the open incidents.',
+            '**Open Incidents**, recent activity, the **Trend** over the last 30 days, **Analyst Workload**, **Top MITRE Tactics** and **Top Tags**.',
+            'A banner while any **Readiness** blocker fails ([[gs-readiness]]), and who is on call.',
+            '**+ New incident** opens the intake form ([[gs-first-incident]]).',
           ] },
+          { type: 'note', text: 'The page updates live while the connection is up; the green dot in its header shows it.' },
         ],
       },
       {
         id: 'gs-search',
         title: 'Global Search',
-        tags: ['search', 'find', 'navigation', 'shortcut'],
+        tags: ['search', 'find', 'navigation', 'shortcut', 'ctrl+k'],
         body: [
-          { type: 'p', text: 'Jump to any incident, entity, or IOC from one box — open **Global Search** from the top bar.' },
+          { type: 'p', text: 'Find an incident, IOC, entity or timeline event from the search box in the top bar. Press `Ctrl+K` (`⌘K` on macOS) to jump to it.' },
           { type: 'section', title: 'Tips', items: [
-            'Search by incident ref (`INC-2026-00001`, or `INC-0001` for incidents created before October 2026), title, hostname, username, or IOC value.',
-            'Results are scoped to what your role can see.',
+            'Search by incident reference (`INC-2026-00001`, or `INC-0001` for incidents created before October 2026), title, hostname, username or IOC value.',
+            'Results are grouped: **Incidents**, **IOCs**, **Entities**, **Timeline**. `Esc` closes them.',
+            'You only find what is in incidents you can see ([[gs-roles]]).',
           ] },
         ],
       },
@@ -156,7 +291,7 @@ const CATEGORIES = [
             'Record yours in **Prepare → IR roster** → **Edit** on your card. An admin can edit anyone\'s.',
             'Admins and analysts see it on **On-call** and in the Dashboard on-call strip. Viewers don\'t.',
           ] },
-          { type: 'note', text: 'It is personal data: it never goes into reports or the LE package. Readiness blocks while anyone on call in the next 14 days has none.' },
+          { type: 'note', text: 'It is personal data: it never goes into reports or disclosure packages. Readiness blocks while anyone on call in the next 14 days has none.' },
         ],
       },
       {
@@ -194,16 +329,17 @@ const CATEGORIES = [
         tags: ['phases', 'lifecycle', 'detection', 'containment', 'eradication', 'recovery', 'post-incident', 'milestones', 'declare', 'gate', 'override', 'stepper', 'colour', 'color', 'symbol', 'glyph', 'legend'],
         body: [
           { type: 'p', text: 'The phase stepper at the top of every incident tracks where you are in the IR lifecycle, aligned to NIST SP 800-61 R3. Moving into Post-Incident passes **Gate 1**.' },
+          { type: 'p', text: 'The current step shows the **time in this phase**. Hover any step for how long the incident spent in it before (and, on the current step, since when). Moving back to a phase, or closing and re-opening, starts a new period; the times come from the audit log. API: `GET /api/incidents/{id}/phase-history`.' },
           { type: 'table', headers: ['Phase', 'What happens'], rows: [
             ['**Preparation**', 'Readiness before any incident: rosters, playbooks, drills. An incident can\'t be moved to it.'],
             ['**Detection & Analysis**', 'Triage, IOC collection, timeline reconstruction, threat actor identification.'],
-            ['**Containment, Eradication & Recovery**', 'Isolate affected systems. Log responder actions in **Respond**. Eradicate and recover; track each system\'s restore and validation on **Recovery** ([[iw-recovery]]). Avoid destroying evidence.'],
+            ['**Containment, Eradication & Recovery**', 'Isolate affected systems. Log responder actions on **Containment** and **Eradication & Recovery**, and decisions on **Decisions** ([[iw-respond]]). Eradicate and recover; track each system\'s restore and validation on the **Recovery tracker** ([[iw-recovery]]). Avoid destroying evidence.'],
             ['**Post-Incident**', 'Closure checklist, lessons learned, report. Cost tracking.'],
           ] },
           { type: 'p', text: 'Each phase has a **symbol** and a **colour** on the stepper, the **Incidents** list and the **Dashboard**. The colour follows the phase\'s NIST CSF 2.0 function and is softer than the severity badges, so the two never read alike.' },
           { type: 'phase-legend', items: ['Violet · CSF 2.0 Protect', 'Yellow · CSF 2.0 Detect', 'Red · CSF 2.0 Respond', 'Green · CSF 2.0 Recover'] },
           { type: 'section', title: 'Changing phase', items: [
-            'Click a phase on the stepper; a confirmation opens. Analysts and Admins only — for Observers the stepper is static.',
+            'Click a phase on the stepper; a confirmation opens. Analysts and admins only; for viewers the stepper is static.',
             '**Preparation** can\'t be selected.',
             'Moving **back** to an earlier phase needs a reason of at least 10 characters. It goes into the audit log.',
             'Moving **into Post-Incident** — from the stepper or with **Resolve** — checks **Gate 1** first.',
@@ -228,7 +364,7 @@ const CATEGORIES = [
             'An override goes into the audit log (`incident_gate_override`, with the blocking items and the warnings) and onto the **Timeline** as **Gate overridden**. Warnings alone never need an override.',
           ] },
           { type: 'section', title: 'Response milestones', items: [
-            'Changing phase sets no time. Declare each milestone in the incident header: **Declare contained** → **Declare eradicated** → **Declare recovered** (only the next one not yet set shows; Observers and closed incidents see none).',
+            'Changing phase sets no time. Declare each milestone in the incident header: **Declare contained** → **Declare eradicated** → **Declare recovered** (only the next one not yet set shows; viewers, closed incidents and Post-Incident see none — set a missing time on **Details** then).',
             'Each is pre-filled with now and editable. It can\'t be in the future, nor before the incident\'s **Detected** time (or **Occurred**, when Detected is empty); Eradicated and Recovered can\'t be before Contained, nor Recovered before Eradicated.',
             'Setting a milestone the first time adds a **Containment declared** / **Eradication declared** / **Recovery declared** event to the **Timeline**, at that time.',
             'Correct or clear a milestone on **Details → Classification** in edit mode. That is audited but adds no Timeline event.',
@@ -284,7 +420,7 @@ const CATEGORIES = [
             'No **Playbook** task Open or In progress, apart from Preparation-phase tasks (a warning). Done, or Skipped with a reason.',
             'Every legal deadline already due is Completed or Waived on **Legal**. Deadlines still ahead, such as the NIS2 final report, are carried forward and listed; they don\'t block.',
             'At least one cost entry, or a filled-in business impact, on **Post-Incident → Costs & Impact**.',
-            '**Evidence**: every exhibit still held has a custodian and is on **legal hold** (otherwise record its disposition: archive, return or destroy); no working-copy download is issued or in progress; every **LE package** is acknowledged by its recipient.',
+            '**Evidence**: every exhibit still held has a custodian and is on **legal hold** (otherwise record its disposition: archive, return or destroy); no working-copy download is issued or in progress; every law-enforcement or regulator **disclosure package** is acknowledged by its recipient.',
             'The **Incident Commander\'s sign-off**, and for a personal-data breach the **DPO\'s sign-off**.',
           ] },
           { type: 'section', title: 'Gate 2 — warnings', items: [
@@ -298,7 +434,7 @@ const CATEGORIES = [
             'The gate panel in the **Close** dialog (and in the **Resolve** dialog when Gate 1 needs the DPO) shows each sign-off the gate needs, with a **Sign off** button for whoever may give it.',
             '**Incident Commander**: the analyst assigned Incident Commander or Deputy on this incident, or an admin. **DPO**: the analyst assigned Data Protection Officer on this incident, or an admin.',
             'A sign-off records your name, the time, your statement and a SHA-256 of the gate\'s blocking checks as they were. It can\'t be edited or deleted; signing again adds a new one. The panel says when the checks have changed since.',
-            'Only sign-offs made since the incident was last re-opened count. All of them appear in the report\'s **Approval & Sign-off** section and in the LE package (`13_Sign_Offs`).',
+            'Only sign-offs made since the incident was last re-opened count. All of them appear in the report\'s **Approval & Sign-off** section and in law-enforcement and regulator disclosure packages (`13_Sign_Offs`).',
           ] },
           { type: 'section', title: 'When Gate 2 is unmet', items: [
             'The **Close** dialog lists each blocking item, then each warning, with a link to where you fix it.',
@@ -319,7 +455,7 @@ const CATEGORIES = [
           ] },
           { type: 'note', text: 'A **False Positive** or **Benign Positive** can be closed from any phase, without Gate 2 — set the **Triage state** on **Details**, then **Close** appears in the header. Outside Detection & Analysis, that triage change needs a reason of at least 10 characters; it goes to the audit log and onto the **Timeline** as **Triage changed**. The phase stays as it is; the audit log records that the gate was skipped, and a close from C/E/R or Post-Incident also adds a **Gate 2 skipped** event with your sign-off statement.' },
           { type: 'note', text: 'Costs and business impact stay editable after closure: realised costs (invoices, legal fees, fines) often arrive weeks later. Changes are audited.' },
-          { type: 'note', text: 'Observers see no Resolve, Close, Re-open or Edit buttons and can\'t change the phase.' },
+          { type: 'note', text: 'Viewers see no Resolve, Close, Re-open or Edit buttons and can\'t change the phase.' },
         ],
       },
     ],
@@ -343,14 +479,16 @@ const CATEGORIES = [
             '**Type** — Malware / Network / Authentication / Process / Registry / etc.',
             '**IR phase** — optional: the 800-61 R3 phase this event belongs to, by your judgement.',
             '**MITRE tactic + technique** — ATT&CK mapping (optional but recommended for the Suggest engine).',
-            '**Host / entity** — type or pick the host (or account, service…). When it matches an entity in **Entities** (case doesn\'t matter), click **Link** to link the event to it; a typed name never links on its own. **Unlink** removes the link and keeps the hostname. A host not in scope yet: tick **Add … to Entities as a host**; it is added once the event is saved. The hostname text is saved as well.',
+            '**Linked IOCs** — pick IOCs of this incident to link; **×** unlinks. The links are saved with the event (each one audited) and also show on the IOC\'s row in **IOCs**.',
+            '**★ Key event** — flag the moments that tell the story (initial access, first C2, lateral movement, detection, containment). An event is also *key* when it has an ATT&CK tactic or technique, or when FENRIR recorded it (milestones, triage, decisions, response actions, closure). Key events show on the Situation board\'s **Key timeline** and come first in **Insert key timeline events** ([[pi-lessons]]). API: `is_key` on the event, `?key=true` on the list.',
+            '**Host / entity** — type or pick the host (or account, service…). When it matches an entity in **Scope** (case doesn\'t matter), click **Link** to link the event to it; a typed name never links on its own. **Unlink** removes the link and keeps the hostname. A host not in scope yet: tick **Add … to Entities as a host**; it is added once the event is saved. The hostname text is saved as well.',
             '**Source · Raw log** — supporting evidence.',
           ] },
           { type: 'section', title: 'Imported events', items: [
             'Events promoted from **Examine → Logs & triage** or committed from **Examine → Vendor reports** carry an **import** badge and, when parsed from an exhibit, a **⛁ exhibit** badge with its identifier.',
             '**TZ assumed** — the source gave no zone; the time was read in the source timezone chosen at import. **year inferred** — the source gave no year (BSD syslog).',
             '**offset-corrected (+120 s)** — the exhibit records the device clock as 120 s ahead, so the time shown is the recorded time minus 120 s. Hover the badge, or expand the event, for the time the device recorded.',
-            'Their facts — time, host, source, type, description, raw log — are locked as imported. **Edit** opens **Annotate imported event**: set the **IR phase**, **ATT&CK** and the **Entity link**.',
+            'Their facts — time, host, source, type, description, raw log — are locked as imported. **Edit** opens **Annotate imported event**: set the **IR phase**, **ATT&CK**, the **Entity link**, linked IOCs and the key-event flag.',
             'The same lock applies to events added from **Network capture**, **Browser history** and an email\u2019s **Import hops**, and to any event recorded from an exhibit or with a time basis (for example a YARA match). The expanded event says where it came from.',
           ] },
           { type: 'note', text: 'Every edit is audit-logged with the value before and after.' },
@@ -363,7 +501,7 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'Tag timeline events with MITRE tactic + technique to enable cross-incident TTP analysis, threat actor attribution scoring, and detection-query generation.' },
           { type: 'section', title: 'Where ATT&CK tags drive value', items: [
-            '**MITRE summary** (Post-Incident) — coverage map of tactics + techniques per incident.',
+            '**ATT&CK & Attribution → Coverage** — coverage map of the 14 tactics + techniques per incident, and the attack chain over time ([[iw-mitre]]).',
             '**Threat actor attribution** — the Suggest engine scores actors using TTP overlap.',
             '**Detection queries** (Examine → YARA & hunt queries) — KQL / Splunk / EQL / Cortex / CrowdStrike queries auto-generated from your tagged events.',
           ] },
@@ -397,12 +535,13 @@ const CATEGORIES = [
       {
         id: 'tl-export',
         title: 'Export Timeline',
-        tags: ['export', 'csv', 'html', 'report', 'zig-zag'],
+        tags: ['export', 'csv', 'html', 'report', 'zig-zag', 'spreadsheet', 'formula', 'excel', 'apostrophe'],
         body: [
-          { type: 'p', text: 'Two export options in the timeline toolbar:' },
+          { type: 'p', text: 'Two exports in the **Timeline** toolbar. Both hold the events the current filters show ([[iw-timeline]]).' },
           { type: 'section', title: 'CSV', items: [
             'Flat row-per-event. Use for spreadsheet analysis, BI tools, or pipeline ingestion.',
             'The last six columns are provenance: exhibit, parser name and version, time basis, the time the device recorded and the clock offset applied. They are empty for events entered by hand.',
+            'Spreadsheet-safe: a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `\'`, so Excel or LibreOffice shows it as text instead of running it as a formula. Plain numbers are left as they are.',
           ] },
           { type: 'section', title: 'HTML', items: [
             'Standalone, JS-free, dark-themed page with a vertical spine and alternating left/right event cards.',
@@ -426,10 +565,11 @@ const CATEGORIES = [
         title: 'IOC Types & Status',
         tags: ['ioc', 'types', 'status', 'malicious', 'clean', 'unknown'],
         body: [
+          { type: 'p', text: 'An indicator of compromise is a value that shows malicious activity — something you can search for, hunt on or block.' },
           { type: 'section', title: 'Supported types', items: [
             '`ip` · `domain` · `url` · `email`',
             '`hash_md5` · `hash_sha1` · `hash_sha256`',
-            '`registry_key` · `file_path` · `other`',
+            '`registry_key` · `file_path` · `crypto_wallet` · `other`',
           ] },
           { type: 'section', title: 'Tri-state status', items: [
             '**Malicious** — analyst-confirmed bad.',
@@ -450,9 +590,9 @@ const CATEGORIES = [
             ['AbuseIPDB',   'ip'],
             ['Shodan',      'ip'],
             ['GreyNoise',   'ip'],
-            ['URLScan',     'url, domain'],
+            ['URLScan',     'url, domain (works without a key)'],
           ] },
-          { type: 'note', text: 'Click **Enrich** on a row for single-IOC enrichment, or **Run all sources** at the top to batch the whole incident.' },
+          { type: 'note', text: 'Click **Enrich** on a row for single-IOC enrichment, or **Scan IOCs** at the top to batch the whole incident. Enrichment sends the indicator to outside services, so it needs the **Analyst** role or higher; viewers see stored results only.' },
         ],
       },
       {
@@ -477,7 +617,7 @@ const CATEGORIES = [
     icon: '▦',
     label: 'Entities & Artifacts',
     color: '#a78bfa',
-    desc: 'Asset registry and quarantine analysis',
+    desc: 'Asset registry and quarantine storage',
     articles: [
       {
         id: 'ee-entities',
@@ -495,18 +635,17 @@ const CATEGORIES = [
       },
       {
         id: 'ee-artifacts',
-        title: 'Quarantine Artifacts',
-        tags: ['artifact', 'quarantine', 'sandbox', 'analysis', 'hash', 'zip', 'infected', 'encrypted', 'ioc', 'delete'],
+        title: 'Quarantine Storage',
+        tags: ['artifact', 'quarantine', 'sandbox', 'hash', 'zip', 'infected', 'encrypted', 'delete', 'integrity', 'storage'],
         body: [
-          { type: 'p', text: 'Upload binary samples for analysis. Files are stored **encrypted at rest** (AES-256-GCM, the same format as evidence) on the quarantine volume. For analysis, FENRIR decrypts a copy in memory and sends it over TLS to the isolated analysis worker, which has no internet access.' },
-          { type: 'section', title: 'On upload', items: [
-            'MD5 / SHA-256 / SHA-512 computed in the same streaming pass that encrypts the file.',
-            'MIME type detected via libmagic.',
-            'No IOCs are created unless you tick **Also create SHA-256 + MD5 IOCs** — only for a malicious sample. A ransom note or a screenshot is context, not an indicator.',
-            'Later, **Promote hashes to IOCs** on the artifact row creates them (ones the incident already has are skipped).',
+          { type: 'p', text: 'How FENRIR stores, hands out and deletes the samples in **Malware quarantine** ([[fo-artifacts]]): encrypted at rest, analysed only in an isolated worker.' },
+          { type: 'section', title: 'Storage', items: [
+            'Files are stored **encrypted at rest** (AES-256-GCM, the same format as evidence) on the quarantine volume.',
+            'MD5, SHA-256 and SHA-512 are computed in the same streaming pass that encrypts the file.',
+            'For analysis, FENRIR decrypts a copy in memory and sends it over TLS to the analysis worker, which has no internet access.',
           ] },
-          { type: 'section', title: 'On download', items: [
-            'Files download as AES-256 password-protected ZIP. Password: `infected`.',
+          { type: 'section', title: 'Download', items: [
+            'Files download as an AES-256 password-protected ZIP. Password: `infected`.',
             'Standard malware-analyst convention — prevents AV auto-execution.',
             'A stored file that fails its integrity check is not downloaded (**integrity failed**).',
           ] },
@@ -515,7 +654,7 @@ const CATEGORIES = [
             'Its YARA matches are deleted with it.',
             'An artifact another record still uses can\'t be deleted: the source of an email analysis or an extracted attachment, a browser-history upload, a collection\'s output, a Defender import or a timeline import.',
           ] },
-          { type: 'note', text: 'Analysis tools available: file-type · hashes · entropy · strings · IOC extract · PE · Office · PDF · EXIF · hexdump · YARA. Run from the artifact row. Artifacts uploaded before encryption at rest show **plaintext (awaiting migration)** until an admin runs the one-off migration.' },
+          { type: 'note', text: 'Artifacts uploaded before encryption at rest show **plaintext (awaiting migration)** until an admin runs the one-off migration.' },
         ],
       },
     ],
@@ -541,9 +680,9 @@ const CATEGORIES = [
             '`GDPR Art. 5.1(c)` lawful basis at collection; `RFC 3161` trusted timestamps; AES-256-GCM at rest.',
           ] },
           { type: 'section', title: 'Lifecycle', items: [
-            'Collect / acquire → **Seal** (Wizard A) → **Examine** (Wizard B) → working copies → custody transfers → provenance gate → send to law enforcement → dispose.',
+            '**Register** (Wizard A, then seal) → **Examine** (Wizard B) → working copies → custody transfers → provenance gate → **Disclosure package** → dispose. The Evidence sub-tabs follow this order: Register · Exhibits · Custody log · Integrity · Disclosure package · SOP ([[iw-evidence]]).',
           ] },
-          { type: 'note', text: 'Every step writes to the hash-chained audit log. The **Audit chain** verifier and the tamper monitor (see **Tamper Monitoring & Audit Anchors**) prove it was not altered.' },
+          { type: 'note', text: 'Every step writes to the hash-chained audit log. The **Integrity** verifier (Evidence › Integrity) and the tamper monitor (see **Tamper Monitoring & Audit Anchors**) prove it was not altered.' },
         ],
       },
       {
@@ -606,7 +745,7 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'Evidence files go up in 8 MiB pieces that FENRIR hashes and encrypts as they arrive, so the file is never written to the server\u2019s disk unencrypted. A brief network drop is retried; a reload, a long outage or a server restart means starting again.' },
           { type: 'section', title: 'Where it is used', items: [
-            '**Evidence › Items**: the **Collection wizard** and **Quick add**.',
+            '**Evidence › Register**: the **acquisition wizard** and **Quick add**.',
             '**Email** (one `.eml` / `.msg` file), **Network capture** and **Browser history** uploads ([[fo-email]], [[fo-pcap]], [[fo-browser-history]]).',
             'The MCP tools that upload these files.',
           ] },
@@ -629,7 +768,7 @@ const CATEGORIES = [
             'A server restart also ends every upload in progress. You see **Upload interrupted — start again**. Nothing was stored: choose the file again.',
             'A failed write on the server (**upload storage error**) ends the upload at once: nothing was stored. Try again later, or ask an admin to check the evidence storage.',
             'Closing the dialog, reloading or closing the tab cancels the upload: the page tells the server as it closes. If that message is lost, the upload ends after 30 minutes.',
-            'Cancelled, or cut off, while FENRIR was storing the file: the result is unknown (**Result unknown**). Check **Evidence › Items** before uploading again.',
+            'Cancelled, or cut off, while FENRIR was storing the file: the result is unknown (**Result unknown**). Check **Evidence › Exhibits** before uploading again.',
           ] },
           { type: 'section', title: 'When the last step is refused', items: [
             '**Collection wizard** and **Quick add**: if FENRIR refuses the details at the end — the identifier is already used, a field it rejects, or the evidence disk is below its 1 GiB reserve (**insufficient storage**) — the uploaded file is kept on the server.',
@@ -683,7 +822,7 @@ const CATEGORIES = [
             '**Failed integrity** — the stored master failed its check while it was read. The item is frozen, as **Verify integrity** does.',
             '**Link expired** — the link was never used.',
             '**Lab copy** — a copy you made outside FENRIR, recorded with **Record a lab copy** and the hash(es) your tool reported for it. **Verified** when each matches the master\u2019s hash of the same algorithm; **Hash mismatch** otherwise (flagged, never counted as verified).',
-            '**Export** — made by an export bundle. **Legacy record** — recorded before copies kept their own hash: it holds the master\u2019s hash, not the copy\u2019s, so it is not a verified copy.',
+            '**Export** — made by a disclosure package (or an earlier evidence export) whose bundle holds the file. **Legacy record** — recorded before copies kept their own hash: it holds the master\u2019s hash, not the copy\u2019s, so it is not a verified copy.',
           ] },
           { type: 'note', text: 'Any **Analyst** who can see the incident can download or record a copy, also after the incident is closed. Every copy is in the item\u2019s custody log; a **Viewer** sees the list only.' },
           { type: 'note', text: 'The item must be active (not frozen), held by an internal custodian, with no transfer pending. The provenance score flags a digital item with no verified working copy.' },
@@ -724,7 +863,7 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'An optional **RFC 3161** time-stamp token binds an evidence hash to an independent trusted time, provable without trusting the platform clock.' },
           { type: 'section', title: 'Where it applies', items: [
-            'Best-effort at **seal**, on the **LE manifest**, and on the **signed audit export**.',
+            'Best-effort at **seal**, on every **disclosure package** manifest and on the **signed audit export**.',
             'Only the hash is sent to the timestamp authority — never the evidence.',
             'Configure the authority with the `TSA_URL` env var; unset = server clock only (provenance shows a manual check).',
           ] },
@@ -742,6 +881,7 @@ const CATEGORIES = [
             'The item shows **Awaiting acceptance by …** and the recipient gets a notification.',
             'The recipient inspects the item, records the **Condition on receipt** and whether the **Seals** are intact, and clicks **Accept custody**. Custody passes to them.',
             'Or the recipient clicks **Decline…**, or the requester or an **Admin** clicks **Cancel request…** — both need a reason.',
+            'The requester gets a notification when the request is accepted, declined or cancelled by someone else.',
           ] },
           { type: 'section', title: 'Rules', items: [
             'Only the recipient can accept — an **Admin** cannot accept for them.',
@@ -783,7 +923,7 @@ const CATEGORIES = [
             'Any **Analyst** who can see the incident can set a hold; only the lead or an **Admin** can release it.',
             'Both work after the incident is closed: preservation outlives closure.',
             'While held: **Destroy** is refused; **Archive** and **Return** need a second approver ([[coc-disposal]]).',
-            'The **LE package** can include only held items (**Only include evidence flagged legal_hold**).',
+            'In a **disclosure package** you pick the exhibits, so you can disclose only held items ([[pi-le-package]]).',
             'Every set and release is in the custody log with its reason; the item detail lists the history.',
           ] },
         ],
@@ -796,13 +936,13 @@ const CATEGORIES = [
           { type: 'p', text: 'A draft exhibit is an evidence item that is registered, hashed and in custody but not yet sealed: its acquisition record is incomplete.' },
           { type: 'section', title: 'Where drafts come from', items: [
             'An upload to **Email**, **Network capture** or **Browser history** — the file is registered first, then analysed (`ISO/IEC 27037 §5.4.4`: identify and preserve before you examine).',
-            'A **Quick add** in **Evidence › Items**.',
+            'A **Quick add** in **Evidence › Register**.',
             'A draft gets an automatic identifier (`EMAIL-…`, `PCAP-…`, `WEBHIST-…`), you as collector and custodian, and its SHA-256 / SHA-1 / MD5. The file is encrypted at rest.',
             '**Acquired at** is unknown unless you entered it at upload. The lawful basis is pending.',
             'Its collection appears in the incident **Custody log** as **Collected**, and every analysis of it as **Examined**.',
           ] },
           { type: 'steps', items: [
-            'Open **Evidence › Items**. Drafts show **Draft · unsealed**.',
+            'Open **Evidence › Exhibits**. Drafts show **Draft · unsealed**.',
             'Click **Complete & seal** (in the row or the item\u2019s detail).',
             'Work through the wizard: device type, lawful basis, how it was acquired, tool + version, the hashes your tool reported, acquisition time, witness. The stored file is kept; nothing is uploaded again.',
             'A target hash you enter is compared with the stored file: a mismatch is refused and nothing changes.',
@@ -810,7 +950,7 @@ const CATEGORIES = [
           ] },
           { type: 'note', text: 'Only the item\u2019s collector, its current custodian, the incident lead or an **Admin** can complete the record, with the item held by an internal custodian and no transfer pending. The record is logged as **Acquisition record** in the custody log with each changed value before and after; device types, decision factors and device details record the new value only.' },
           { type: 'note', text: 'An upload whose SHA-256 equals an active exhibit with a stored file is analysed as that exhibit (the oldest, if there are several) — no second copy is made, and the uploaded copy is deleted.' },
-          { type: 'note', text: 'Exports and LE packages leave unsealed drafts out unless you tick **Include unsealed drafts** (audited): the manifest lists each as `excluded: unsealed draft`. See [[pi-le-package]].' },
+          { type: 'note', text: 'Disclosure packages leave unsealed drafts out unless you tick **Include unsealed drafts** (audited): the inventory lists each as `excluded: unsealed draft`. See [[pi-le-package]].' },
         ],
       },
       {
@@ -853,18 +993,18 @@ const CATEGORIES = [
             'A sidecar verifies the chain segment and takes an **RFC 3161** timestamp over the chain head on an interval; each result is stored as an anchor.',
             'View anchor status at `/api/admin/audit/anchors` (admin); a detected break is logged and flagged.',
           ] },
-          { type: 'note', text: 'The per-incident **Evidence → Audit chain** sub-tab verifies on demand; the signed **Audit Export** lets anyone re-verify offline.' },
+          { type: 'note', text: 'The per-incident **Evidence › Integrity** sub-tab verifies on demand; the signed **Audit Export** lets anyone re-verify offline.' },
         ],
       },
       {
         id: 'coc-handoff',
-        title: 'Send to Law Enforcement',
-        tags: ['le', 'law enforcement', 'package', 'manifest', 'eio', 'mla', 'export'],
+        title: 'Send to Law Enforcement or a Regulator',
+        tags: ['le', 'law enforcement', 'regulator', 'disclosure', 'package', 'manifest', 'eio', 'mla', 'export'],
         body: [
-          { type: 'p', text: 'The law-enforcement package is a single signed handoff bundle: report + per-item custody chains + manifest, AES-256-encrypted with a one-time download.' },
+          { type: 'p', text: 'Exhibits leave FENRIR only in a **disclosure package** (Evidence › Disclosure package): one signed, custody-logged, AES-256-encrypted bundle with a one-time download. See [[pi-le-package]].' },
           { type: 'section', title: 'What it contains', items: [
-            'Manifest with **SHA-256** file hashes and an **HMAC-SHA-256** integrity check (not a public-key signature); embeds the SOP, Annex B documents, and EIO / MLA references.',
-            'A one-time, time-limited download URL plus a recipient acknowledgment (HMAC) that closes the chain.',
+            'Manifest with **SHA-256** file hashes, signed with the platform’s **Ed25519** key (`MANIFEST.json.sig`) and an **HMAC-SHA-256** (`INTEGRITY.sig`); with the chain-of-custody SOP, the TLP statement, tool provenance and the legal basis (EIO / MLA references when given).',
+            'A one-time, time-limited download URL plus a recipient acknowledgment that closes the chain.',
             '`retention_until` recorded for lawful retention.',
             'Unsealed draft exhibits are left out unless you tick **Include unsealed drafts** — see [[pi-le-package]].',
           ] },
@@ -911,11 +1051,11 @@ const CATEGORIES = [
             '**Resolve** — moves the incident to Post-Incident through the phase confirmation; it stays open. Shown until the incident is in Post-Incident.',
             '**Close** — signs the incident off with a statement; it becomes read-only. Shown in Post-Incident, and in any phase for a False or Benign Positive — see [[inc-closing]].',
             '**Re-open** — appears once the incident is closed; asks for a reason and the phase to return to.',
-            'Observers see none of Edit, Resolve, Close or Re-open.',
+            'Viewers see none of Edit, Resolve, Close or Re-open.',
             '**Save changes / Discard** — appear only in edit mode. A grey dot ● = unsaved changes; "SAVED" tag = recently persisted.',
           ] },
           { type: 'section', title: 'Status band', items: [
-            '**Phase stepper** — the 4 phases (Preparation · Detection & Analysis · Containment/Eradication/Recovery · Post-Incident). Click one to move there; Preparation can\'t be selected. Opens a confirmation that asks a reason for moving back and checks Gate 1 before Post-Incident — see [[inc-phases]]. Static for Observers and closed incidents.',
+            '**Phase stepper** — the 4 phases (Preparation · Detection & Analysis · Containment/Eradication/Recovery · Post-Incident). Click one to move there; Preparation can\'t be selected. Opens a confirmation that asks a reason for moving back and checks Gate 1 before Post-Incident — see [[inc-phases]]. Static for viewers and closed incidents.',
             '**Pills** — current severity, status, TLP, and a red **DARK OP** pill when Dark Operation is on.',
             '**Presence avatars** — coloured initials of every other user currently viewing the incident, via WebSocket. Yours has a thicker ring.',
           ] },
@@ -931,14 +1071,14 @@ const CATEGORIES = [
           { type: 'section', title: 'Situation board', items: [
             '**Stakeholder notifications banner** — the notification tracker in one line: x of y required notified, overdue ones, and a chip per stakeholder ([[iw-notifications]]).',
             '**Classification strip** — Type · Severity · TLP · Triage · How detected · Reporter · Teams · Tags on one line. **Edit details** opens Details in edit mode (analysts and admins, while the incident is open).',
-            '**Clocks** — Occurred · Detected · Declared (opened in FENRIR) · Contained · Eradicated · Recovered, the time elapsed since detection, the nearest open legal deadline, and **Stakeholder notifications** (x of y, overdue or next due). **NOT CONTAINED** shows in red when Contained is not declared in Containment, Eradication & Recovery or later.',
+            '**Clocks** — Occurred · Detected · Declared (opened in FENRIR) · Contained · Eradicated · Recovered, the time elapsed since detection, the **time in phase** (hover it for how long each earlier phase took), the nearest open legal deadline, and **Stakeholder notifications** (x of y, overdue or next due). **NOT CONTAINED** shows in red when Contained is not declared in Containment, Eradication & Recovery or later.',
             '**Next gate** — Gate 1 (into Post-Incident) or Gate 2 (close), as the server evaluates it now: met, or how many items are missing with links to where each is fixed ([[inc-phases]]).',
-            '**Open response actions** — open and in-progress actions from Respond, with their target, its containment state, owner and age ([[iw-respond]]).',
+            '**Open response actions** — open and in-progress actions from Containment and Eradication & Recovery, with their target, its containment state, owner and age ([[iw-respond]]).',
             '**Scope** — compromised entities with their containment state, plus entity and IOC counts.',
             '**Team** — every operational role and who holds it; vacant roles are outlined.',
             '**Latest shift handoff** — who handed over to whom, whether it is acknowledged, and the working hypothesis.',
             '**Next tasks** — the first 3 open playbook tasks of the current phase, with owner and due time.',
-            '**Latest events** — the newest 5 timeline events. **Description** — the first lines; **Show all** opens Details.',
+            '**Key timeline** — the newest 5 key events ([[tl-events]]); **+ event** opens the Add event form. **Description** — the first lines; **Show all** opens Details.',
             'Each panel loads on its own: if one can\'t be read, only that panel says so.',
           ] },
           { type: 'section', title: 'Details', items: [
@@ -957,14 +1097,15 @@ const CATEGORIES = [
         title: 'Team',
         tags: ['assign', 'role', 'commander', 'coverage', 'cisa', 'operational role'],
         body: [
-          { type: 'p', text: 'Who is on the response team and what role they hold. Distinct from RBAC ([[gs-roles]]) — these are CISA operational roles per incident.' },
+          { type: 'p', text: 'Who is on the response team and what role they hold. Distinct from platform roles ([[gs-roles]]): these are the CISA / NIST SP 800-61 R3 response roles, per incident.' },
           { type: 'section', title: 'Sections', items: [
-            '**Role Coverage** — at-a-glance grid showing which CISA roles are filled (Incident Commander, Communications Lead, Forensic Lead, Containment Lead, Recovery Lead, Scribe) and which are vacant.',
+            '**Role Coverage** — which active operational roles are filled and which are vacant: Incident Commander, Deputy Incident Commander, Lead Investigator, Communications Lead, Legal Liaison, Recorder, Data Protection Officer, and any role an admin added.',
             '**Team grid** — one card per assignee: username, operational role, assignment notes, assigned-at timestamp.',
-            '**+ Assign** — modal picks a user, role, and optional notes. The user must already be able to see the incident. The assignee gets a notification.',
+            '**+ Assign** — modal picks a user, role, and optional notes. Each user shows **ON CALL** (today\'s rota), their availability and skills from the Roster. The user must already be able to see the incident. The assignee gets a notification.',
             "**Incident Commander / Deputy** — these make an analyst the incident lead ([[gs-roles]]). Only the lead or an admin can assign or remove them; while the incident has no lead, its creator or today's on-call analyst can.",
             "**Remove** — your own assignment, or anyone's if you are the lead.",
           ] },
+          { type: 'note', text: 'The start checks ask for an Incident Commander, a Communications Lead and a Legal Liaison within the first hour ([[inc-start-checks]]).' },
         ],
       },
       {
@@ -989,7 +1130,7 @@ const CATEGORIES = [
             '**Suggested for** — the incident types a template is offered for. Admins set it on system templates; analysts on custom ones.',
             '**Mark reviewed** — records that you reviewed the template today (who and when). Editing a template is not a review. Readiness warns until the Ransomware and Data-breach playbooks are marked reviewed within 12 months ([[gs-readiness]]).',
           ] },
-          { type: 'note', text: 'Gate 2 (closing) needs every task Done or Skipped. Preparation-phase tasks count too.' },
+          { type: 'note', text: 'Gate 2 (closing) needs every task Done or Skipped, except Preparation-phase tasks: those are readiness work and only warn ([[inc-closing]]).' },
         ],
       },
       {
@@ -1035,7 +1176,7 @@ const CATEGORIES = [
       },
       {
         id: 'iw-case-notes',
-        title: 'Case notes',
+        title: 'Case Notes',
         tags: ['case notes', 'notes', 'scratchpad', 'append-only', 'correction', 'contemporaneous', 'exhibit', 'sha-256'],
         body: [
           { type: 'p', text: 'Shared notes made at the time: what you did, saw or decided, and why. Everyone who can see the incident reads them; analysts and admins add them. Open **Detection & Analysis → Case notes**.' },
@@ -1051,7 +1192,7 @@ const CATEGORIES = [
           ] },
           { type: 'section', title: 'Where else they show', items: [
             '**Evidence** item detail, an expanded **Timeline** event or **IOC**, and the **Entities** drawer list the notes linked to that item. **+ Add note** there posts a note already linked to it.',
-            'The **LE package** has them in `10_Case_Notes/Case_Notes.csv`; the **Full Technical Report** has a **Case Notes** appendix. Both include each entry’s SHA-256.',
+            'Law-enforcement and internal **disclosure packages** have them in `10_Case_Notes/` (`Case_Notes.csv` and `Case_Notes.json`); the **Full Technical Report** has a **Case Notes** appendix. Both include each entry’s SHA-256.',
           ] },
           { type: 'note', text: 'Each entry shows `#` and the start of its SHA-256. The hash is written to the hash-chained audit log when the entry is posted, so a changed note would no longer match.' },
           { type: 'note', text: 'On a closed incident case notes are read-only, like comments. Re-open the incident to add one.' },
@@ -1074,6 +1215,7 @@ const CATEGORIES = [
             'Give a regulation its **own anchor** when its awareness moment differs (GDPR Art. 33, NIS2 Art. 23 and DORA each define it differently).',
             'Initialising again adds only what is missing — it never duplicates a deadline.',
             'No Detected time and no anchor entered: initialise is refused until you enter one.',
+            'An anchor can\'t be in the future (2 minutes\' allowance for clock skew) — initialise, **+ Add custom** and **Re-anchor** refuse it.',
           ] },
           { type: 'section', title: 'Built-in regulations', items: [
             '**GDPR** — Art. 33 DPA notification, 72 h. Art. 34 notice to individuals is an **internal target**: the law says “without undue delay” and sets no fixed window.',
@@ -1104,16 +1246,19 @@ const CATEGORIES = [
       {
         id: 'iw-evidence',
         title: 'Evidence Tab',
-        tags: ['evidence', 'items', 'custody', 'audit chain', 'export', 'sop', 'aes-256', 'transfer', 'dispose'],
+        tags: ['evidence', 'register', 'exhibits', 'items', 'custody', 'integrity', 'audit chain', 'disclosure', 'export', 'sop', 'supporting documents', 'aes-256', 'transfer', 'dispose'],
         body: [
-          { type: 'p', text: 'The incident workspace for evidence — five sub-tabs. For the full ISO 27037/41/42/43 lifecycle and wizards, see the **Evidence & Chain of Custody** category.' },
+          { type: 'p', text: 'The incident workspace for evidence. The sub-tabs follow the evidence lifecycle (ISO/IEC 27037), and each has its own address, so you can bookmark it. For the full ISO 27037/41/42/43 lifecycle and wizards, see the **Evidence & Chain of Custody** category.' },
           { type: 'table', headers: ['Sub-tab', 'What it does'], rows: [
-            ['**Items**', 'Add / view evidence items, filter by kind (digital file or physical item). Unsealed items show **Draft · unsealed** with **Complete & seal** ([[coc-draft-exhibits]]). Actions: collection + acquisition wizards, evidence detail (acquisition record, legal hold, working copies, examinations, photos, provenance score), transfer custody, examination wizard, dispose (admin only).'],
-            ['**Custody log**', 'Per-incident timeline of every collect / acquire / transfer / examine / return / dispose event across all items.'],
-            ['**Audit chain**', 'Cryptographic chain verifier — recomputes the hash chain over evidence events and reports any mismatch.'],
-            ['**Export**', 'Bundles selected items into an AES-256-encrypted ZIP with a one-time key and a single-use 24-hour download URL; auto-mints master-verified working copies for the items whose file is in the bundle. Up to 60 GiB of stored files per bundle; a multi-GiB bundle takes minutes to build. Unsealed drafts are left out (listed `excluded: unsealed draft`) unless you tick **Include unsealed drafts** (audited). Each file is hashed as it is bundled: a SHA-256 mismatch or a failed integrity check discards the bundle (nothing is exported) and freezes the item.'],
-            ['**CoC SOP**', 'Reference card: phase-by-phase chain-of-custody procedure; flags missing photos on physical items and missing SHA-256 on digital files.'],
+            ['**Register**', 'Register an exhibit: the **acquisition wizard** (lawful basis, device type, collect or acquire, hashes, witness; sealed at the end), or **Quick add**, which registers an **unsealed draft** to complete and seal later ([[coc-draft-exhibits]]). Device types include **Email export**, **Vendor report** and **Network capture export** for data handed over as an export.'],
+            ['**Exhibits**', 'The register: filter by kind and status. Unsealed items show **Draft · unsealed** with **Complete & seal**. **Detail** opens the exhibit: acquisition record, legal hold, working copies, examinations, photos, provenance score; transfer custody, examine, dispose (admin only). **+ Register exhibit** opens Register.'],
+            ['**Custody log**', 'Every custody event of the incident (collect, seal, transfer, examine, verify, disclose, dispose …), oldest first, each naming its exhibit by identifier and name.'],
+            ['**Integrity**', 'The evidence audit chain: **Verify chain** recomputes each event’s hash and names the exhibit of the first event that fails.'],
+            ['**Disclosure package**', 'Build a signed, custody-logged package for law enforcement, a regulator or internal use, and record the recipient’s receipt. Incident lead or **Admin**. See [[pi-le-package]].'],
+            ['**SOP**', 'Reference card: phase-by-phase chain-of-custody procedure; flags missing photos on physical items and missing SHA-256 on digital files.'],
+            ['**Supporting documents**', 'Screenshots, exported logs and notes that are not evidence; any of them can be registered as an exhibit ([[iw-files]]).'],
           ] },
+          { type: 'note', text: 'Old addresses still work: `evidence/items` opens Exhibits, `evidence/audit-chain` Integrity, `evidence/export` Disclosure package, and `files` Supporting documents.' },
           { type: 'note', text: 'A **legal hold** item can\u2019t be destroyed; archiving or returning it needs a second approver (two-person rule) — see [[coc-legal-hold]] and [[coc-disposal]].' },
         ],
       },
@@ -1141,7 +1286,7 @@ const CATEGORIES = [
           { type: 'section', title: 'When to register as exhibit', items: [
             'When the file itself may be needed as evidence — shown to a court, a regulator or law enforcement, or relied on for a finding — rather than only illustrating the work.',
             'The file is decrypted, re-encrypted into the evidence store with a new key, and its SHA-256 checked against the one recorded at upload; if they differ nothing is registered and the attempt is audited.',
-            'The result is an **unsealed draft exhibit** collected by you and in your custody (audited as a collection, with the file as its source). Complete its acquisition record and seal it in **Evidence → Items** ([[iw-evidence]]).',
+            'The result is an **unsealed draft exhibit** collected by you and in your custody (audited as a collection, with the file as its source). Complete its acquisition record and seal it in **Evidence › Exhibits** ([[iw-evidence]]).',
             'If the incident already holds an exhibit with the same SHA-256, that exhibit is linked instead (no second copy). Registering again just shows the exhibit. The file stays here as a supporting document.',
           ] },
           { type: 'note', text: 'Screenshots can show personal data or TLP:RED material, and an included image goes into every report for the incident. Check it first; upload a cropped or redacted copy if needed.' },
@@ -1164,7 +1309,7 @@ const CATEGORIES = [
             '**Browser history** — Chromium / Firefox history: visits, search terms, downloads — see [[fo-browser-history]].',
             '**Logs & triage** (was Timeline Import) — parse a log file or a registered exhibit, then promote events to the timeline — see [[fo-timeline-import]].',
             '**Vendor reports** (was Defender Import) — import a Microsoft Defender XDR incident PDF or a registered exhibit — see [[fo-vendor-reports]].',
-            '**Ransom note** — pull wallets, deadlines and amounts out of a ransom note.',
+            '**Ransom note** — pull wallets, deadlines and amounts out of a ransom note — see [[fo-ransom-note]].',
           ] },
           { type: 'section', title: 'Enrich & hunt', items: [
             '**OSINT** — 11-source OSINT lookup for free-text IOCs — see [[fo-osint]].',
@@ -1185,10 +1330,13 @@ const CATEGORIES = [
             'Vertical spine with date separators and alternating event cards.',
             'Per-event: type, MITRE tactic + technique, IR phase, host (linked to its entity), source, raw log (collapsible).',
             'Inline **⚑ LOLBin panel** when an event references a known living-off-the-land binary.',
+            '**★ Key** marks a key event; linked IOCs show as **⌖** chips under the event (red when malicious).',
             '**Show / hide system events** toggle.',
           ] },
           { type: 'section', title: 'Toolbar', items: [
-            '**+ Add event** — modal with a host picker over **Entities**, an IR-phase field, the MITRE selector and structured fields ([[tl-events]]).',
+            '**+ Add event** — modal with a host picker over **Scope**, an IR-phase field, the MITRE selector, linked IOCs, the key-event flag and structured fields ([[tl-events]]).',
+            '**⇪ Import** — opens **Examine → Logs & triage** to import events from an exhibit or a log file.',
+            '**Filters** — IR phase (or *No phase set*), entity, IOC, source (Manual / Imported / System), **★ Key events only**, and a text search over description, host, source, type, raw log and ATT&CK. The server filters before paging, so every matching event is listed. Filters stay in the address, so a filtered view can be bookmarked or shared; **Clear filters** resets them. The exports hold the events shown.',
             '**Export CSV** — flat rows for spreadsheets / pipelines.',
             '**Export HTML** — standalone, JS-free, printable dark page ([[tl-export]]).',
           ] },
@@ -1196,19 +1344,19 @@ const CATEGORIES = [
       },
       {
         id: 'iw-entities',
-        title: 'Entities',
-        tags: ['entity', 'asset', 'host', 'user', 'graph', 'compromised', 'connect', 'import'],
+        title: 'Scope',
+        tags: ['scope', 'entity', 'asset', 'host', 'user', 'graph', 'compromised', 'connect', 'import'],
         body: [
-          { type: 'p', text: 'Assets in your environment relevant to the incident — hosts, users, services, IP ranges. See also [[ee-entities]].' },
+          { type: 'p', text: '**Scope** (the rail item; the old *Entities* address still works) lists the assets in your environment relevant to the incident — hosts, users, services, IP ranges. See also [[ee-entities]].' },
           { type: 'section', title: 'Views', items: [
             '**Table view** — Type, Value, Name, Criticality dropdown, Compromised toggle, added-at.',
             '**Compromised** entities are the incident\'s **Affected systems** on the Details tab and in reports — add a host once, here or there.',
-            '**Isolate** (hosts), **Disable** (user and email accounts) or **Block** (IPs, network ranges, domains) — opens the **Respond** action form with that containment template and this entity already linked. Not shown to viewers or on a closed incident.',
+            '**Isolate** (hosts), **Disable** (user and email accounts) or **Block** (IPs, network ranges, domains) — opens the **Containment** action form with that containment template and this entity already linked. Not shown to viewers or on a closed incident.',
             '**Isolated** / **Disabled** / **Blocked** / **Pending…** badge next to the Compromised toggle — containment state from **Respond**: the linked containment action is done (green) or still open or in progress (amber). See [[iw-respond]].',
             '**Graph view** — relationship visualisation of connected entities.',
           ] },
           { type: 'section', title: 'Toolbar', items: [
-            '**Filter by Type / Criticality.**',
+            '**Filter by Type / Criticality**, and **Compromised only** (the affected systems; filtered on the server).',
             '**+ Add entity** — single-entity modal (Type · Value · Name · Criticality · Compromised · Tags).',
             '**Bulk import** — CSV upload with preview.',
             '**Connect** — draw a relationship between two existing entities.',
@@ -1216,6 +1364,10 @@ const CATEGORIES = [
           { type: 'section', title: 'Entity detail drawer', items: [
             'Edit / Delete / Promote to IOC.',
             'Relationships to other entities, count of linked evidence files.',
+            '**Timeline events** — the incident timeline events on this entity (first 50, oldest first); **Open in Timeline →** shows them all, filtered to the entity.',
+            '**Linked IOCs** — the IOCs whose entity is this one.',
+            '**Containment actions** — the containment actions on **Containment** that target this entity, with their status.',
+            '**Asset Log** — the entity\'s own notes and automatic entries (added, compromised flag changes), as before.',
           ] },
         ],
       },
@@ -1226,22 +1378,25 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'Indicators of compromise tied to this incident. See also [[ioc-types]] and [[ioc-enrichment]] for status and enrichment fundamentals.' },
           { type: 'section', title: 'Table columns', items: [
-            'Type · Value (with badges) · linked Entity · Source · confidence bar · added-at · tags.',
+            'Type · Value (with badges) · linked Entity · Source · confidence bar · tags · added-at · **First / last seen**.',
+            '**First / last seen** — the earliest and latest time of the timeline events linked to the IOC (link them in the expanded row); — when none is linked.',
             '**⚠ TI** badge — value matches an enabled Threat Intel feed.',
             '**LOL** badge — file-path matches a known LOLBin.',
             '**⋈** badge — IOC appears in N other incidents (click for cross-incident list).',
             '**Blocked** / **Pending…** badge — containment state from **Respond**: a block action linked to this IOC is done (green) or still open or in progress (amber). See [[iw-respond]].',
           ] },
           { type: 'section', title: 'Toolbar', items: [
-            '**+ Add IOC** · **Bulk import (CSV)** · **Run all sources** (batch enrich whole incident).',
-            '**Scan to platforms** — modal pushes IOCs to Microsoft Defender / CrowdStrike / SentinelOne / Cortex XDR / FortiGate / Palo Alto for blocking or hunting.',
+            '**Scan IOCs** — enrich every IOC of the incident with the sources ticked under **▾** (Analyst role or higher: the lookups leave FENRIR). After a scan it reads **↻ Re-scan IOCs**.',
+            '**Export** — download the IOCs in a platform\'s import format: Microsoft Defender (CSV or JSON), CrowdStrike, SentinelOne, Cortex XDR (JSON), FortiGate (CLI script) or Palo Alto PAN-OS (XML + EDL). Each file holds only the types that platform takes; FENRIR sends nothing to the platforms.',
+            '**Bulk Import** (CSV, with a preview) · **+ Add IOC**.',
           ] },
           { type: 'section', title: 'Row actions', items: [
             'Click a row to expand: full value, **Mark Malicious / Mark Clean / Mark Unknown** buttons, notes editor, enrichment cards.',
-            'Per-row **Enrich** runs only the enrichment sources that apply to this IOC type.',
-            '**Edit** · **Delete** · **Open correlations**.',
-            '**Block** (IP, domain, URL and hash IOCs) — opens the **Respond** action form with the matching block template and this IOC already linked. Not shown to viewers or on a closed incident.',
+            'Per-row **Enrich** runs only the enrichment sources that apply to this IOC type (Analyst role or higher: it is an outbound lookup).',
+            '**Edit** · **Delete** (not shown to viewers). The **⋈** badge lists the other incidents with the same IOC.',
+            '**Block** (IP, domain, URL and hash IOCs) — opens the **Containment** action form with the matching block template and this IOC already linked. Not shown to viewers or on a closed incident.',
           ] },
+          { type: 'note', text: 'The Defender CSV is spreadsheet-safe: a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `\'` ([[tl-export]]).' },
         ],
       },
       {
@@ -1249,32 +1404,37 @@ const CATEGORIES = [
         title: 'ATT&CK & Attribution',
         tags: ['mitre', 'attack', 'tactic', 'technique', 'coverage', 'attribution', 'actor'],
         body: [
-          { type: 'p', text: 'What the attacker did, and who it points to. Two sub-tabs: **Coverage** (opens first) and **Attribution** — see [[fo-attribution]].' },
+          { type: 'p', text: 'What the attacker did, and who it points to. Two sub-tabs: **Coverage** (opens first, with the attack chain) and **Attribution** — see [[fo-attribution]].' },
           { type: 'section', title: 'Coverage', items: [
             'Per-incident MITRE coverage map. Driven entirely by timeline events you have tagged with a tactic + technique ([[tl-mitre]]).',
-            'Header counts: tactics observed (of 12) · total techniques observed.',
-            'One row per MITRE tactic, in ATT&CK order.',
+            'Header counts: tactics observed (of 14) · total techniques observed.',
+            'One row per MITRE tactic, in ATT&CK order — from **Reconnaissance** (TA0043) and **Resource Development** (TA0042) to **Impact**.',
             'Observed tactics show technique pills with the event count per technique.',
             'Unobserved tactics show a gap indicator — useful to spot blind spots.',
+            '**Attack chain** below the rows — the same tagged events over time, one lane per tactic ([[pi-attack-chain]]).',
           ] },
         ],
       },
       {
         id: 'iw-respond',
-        title: 'Respond',
-        tags: ['respond', 'kanban', 'containment', 'eradication', 'recovery', 'decision', 'action', 'revert', 'link', 'task'],
+        title: 'Containment, Eradication & Recovery, Decisions',
+        tags: ['respond', 'containment', 'eradication', 'recovery', 'decision', 'action', 'revert', 'link', 'task'],
         body: [
-          { type: 'p', text: 'A Kanban board for tracking response actions during Containment / Eradication / Recovery.' },
-          { type: 'section', title: 'Columns', items: [
-            '**Containment** · **Eradication** · **Recovery** · **Decisions**.',
-            'Drag cards between columns or change status via the per-card dropdown.',
+          { type: 'p', text: 'Response actions during Containment, Eradication & Recovery, on three rail pages so first-hour containment has its own entry.' },
+          { type: 'section', title: 'Pages', items: [
+            '**Containment** — the containment actions. Rail count: done / total.',
+            '**Eradication & Recovery** — the eradication and recovery columns side by side; **Recovery tracker →** opens the per-system restore and validation tracker ([[iw-recovery]]).',
+            '**Decisions** — the decision log. Rail count: decisions recorded.',
+            'The old **Respond** address (and its links from Scope and IOCs) opens **Containment**.',
+            'Change an action\'s status with the dropdown on its card.',
           ] },
           { type: 'section', title: 'Action cards', items: [
             'Title, description, target, assignee, occurrence + completion timestamps. A target not linked to an entity or IOC shows **(unlinked target)**.',
             '**Done** — stamps the completion time and adds a system event to the **Timeline** (at the occurrence time if set, else the completion time). Logging an action straight as Done does the same.',
-            '**Revert** — marks the action **Reverted** (rolled back), records the reason and adds a Timeline event.',
+            'Status: **Open** · **In progress** · **Done** · **Deferred**, from the dropdown on the card.',
+            '**↩** (revert) — rolls an action back. Give the reason and click **↩ Confirm revert**: the action becomes **Reverted** for good (its status can\'t change again), the reason stays on the card and a Timeline event records it.',
             '**Deferred** — give the reason in **Edit** (*Why is it deferred?*). Gate 1 warns about a deferred action without one.',
-            'Edit / Delete inline.',
+            '**Edit** and **✕** (delete) on the card. A closed incident is read-only.',
           ] },
           { type: 'section', title: 'Target and containment state', items: [
             'Pick the host, account or C2 IP in **Link target** — the entities and IOCs of this incident, filtered to the template\'s types. **Target** takes its value; you can still type free text instead. The list loads when the dialog opens; if it can\'t load, the dialog says so and free text still works.',
@@ -1285,6 +1445,7 @@ const CATEGORIES = [
           ] },
           { type: 'section', title: 'Decision cards', items: [
             'Summary, rationale, outcome, tags, decided-by / decided-at.',
+            'Outcome: **Pending** · **Approved** · **Rejected** · **Deferred**.',
             'A decision promoted from the War Room or a comment keeps a link to that message ([[co-warroom]]).',
           ] },
           { type: 'section', title: 'Links between decisions, actions and tasks', items: [
@@ -1300,10 +1461,10 @@ const CATEGORIES = [
       },
       {
         id: 'iw-recovery',
-        title: 'Recovery',
+        title: 'Recovery Tracker',
         tags: ['recovery', 'restore', 'backup', 'restore point', 'validate', 'validation', 'validator', 'monitoring', 'not required', 'declare recovered', 'rc.rp'],
         body: [
-          { type: 'p', text: 'One row per system in scope: every **compromised** host, service or network range from **Entities**. Track its restore from backup, who checked it clean, and how long it stays under watch. Maps to NIST CSF 2.0 `RC.RP-02`, `RC.RP-03` and `RC.RP-05`.' },
+          { type: 'p', text: 'One row per system in scope: every **compromised** host, service or network range from **Scope**. Track its restore from backup, who checked it clean, and how long it stays under watch. Maps to NIST CSF 2.0 `RC.RP-02`, `RC.RP-03` and `RC.RP-05`.' },
           { type: 'section', title: 'States', items: [
             '**Not started** → **Restoring** → **Restored** → **Validated**. Or **Not required**, with a reason, for a system that needs no restore.',
             'Each row shows only the next steps allowed. You can\'t skip a step.',
@@ -1321,13 +1482,13 @@ const CATEGORIES = [
             'When every system is **Validated** or **Not required**, the page offers **Declare recovered**. It sets the incident\'s **Recovered** time, the same as the header button (see [[inc-phases]]). Nothing is set automatically.',
             'The rail and the **Situation** board show **Recovery x/y validated**; systems marked Not required are left out of y.',
           ] },
-          { type: 'note', text: 'Clearing a system\'s **Compromised** flag takes it off this list; its record is kept. An entity with a recovery record can\'t be deleted. Observers can read the tracker; a closed incident is read-only.' },
-          { type: 'note', text: 'The **Full Technical Report** has a **Recovery Validation** section, and the LE package has `11_Recovery/Recovery.csv`. From the API: `GET /api/incidents/{id}/recovery` and `PATCH /api/incidents/{id}/recovery/{entity_id}`.' },
+          { type: 'note', text: 'Clearing a system\'s **Compromised** flag takes it off this list; its record is kept. An entity with a recovery record can\'t be deleted. Viewers can read the tracker; a closed incident is read-only.' },
+          { type: 'note', text: 'The **Full Technical Report** has a **Recovery Validation** section, and every disclosure package has `11_Recovery/Recovery.csv`. From the API: `GET /api/incidents/{id}/recovery` and `PATCH /api/incidents/{id}/recovery/{entity_id}`.' },
         ],
       },
       {
         id: 'iw-notifications',
-        title: 'Stakeholder notifications',
+        title: 'Stakeholder Notifications',
         tags: ['notifications', 'stakeholder', 'matrix', 'notify', 'countdown', 'overdue', 'sla', 'escalation', 'severity', 'ciso', 'dpo', 'rs.co-02'],
         body: [
           { type: 'p', text: '**Comms › Notifications** turns the stakeholder matrix ([[co-matrix]]) into a checklist with countdowns: who must be told about this incident, by when, and whether it was done. Maps to NIST CSF 2.0 `RS.CO-02` (stakeholders are notified of incidents).' },
@@ -1347,7 +1508,7 @@ const CATEGORIES = [
             'The header chip **Notifications x of y** (red when one is overdue), the Comms rail count, the **Situation** board clock line, and the banner above the Comms tabs.',
             'An overdue required notification sends one **in-app** reminder to the incident\'s assignees (everyone with access if none), and one email to the Legal Liaison and Incident Commander under the rules in [[iw-legal]]. The stakeholder is never contacted by FENRIR.',
           ] },
-          { type: 'note', text: 'The **Full Technical Report** lists them in **Communications & Notification Log**, and the LE package has `12_Notifications/Stakeholder_Notifications.csv`. From the API: `GET /api/incidents/{id}/stakeholder-notifications` and `PATCH …/stakeholder-notifications/{notification_id}`. Observers can read the tracker.' },
+          { type: 'note', text: 'The **Full Technical Report** lists them in **Communications & Notification Log**, and law-enforcement and regulator disclosure packages have `12_Notifications/Stakeholder_Notifications.csv`. From the API: `GET /api/incidents/{id}/stakeholder-notifications` and `PATCH …/stakeholder-notifications/{notification_id}`. Viewers can read the tracker.' },
         ],
       },
       {
@@ -1355,16 +1516,15 @@ const CATEGORIES = [
         title: 'Post-Incident Tab',
         tags: ['post-incident', 'analytics', 'closure', 'lessons', 'attack chain', 'costs', 'impact', 'reports', 'url', 'link'],
         body: [
-          { type: 'p', text: 'Closure activities and reporting. Six inner tabs, each with its own address, so a reload or a shared link opens the same tab:' },
+          { type: 'p', text: 'Closure activities and reporting. Five inner tabs, each with its own address, so a reload or a shared link opens the same tab:' },
           { type: 'table', headers: ['Sub-tab', 'Address', 'What it does'], rows: [
             ['**Analytics**',         '`post-incident/analytics`',    'Quantitative incident view — see [[pi-analytics]].'],
             ['**Lessons Learned**',   '`post-incident/lessons`',      'Structured 800-61 §4 review; the only place lessons learned are edited — see [[pi-lessons]].'],
-            ['**Attack Chain**',      '`post-incident/attack-chain`', 'Swimlane visualisation of MITRE-tagged events — see [[pi-attack-chain]].'],
             ['**Costs & Impact**',    '`post-incident/costs`',        'Business impact assessment and cost entries — see [[pi-costs]].'],
-            ['**Reports**',           '`post-incident/reports`',      'Executive / Full / LE Package generation — see [[pi-reports]].'],
+            ['**Reports**',           '`post-incident/reports`',      'Executive Summary and Full Technical Report — see [[pi-reports]]. Disclosure packages are under Evidence ([[pi-le-package]]).'],
             ['**Closure Checklist**', '`post-incident/closure`',      '12 seeded items plus custom rows — see [[pi-closure]].'],
           ] },
-          { type: 'note', text: '**Post-Incident** on its own opens **Analytics**. The Fix links of the gates open the sub-tab that fixes the item.' },
+          { type: 'note', text: '**Post-Incident** on its own opens **Analytics**. The Fix links of the gates open the sub-tab that fixes the item. The attack chain is on **ATT&CK & Attribution → Coverage**; the old `post-incident/attack-chain` address opens it there.' },
         ],
       },
       {
@@ -1374,13 +1534,13 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: "Per-incident audit feed. Visible to admins and to the incident lead (its Incident Commander or Deputy, [[gs-roles]]); a lead's read is itself audited." },
           { type: 'section', title: 'Columns', items: [
-            'Timestamp · HTTP method / IP · action name (colour-coded) · username + role · outcome (success / failure / denied) · resource label · request path.',
+            'Timestamp · HTTP method, client IP and client (e.g. Firefox 131 (Linux), curl/8.5.0; hover for the full user agent; **system** for entries written without a request) · action name (colour-coded) · username + role · outcome (success / failure / denied) · resource label · request path.',
           ] },
           { type: 'section', title: 'Filters', items: [
             'By action type · by user · shows total + filtered counts.',
-            'Click any row to expand the full event payload.',
+            'Open **details** under an entry (on the Global Audit Log, click the row) for its full IP address, user agent, request path and request ID, then the event payload. From 2026-10-06 the user agent is part of each entry\'s hash, so it cannot be changed unnoticed.',
           ] },
-          { type: 'note', text: 'Cookie sessions and Bearer-token API calls both appear here. Global audit is at Admin → Global Audit Log ([[st-audit-export]]).' },
+          { type: 'note', text: 'Cookie sessions and Bearer-token API calls both appear here. The log across all incidents is **Admin → Audit Log** ([[set-admin]]); signed exports: [[st-audit-export]].' },
         ],
       },
       {
@@ -1388,7 +1548,12 @@ const CATEGORIES = [
         title: 'War Room Tab',
         tags: ['warroom', 'chat', 'mention', 'drawer'],
         body: [
-          { type: 'p', text: 'Pinned to the right edge of every incident page. See [[co-warroom]] for full details.' },
+          { type: 'p', text: 'The **War Room** tab on the right edge of every incident page opens the incident\'s chat ([[co-warroom]]).' },
+          { type: 'section', title: 'What you can do', items: [
+            'Chat with everyone working the incident; `@username` notifies them.',
+            '**Promote** a message to a Timeline event or a decision.',
+            'Viewers read the chat; analysts and admins post.',
+          ] },
         ],
       },
     ],
@@ -1398,7 +1563,7 @@ const CATEGORIES = [
     icon: '⌖',
     label: 'Examine Tools',
     color: '#22d3ee',
-    desc: 'YARA & hunt queries · LOLBins · Email · Network capture · Browser history · Malware quarantine · Logs & triage · OSINT',
+    desc: 'Every Examine sub-tab: acquire, analyse by artefact, enrich and hunt',
     articles: [
       {
         id: 'fo-detections',
@@ -1447,7 +1612,7 @@ const CATEGORIES = [
       },
       {
         id: 'fo-pcap',
-        title: 'PCAP Analysis',
+        title: 'Network Capture',
         tags: ['pcap', 'pcapng', 'network', 'network capture', 'tshark', 'dns', 'tls', 'http', 'talkers', 'exhibit', 'run record', 'timeline'],
         body: [
           { type: 'p', text: 'Analyse a packet capture in the air-gapped analysis worker (tshark). The capture itself is kept as an exhibit, so every result traces back to the hashed file.' },
@@ -1538,22 +1703,24 @@ const CATEGORIES = [
       {
         id: 'fo-artifacts',
         title: 'Malware Quarantine',
-        tags: ['artifact', 'artifacts', 'malware', 'quarantine', 'sandbox', 'hash', 'zip', 'infected', 'pe', 'office', 'pdf', 'yara', 'strings'],
+        tags: ['artifact', 'artifacts', 'malware', 'quarantine', 'sandbox', 'hash', 'zip', 'infected', 'pe', 'office', 'pdf', 'yara', 'strings', 'promote hashes'],
         body: [
-          { type: 'p', text: 'Upload binaries for analysis. Files land on the air-gapped quarantine volume (no internet, read-only from the worker).' },
+          { type: 'p', text: 'Quarantine suspected-malicious files and run the analysis tools on them — **Examine → Malware quarantine**. How the files are stored and deleted: [[ee-artifacts]].' },
           { type: 'section', title: 'Upload', items: [
-            'Drag-and-drop or click upload zone, up to **500 MiB**.',
-            'On ingest: SHA-256 / SHA-512 / MD5 hashed in one streaming pass, MIME detected via libmagic, IOCs auto-extracted, path-traversal guard applied.',
-            'Files **download** as AES-256 password-protected ZIP. Password: `infected`.',
+            'Drop a file on the upload zone or click it, up to **500 MiB**. The MIME type is detected with libmagic; file names are checked for path traversal.',
+            '**Also create SHA-256 + MD5 IOCs** — tick it only for a malicious sample. A ransom note or a screenshot is context, not an indicator.',
+            'Later, **Promote hashes to IOCs** on the row creates them (ones the incident already has are skipped).',
+            'Files **download** as an AES-256 password-protected ZIP. Password: `infected`.',
           ] },
           { type: 'section', title: 'Per-artifact card', items: [
-            'Filename, MIME type, size, SHA-256 (truncated, full on hover), uploader, uploaded-at.',
-            '**Download** · **Delete** · expand for analysis panel.',
+            'File name, MIME type, size, SHA-256 (truncated; full on hover), uploader, upload time.',
+            '**Download** · **Delete** (with a reason) · expand for the analysis panel.',
           ] },
-          { type: 'section', title: 'Analysis tools (11)', items: [
-            '**Hashes · File Type · Strings · IOC Extract · Entropy · PE Analysis · Office/Macro · PDF · Metadata/EXIF · Hex Dump · YARA**.',
+          { type: 'section', title: 'Analysis tools', items: [
+            'Eleven tools: **Hashes · File Type · Strings · IOC Extract · Entropy · PE Analysis · Office/Macro · PDF · Metadata/EXIF · Hex Dump · YARA**.',
             'Click a tool tab to run it; results are cached on the artifact and surfaced inline.',
           ] },
+          { type: 'note', text: 'Not for supporting material: screenshots and exported logs go to **Supporting documents** ([[iw-files]]).' },
         ],
       },
       {
@@ -1648,7 +1815,7 @@ const CATEGORIES = [
             'Paste log output, alert text, or any free-form text into the textarea.',
             'Click **Extract indicators** — up to 100 indicators are pulled out (private IPs are flagged).',
             'Pick which sources to query (the **SOURCES** bar at the top — toggleable checkboxes).',
-            'Click **Enrich** per row, or **Enrich all visible** to batch (sequential, to avoid rate limits).',
+            'Click **Enrich** per row, or **Enrich all visible** to batch (sequential, to avoid rate limits). Analyst role or higher: the lookup leaves FENRIR.',
             'Click any enriched row to expand and see the per-source result cards.',
             'Tick rows and use **Add N to IOCs** to push selections into the incident IOC list (de-duped server-side).',
           ] },
@@ -1674,7 +1841,31 @@ const CATEGORIES = [
             'Each Extract creates a saved session — raw text, extracted indicators, and any enrichment results persist across reloads.',
             '**SAVED SESSIONS** list at the bottom: timestamp · indicator count · enriched flag · creator. **Load** to switch, **×** to delete.',
           ] },
+          { type: 'section', title: 'Exports', items: [
+            '**Export CSV** · **Export CSV (enriched)** · **Download report (HTML)** — open the report and print it to save a PDF.',
+            'The CSVs are spreadsheet-safe: a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `\'` ([[tl-export]]).',
+          ] },
           { type: 'note', text: 'Sources without an API key show greyed out and labelled `(no key)`. Configure keys in Settings → API Keys.' },
+        ],
+      },
+      {
+        id: 'fo-ransom-note',
+        title: 'Ransom Note',
+        tags: ['ransom', 'ransomware', 'note', 'wallet', 'bitcoin', 'monero', 'deadline', 'onion', 'tor', 'telegram', 'extortion', 'crypto wallet'],
+        body: [
+          { type: 'p', text: 'Pull the payment wallets, deadlines, amounts and contact channels out of a ransom note — **Examine → Ransom note**.' },
+          { type: 'steps', items: [
+            'Paste the note, or related text, into the box and click **Extract**.',
+            'Review **Wallet addresses**, **Deadline / threat language**, **Ransom amount mentions** and **Contact channels** (`.onion` addresses, email, Telegram).',
+            'Click **Add IOC** on a wallet to add it to **IOCs** as a `crypto_wallet`, with optional notes.',
+          ] },
+          { type: 'section', title: 'Wallets recognised', items: [
+            'Bitcoin, Monero, Ethereum (and ERC-20 tokens such as USDT), Litecoin, Bitcoin Cash, Dash, Zcash, Ripple and Tron (and TRC-20 tokens).',
+            'Monero is a privacy chain: its addresses can\'t be looked up.',
+            'A legacy Litecoin address can look like a Bitcoin one; check it before acting on it.',
+          ] },
+          { type: 'note', text: 'Extraction runs in your browser; the pasted text is not stored. An **Explorer** link opens a public block explorer in a new tab, which sees the address you look up.' },
+          { type: 'note', text: 'Keep the note file itself as evidence ([[iw-evidence]]).' },
         ],
       },
     ],
@@ -1691,9 +1882,10 @@ const CATEGORIES = [
         title: 'Comments & OOB',
         tags: ['comment', 'oob', 'out-of-band', 'dark', 'passphrase'],
         body: [
+          { type: 'p', text: 'Two channels on **Comms & stakeholders**: comments inside FENRIR, and the out-of-band log for when FENRIR, email or chat may be compromised.' },
           { type: 'section', title: 'Comments', items: [
             'Free-text @-mention thread per incident. Mentions deliver notifications.',
-            '**Promote** — turns a comment into a **Timeline** event or a **Respond** decision, as in the War Room ([[co-warroom]]).',
+            '**Promote** — turns a comment into a **Timeline** event or a decision on **Decisions**, as in the War Room ([[co-warroom]]).',
           ] },
           { type: 'section', title: 'OOB (Out-of-Band)', items: [
             'For incidents where the platform itself may be compromised. Switch the incident to **Dark Operation** mode — banner appears, communication blackout in effect. To start dark, tick **Open as Dark Operation** when you create the incident.',
@@ -1772,7 +1964,7 @@ const CATEGORIES = [
             'Press-and-hold (or drag past ~18 px) to reposition the tab vertically; the position persists per browser.',
           ] },
           { type: 'section', title: 'Promote a message', items: [
-            '**Promote** on a message makes it a **Timeline event** or a **Respond decision**. The text and the time start as the message\'s; edit them before you save.',
+            '**Promote** on a message makes it a **Timeline event** or a decision on **Decisions**. The text and the time start as the message\'s; edit them before you save.',
             'The new event or decision keeps a link to the message. The promotion is audited. A message can be promoted once to each kind of record.',
             'Analysts and admins, on an open incident. Comments have the same button ([[co-comments]]).',
           ] },
@@ -1785,7 +1977,7 @@ const CATEGORIES = [
     icon: '⏲',
     label: 'Post-Incident',
     color: '#84cc16',
-    desc: 'Analytics, lessons, attack chain, costs, reports, closure',
+    desc: 'Analytics, lessons, costs, reports, closure',
     articles: [
       {
         id: 'pi-analytics',
@@ -1843,8 +2035,8 @@ const CATEGORIES = [
             '**Report text** — what worked well, what could be improved and security recommendations, printed in report §09 before the lists.',
             '**Remediation plan** — short-, medium- and long-term text, printed in report §10 before the dated action items.',
           ] },
-          { type: 'note', text: 'Required to close (Gate 2): the narrative (**what happened**), the root-cause **Description** and **Security recommendations**. The line under the status buttons says what is still missing.' },
-          { type: 'note', text: 'Meeting minutes go into the HTML export, the full report (§09) and the LE package. Not the executive report.' },
+          { type: 'note', text: 'Required to close (Gate 2): the narrative (**what happened**), the root-cause **Description** and **Security recommendations**; status **Final**; **Date conducted**; at least one participant; and an **Owner** and **Due date** on every action item ([[inc-closing]]). The line under the status buttons says what is still missing.' },
+          { type: 'note', text: 'Meeting minutes go into the HTML export, the full report (§09) and disclosure packages (`01_Incident/Lessons_Learned.json`). Not the executive report.' },
           { type: 'note', text: 'Export as a standalone HTML for distribution. Status flips from Draft → Final when finalised.' },
           { type: 'note', text: 'After the incident is closed, only **Action items** can be edited (**Save action items**); everything else is read-only until it is re-opened.' },
         ],
@@ -1854,14 +2046,14 @@ const CATEGORIES = [
         title: 'Attack Chain',
         tags: ['attack chain', 'swimlane', 'mitre', 'kill chain', 'sequence'],
         body: [
-          { type: 'p', text: 'Visual reconstruction of the attack, driven by MITRE-tagged timeline events ([[tl-mitre]]).' },
+          { type: 'p', text: 'Visual reconstruction of the attack, driven by MITRE-tagged timeline events ([[tl-mitre]]). It is on **ATT&CK & Attribution → Coverage**, below the tactic rows ([[iw-mitre]]); the old Post-Incident tab address opens it there.' },
           { type: 'section', title: 'On the page', items: [
             '**Swimlane diagram** — one lane per observed tactic, in canonical ATT&CK order; events plotted on a left-to-right time axis with dashed connectors.',
             'Each event is a coloured dot — hover for time, technique ID, description.',
             'Time axis with 5 evenly-spaced ticks across the incident span.',
             '**Chronological list** below — every MITRE-tagged event, ordered by time, with technique ID and hostname.',
           ] },
-          { type: 'note', text: 'If no events are MITRE-tagged, the page tells you so — tag events from the Timeline tab to build the chain.' },
+          { type: 'note', text: 'If no events are MITRE-tagged, Coverage tells you so and shows no chain — tag events from the Timeline tab to build it.' },
         ],
       },
       {
@@ -1873,6 +2065,7 @@ const CATEGORIES = [
           { type: 'section', title: 'On the page', items: [
             '**Business Impact Assessment** — financial, operational, data exposure, reputational, regulatory and legal impact, plus notes. **Save business impact**.',
             '**Cost Tracking** — one row per cost: category, description, amount, currency, IR phase, date and whether it is an estimate. Totals are shown per currency; amounts in different currencies are never added.',
+            'The currency must be an ISO 4217 code (EUR, USD, SEK, …); anything else is refused.',
           ] },
           { type: 'note', text: 'Gate 2 needs at least one cost entry or a filled-in business impact. Both stay editable after closure, and every change is audited.' },
         ],
@@ -1880,58 +2073,69 @@ const CATEGORIES = [
       {
         id: 'pi-reports',
         title: 'Reports',
-        tags: ['report', 'pdf', 'html', 'executive', 'full', 'post-incident', 'le package', 'sha-256', 'template', 'figures', 'screenshots', 'communications log', 'sign-off', 'csf', 'nciss'],
+        tags: ['report', 'html', 'pdf', 'print', 'executive', 'full', 'sha-256', 'template', 'figures', 'screenshots', 'communications log', 'sign-off', 'csf', 'nciss', 'history'],
         body: [
-          { type: 'p', text: 'Generate, preview, and download incident reports. All persist to history. **Lessons Learned & Remediation Plan** at the top shows the report text read-only; edit it on [[pi-lessons]]. Costs and business impact are on [[pi-costs]].' },
-          { type: 'section', title: 'Template picker', items: [
-            '**Executive Summary** — key facts, KPIs, MITRE tactics, lessons, recommendations. No raw IOC values, no full timeline.',
-            '**Full Technical Report** — every section: complete IOC table, timeline, entities, respond actions, playbook, evidence.',
-            '**Post-Incident Report** — formal closure report (lessons learned, remediation roadmap, what worked / could improve).',
+          { type: 'p', text: 'Build the incident report as a self-contained HTML document, preview or download it, and keep a hashed copy in **Report History**. **Lessons Learned & Remediation Plan** at the top shows the report text read-only; edit it on [[pi-lessons]]. Costs and business impact are on [[pi-costs]].' },
+          { type: 'section', title: 'Report type', items: [
+            '**Executive Summary** — key facts, KPIs, MITRE tactics, lessons and recommendations. No raw IOC values or full timeline; only timeline events marked external-safe, unless you tick **Include internal-only events**.',
+            '**Full Technical Report** — every section: the complete IOC table, timeline, entities, response actions, recovery validation, playbook, evidence and the communications log.',
           ] },
-          { type: 'section', title: 'Customisation', items: [
-            'Mode: HTML or PDF.',
-            'Custom logo upload.',
-            'Custom footer text.',
-            '**Remediation roadmap** is split into Short-term (0–30 days) · Medium-term (30–90 days) · Long-term (90+ days).',
-            '**Preview structure** button shows the report skeleton with autogen-field placeholders.',
+          { type: 'section', title: 'Options', items: [
+            '**Template** — the look: **Executive** (light, serif), **Tactical** (the original dark FENRIR style), **Forensic** (court-ready, for regulators and law enforcement) or **Print** (black and white).',
+            '**Company logo** and **Footer text** — kept in this browser only.',
+            '**Classification** (default: the incident\'s TLP) and **Audience**.',
+            '**Include sections** — one box per section; full-report-only sections don\'t apply to the executive report. **Appendix B — Timeline** adds the full timeline.',
+          ] },
+          { type: 'steps', items: [
+            'Click **Preview in new tab** (allow pop-ups for FENRIR) or **Download HTML**. **Show structure** shows the skeleton with placeholders.',
+            'As an analyst or admin, the report is saved to **Report History** at the same time. Viewers can preview and download, but not save.',
+            'For a PDF, open the preview, press `Ctrl+P` (`⌘P` on macOS) and choose **Save as PDF**. FENRIR itself produces HTML only.',
           ] },
           { type: 'section', title: 'Figures, comms log, sign-off, standards', items: [
             '**Figures** — screenshots ticked **Include in report** in Supporting documents ([[iw-files]]), numbered, with caption and the SHA-256 of the original file. Images over 1.5 MiB are downscaled to 1920 px; embedded images are capped at 7 MiB, and you are warned before saving if figures go over it.',
-            '**Communications & Notification Log** (full report only) — the out-of-band log. Never the passphrase or anyone\'s contact details.',
+            '**Communications & Notification Log** (full report only) — the stakeholder notifications and the out-of-band log. Never the passphrase or anyone\'s contact details.',
             '**Approval & Sign-off** — who closed the incident, when, the close statement, and a signature line for Incident Commander, Deputy, Legal Liaison and DPO.',
-            'Every section shows its **NIST CSF 2.0** subcategory IDs. Severity also shows the **NCISS** level: Critical → Emergency, High → Severe, Medium → Medium, Low → Low.',
+            'Every section shows its **NIST CSF 2.0** subcategory IDs. Severity also shows the **NCISS** level, mapped from the internal severity: Critical → Emergency, High → Severe, Medium → Medium, Low → Low.',
           ] },
           { type: 'section', title: 'Report History', items: [
-            'Every generated report is persisted with template ID and SHA-256 footer for tamper-evidence.',
-            'Re-download requires entering a reason — logged in the audit trail.',
+            'Each saved report keeps its type, template and SHA-256.',
+            'Downloading one again asks for a reason, which is audited, and checks the file against the stored SHA-256.',
+            'The footer of every report carries its own SHA-256, so any copy can be checked (see the FAQ below).',
           ] },
+          { type: 'note', text: 'Gate 2 warns until the executive and full reports have been generated and saved after the last change to the incident ([[inc-closing]]).' },
         ],
       },
       {
         id: 'pi-le-package',
-        title: 'Law-Enforcement Package',
-        tags: ['le package', 'law enforcement', 'aes-256', 'one-time', 'key', 'download url', 'forensic'],
+        title: 'Disclosure Package',
+        tags: ['disclosure', 'disclosure package', 'le package', 'law enforcement', 'regulator', 'internal', 'export', 'ed25519', 'signature', 'aes-256', 'one-time', 'password', 'download url', 'receipt'],
         body: [
-          { type: 'p', text: 'One-click bundle for handing the incident to law enforcement: full report + timeline + IOCs + artifact manifest + audit chain in a single AES-256-encrypted ZIP.' },
-          { type: 'section', title: 'Generate flow', items: [
-            'Click **Generate LE package**.',
-            'The system produces the bundle and shows the AES-256 key + a single-use download URL **ONCE**.',
-            'Copy both — they are not stored and cannot be retrieved later.',
+          { type: 'p', text: 'The one way exhibits leave FENRIR: **Evidence › Disclosure package**. It replaces the former Evidence › Export and law-enforcement package (Post-Incident › Reports links here). The incident lead (Incident Commander or Deputy) or an **Admin** builds it.' },
+          { type: 'table', headers: ['Purpose', 'What goes with the exhibits'], rows: [
+            ['**Law enforcement**', 'Incident, timeline, IOCs, forensic results, communications, case notes, recovery, notifications, sign-offs. Needs a case reference, the requesting authority and the legal basis (EIO and MLA need their references).'],
+            ['**Regulator**', 'Incident, timeline, IOCs, recovery, notifications, sign-offs. Needs a case reference, the regulator and the legal basis (default: statutory obligation, e.g. GDPR Art. 33, NIS2 Art. 23).'],
+            ['**Internal**', 'Incident, timeline, IOCs, forensic results, case notes, recovery. The case reference defaults to the incident reference.'],
           ] },
-          { type: 'section', title: 'After generation', items: [
-            'Download URL is single-use and expires after 24 hours.',
-            'Decryption instructions are displayed (OpenSSL / 7-Zip commands).',
-            'Lives in Post-Incident → Reports tab alongside other generated artefacts.',
+          { type: 'steps', items: [
+            'Click **+ New disclosure package**.',
+            'Pick the purpose, then the exhibits. Destroyed and verify-failed exhibits are not offered; unsealed drafts stay out unless you tick **Include unsealed drafts**.',
+            'Fill in the case, the legal basis and the recipient, then the sender declaration and whether to create a receipt URL.',
+            'Click **Build disclosure package**. The password and the single-use download link (24 h) are shown **once**: give the password to the recipient over a separate channel.',
+            'When the recipient confirms, they use the receipt URL, or you click **Record receipt**.',
           ] },
+          { type: 'section', title: 'Every package', items: [
+            'Is **signed**: `MANIFEST.json.sig` is an Ed25519 signature over the manifest, checkable with `SIGNING_PUBLIC_KEY.pem` (its fingerprint is in `GET /api/version`). `INTEGRITY.sig` keeps the HMAC-SHA-256, and a trusted timestamp is added when a TSA is set up. The README says how to verify each.',
+            'Is **custody-logged**: each exhibit in it gets a **Disclosed** event in the custody log, and one whose file is in it a working copy of kind **Export**.',
+            'Is **audited** (`le_package_generate`, with its purpose), and every other **Admin** gets an in-app notification.',
+            'Holds the incident’s audit rows (`08_Audit`) and the legal notes (`09_Legal`).',
+            'Its CSV files are spreadsheet-safe (a leading `\'` before a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return); each has a JSON copy with the raw values. Recompute hashes from the JSON, for example `10_Case_Notes/Case_Notes.json` or `08_Audit/Audit_Trail.json`.',
+          ] },
+          { type: 'note', text: 'You can build a package after the incident is closed: preservation and disclosure outlive closure.' },
+          { type: 'note', text: 'Law-enforcement and regulator packages must be acknowledged by the recipient before the incident can close; internal ones need not be.' },
           { type: 'note', text: '`02_Timeline/Timeline.csv` ends with provenance columns: exhibit, its SHA-256, parser name and version, time basis, the import run, the time the device recorded and the clock offset applied. New columns are only ever appended.' },
-          { type: 'section', title: 'Unsealed drafts', items: [
-            'By default an exhibit whose chain of custody is not sealed is left out: `Evidence_Inventory.csv` lists it as `excluded: unsealed draft`, with no custody log or file.',
-            'Tick **Include unsealed drafts** (incident lead or **Admin**, as for the package itself) to put them in; the choice is recorded on the package\u2019s audit anchor.',
-            'The inventory has `coc_sealed`, `coc_sealed_at_utc`, `lawful_basis` and `package_inclusion` columns. After the build the page lists the drafts left out.',
-          ] },
-          { type: 'note', text: 'Exhibits of any size are streamed into the package. A multi-GiB package takes minutes: wait for the result, which is the only place the key appears.' },
-          { type: 'note', text: 'An exhibit whose stored file fails its integrity check while the package is built is listed as `integrity_failed:<reason>` (or `HASH_MISMATCH_AT_EXPORT` for a different SHA-256), with no file, and is frozen (**verify failed**); the page names it. If a file changes while it is being written into the package, nothing is built.' },
-          { type: 'note', text: 'Treat the AES-256 key like a one-time passphrase — share via OOB channels with the LE recipient, never in-band.' },
+          { type: 'note', text: 'Exhibits of any size are streamed into the package. A multi-GiB package takes minutes: wait for the result, which is the only place the password appears.' },
+          { type: 'note', text: 'An exhibit whose stored file fails its integrity check while the package is built is listed as `integrity_failed:<reason>` (or `HASH_MISMATCH_AT_EXPORT` for a different SHA-256), with no file, and is frozen (**verify failed**); the result names it. If an exhibit changes, is disposed of or is frozen by someone else during the build, nothing is disclosed.' },
+          { type: 'note', text: 'From the API: `POST /api/incidents/{id}/disclosures` with `purpose`. The older `POST …/le-package` and `POST …/evidence/exports` still work but are deprecated; they follow the same rights, audit and notification.' },
         ],
       },
     ],
@@ -1961,44 +2165,65 @@ const CATEGORIES = [
       {
         id: 'st-users',
         title: 'Users, Teams, Operational Roles',
-        tags: ['user', 'team', 'role', 'operational', 'admin'],
+        tags: ['user', 'team', 'role', 'operational', 'admin', 'password', 'disable', 'totp', 'visibility'],
         body: [
-          { type: 'p', text: 'Admin-only sections.' },
+          { type: 'p', text: 'Who can sign in, what they may do, and which incidents they see — admin-only sections of **Settings**.' },
           { type: 'section', title: 'Users', items: [
-            'Create / disable users. Set RBAC role (Admin / Analyst / Responder / Observer).',
-            'Reset passwords. Force-rotate sessions.',
+            '**Settings → Users** → create a user: username, email, optional full name, role (**Viewer**, **Analyst** or **Admin** — [[gs-roles]]), ISO/IEC 27037 / 27041 qualifications, and a password of at least 12 characters.',
+            '**Edit** changes the role and can force a password change or TOTP enrolment at the next sign-in. **Reset password** sets a new one.',
+            '**Disable** signs the user out and blocks sign-in; **Enable** undoes it. **Delete** removes the account.',
+            'End one of someone\'s sessions under **Admin → Sessions** ([[set-admin]]).',
+          ] },
+          { type: 'section', title: 'Teams', items: [
+            '**Settings → Teams** — create teams and choose their members.',
+            'An incident with teams is visible only to their members and to admins; an incident without teams is open to everyone.',
+            'Set an incident\'s teams on its **Details** (**Teams → Manage**). Only an admin can make a restricted incident visible to everyone.',
           ] },
           { type: 'section', title: 'Operational roles', items: [
-            'Distinct from RBAC. These are *response* roles assignable per incident. Seeded on every install: Incident Commander, Deputy Incident Commander, Lead Investigator, Communications Lead, Legal Liaison, Recorder, Data Protection Officer.',
+            'Distinct from platform roles: *response* roles, assigned per incident on its **Team** page. Seeded on every install: Incident Commander, Deputy Incident Commander, Lead Investigator, Communications Lead, Legal Liaison, Recorder, Data Protection Officer.',
             '**Data Protection Officer** — assesses personal-data impact and advises on GDPR breach notification. Readiness blocks while the role is inactive.',
+            '**Settings → Operational Roles** — **+ New role** adds a custom role. Any role can be deactivated; only custom roles can be deleted.',
           ] },
         ],
       },
       {
         id: 'st-tokens',
         title: 'API Tokens',
-        tags: ['api', 'token', 'bearer', 'mcp', 'integration', 'script'],
+        tags: ['api', 'token', 'bearer', 'mcp', 'integration', 'script', 'fenrir-mcp', 'login', 'revoke'],
         body: [
-          { type: 'p', text: 'For MCP clients, scripts, and integrations. Both browser cookies and Bearer tokens resolve to the same User and the same RBAC.' },
+          { type: 'p', text: 'A Bearer token lets the MCP server, a script or an integration call the API as you, under the same rules as your browser session.' },
           { type: 'steps', items: [
-            'Settings → **API Keys** (admin only).',
-            '**+ Create token** — name it, set expiry, choose scopes (defaults to the creating user\'s role).',
-            'Copy the token *immediately* — it\'s only shown once.',
-            'Use as `Authorization: Bearer <token>` against any `/api/...` endpoint.',
+            'For the MCP server, run `fenrir-mcp login` in a terminal. It signs you in with your password and TOTP and stores a token for the MCP; it is the only way the MCP gets one.',
+            'For a script, call `POST /api/tokens` while signed in, with a `name`, a `role` (yours or lower) and optionally `expires_in_days`.',
+            'Copy the token at once: it appears only in that response.',
+            'Send it as `Authorization: Bearer <token>` to any `/api/...` endpoint.',
           ] },
-          { type: 'note', text: 'Revoke any token with one click. Token usage is audit-logged separately from cookie sessions.' },
+          { type: 'section', title: 'Managing tokens', items: [
+            '`GET /api/tokens` lists your tokens (never their values); `DELETE /api/tokens/{id}` revokes one.',
+            'Admins list and revoke anyone\'s: `GET /api/admin/tokens` and `DELETE /api/admin/tokens/{id}`.',
+            'A token capped at **Viewer** never gets lead rights, even when you are the incident lead ([[gs-roles]]).',
+            'Issuing a token is audited (`api_token_issue`); calls made with it appear in the audit log like any other.',
+          ] },
+          { type: 'note', text: 'Tokens have no page in FENRIR yet. **Settings → API Keys** holds the IOC-enrichment service keys (VirusTotal, AbuseIPDB …), not Bearer tokens ([[ioc-enrichment]]).' },
         ],
       },
       {
         id: 'st-audit-export',
         title: 'Signed Audit Export',
-        tags: ['audit', 'export', 'ed25519', 'signature', 'compliance'],
+        tags: ['audit', 'export', 'ed25519', 'signature', 'compliance', 'verify', 'aes-256', 'offline'],
         body: [
-          { type: 'p', text: 'The audit log is a tamper-evident hash chain. Exports are Ed25519-signed + ReportLab PDF + AES-256 ZIP; bundles expire after 30 days.' },
-          { type: 'section', title: 'Verifying an export', items: [
-            'Each bundle includes the public key fingerprint and the detached signature.',
-            'The Public Key PEM is exposed unauthenticated at `/api/version` for downstream verifiers.',
+          { type: 'p', text: 'A signed, encrypted copy of the audit log that anyone can verify offline, without trusting FENRIR — **Admin → Audit Exports**, admins only.' },
+          { type: 'steps', items: [
+            'Click **+ Generate**. Narrow it if you like (**From**, **To**, **Action**, **Username**, **Resource type**, **Outcome**) and enter the **Purpose**, which is written into the manifest and the audit log. At most 50,000 rows per export.',
+            'Copy the **Bundle password** and the **Download URL**: both are shown once. The link works once, for 24 h; the bundle is kept for 30 days.',
+            'Give the password to the recipient over a separate channel.',
           ] },
+          { type: 'section', title: 'In the bundle (AES-256 ZIP)', items: [
+            '`audit.pdf` to read; `audit.jsonl`, each row as it was hashed; `audit.jsonl.sig`, an **Ed25519** signature over it; `public_key.pem`; `manifest.json` with the chain anchors; `README.txt` with the verification steps.',
+            'The public key\'s fingerprint is also published at `/api/version`, so a recipient can check the export came from this FENRIR.',
+            'Each row\'s hash covers its client IP address and, from 2026-10-06, its user agent ([[iw-audit-log]]).',
+          ] },
+          { type: 'note', text: 'One incident only: `POST /api/incidents/{id}/audit-log/exports` (admins). Disclosure packages are signed with the same key ([[pi-le-package]]).' },
         ],
       },
       {
@@ -2021,19 +2246,22 @@ const CATEGORIES = [
       {
         id: 'set-integrations',
         title: 'Integrations & Feeds',
-        tags: ['integrations', 'feeds', 'threat intel', 'webhook', 'syslog', 'admin'],
+        tags: ['integrations', 'feeds', 'threat intel', 'webhook', 'syslog', 'email', 'smtp', 'graph', 'teams', 'slack', 'admin'],
         body: [
-          { type: 'p', text: 'Admin configuration for outside data and destinations — under **Settings** (admin only).' },
-          { type: 'section', title: 'What you can configure', items: [
-            '**Feeds** — threat-intel sources that enrich IOCs and drive cross-incident correlations.',
-            '**Integrations** — outbound connections such as a syslog forwarder for audit rows (TLS 1.3, HMAC where applicable).',
-            '**Email** — SMTP or Microsoft Graph for admin alerts and **Email deadline reminders** ([[iw-legal]]). The reminders are on by default once a mail transport is set; untick to stop them.',
+          { type: 'p', text: 'Where FENRIR gets outside data and sends notices — admin-only sections of **Settings**.' },
+          { type: 'table', headers: ['Where', 'What'], rows: [
+            ['**Settings → Feeds**', 'Threat-intel feeds that enrich IOCs and drive cross-incident correlations ([[ioc-intel]]).'],
+            ['**Settings → API Keys**', 'The IOC-enrichment service keys: VirusTotal, AbuseIPDB, Shodan, GreyNoise, URLScan ([[ioc-enrichment]]).'],
+            ['**Integrations → Email (SMTP / M365)**', 'The mail transport for admin alerts and **Email deadline reminders** ([[iw-legal]]). The reminders are on by default once a mail transport is set; untick to stop them.'],
+            ['**Integrations → Outbound webhooks**', 'Teams and Slack messages about incidents. Never sent under Dark Operation or TLP:RED ([[inc-severity-tlp]]).'],
+            ['**Integrations → SIEM inbound webhooks**', 'Splunk, Microsoft Sentinel and Elastic alerts that open incidents ([[set-siem-intake]]).'],
+            ['**Integrations → Syslog forwarding**', 'Audit rows forwarded to your SIEM over TLS: actions and IDs only.'],
           ] },
         ],
       },
       {
         id: 'set-siem-intake',
-        title: 'SIEM intake',
+        title: 'SIEM Intake',
         tags: ['siem', 'splunk', 'sentinel', 'elastic', 'webhook', 'alert', 'dedup', 're-fired', 'ioc', 'integrations', 'admin'],
         body: [
           { type: 'p', text: 'Splunk, Microsoft Sentinel and Elastic can open incidents by POSTing their alert to FENRIR. Set it up under **Settings → Integrations → SIEM inbound webhooks**: generate the key and send it in the `X-Fenrir-Key` header.' },
@@ -2052,12 +2280,23 @@ const CATEGORIES = [
         ],
       },
       {
-        id: 'set-storage',
-        title: 'Storage',
-        tags: ['storage', 'disk', 'volumes', 'evidence', 'admin'],
+        id: 'set-admin',
+        title: 'Admin Console',
+        tags: ['admin', 'audit log', 'global audit', 'audit exports', 'sessions', 'revoke', 'storage', 'disk', 'volumes', 'backup', 'api docs', 'openapi', 'incident reference', 'prefix'],
         body: [
-          { type: 'p', text: 'Admin view of storage usage across the platform volumes (quarantine, evidence, reports, backups).' },
-          { type: 'note', text: 'Evidence and backups are encrypted at rest. For continuity and recovery see **Backup & Restore** in **Evidence & Chain of Custody**.' },
+          { type: 'p', text: 'Platform-wide administration — sidebar **Admin → Admin**, for admins only.' },
+          { type: 'table', headers: ['Page', 'What it does'], rows: [
+            ['**Audit Log**', 'The **Global Audit Log**: every audited action on the platform, with the same columns as an incident\'s audit log ([[iw-audit-log]]). Click a row for its full IP address, user agent, request path and request ID.'],
+            ['**Audit Exports**', 'Signed, encrypted exports of the audit log ([[st-audit-export]]).'],
+            ['**Sessions**', 'Every active sign-in, with IP address. **Revoke** ends someone else\'s session; end your own by signing out.'],
+            ['**Storage**', 'Space used on the platform volumes (quarantine, evidence, reports, backups). Evidence and backups are encrypted at rest.'],
+            ['**Backup**', '**Backup Status** of the scheduled backups. Readiness blocks while the newest backup is over 26 h old or failing ([[coc-backup]]).'],
+            ['**API Docs**', 'The reference of every API endpoint, from `/api/openapi.json`.'],
+          ] },
+          { type: 'section', title: 'Incident Reference', items: [
+            '**Settings → Incident Reference** sets the prefix for new references: `PREFIX-YYYY-NNNNN` (the UTC year of creation and a counter that never resets).',
+            'A reference is given once, at creation, and never changes, so references in issued reports, disclosure packages and audit exports stay valid. Incidents created before this format keep their `INC-NNNN` reference.',
+          ] },
         ],
       },
     ],
@@ -2093,9 +2332,9 @@ const FAQS = [
     tags: ['warroom', 'tab', 'drag', 'reposition'],
   },
   {
-    q: 'Why are timestamps shown in my browser TZ but not the picker TZ?',
-    a: 'Most surfaces use the persisted TZ from the picker. If you spot one that uses raw `toISOString()` (browser TZ or UTC), report it as a bug — every UI-rendered time should respect the picker.',
-    tags: ['timezone', 'tz', 'utc', 'time'],
+    q: 'Why is a time shown in my browser\'s timezone instead of my FENRIR timezone?',
+    a: 'Every time on screen should use your FENRIR timezone (the top bar, or **Settings → Account → Display timezone**) with its offset shown. If one doesn\'t, report it as a bug.',
+    tags: ['timezone', 'tz', 'utc', 'time', 'browser'],
   },
   {
     q: 'Do I enter a time in UTC or in my local time?',
@@ -2103,9 +2342,9 @@ const FAQS = [
     tags: ['utc', 'datetime', 'time', 'entry', 'iso 8601'],
   },
   {
-    q: 'How do I integrate FENRIR with my MCP client?',
-    a: 'Issue a Bearer token in Settings → API Keys, then point your MCP server at `https://<your-host>/api/openapi.json`. Every endpoint is API-first — no feature is browser-only.',
-    tags: ['mcp', 'api', 'token', 'bearer', 'openapi'],
+    q: 'How do I connect the FENRIR MCP server?',
+    a: 'Run `fenrir-mcp login` in a terminal: it signs you in with your password and TOTP and stores a Bearer token for the MCP server. Scripts can request their own token with `POST /api/tokens` — see [[st-tokens]]. Every feature is in the API (`/api/openapi.json`); none is browser-only.',
+    tags: ['mcp', 'api', 'token', 'bearer', 'openapi', 'fenrir-mcp', 'login'],
   },
   {
     q: 'What is "Dark Operation" mode?',
@@ -2114,13 +2353,13 @@ const FAQS = [
   },
   {
     q: 'Where is the audit log?',
-    a: 'On each incident: Audit Log tab (admin-only). Global audit: Admin → Global Audit Log. Audit exports (Ed25519-signed) are under Admin → Audit Exports.',
+    a: 'On an incident: **Record → Audit log**, for admins and the incident lead ([[iw-audit-log]]). Across all incidents: **Admin → Audit Log**. Signed exports: **Admin → Audit Exports** ([[st-audit-export]]). The last two are admin-only.',
     tags: ['audit', 'log', 'compliance'],
   },
   {
     q: 'How do I verify a generated report wasn\'t tampered with?',
-    a: 'Each report has a SHA-256 footer. Recompute the SHA-256 of the downloaded file (excluding the footer placeholder); it must match the value in the footer.',
-    tags: ['report', 'sha-256', 'integrity', 'tamper'],
+    a: 'The footer of every report shows its own SHA-256. In a copy of the file, replace that 64-character value with `___FENRIR_REPORT_SHA256_PLACEHOLDER___`, then take the SHA-256 of the result: it must equal the value you replaced. Re-downloads from **Report History** are also checked against the hash stored when the report was saved ([[pi-reports]]).',
+    tags: ['report', 'sha-256', 'integrity', 'tamper', 'verify'],
   },
   {
     q: 'Which OSINT sources can I query, and which need an API key?',
@@ -2134,13 +2373,13 @@ const FAQS = [
   },
   {
     q: 'Where do I parse an EVTX or syslog file?',
-    a: 'Examine → Logs & triage. Drop the file in (EVTX, Windows XML, SQLite, CSV/TSV, JSON/JSONL, syslog/auth.log, journald JSON, macOS Unified Log — up to 500 MiB), click Parse, tick the rows you want, then **Add N to Timeline**. Rows without a timestamp are never placed on the timeline; add them as IOCs instead.',
-    tags: ['evtx', 'syslog', 'timeline import', 'parse', 'forensic'],
+    a: 'Examine → **Logs & triage**. Choose **Upload a file** (EVTX, Windows XML, SQLite, CSV/TSV, JSON/JSONL, syslog/auth.log, journald JSON, macOS Unified Log — up to 500 MiB) or **From a registered exhibit**, set the **Source timezone**, then click **Parse & save** (or **Parse exhibit**). Tick the rows you want and click **Add N to Timeline**. Rows without a timestamp never go on the timeline; add them as IOCs instead. See [[fo-timeline-import]].',
+    tags: ['evtx', 'syslog', 'timeline import', 'logs & triage', 'parse', 'forensic'],
   },
   {
-    q: 'Where is the Law-Enforcement package?',
-    a: 'Post-Incident → Reports → LE Package. Clicking Generate shows the AES-256 key and a single-use 24-hour download URL ONCE — copy both before closing. Share the key out-of-band, never in-band with the URL.',
-    tags: ['le package', 'law enforcement', 'aes-256', 'download'],
+    q: 'How do I send exhibits to law enforcement or a regulator?',
+    a: 'Evidence › **Disclosure package**, purpose **Law enforcement** or **Regulator** (Post-Incident › Reports links there). Building it shows the bundle password and a single-use 24-hour download link once: copy both before closing. Give the password over a separate channel, never with the link ([[pi-le-package]]).',
+    tags: ['le package', 'law enforcement', 'disclosure', 'aes-256', 'download'],
   },
   {
     q: 'Why is the right-edge War Room tab on every incident page?',
@@ -2148,9 +2387,9 @@ const FAQS = [
     tags: ['warroom', 'drawer', 'tab', 'pinned'],
   },
   {
-    q: 'How do I revert a completed Respond action?',
-    a: 'Open the action card on the Respond Kanban board → Revert button. A modal asks for the reason; the revert is audit-logged. The card moves back to in-progress.',
-    tags: ['respond', 'revert', 'kanban', 'action'],
+    q: 'How do I revert a response action?',
+    a: 'On **Containment** or **Eradication & Recovery**, click **↩** on the action card, give the reason and click **↩ Confirm revert**. The action becomes **Reverted** for good — its status can\'t change again — the reason stays on the card and a Timeline event records it. To redo the work, log a new action ([[iw-respond]]).',
+    tags: ['respond', 'revert', 'containment', 'action'],
   },
   {
     q: 'How do I initialise the Legal regulatory deadlines?',
@@ -2158,11 +2397,26 @@ const FAQS = [
     tags: ['legal', 'gdpr', 'nis2', 'dora', 'deadline', 'anchor', 'reminder'],
   },
   {
-    q: 'What\'s the difference between an Operational Role and an RBAC role?',
-    a: 'RBAC roles (Admin / Analyst / Responder / Observer) gate what you can do in the platform. Operational roles (Incident Commander, Forensic Lead, etc.) are per-incident response responsibilities assigned in the Assignments tab. The Role Coverage widget there shows which seats are empty.',
-    tags: ['role', 'rbac', 'operational', 'assignments', 'cisa'],
+    q: 'What\'s the difference between an operational role and my platform role?',
+    a: 'Your platform role (**Admin** / **Analyst** / **Viewer**) decides what you can do in FENRIR. Operational roles (Incident Commander, Deputy Incident Commander, Lead Investigator, Communications Lead, Legal Liaison, Recorder, Data Protection Officer) are response duties on one incident, assigned on its **Team** page, where **Role Coverage** shows the empty seats. Being IC or Deputy also gives an analyst lead rights on that incident ([[gs-roles]]).',
+    tags: ['role', 'rbac', 'operational', 'team', 'assignments', 'viewer', 'cisa'],
+  },
+  {
+    q: 'Why does a cell in an exported CSV start with an apostrophe?',
+    a: 'FENRIR puts a `\'` before any cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return, so Excel or LibreOffice shows it as text instead of running it as a formula (CSV injection). Plain numbers are left as they are. It applies to the Timeline, OSINT and Defender IOC CSVs and to the CSVs in a disclosure package, whose JSON copies keep the raw values ([[tl-export]]).',
+    tags: ['csv', 'apostrophe', 'formula', 'excel', 'injection', 'export', 'spreadsheet'],
   },
 ]
+
+// ── Topic lookup ([[topic-id]] cross-links) ─────────────────────────────────
+// Every [[id]] in a topic or FAQ must name an article here; `npm run build` runs
+// scripts/check-help-links.mjs first and fails on a dangling link.
+
+const ARTICLE_BY_ID = Object.fromEntries(
+  CATEGORIES.flatMap(cat => cat.articles.map(art => [art.id, { cat, art }])))
+
+const LINK_RE = /\[\[([a-z0-9-]+)\]\]/g
+const withLinkTitles = text => String(text).replace(LINK_RE, (m, id) => ARTICLE_BY_ID[id]?.art.title ?? m)
 
 // ── Search index ────────────────────────────────────────────────────────────
 
@@ -2170,7 +2424,7 @@ function buildIndex() {
   const index = []
   CATEGORIES.forEach(cat => {
     cat.articles.forEach(art => {
-      const text = [
+      const text = withLinkTitles([
         art.title,
         ...(art.tags || []),
         ...art.body.flatMap(b => {
@@ -2180,7 +2434,7 @@ function buildIndex() {
           if (b.text)                      return [b.text]
           return []
         }),
-      ].join(' ').toLowerCase()
+      ].join(' ')).toLowerCase()
       index.push({
         type: 'article', catId: cat.id, catLabel: cat.label,
         catColor: cat.color, catIcon: cat.icon, id: art.id, title: art.title, text,
@@ -2190,7 +2444,7 @@ function buildIndex() {
   FAQS.forEach((faq, i) => {
     index.push({
       type: 'faq', id: `faq-${i}`, title: faq.q,
-      text: [faq.q, faq.a, ...(faq.tags || [])].join(' ').toLowerCase(),
+      text: withLinkTitles([faq.q, faq.a, ...(faq.tags || [])].join(' ')).toLowerCase(),
     })
   })
   return index
@@ -2204,22 +2458,35 @@ function searchIndex(q) {
   return SEARCH_INDEX.filter(item => words.every(w => item.text.includes(w))).slice(0, 10)
 }
 
-// ── Inline markdown renderer (bold **text** only) ───────────────────────────
+// ── Inline markup renderer ──────────────────────────────────────────────────
+// **bold** · *italic* · `code` · [[topic-id]] (a link showing the topic's title).
+// Bold and italic may contain the others; code is literal.
 
-function renderInline(text) {
-  const parts = String(text).split(/\*\*([^*]+)\*\*/g)
-  return parts.map((p, i) => i % 2 === 1
-    ? <strong key={i} style={{ color: 'var(--text)' }}>{p}</strong>
-    : <span key={i}>{p}</span>)
+const INLINE_RE = /(\*\*[^*]+\*\*|`[^`]+`|\[\[[a-z0-9-]+\]\]|\*[^*\s][^*]*\*)/g
+
+function renderInline(text, onLink) {
+  return String(text).split(INLINE_RE).map((part, i) => {
+    if (i % 2 === 0) return part
+    if (part.startsWith('**')) return <strong key={i} style={{ color: 'var(--text)' }}>{renderInline(part.slice(2, -2), onLink)}</strong>
+    if (part.startsWith('`'))  return <code key={i} className="help-code">{part.slice(1, -1)}</code>
+    if (part.startsWith('*'))  return <em key={i}>{renderInline(part.slice(1, -1), onLink)}</em>
+    const id = part.slice(2, -2)
+    const target = ARTICLE_BY_ID[id]
+    if (!target) return part
+    return (
+      <a key={i} href={`#${id}`} className="help-link" data-topic={id}
+         onClick={e => { e.preventDefault(); onLink?.(id) }}>{target.art.title}</a>
+    )
+  })
 }
 
-function ArticleBody({ body }) {
+function ArticleBody({ body, onLink }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {body.map((block, i) => {
         if (block.type === 'p') return (
           <p key={i} style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.7, margin: 0 }}>
-            {renderInline(block.text)}
+            {renderInline(block.text, onLink)}
           </p>
         )
         if (block.type === 'section') return (
@@ -2232,7 +2499,7 @@ function ArticleBody({ body }) {
             <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
               {block.items.map((item, j) => (
                 <li key={j} style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>
-                  {renderInline(item)}
+                  {renderInline(item, onLink)}
                 </li>
               ))}
             </ul>
@@ -2250,7 +2517,7 @@ function ArticleBody({ body }) {
                   flexShrink: 0, marginTop: 2,
                 }}>{j + 1}</div>
                 <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6, flex: 1 }}>
-                  {renderInline(item)}
+                  {renderInline(item, onLink)}
                 </div>
               </div>
             ))}
@@ -2281,7 +2548,7 @@ function ArticleBody({ body }) {
                         borderBottom: '1px solid var(--border)',
                         color: 'var(--muted)', lineHeight: 1.5,
                         verticalAlign: 'top',
-                      }}>{renderInline(cell)}</td>
+                      }}>{renderInline(cell, onLink)}</td>
                     ))}
                   </tr>
                 ))}
@@ -2296,7 +2563,7 @@ function ArticleBody({ body }) {
                 <span className="phase-glyph" aria-hidden="true"
                       style={{ color: p.color, width: 16, textAlign: 'center', marginRight: 0, flexShrink: 0 }}>{p.glyph}</span>
                 <strong style={{ color: 'var(--text)' }}>{p.label}</strong>
-                <span>{block.items[j]}</span>
+                <span>{renderInline(block.items[j], onLink)}</span>
               </div>
             ))}
           </div>
@@ -2310,7 +2577,7 @@ function ArticleBody({ body }) {
             borderRadius: 'var(--radius-sm)',
             fontSize: 12, color: 'var(--muted)', lineHeight: 1.6,
           }}>
-            <strong style={{ color: 'var(--accent)' }}>Note:</strong> {renderInline(block.text)}
+            <strong style={{ color: 'var(--accent)' }}>Note:</strong> {renderInline(block.text, onLink)}
           </div>
         )
         return null
@@ -2329,7 +2596,27 @@ export default function Help() {
   const [activeCat,     setActiveCat]     = useState(null)
   const [activeArt,     setActiveArt]     = useState(null)
   const [openFaq,       setOpenFaq]       = useState(null)
-  const searchRef = useRef(null)
+  const searchRef  = useRef(null)
+  const articleRef = useRef(null)
+
+  // Opens a topic from a [[link]] (or /help#topic-id) and brings its article into view.
+  function openTopic(id) {
+    const t = ARTICLE_BY_ID[id]
+    if (!t) return
+    setSearchResults(null)
+    setShowSugg(false)
+    setQuery('')
+    setActiveCat(t.cat)
+    setActiveArt(t.art)
+    setTimeout(() => articleRef.current?.scrollIntoView({ block: 'start' }), 0)
+  }
+
+  useEffect(() => {
+    const fromHash = () => openTopic(window.location.hash.slice(1))
+    fromHash()
+    window.addEventListener('hashchange', fromHash)
+    return () => window.removeEventListener('hashchange', fromHash)
+  }, [])
 
   const showCategoryGrid = searchResults === null && !activeCat
 
@@ -2404,7 +2691,7 @@ export default function Help() {
               style={{ flex: 1, borderRadius: 'var(--radius) 0 0 var(--radius)' }}
             />
             <button type="submit" className="btn primary"
-                    style={{ borderRadius: '0 var(--radius) var(--radius) 0', fontSize: 12 }}>
+                    style={{ borderRadius: '0 var(--radius) var(--radius) 0' }}>
               Search
             </button>
           </div>
@@ -2576,7 +2863,7 @@ export default function Help() {
             }}
           >← All categories</button>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 'var(--space-4)' }}>
+          <div className="help-layout">
             {/* Article list */}
             <div>
               <div style={{
@@ -2609,14 +2896,14 @@ export default function Help() {
 
             {/* Article body */}
             {activeArt && (
-              <div className="panel">
+              <div className="panel" ref={articleRef} data-article={activeArt.id}>
                 <h2 style={{
                   fontSize: 17, fontWeight: 700, color: 'var(--text)',
                   borderBottom: '1px solid var(--border)',
                   paddingBottom: 'var(--space-2)',
                   marginBottom: 'var(--space-3)',
                 }}>{activeArt.title}</h2>
-                <ArticleBody body={activeArt.body} />
+                <ArticleBody body={activeArt.body} onLink={openTopic} />
               </div>
             )}
           </div>
@@ -2669,7 +2956,7 @@ export default function Help() {
                   lineHeight: 1.7,
                   borderTop: '1px solid var(--border)',
                 }}>
-                  <div style={{ paddingTop: 'var(--space-2)' }}>{renderInline(faq.a)}</div>
+                  <div style={{ paddingTop: 'var(--space-2)' }}>{renderInline(faq.a, openTopic)}</div>
                 </div>
               )}
             </div>

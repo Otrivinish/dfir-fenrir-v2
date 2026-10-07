@@ -148,9 +148,9 @@ function IOCImportModal({ result, incidentId, onClose, onDone }) {
                 <span style={{ fontSize: 12, color: 'var(--muted)', flex: 1 }}>
                   {selectedCount} of {candidates.length} selected
                 </span>
-                <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px' }} onClick={() => toggleAll(true)}>All</button>
-                <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px' }} onClick={() => toggleAll(false)}>None</button>
-                <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px', color: 'var(--crit)' }}
+                <button type="button" className="btn ghost" onClick={() => toggleAll(true)}>All</button>
+                <button type="button" className="btn ghost" onClick={() => toggleAll(false)}>None</button>
+                <button type="button" className="btn ghost" style={{ color: 'var(--crit)' }}
                   onClick={() => {
                     const s = {}
                     candidates.forEach((c, i) => { if (c.suspicious) s[i] = true })
@@ -272,8 +272,8 @@ function SavedPanel({ incidentId, onLoad, onDelete }) {
                   title="The exhibit this analysis ran on">⛁ {r.evidence_identifier}</span>
           )}
           {r.evidence_identifier && r.evidence_sealed === false && <DraftBadge />}
-          <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px' }} onClick={() => onLoad(r.id)}>Load</button>
-          <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px', color: 'var(--crit)' }} onClick={() => onDelete(r.id, r.filename)}>✕</button>
+          <button type="button" className="btn ghost" onClick={() => onLoad(r.id)}>Load</button>
+          <button type="button" className="btn ghost" style={{ color: 'var(--crit)' }} onClick={() => onDelete(r.id, r.filename)}>✕</button>
         </div>
       ))}
     </div>
@@ -529,15 +529,15 @@ export default function PCAP() {
   return (
     <section className="panel">
       <div className="panel-toolbar">
-        <h2 className="panel-h">PCAP Analysis</h2>
+        <h2 className="panel-h">Network capture</h2>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
           {result && !ro && (
-            <button type="button" className="btn ghost" style={{ fontSize: 12 }}
+            <button type="button" className="btn ghost"
               onClick={() => { setResult(null); setFile(null); setTimeout(() => fileRef.current?.click(), 0) }}>
               Analyze Another
             </button>
           )}
-          <button type="button" className="btn ghost" style={{ fontSize: 12 }}
+          <button type="button" className="btn ghost"
             onClick={() => setShowSaved(s => !s)}>
             {showSaved ? 'Hide Saved' : 'Saved Results'}
           </button>
@@ -600,7 +600,7 @@ export default function PCAP() {
           </div>
           <span className="field-hint" data-testid="pcap-register-hint" style={{ margin: 0 }}>
             Registers first: the capture is kept in Evidence as an <strong>unsealed draft exhibit</strong> (hashed, encrypted, custody-logged) — or
-            analysed as the exhibit with the same SHA-256 — then analysed. Complete and seal it in Evidence › Items.
+            analysed as the exhibit with the same SHA-256 — then analysed. Complete and seal it in Evidence › Exhibits.
           </span>
         </div>
       )}
@@ -658,7 +658,7 @@ export default function PCAP() {
               </div>
             </div>
             {result.result_id && !ro && (
-              <button type="button" className="btn primary" style={{ fontSize: 12 }}
+              <button type="button" className="btn primary"
                 onClick={() => setShowImport(true)}>
                 Import IOCs to Incident
               </button>
@@ -1030,8 +1030,8 @@ function DnsReconTab({ incidentId, resultId, data, loading, error, isClosed, onP
         <span style={{ flex: 1, fontSize: 12, color: 'var(--muted)' }}>
           {selectedCount} of {domains.length} domain{domains.length === 1 ? '' : 's'} selected
         </span>
-        <button type="button" className="btn ghost" style={{ fontSize: 11 }} onClick={() => toggleAll(true)}>All</button>
-        <button type="button" className="btn ghost" style={{ fontSize: 11 }} onClick={() => toggleAll(false)}>None</button>
+        <button type="button" className="btn ghost" onClick={() => toggleAll(true)}>All</button>
+        <button type="button" className="btn ghost" onClick={() => toggleAll(false)}>None</button>
         <button
           type="button"
           className="btn primary"
@@ -1090,7 +1090,7 @@ function DnsReconTab({ incidentId, resultId, data, loading, error, isClosed, onP
                       <button
                         type="button"
                         className="btn ghost"
-                        style={{ fontSize: 10, padding: '0 4px', marginRight: 4 }}
+                        style={{ marginRight: 4 }}
                         onClick={() => setExpanded(isExp ? null : i)}
                         title={isExp ? 'Collapse' : 'Show CNAMEs / clients / timing'}
                       >{isExp ? '▲' : '▼'}</button>
@@ -1128,7 +1128,6 @@ function DnsReconTab({ incidentId, resultId, data, loading, error, isClosed, onP
                       <button
                         type="button"
                         className="btn ghost"
-                        style={{ fontSize: 11 }}
                         disabled={isClosed || importing}
                         onClick={() => promote([i])}
                         title={isClosed ? 'Closed incidents are read-only' : 'Promote this domain as an IOC (tagged dns-recon)'}

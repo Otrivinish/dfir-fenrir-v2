@@ -36,7 +36,7 @@ const PHASE_LABELS = {
   preparation:                        'Preparation',
   detection_and_analysis:             'Detection & Analysis',
   containment_eradication_recovery:   'Containment, Eradication & Recovery',
-  post_incident_activity:             'Post-Incident Activity',
+  post_incident:                      'Post-Incident Activity',   // L3 (R48): the phase value (was post_incident_activity)
 }
 
 // ─── Shared sub-components ────────────────────────────────────────────────────

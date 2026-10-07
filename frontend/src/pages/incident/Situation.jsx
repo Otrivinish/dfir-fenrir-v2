@@ -10,6 +10,7 @@ import ClassificationStrip from '../../components/ClassificationStrip.jsx'
 import ContainmentBadge from '../../components/ContainmentBadge.jsx'
 import StakeholderMatrixBanner from '../../components/StakeholderMatrixBanner.jsx'
 import { notificationsChip } from '../../components/NotificationsChip.jsx'
+import { usePhaseTimes } from '../../components/PhaseStepper.jsx'
 
 // Situation board: the incident landing tab. A read-only, one-screen summary built from
 // existing endpoints; every rule (gates, containment state, counts) comes from the API.
@@ -32,7 +33,7 @@ const LOADS = {
   handoffs: id => api.listHandoffs(id),
   tasks:    id => api.listPlaybookTasks(id),
   legal:    id => api.listDeadlines(id),
-  events:   id => api.listTimelineEvents(id, { sort: '-event_time', limit: 5 }),
+  events:   id => api.listTimelineEvents(id, { sort: '-event_time', limit: 5, key: true }),   // K3: key events
   coverage: id => api.getRosterCoverage(id),
   users:    () => api.listAssignableUsers(),
 }
@@ -110,6 +111,13 @@ function Clocks({ inc, data }) {
   }, [])
 
   const notContained = !inc.contained_at && CONTAINED_BY.includes(inc.phase)
+  // K2 (R38): time in the current phase (snapshot phase_history); earlier phases' durations on hover.
+  const hist  = ready(data, 'snapshot') ? data.snapshot.value.phase_history : null
+  const times = usePhaseTimes(hist && hist.phase === inc.phase ? hist : null)
+  const phase = PHASE_BY_VALUE[inc.phase]
+  const tookTitle = times ? [`In ${phase?.label || inc.phase} since ${times.since}`,
+    ...(hist.completed || []).map(c => `${PHASE_BY_VALUE[c.phase]?.label || c.phase}: ${span(c.seconds * 1000)}` +
+                                      (c.periods > 1 ? ` (${c.periods} periods)` : ''))].join('\n') : undefined
   const cells = [
     { key: 'occurred', label: 'Occurred', at: inc.occurred_at },
     { key: 'detected', label: 'Detected', at: inc.detected_at },
@@ -162,6 +170,11 @@ function Clocks({ inc, data }) {
           )
         })}
         <div className="sit-clock" data-clock="elapsed"><dt>Elapsed</dt><dd>{elapsed}</dd></div>
+        <div className="sit-clock" data-clock="in-phase" title={tookTitle}>
+          <dt>Time in phase</dt>
+          <dd>{times ? <>{phase?.short || phase?.label || inc.phase} · {times.inPhase}{times.closed ? ' (closed)' : ''}</>
+                     : <span className="sit-muted">{data ? '—' : 'Loading…'}</span>}</dd>
+        </div>
         <div className="sit-clock" data-clock="legal"><dt>Nearest legal deadline</dt><dd>{legal}</dd></div>
         <div className="sit-clock" data-clock="notifications"><dt>Stakeholder notifications</dt><dd>{notify}</dd></div>
       </dl>
@@ -275,7 +288,7 @@ function ContainmentPanel({ data }) {
   const now = Date.now()
   return (
     <Panel title="Open response actions" meta={ready(data, 'actions') ? `${open.length} open / ${actions.length}${more}` : null}
-           to="respond" toLabel="Respond" data={data} need={['actions']}>
+           to="containment" toLabel="Containment" data={data} need={['actions']}>
       {() => {
         if (!actions.length) return <div className="sit-muted">No response actions yet.</div>
         if (!open.length) return <div className="sit-muted">No open actions.</div>
@@ -292,7 +305,7 @@ function ContainmentPanel({ data }) {
                     <span className="sit-title">{a.title}</span>
                     {a.entity_id || a.ioc_id ? (
                       <span className="sit-target">
-                        <Link to={`../${a.entity_id ? 'entities' : 'iocs'}`}>{target || (ent || ioc)?.value || 'linked target'}</Link>
+                        <Link to={`../${a.entity_id ? 'scope' : 'iocs'}`}>{target || (ent || ioc)?.value || 'linked target'}</Link>
                         <ContainmentBadge containment={(ent || ioc)?.containment} />
                       </span>
                     ) : target ? <span className="sit-sub">{target}</span> : null}
@@ -305,7 +318,7 @@ function ContainmentPanel({ data }) {
                 )
               })}
             </ul>
-            {open.length > 5 && <div className="sit-sub">+{open.length - 5} more on Respond</div>}
+            {open.length > 5 && <div className="sit-sub">+{open.length - 5} more on Containment and Eradication &amp; Recovery</div>}
           </>
         )
       }}
@@ -315,7 +328,7 @@ function ContainmentPanel({ data }) {
 
 function ScopePanel({ data }) {
   return (
-    <Panel title="Scope" to="entities" toLabel="Entities" data={data} need={['snapshot', 'scope']}>
+    <Panel title="Scope" to="scope" toLabel="Scope" data={data} need={['snapshot', 'scope']}>
       {d => {
         const s = d.snapshot.value
         const hosts = d.scope.value.items
@@ -436,13 +449,15 @@ function TasksPanel({ inc, data }) {
   )
 }
 
-function EventsPanel({ data }) {
+// K3 (R39): the newest 5 key events (key_event: flagged, ATT&CK-tagged or recorded by FENRIR).
+function EventsPanel({ inc, data }) {
   return (
-    <Panel title="Latest events" meta="newest 5" to="timeline" toLabel="Timeline" data={data} need={['events']}>
+    <Panel title="Key timeline" meta="newest 5" to="timeline?key=true" toLabel="Timeline" data={data} need={['events']}>
       {d => {
         const events = d.events.value.items || []
-        if (!events.length) return <div className="sit-muted">No timeline events yet.</div>
         return (
+          <>
+          {!events.length ? <div className="sit-muted">No key events yet. Flag one on the Timeline (★ Key event), or tag it with ATT&amp;CK.</div> : (
           <ul className="sit-list sit-events">
             {events.map(e => (
               <li key={e.id} data-event={e.id}>
@@ -452,6 +467,9 @@ function EventsPanel({ data }) {
               </li>
             ))}
           </ul>
+          )}
+          {inc.status !== 'closed' && <Link to="../timeline?add=1" className="sit-more" data-add-event>+ event</Link>}
+          </>
         )
       }}
     </Panel>
@@ -501,7 +519,7 @@ export default function Situation() {
           <PanelBoundary title="Next tasks" resetKey={rk}><TasksPanel inc={inc} data={data} /></PanelBoundary>
         </div>
       </div>
-      <PanelBoundary title="Latest events" resetKey={rk}><EventsPanel data={data} /></PanelBoundary>
+      <PanelBoundary title="Key timeline" resetKey={rk}><EventsPanel inc={inc} data={data} /></PanelBoundary>
       <PanelBoundary title="Description" resetKey={rk}><DescriptionPanel inc={inc} /></PanelBoundary>
     </div>
   )

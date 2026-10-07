@@ -2,8 +2,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { MITRE_TACTICS, tacticColor } from '../../lib/mitre.js'
+import AttackChain from './AttackChain.jsx'
 
-// Build a lookup from the canonical tactic list so we can render all 12 rows
+// Build a lookup from the canonical tactic list so we can render all 14 rows
 // even when some have no observed events (gap rows).
 const TACTIC_ORDER = MITRE_TACTICS.map(t => t.id)
 const TACTIC_NAME  = Object.fromEntries(MITRE_TACTICS.map(t => [t.id, t.name]))
@@ -63,7 +64,7 @@ export default function Mitre() {
           <div style={{ fontSize: 24, fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>
             {tactics_observed ?? 0}
           </div>
-          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>of 12 tactics</div>
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>of {TACTIC_ORDER.length} tactics</div>
         </div>
         <div style={{ width: 1, background: 'var(--border)' }} />
         <div style={{ textAlign: 'center' }}>
@@ -179,6 +180,14 @@ export default function Mitre() {
               </div>
             )
           })}
+        </div>
+      )}
+
+      {/* K4 (R40): the attack chain (was a duplicate Post-Incident tab) — the same tagged events over time */}
+      {tactics_observed > 0 && (
+        <div data-testid="mitre-attack-chain" style={{ marginTop: 'var(--space-5)' }}>
+          <h3 className="panel-h" style={{ marginBottom: 'var(--space-3)' }}>Attack chain</h3>
+          <AttackChain inc={inc} />
         </div>
       )}
     </section>

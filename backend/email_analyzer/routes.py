@@ -817,14 +817,16 @@ async def promote_iocs(
 
     Takes a list of typed indicators (ip, domain, url, hash_*, email, registry_key,
     file_path, other); unknown types and existing duplicates are skipped. IOCs from an analysis with a
-    run record (G3) record its exhibit (`evidence_id`). Requires the analyst role and an open
-    incident. Returns the email analysis.
+    run record (G3) record its exhibit (`evidence_id`). Each `urls[]` row whose URL (its Safelink
+    target when it has one) is now a URL IOC of the incident, new or existing, gets
+    `promoted_ioc_id`. Requires the analyst role and an open incident. Returns the email analysis.
     """
     await _incident(db, incident_id, user)
     analysis = await _get_analysis(db, incident_id, aid)
     valid = {"ip", "domain", "url", "hash_md5", "hash_sha1", "hash_sha256",
              "email", "registry_key", "file_path", "other"}
     created = 0
+    url_iocs: dict[str, str] = {}      # K5 (R49): URL value -> its IOC id, for urls[].promoted_ioc_id
     for item in req.iocs:
         if item.type not in valid:
             continue
@@ -832,13 +834,24 @@ async def promote_iocs(
             IOC.incident_id == incident_id, IOC.type == item.type, IOC.value == item.value,
         ))).scalar_one_or_none()
         if exists:
+            if item.type == "url":
+                url_iocs[item.value] = str(exists.id)
             continue
-        db.add(IOC(incident_id=incident_id, type=item.type, value=item.value,
-                   notes=item.notes or f"From email analysis {aid}", source="email-analysis",
-                   tags=["email"], added_by_id=user.id,
-                   # G3 — found in the exhibit this run analysed (none for a pre-G3 analysis)
-                   evidence_id=analysis.evidence_id if analysis.input_sha256 else None))
+        ioc = IOC(id=uuid.uuid4(), incident_id=incident_id, type=item.type, value=item.value,
+                  notes=item.notes or f"From email analysis {aid}", source="email-analysis",
+                  tags=["email"], added_by_id=user.id,
+                  # G3 — found in the exhibit this run analysed (none for a pre-G3 analysis)
+                  evidence_id=analysis.evidence_id if analysis.input_sha256 else None)
+        db.add(ioc)
+        if item.type == "url":
+            url_iocs[item.value] = str(ioc.id)
         created += 1
+    # A URL row is promoted when its value (the Safelink target when there is one, as the UI
+    # sends) is a URL IOC of this incident. A new list, so the JSON column is written.
+    if url_iocs:
+        analysis.urls = [({**u, "promoted_ioc_id": url_iocs[k]}
+                          if (k := (u.get("safelink_target") or u.get("url"))) in url_iocs else u)
+                         for u in (analysis.urls or [])]
     await write_audit(db, "email_promote_iocs", user_id=user.id, username=user.username,
                       resource_type="email_analysis", resource_id=str(aid), outcome="success",
                       details={"incident_id": str(incident_id), "created": created},
@@ -1042,7 +1055,7 @@ async def mint_evidence(
     await _incident(db, incident_id, user)
     analysis = await _get_analysis(db, incident_id, aid)
     if analysis.evidence_id:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Already minted as evidence")
+        raise ApiError(status.HTTP_409_CONFLICT, "already_minted", "Already minted as evidence")
     if not analysis.source_artifact_id:
         raise HTTPException(status.HTTP_410_GONE, "Source message unavailable")
     src = (await db.execute(select(Artifact).where(Artifact.id == analysis.source_artifact_id))).scalar_one_or_none()

@@ -154,7 +154,8 @@ async def _read_capped(file: UploadFile, cap: int, what: str = "File") -> bytes:
             break
         total += len(chunk)
         if total > cap:
-            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"{what} exceeds {cap} bytes")
+            raise ApiError(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "file_too_large",
+                           f"{what} is larger than {cap // (1024 * 1024)} MiB ({cap} bytes): nothing was stored.")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -207,7 +208,7 @@ async def _get_upload(db, incident_id, upload_id, *, for_update: bool = False) -
 
 _UPLOAD_RESPONSES = {
     **_CLOSED_409,
-    413: {"description": "a file is larger than 500 MB"},
+    413: {"model": ApiErrorBody, "description": "file_too_large (a file is larger than 500 MiB)"},
     422: {"model": ApiErrorBody,
           "description": "not a SQLite database (nothing stored), acquired_in_future, or parse_failed (the "
                          "file stays registered as a draft exhibit: `evidence_id` in the body)"},
@@ -674,7 +675,7 @@ async def delete_upload(
              response_model=BrowserHistoryUploadOut,
              summary="Register a pre-G3 upload's history file as an exhibit (legacy)",
              operation_id="mint_webhistory_evidence",
-             responses={409: {"model": ApiErrorBody, "description": "artifact_hash_mismatch, or incident_closed"},
+             responses={409: {"model": ApiErrorBody, "description": "already_minted, artifact_hash_mismatch, or incident_closed"},
                         507: {"model": ApiErrorBody, "description": "insufficient_storage (the evidence volume is full; nothing stored)"}})
 async def mint_evidence(
     incident_id: uuid.UUID,
@@ -690,13 +691,13 @@ async def mint_evidence(
     Re-hashes the quarantined file first: if its SHA-256 no longer matches the hash recorded
     at upload, nothing is minted (409 `artifact_hash_mismatch`, audited as
     `evidence_collect_rejected`). Otherwise stores it AES-encrypted with `acquired_at` = the
-    upload time and audits `evidence_collect` (details.method = webhistory_mint). 400 if
-    already minted, 410 if the source file is gone. Requires the analyst role.
+    upload time and audits `evidence_collect` (details.method = webhistory_mint). 409
+    already_minted if already minted, 410 if the source file is gone. Requires the analyst role.
     """
     await _incident(db, incident_id, user)
     upload = await _get_upload(db, incident_id, upload_id)
     if upload.evidence_id:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Already minted as Evidence")
+        raise ApiError(status.HTTP_409_CONFLICT, "already_minted", "Already minted as Evidence")
     if not upload.source_artifact_id:
         raise HTTPException(status.HTTP_410_GONE, "Source artifact missing")
 

@@ -126,7 +126,6 @@ function MatchedIncidents() {
           <button
             type="button"
             className="btn ghost"
-            style={{ fontSize: 12 }}
             onClick={() => load(cursor)}
             disabled={loading}
           >
@@ -173,11 +172,11 @@ function IocDatabase() {
       <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-3)', alignItems: 'center', flexWrap: 'wrap' }}>
         <form onSubmit={search} style={{ display: 'flex', gap: 'var(--space-2)', flex: 1 }}>
           <input
-            className="input"
+            className="input compact"
             placeholder="Search value…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            style={{ maxWidth: 320, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+            style={{ maxWidth: 320, fontFamily: 'var(--font-mono)' }}
           />
           <select
             className="select"
@@ -187,7 +186,7 @@ function IocDatabase() {
             <option value="">All types</option>
             {IOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
           </select>
-          <button type="submit" className="btn ghost" style={{ fontSize: 12 }}>Search</button>
+          <button type="submit" className="btn ghost">Search</button>
         </form>
         <span style={{ color: 'var(--muted)', fontSize: 12, flexShrink: 0 }}>
           {total.toLocaleString()} total
@@ -231,7 +230,6 @@ function IocDatabase() {
           <button
             type="button"
             className="btn ghost"
-            style={{ fontSize: 12 }}
             onClick={() => load({ cursor })}
             disabled={loading}
           >
@@ -262,7 +260,7 @@ export default function ThreatIntelHub() {
             Cross-incident threat intelligence — matched IOCs and global feed database.
           </p>
         </div>
-        <Link to="/settings/threat-intel" className="btn ghost" style={{ fontSize: 12, alignSelf: 'flex-start' }}>
+        <Link to="/settings/threat-intel" className="btn ghost" style={{ alignSelf: 'flex-start' }}>
           Manage Feeds ↗
         </Link>
       </div>
@@ -289,7 +287,6 @@ export default function ThreatIntelHub() {
             key={t.key}
             type="button"
             className={`btn ${tab === t.key ? 'primary' : 'ghost'}`}
-            style={{ fontSize: 13 }}
             onClick={() => setTab(t.key)}
           >
             {t.label}

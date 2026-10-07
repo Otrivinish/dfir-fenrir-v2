@@ -70,12 +70,12 @@ export const CUSTODY_ACTION_LABEL = {
   evidence_archive:                'Archived',
   evidence_mirror_purged:          'Backup mirror copy purged',
   evidence_storage_rekeyed:        'Storage key rotated (KEK rotation)',
-  evidence_export:                 'Exported',
+  evidence_export:                 'Disclosed (package or export)',
   evidence_export_create:          'Export bundle created',
   evidence_export_download:        'Export downloaded',
   evidence_export_download_denied: 'Export download denied',
   evidence_amend_after_seal:       'Amended after seal',
-  evidence_copy_mint:              'Export copy recorded',
+  evidence_copy_mint:              'Disclosure copy recorded',
   evidence_copy_correction:        'Working copy correction',
   evidence_working_copy_issued:    'Working copy issued',
   evidence_working_copy_complete:  'Working copy downloaded',
@@ -86,4 +86,12 @@ export const CUSTODY_ACTION_LABEL = {
   evidence_working_copy_verify_failed: 'Working copy changed',
   evidence_legal_hold_set:         'Legal hold set',
   evidence_legal_hold_released:    'Legal hold released',
+}
+
+// K1 (R37): what a custody event is about, by name — the exhibit's identifier (and name) the API adds to the
+// incident custody log, or the export bundle's recipient. Never a truncated id.
+export function custodySubject(ev) {
+  if (ev.exhibit_identifier) return ev.exhibit_name ? `${ev.exhibit_identifier} — ${ev.exhibit_name}` : ev.exhibit_identifier
+  if (ev.resource_type === 'custody_export') return `export bundle${ev.details?.recipient ? ` to ${ev.details.recipient}` : ''}`
+  return ev.resource_type || '—'
 }

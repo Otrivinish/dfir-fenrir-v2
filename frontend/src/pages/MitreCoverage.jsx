@@ -219,7 +219,7 @@ export default function MitreCoverage() {
         flexWrap: 'wrap',
       }}>
         {[
-          { val: tactics_observed ?? 0,    label: 'of 12 tactics observed' },
+          { val: tactics_observed ?? 0,    label: `of ${MITRE_TACTICS.length} tactics observed` },
           { val: techniques_observed ?? 0, label: 'techniques observed' },
           { val: incidents_with_mitre ?? 0, label: 'incidents with ATT&CK tags' },
         ].map(({ val, label }) => (

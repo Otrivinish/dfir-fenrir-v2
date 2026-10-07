@@ -240,9 +240,9 @@ export default function OnCall() {
                     {isAdmin && (
                       <td>
                         <div style={{ display: 'flex', gap: 'var(--space-1)' }}>
-                          <button className="btn" style={{ fontSize: 12, padding: '2px 8px' }}
+                          <button className="btn"
                             onClick={() => setModal(e)}>Edit</button>
-                          <button className="btn" style={{ fontSize: 12, padding: '2px 8px', color: 'var(--crit)' }}
+                          <button className="btn" style={{ color: 'var(--crit)' }}
                             disabled={deletingId === e.id}
                             onClick={() => handleDelete(e.id)}>
                             {deletingId === e.id ? '…' : 'Del'}

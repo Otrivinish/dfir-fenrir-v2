@@ -194,12 +194,12 @@ export default function Collections() {
               background: 'var(--surface-2)', padding: '6px 10px', borderRadius: 'var(--radius-sm)',
               wordBreak: 'break-all', flex: 1, minWidth: 240,
             }}>{justGenerated.download_url}</code>
-            <a className="btn primary" href={justGenerated.download_url} style={{ fontSize: 12, textDecoration: 'none' }}>
+            <a className="btn primary" href={justGenerated.download_url} style={{ textDecoration: 'none' }}>
               Download
             </a>
-            <button type="button" className="btn ghost" style={{ fontSize: 12 }}
+            <button type="button" className="btn ghost"
                     onClick={() => copy(justGenerated.download_url)}>Copy</button>
-            <button type="button" className="btn ghost" style={{ fontSize: 12 }}
+            <button type="button" className="btn ghost"
                     onClick={() => setJustGenerated(null)}>Dismiss</button>
           </div>
           <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 8, fontFamily: 'var(--font-mono)' }}>
@@ -229,7 +229,7 @@ export default function Collections() {
             </div>
             <button type="button" className="btn primary"
                     disabled={busy || !name.trim() || !selectedProfile || (cap !== null && activeCount >= cap)}
-                    onClick={onGenerate} style={{ fontSize: 12 }}>
+                    onClick={onGenerate}>
               {busy ? 'Generating…' : 'Generate package'}
             </button>
           </div>
@@ -317,22 +317,22 @@ export default function Collections() {
                       <>
                         {!ro && (
                           <Link to={`../timeline-import?artifact=${p.result_artifact_id}`} relative="path"
-                                className="btn ghost" style={{ fontSize: 11, textDecoration: 'none', marginRight: 6 }}>
+                                className="btn ghost" style={{ textDecoration: 'none', marginRight: 6 }}>
                             Review in Logs & triage
                           </Link>
                         )}
-                        <Link to="../artifacts" relative="path" className="btn ghost" style={{ fontSize: 11, textDecoration: 'none', marginRight: 6 }}>
+                        <Link to="../artifacts" relative="path" className="btn ghost" style={{ textDecoration: 'none', marginRight: 6 }}>
                           View artifact ↗
                         </Link>
                       </>
                     )}
                     {!ro && p.status !== 'deleted' && p.status !== 'ingested' && (
-                      <button type="button" className="btn ghost" style={{ fontSize: 11, marginRight: 6 }}
+                      <button type="button" className="btn ghost" style={{ marginRight: 6 }}
                               disabled={ingesting}
                               onClick={() => startIngest(p)}>Ingest results</button>
                     )}
                     {!ro && p.status !== 'deleted' && (
-                      <button type="button" className="btn ghost" style={{ fontSize: 11 }}
+                      <button type="button" className="btn ghost"
                               onClick={() => onDelete(p)}>Delete</button>
                     )}
                   </td>

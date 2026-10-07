@@ -40,7 +40,7 @@
 
 .warroom-drawer {
   position: fixed;
-  top: 52px;        /* sits beneath the topbar (52px in shell.css) */
+  top: var(--topbar-h, 52px);   /* beneath the topbar: its measured height (Topbar.jsx; R138), 52 px before it is known */
   bottom: 0;
   right: 0;
   width: 360px;

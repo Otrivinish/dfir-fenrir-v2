@@ -138,19 +138,19 @@ function ServiceRow({ svc, onSaved, onDeleted }) {
         </td>
         <td className="actions">
           {editing ? (
-            <button type="button" className="btn ghost" style={{ fontSize: 12 }}
+            <button type="button" className="btn ghost"
               onClick={() => { setEditing(false); setKeyValue(''); setErr(null) }}
               disabled={busy}>
               Cancel
             </button>
           ) : (
             <>
-              <button type="button" className="btn ghost" style={{ fontSize: 12 }}
+              <button type="button" className="btn ghost"
                 onClick={() => setEditing(true)} disabled={busy}>
                 {svc.configured && svc.source === 'db' ? 'Rotate' : 'Set key'}
               </button>
               {svc.configured && svc.source === 'db' && (
-                <button type="button" className="btn ghost" style={{ fontSize: 12, color: 'var(--crit)' }}
+                <button type="button" className="btn ghost" style={{ color: 'var(--crit)' }}
                   onClick={remove} disabled={busy}>
                   Remove
                 </button>
@@ -167,15 +167,15 @@ function ServiceRow({ svc, onSaved, onDeleted }) {
                 <input
                   type="password"
                   autoFocus
-                  className="input"
+                  className="input compact"
                   placeholder={`Paste ${svc.label} API key…`}
                   value={keyValue}
                   onChange={e => setKeyValue(e.target.value)}
                   maxLength={512}
-                  style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                  style={{ flex: 1, fontFamily: 'var(--font-mono)' }}
                   autoComplete="off"
                 />
-                <button type="submit" className="btn primary" style={{ fontSize: 12 }} disabled={busy || !keyValue.trim()}>
+                <button type="submit" className="btn primary" disabled={busy || !keyValue.trim()}>
                   {busy ? 'Saving…' : 'Save'}
                 </button>
               </div>

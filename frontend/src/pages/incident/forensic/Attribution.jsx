@@ -301,11 +301,13 @@ function SuggestionCard({ suggestion, onAttribute }) {
             {actor.country_of_origin}
           </span>
         )}
-        <button
-          className="btn ghost"
-          onClick={() => onAttribute(suggestion)}
-          style={{ marginLeft: 'auto', color: 'var(--accent)' }}
-        >+ Attribute</button>
+        {onAttribute && (
+          <button
+            className="btn ghost"
+            onClick={() => onAttribute(suggestion)}
+            style={{ marginLeft: 'auto', color: 'var(--accent)' }}
+          >+ Attribute</button>
+        )}
       </div>
 
       <ScoreBar score={score} confidence={confidence} />
@@ -388,7 +390,7 @@ function AttributionModal({ incidentId, existing, prefillActor, prefillSuggestio
 
   return (
     <div className="modal-backdrop">
-      <div className="modal" style={{ width: 520, maxHeight: '90vh', overflowY: 'auto' }}
+      <div className="modal" style={{ maxWidth: 520, maxHeight: '90vh', overflowY: 'auto' }}
            onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h3 style={{ margin: 0, fontSize: 15 }}>
@@ -550,7 +552,8 @@ export default function Attribution() {
   // The `ctx.incident` typo below previously made `incidentId` undefined and
   // the early-return blanked the whole tab.
   const incidentId = ctx?.inc?.id
-  const isClosed   = ctx?.inc?.status === 'closed'
+  // L2 (R43): canEdit = analyst/admin on an open incident; closed incidents and viewers are read-only.
+  const readOnly   = !ctx?.canEdit
 
   const [attributions, setAttributions] = useState([])
   const [actorMap, setActorMap]         = useState({})   // actor_id → actor obj
@@ -646,7 +649,7 @@ export default function Attribution() {
         marginBottom: 'var(--space-4)', flexWrap: 'wrap', gap: 'var(--space-2)',
       }}>
         <div>
-          <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Threat Actor Attribution</h3>
+          <h2 className="panel-h" style={{ margin: 0 }}>Attribution</h2>
           <p style={{ margin: '2px 0 0', fontSize: 12, color: 'var(--muted)' }}>
             Link this incident to known threat actors or named clusters
           </p>
@@ -658,7 +661,7 @@ export default function Attribution() {
           >
             {showSuggest ? '▾ Hide suggestions' : '◈ Suggest actors'}
           </button>
-          {!isClosed && (
+          {!readOnly && (
             <button
               className="btn primary"
               onClick={() => setModal({ mode: 'create' })}
@@ -721,7 +724,7 @@ export default function Attribution() {
                     <SuggestionCard
                       key={s.actor.id}
                       suggestion={s}
-                      onAttribute={handlePrefillAttribute}
+                      onAttribute={readOnly ? null : handlePrefillAttribute}
                     />
                   ))}
                 </>
@@ -741,7 +744,7 @@ export default function Attribution() {
           border: '1px dashed var(--border)', borderRadius: 'var(--radius)',
           color: 'var(--dim)', fontSize: 13,
         }}>
-          No attributions yet.{!isClosed && ' Use "Suggest by TTPs" or "+ Attribute" to link a threat actor.'}
+          No attributions yet.{!readOnly && ' Use "Suggest by TTPs" or "+ Attribute" to link a threat actor.'}
         </div>
       )}
 
@@ -752,7 +755,7 @@ export default function Attribution() {
           actor={attr.threat_actor_id ? actorMap[attr.threat_actor_id] : null}
           onEdit={a => setModal({ mode: 'edit', attr: a })}
           onDelete={handleDelete}
-          isClosed={isClosed}
+          isClosed={readOnly}
         />
       ))}
 

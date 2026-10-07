@@ -1,14 +1,17 @@
 import { NavLink, Outlet, useOutletContext } from 'react-router-dom'
 
-// Evidence sub-section — chain of custody.
-// Phase 1: Items (built). CustodyLog / AuditChain / Export are stubs until
-// Phase 2 (export pipeline) and Phase 3 (chain verifier + global timeline).
+// Evidence sub-section, in ISO/IEC 27037 lifecycle order (K1, R36): register an exhibit, work with the
+// exhibits, follow their custody and its integrity, disclose them, and the SOP. Supporting documents (incident
+// Files: not chain-of-custody, can be registered as exhibits) sit here too. Every tab has its own route;
+// the old paths (items, audit-chain, export, ../files) redirect.
 const TABS = [
-  { to: 'items',       label: 'Items' },
+  { to: 'register',    label: 'Register' },
+  { to: 'exhibits',    label: 'Exhibits' },
   { to: 'custody-log', label: 'Custody log' },
-  { to: 'audit-chain', label: 'Audit chain' },
-  { to: 'export',      label: 'Export' },
-  { to: 'sop',         label: 'CoC SOP' },
+  { to: 'integrity',   label: 'Integrity' },
+  { to: 'disclosure',  label: 'Disclosure package' },
+  { to: 'sop',         label: 'SOP' },
+  { to: 'documents',   label: 'Supporting documents' },
 ]
 
 export default function Evidence() {

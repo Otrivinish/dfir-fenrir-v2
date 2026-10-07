@@ -61,7 +61,13 @@ const DEVICE_TYPES = [
   { value: 'mobile',     label: 'Mobile' },
   { value: 'network',    label: 'Network device' },
   { value: 'cctv',       label: 'CCTV / VSS' },
+  // K1 (R37): data handed over as an export, with no device to tag (no §7 branch checklist).
+  { value: 'email_export',    label: 'Email export' },
+  { value: 'vendor_report',   label: 'Vendor report' },
+  { value: 'network_capture', label: 'Network capture export' },
 ]
+// The types whose §7 checklist is on the Branch step.
+const BRANCH_TYPES = ['computer', 'peripheral', 'storage', 'mobile', 'network', 'cctv']
 
 const HANDLING_MODE = [
   { value: 'acquire', label: 'Acquire — image / copy here' },
@@ -127,7 +133,7 @@ function HashInput({ id, value, onChange, placeholder, disabled, sha256Only = fa
     <>
       <input
         id={id}
-        className="input"
+        className="input compact"
         value={value || ''}
         onChange={(e) => onChange(e.target.value.trim())}
         placeholder={placeholder}
@@ -135,10 +141,8 @@ function HashInput({ id, value, onChange, placeholder, disabled, sha256Only = fa
         disabled={disabled}
         aria-invalid={bad || undefined}
         aria-describedby={sha256Only ? undefined : hintId}
-        style={{
-          fontFamily: 'var(--font-mono)', fontSize: 11,
-          borderColor: bad ? 'var(--crit)' : (ok ? 'var(--ok)' : undefined),
-        }}
+        style={{ fontFamily: 'var(--font-mono)',
+          borderColor: bad ? 'var(--crit)' : (ok ? 'var(--ok)' : undefined) }}
       />
       {!sha256Only && (
         <div id={hintId} className="field-hint" data-hash-algo={algo || ''}
@@ -283,7 +287,7 @@ export default function AcquisitionWizard({
   // only for digital files.
   const stepList = [
     'type', 'identify', 'decide',
-    ...(deviceTypes.length ? ['branch'] : []),
+    ...(deviceTypes.some(t => BRANCH_TYPES.includes(t)) ? ['branch'] : []),
     ...(kind === 'digital_file' ? ['acquire'] : []),
     'witness', 'confirm',
   ]
@@ -567,7 +571,7 @@ export default function AcquisitionWizard({
                     <TypeChip key={t.value} active={has(t.value)} label={t.label} onClick={() => toggleType(t.value)} />
                   ))}
                 </div>
-                <div className="field-hint">A device can be several types (e.g. a seized phone is both Mobile and Storage). Each tag adds its §7 checklist on the Branch step.</div>
+                <div className="field-hint">A device can be several types (e.g. a seized phone is both Mobile and Storage). Each device tag adds its §7 checklist on the Branch step; the export types (email, vendor report, network capture) have none.</div>
               </div>
 
               <div className="field">
@@ -1041,14 +1045,17 @@ export default function AcquisitionWizard({
               )}
 
               <div className="form-row">
-                <div className="field">
-                  <label className="field-label" htmlFor="aw-wb2">Write-blocker used?</label>
-                  <select id="aw-wb2" className="select" value={writeBlockerUsed} onChange={e => setWriteBlockerUsed(e.target.value)}>
-                    <option value="">— select —</option>
-                    <option value="true">Yes</option>
-                    <option value="false">No</option>
-                  </select>
-                </div>
+                {/* K1 (R37): asked here only when the Branch step (computer / peripheral / storage) did not ask it. */}
+                {!(has('computer') || has('peripheral') || has('storage')) && (
+                  <div className="field">
+                    <label className="field-label" htmlFor="aw-wb2">Write-blocker used?</label>
+                    <select id="aw-wb2" className="select" value={writeBlockerUsed} onChange={e => setWriteBlockerUsed(e.target.value)}>
+                      <option value="">— select —</option>
+                      <option value="true">Yes</option>
+                      <option value="false">No</option>
+                    </select>
+                  </div>
+                )}
                 <div className="field">
                   <label className="field-label" htmlFor="aw-ni">Network isolated?</label>
                   <select id="aw-ni" className="select" value={networkIsolated} onChange={e => setNetworkIsolated(e.target.value)}>

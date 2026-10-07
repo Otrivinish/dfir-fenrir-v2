@@ -309,7 +309,9 @@ async def create_respond_action(
     db.add(action)
     await db.flush()
 
-    audit_details = {"incident_id": str(incident_id), "category": action.category, "title": action.title}
+    # L3 (R47): the starting status is part of the record (an action can be created as done/deferred).
+    audit_details = {"incident_id": str(incident_id), "category": action.category, "title": action.title,
+                     "status": action.status}
     for key in ("entity_id", "ioc_id", "template_id", "decision_id", "task_id"):
         if getattr(action, key):
             audit_details[key] = str(getattr(action, key))

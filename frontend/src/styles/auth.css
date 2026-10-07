@@ -112,13 +112,16 @@
 @media (max-width: 480px) { .form-row { grid-template-columns: 1fr; } }
 
 .field { display: flex; flex-direction: column; gap: var(--space-1); }
-.field-label {
+/* R138 (L3): .form-label is an alias (Handoffs, On-call forms) */
+.field-label,
+.form-label {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+.form-label { display: block; margin-bottom: var(--space-1); }
 .field-hint {
   font-size: 12px;
   color: var(--dim);
@@ -242,7 +245,9 @@
 .btn.ghost { background: transparent; }
 
 /* ── Alert ───────────────────────────────────────────────────────────── */
-.alert {
+/* R138 (L3): .form-error is an alias of .alert.error (Handoffs, On-call forms) */
+.alert,
+.form-error {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
@@ -251,7 +256,8 @@
   font-size: 13px;
   border: 1px solid transparent;
 }
-.alert.error {
+.alert.error,
+.form-error {
   background: color-mix(in srgb, var(--crit) 14%, transparent);
   border-color: color-mix(in srgb, var(--crit) 40%, transparent);
   color: var(--crit);
@@ -260,6 +266,11 @@
   background: color-mix(in srgb, var(--high) 14%, transparent);
   border-color: color-mix(in srgb, var(--high) 40%, transparent);
   color: var(--high);
+}
+.alert.ok {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  color: var(--ok);
 }
 .alert.info {
   background: var(--accent-soft);

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
 from auth.deps import current_user
+from core.csv_safe import csv_safe
 from core.database import get_db
 from models import IOC, Incident, User
 
@@ -240,7 +241,7 @@ def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_d
             t.upper() for t in (ioc.tags or []) if re.match(r"^t\d{4}(\.\d{3})?$", t, re.I)
         )
         row_mitre = ",".join(filter(None, [mitre, ioc_mitre_tags]))
-        w.writerow({
+        w.writerow({k: csv_safe(v) for k, v in {   # R129: formula-escape every cell
             "IndicatorType":      itype,
             "IndicatorValue":     ioc.value,
             "ExpirationTime":     expiry,
@@ -253,7 +254,7 @@ def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_d
             "Category":           _MDE_CATEGORY.get(ioc.type, ""),
             "MitreTechniques":    row_mitre,
             "GenerateAlert":      "true" if generate_alert else "false",
-        })
+        }.items()})
     # utf-8-sig BOM for Excel compatibility
     content = buf.getvalue().encode("utf-8-sig")
     return Response(

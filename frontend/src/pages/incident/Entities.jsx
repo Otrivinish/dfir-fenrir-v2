@@ -52,6 +52,9 @@ export default function Entities() {
   const navigate = useNavigate()
   // J5: Isolate / Disable / Block opens the Respond action form prefilled (not for viewers or closed incidents).
   const canContain = !isClosed && user?.role !== 'viewer'
+  // L2 (R43): a viewer gets no write controls (the API refuses them); ro = closed or viewer.
+  const viewer = user?.role === 'viewer'
+  const ro = isClosed || viewer
 
   const [items, setItems]           = useState([])
   const [relations, setRelations]   = useState([])
@@ -59,6 +62,7 @@ export default function Entities() {
   const [error, setError]           = useState(null)
   const [typeFilter, setTypeFilter] = useState('')
   const [critFilter, setCritFilter] = useState('')
+  const [compOnly, setCompOnly]     = useState(false)    // K4: server-side ?compromised=true
   const [view, setView]             = useState('table')   // 'table' | 'graph'
 
   // Entity add/edit modal
@@ -92,6 +96,7 @@ export default function Entities() {
       const params = {}
       if (typeFilter) params.type        = typeFilter
       if (critFilter) params.criticality = critFilter
+      if (compOnly)   params.compromised = true
       // Every page, so the table and the graph hold all of the incident's entities.
       const [ents, relRes] = await Promise.all([
         api.listAllPages(api.listEntities, inc.id, params, 200, { signal }),
@@ -110,7 +115,7 @@ export default function Entities() {
     } finally {
       if (seq === loadSeq.current) setLoading(false)
     }
-  }, [inc.id, typeFilter, critFilter]) // intentionally excludes selectedEntity to avoid loop
+  }, [inc.id, typeFilter, critFilter, compOnly]) // intentionally excludes selectedEntity to avoid loop
 
   useEffect(() => { load(); return () => loadAbort.current?.abort() }, [load])
   // After a write: re-read the list and the rail's counts.
@@ -192,7 +197,7 @@ export default function Entities() {
     <section className="panel">
       <div className="panel-toolbar" style={{ flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
-          <h2 className="panel-h">Entities</h2>
+          <h2 className="panel-h">Scope</h2>
 
           {/* View toggle */}
           <div style={{
@@ -202,7 +207,7 @@ export default function Entities() {
             <button
               type="button"
               className={`btn ${view === 'table' ? 'primary' : 'ghost'}`}
-              style={{ borderRadius: 0, borderRight: '1px solid var(--border)', padding: '4px 12px', fontSize: 12 }}
+              style={{ borderRadius: 0, borderRight: '1px solid var(--border)' }}
               onClick={() => setView('table')}
             >
               ≡ Table
@@ -210,7 +215,7 @@ export default function Entities() {
             <button
               type="button"
               className={`btn ${view === 'graph' ? 'primary' : 'ghost'}`}
-              style={{ borderRadius: 0, padding: '4px 12px', fontSize: 12 }}
+              style={{ borderRadius: 0 }}
               onClick={() => setView('graph')}
             >
               ◎ Graph
@@ -227,12 +232,16 @@ export default function Entities() {
                 <option value="">All criticalities</option>
                 {CRITICALITY.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
               </select>
+              <label className="tl-key-toggle">
+                <input type="checkbox" checked={compOnly} onChange={(e) => setCompOnly(e.target.checked)} data-testid="ent-compromised-only" />
+                Compromised only
+              </label>
             </>
           )}
         </div>
 
         <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
-          {!isClosed && (
+          {!ro && (
             <button
               type="button"
               className="btn ghost"
@@ -242,15 +251,17 @@ export default function Entities() {
               ↑ Import CSV
             </button>
           )}
-          <button
-            type="button"
-            className="btn primary"
-            onClick={() => setModal({ mode: 'create' })}
-            disabled={isClosed}
-            title={isClosed ? 'Closed incidents are read-only' : 'Add entity'}
-          >
-            + Add entity
-          </button>
+          {!viewer && (
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => setModal({ mode: 'create' })}
+              disabled={isClosed}
+              title={isClosed ? 'Closed incidents are read-only' : 'Add entity'}
+            >
+              + Add entity
+            </button>
+          )}
         </div>
       </div>
 
@@ -272,153 +283,152 @@ export default function Entities() {
       ) : items.length === 0 ? (
         <div className="panel-empty">
           <div className="panel-empty-mark" aria-hidden="true">◇</div>
-          <div>No entities yet.</div>
-          {!isClosed && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Click "Add entity" to record a host, user, service, …</div>}
+          <div>{typeFilter || critFilter || compOnly ? 'No entities match the filters.' : 'No entities yet.'}</div>
+          {!ro && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Click "Add entity" to record a host, user, service, …</div>}
         </div>
       ) : (
-        <table className="settings-table">
-          <thead>
-            <tr>
-              <th style={{ width: 110 }}>Type</th>
-              <th>Value</th>
-              <th>Name</th>
-              <th style={{ width: 130 }}>Criticality</th>
-              <th style={{ width: 120 }}>Compromised</th>
-              <th style={{ width: 140 }}>Added</th>
-              <th className="actions">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map(ent => {
-              const isSelected = selectedEntity?.id === ent.id
-              return (
-                <tr
-                  key={ent.id}
-                  onClick={() => setSelectedEntity(isSelected ? null : ent)}
-                  style={{
-                    cursor: 'pointer',
-                    background: isSelected ? 'var(--accent-soft)' : undefined,
-                  }}
-                >
-                  <td>
-                    <span style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 5,
-                      fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700,
-                      letterSpacing: '0.08em', textTransform: 'uppercase',
-                      color: typeColor(ent.type),
-                    }}>
-                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: typeColor(ent.type), flexShrink: 0 }} />
-                      {labelOfType(ent.type)}
-                    </span>
-                  </td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, wordBreak: 'break-all' }}>
-                    {ent.value}
-                  </td>
-                  <td>
-                    {editingNameId === ent.id ? (
-                      <input
-                        className="input"
-                        autoFocus
-                        value={nameDraft}
-                        onChange={(e) => setNameDraft(e.target.value)}
-                        onBlur={() => saveNameEdit(ent)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter')  { e.preventDefault(); saveNameEdit(ent) }
-                          if (e.key === 'Escape') { e.preventDefault(); cancelNameEdit() }
-                        }}
-                        maxLength={256}
-                        onClick={(e) => e.stopPropagation()}
-                      />
-                    ) : (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div className="table-scroll">
+          <table className="settings-table">
+            <thead>
+              <tr>
+                <th style={{ width: 110 }}>Type</th>
+                <th>Value</th>
+                <th>Name</th>
+                <th style={{ width: 130 }}>Criticality</th>
+                <th style={{ width: 120 }}>Compromised</th>
+                <th style={{ width: 140 }}>Added</th>
+                <th className="actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map(ent => {
+                const isSelected = selectedEntity?.id === ent.id
+                return (
+                  <tr
+                    key={ent.id}
+                    onClick={() => setSelectedEntity(isSelected ? null : ent)}
+                    style={{
+                      cursor: 'pointer',
+                      background: isSelected ? 'var(--accent-soft)' : undefined,
+                    }}
+                  >
+                    <td>
+                      <span style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 5,
+                        fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 700,
+                        letterSpacing: '0.08em', textTransform: 'uppercase',
+                        color: typeColor(ent.type),
+                      }}>
+                        <span style={{ width: 7, height: 7, borderRadius: '50%', background: typeColor(ent.type), flexShrink: 0 }} />
+                        {labelOfType(ent.type)}
+                      </span>
+                    </td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, wordBreak: 'break-all' }}>
+                      {ent.value}
+                    </td>
+                    <td>
+                      {editingNameId === ent.id ? (
+                        <input
+                          className="input"
+                          autoFocus
+                          value={nameDraft}
+                          onChange={(e) => setNameDraft(e.target.value)}
+                          onBlur={() => saveNameEdit(ent)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter')  { e.preventDefault(); saveNameEdit(ent) }
+                            if (e.key === 'Escape') { e.preventDefault(); cancelNameEdit() }
+                          }}
+                          maxLength={256}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <button
+                            type="button"
+                            className="btn ghost"
+                            onClick={(e) => { e.stopPropagation(); if (!ro) startNameEdit(ent) }}
+                            disabled={ro}
+                            title={isClosed ? 'Closed incidents are read-only' : 'Click to edit display name'}
+                            style={{ textAlign: 'left',
+                              fontFamily: 'var(--font-body)', fontWeight: 400,
+                              minHeight: 28, justifyContent: 'flex-start' }}
+                          >
+                            {ent.name || <span style={{ color: 'var(--dim)' }}>—</span>}
+                          </button>
+                          {ent.file_count > 0 && (
+                            <span style={{
+                              fontSize: 9, fontFamily: 'var(--font-mono)', fontWeight: 700,
+                              letterSpacing: '0.06em', textTransform: 'uppercase',
+                              padding: '1px 5px', borderRadius: 'var(--radius-sm)',
+                              background: 'var(--accent-soft)', color: 'var(--accent)',
+                              border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
+                              whiteSpace: 'nowrap', flexShrink: 0,
+                            }}>
+                              {ent.file_count} {ent.file_count === 1 ? 'file' : 'files'}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <select
+                        className="select compact"
+                        value={ent.criticality}
+                        onChange={(e) => setCriticality(ent, e.target.value)}
+                        disabled={ro || busy}
+                        aria-label="Criticality"
+                      >
+                        {CRITICALITY.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </td>
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
+                        <button
+                          type="button"
+                          className={`compromised-toggle ${ent.compromised ? 'is-compromised' : 'not-compromised'}`}
+                          style={{ padding: '2px 8px', fontSize: 10 }}
+                          onClick={() => !ro && toggleCompromised(ent)}
+                          disabled={ro || busy}
+                          title={ent.compromised ? 'Clear compromised flag' : 'Mark as compromised'}
+                        >
+                          {ent.compromised ? '⚠ Compromised' : '○ Clean'}
+                        </button>
+                        <ContainmentBadge containment={ent.containment} />
+                      </div>
+                    </td>
+                    <td title={formatLocal(ent.added_at)} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
+                      {formatLocal(ent.added_at).slice(0, 16)}
+                    </td>
+                    <td className="actions" onClick={(e) => e.stopPropagation()}>
+                      <span className="row-actions">
+                        {canContain && (() => {
+                          const rc = rowContainment('entity', ent)
+                          return rc && (
+                            <button type="button" className="btn ghost" data-row-contain={rc.template}
+                                    title={`New containment action (${rc.template}) linked to this entity`}
+                                    onClick={() => navigate(rc.href)}>{rc.label}</button>
+                          )
+                        })()}
                         <button
                           type="button"
                           className="btn ghost"
-                          onClick={(e) => { e.stopPropagation(); if (!isClosed) startNameEdit(ent) }}
-                          disabled={isClosed}
-                          title={isClosed ? 'Closed incidents are read-only' : 'Click to edit display name'}
-                          style={{
-                            padding: '4px 8px', textAlign: 'left',
-                            fontFamily: 'var(--font-body)', fontWeight: 400,
-                            minHeight: 28, justifyContent: 'flex-start',
-                          }}
-                        >
-                          {ent.name || <span style={{ color: 'var(--dim)' }}>—</span>}
-                        </button>
-                        {ent.file_count > 0 && (
-                          <span style={{
-                            fontSize: 9, fontFamily: 'var(--font-mono)', fontWeight: 700,
-                            letterSpacing: '0.06em', textTransform: 'uppercase',
-                            padding: '1px 5px', borderRadius: 'var(--radius-sm)',
-                            background: 'var(--accent-soft)', color: 'var(--accent)',
-                            border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
-                            whiteSpace: 'nowrap', flexShrink: 0,
-                          }}>
-                            {ent.file_count} {ent.file_count === 1 ? 'file' : 'files'}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </td>
-                  <td onClick={(e) => e.stopPropagation()}>
-                    <select
-                      className="select"
-                      value={ent.criticality}
-                      onChange={(e) => setCriticality(ent, e.target.value)}
-                      disabled={isClosed || busy}
-                      aria-label="Criticality"
-                      style={{ padding: '2px 6px', fontSize: 11 }}
-                    >
-                      {CRITICALITY.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  </td>
-                  <td onClick={(e) => e.stopPropagation()}>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
-                      <button
-                        type="button"
-                        className={`compromised-toggle ${ent.compromised ? 'is-compromised' : 'not-compromised'}`}
-                        style={{ padding: '2px 8px', fontSize: 10 }}
-                        onClick={() => !isClosed && toggleCompromised(ent)}
-                        disabled={isClosed || busy}
-                        title={ent.compromised ? 'Clear compromised flag' : 'Mark as compromised'}
-                      >
-                        {ent.compromised ? '⚠ Compromised' : '○ Clean'}
-                      </button>
-                      <ContainmentBadge containment={ent.containment} />
-                    </div>
-                  </td>
-                  <td title={formatLocal(ent.added_at)} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
-                    {formatLocal(ent.added_at).slice(0, 16)}
-                  </td>
-                  <td className="actions" onClick={(e) => e.stopPropagation()}>
-                    <span className="row-actions">
-                      {canContain && (() => {
-                        const rc = rowContainment('entity', ent)
-                        return rc && (
-                          <button type="button" className="btn ghost" data-row-contain={rc.template}
-                                  title={`New containment action (${rc.template}) linked to this entity`}
-                                  onClick={() => navigate(rc.href)}>{rc.label}</button>
-                        )
-                      })()}
-                      <button
-                        type="button"
-                        className="btn ghost"
-                        onClick={() => setModal({ mode: 'edit', entity: ent })}
-                        disabled={isClosed || busy}
-                      >Edit</button>
-                      <button
-                        type="button"
-                        className="btn ghost"
-                        onClick={() => onDelete(ent)}
-                        disabled={isClosed || busy}
-                      >Delete</button>
-                    </span>
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+                          onClick={() => setModal({ mode: 'edit', entity: ent })}
+                          disabled={ro || busy}
+                        >Edit</button>
+                        <button
+                          type="button"
+                          className="btn ghost"
+                          onClick={() => onDelete(ent)}
+                          disabled={ro || busy}
+                        >Delete</button>
+                      </span>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {/* Entity add/edit modal */}
@@ -440,7 +450,7 @@ export default function Entities() {
           relations={relations}
           allEntities={items}
           incidentId={inc.id}
-          isClosed={isClosed}
+          isClosed={ro}
           onClose={() => setSelectedEntity(null)}
           onEntityUpdated={onEntityUpdated}
           onEntityDeleted={onEntityDeleted}
@@ -674,14 +684,12 @@ function EntityModal({ mode, entity, incidentId, allEntities, onClose, onSaved }
                         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
                           <button type="button"
                             className={`btn ${!relReversed ? 'primary' : 'ghost'}`}
-                            style={{ fontSize: 11, padding: '3px 10px' }}
                             onClick={() => setRelReversed(false)}
                           >
                             {newEntityLabel} →
                           </button>
                           <button type="button"
                             className={`btn ${relReversed ? 'primary' : 'ghost'}`}
-                            style={{ fontSize: 11, padding: '3px 10px' }}
                             onClick={() => setRelReversed(true)}
                           >
                             ← {newEntityLabel}

@@ -73,6 +73,8 @@
 }
 
 /* ── Pills (severity, status, phase, CSF, TLP) ───────────────────────── */
+/* A badge in a narrow timeline card wraps instead of widening the page (L1, R45). */
+.tl-badges .pill { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .pill {
   display: inline-flex;
   align-items: center;
@@ -119,7 +121,8 @@
 }
 
 /* ── Modal ───────────────────────────────────────────────────────────── */
-.modal-backdrop {
+.modal-backdrop,
+.modal-overlay {             /* L1 (R44): .modal-overlay/-header/-footer/-title were used but undefined */
   position: fixed; inset: 0;
   background: rgba(0,0,0,0.55);
   display: flex;
@@ -139,17 +142,21 @@
   flex-direction: column;
   max-height: 90vh;
 }
-.modal-head {
+.modal-head,
+.modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: var(--space-4);
   border-bottom: 1px solid var(--border);
 }
-.modal-head h2 {
+.modal-head h2,
+.modal-header h2,
+.modal-title {
   margin: 0;
   font-family: var(--font-heading);
   font-size: 14px;
+  font-weight: 700;
   letter-spacing: var(--heading-letter-spacing);
   text-transform: var(--heading-transform);
 }
@@ -164,7 +171,9 @@
 }
 .modal-close:hover { color: var(--accent); }
 .modal-body { padding: var(--space-4); overflow: auto; }
-.modal-foot {
+.muted { color: var(--muted); }
+.modal-foot,
+.modal-footer {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-2);
@@ -341,8 +350,9 @@ textarea.input { min-height: 90px; resize: vertical; font-family: var(--font-bod
 /* ── Status band (under header, persistent across sub-sections) ──────── */
 .status-band {
   display: flex;
+  flex-wrap: wrap;           /* L1 (R45): narrow screens wrap the chips instead of overlapping them */
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-2) var(--space-4);
   padding: var(--space-3) var(--space-4);
   background: var(--surface);
   border: 1px solid var(--border);
@@ -548,8 +558,9 @@ button.phase-step.clickable:focus-visible {
   gap: 2px;
 }
 
-/* Panel heading reused in detail page */
-.panel-h {
+/* Panel heading reused in detail page. R138 (L3): .settings-section-title is an alias. */
+.panel-h,
+.settings-section-title {
   font-family: var(--font-heading);
   font-size: 12px;
   font-weight: 700;
@@ -646,6 +657,13 @@ button.phase-step.clickable:focus-visible {
   padding-bottom: var(--space-1);
   border-bottom: 1px solid var(--border);
 }
+/* K4: the drawer's timeline / IOC / containment lists */
+.entity-drawer-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.entity-drawer-list li { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.entity-drawer-when { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+.entity-drawer-mono { font-family: var(--font-mono); }
+.entity-drawer-empty { font-size: 12px; color: var(--muted); }
+.entity-drawer-more { font-size: 12px; color: var(--accent); align-self: flex-start; }
 .entity-drawer .relation-row {
   display: flex;
   align-items: center;
@@ -1299,7 +1317,15 @@ a.case-note-flag { color: var(--accent); text-decoration: none; }
 .pi-checklist-meta   { font-size: 11px; color: var(--muted); }
 
 /* Lessons learned */
-.pi-lessons         { display: flex; flex-direction: column; gap: var(--space-4); }
+.pi-lessons         { display: flex; flex-direction: column; gap: var(--space-4); container-type: inline-size; }
+/* Action-item and control-improvement rows (L1, R45): one line when wide; stacked in a narrow column. */
+.pi-ai-row, .pi-ci-row { display: grid; gap: var(--space-1); margin-bottom: var(--space-2); align-items: center; }
+.pi-ai-row { grid-template-columns: minmax(0, 1fr) 120px 130px 90px 100px 40px; }
+.pi-ci-row { grid-template-columns: minmax(0, 1fr) 110px 90px 40px; }
+@container (max-width: 640px) {
+  .pi-ai-row, .pi-ci-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pi-ai-row > :first-child, .pi-ci-row > :first-child { grid-column: 1 / -1; }
+}
 .pi-lessons-field   { display: flex; flex-direction: column; gap: var(--space-1); }
 .pi-lessons-label   { font-size: 13px; font-weight: 600; color: var(--text); }
 .pi-lessons-textarea{ background: var(--surface-2); border: 1px solid var(--border);
@@ -1628,3 +1654,71 @@ a.case-note-flag { color: var(--accent); text-decoration: none; }
   text-overflow: ellipsis;
 }
 .link-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* K1 (R36): Evidence › Register — the two ways to register an exhibit, side by side (stacked when narrow). */
+.register-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+.register-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.register-option h3 { margin: 0; font-size: 15px; color: var(--text); }
+.register-option p  { margin: 0; flex: 1; font-size: 13px; color: var(--muted); line-height: 1.5; }
+
+/* K1 (R36): Disclosure package — the wizard's review list and the one-time result's secrets. */
+.disclosure-review {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: var(--space-3);
+  font-size: 13px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.disclosure-review dt { color: var(--muted); }
+.disclosure-review dd { margin: 0; overflow-wrap: anywhere; }
+.disclosure-secret {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  padding: var(--space-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  user-select: all;
+}
+
+/* K2 (R38): the split Respond pages (Containment: 1 column; Eradication & Recovery: 2; Decisions: 1). */
+.respond-board.cols-1 { grid-template-columns: minmax(0, 1fr); max-width: 760px; }
+.respond-board.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@container (max-width: 420px) { .respond-board.cols-2 { grid-template-columns: minmax(0, 1fr); } }
+.respond-sub { color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+/* K2: time in the current phase, inside the stepper's current step. */
+.phase-time { margin-left: 6px; letter-spacing: 0; text-transform: none; font-weight: 400; }
+
+/* K3 (R39): Timeline filters, key-event marker, linked IOC chips. */
+.tl-filters { justify-content: flex-start; }
+.tl-filter-group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.tl-filters .select { max-width: 220px; }
+.tl-key-toggle { display: inline-flex; align-items: center; gap: var(--space-2); font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.tl-key {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.tl-iocs { margin-top: var(--space-2); }
+.tl-modal-iocs { margin-bottom: var(--space-2); }

@@ -912,6 +912,9 @@ class LePackage(Base):
     acknowledged_by_name  = Column(String(256))
     acknowledged_ip       = Column(String(64))
     acknowledged_notes    = Column(Text)
+    # K1 (R36): a Disclosure package's purpose (CHECK in core/database.py). Rows built before K1 are LE packages.
+    purpose               = Column(String(24), nullable=False, default="law_enforcement",
+                                   server_default="law_enforcement")
 
 
 # ─── AuditExport (signed audit-log handoff) ──────────────────────────────────
@@ -1530,6 +1533,9 @@ class TimelineEvent(Base):
     # by default; internal-only events are excluded unless explicitly overridden.
     # Default TRUE for analyst-authored events; system events flip to FALSE on insert.
     external_safe = Column(Boolean, nullable=False, default=True)
+    # K3 (R39): the analyst flagged it a key event. The API's key_event also counts ATT&CK-tagged and
+    # server-recorded events (timeline/routes.py KEY_EVENT).
+    is_key        = Column(Boolean, nullable=False, default=False, server_default="false")
 
     created_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     created_at    = Column(DateTime(timezone=True), default=utcnow, nullable=False)

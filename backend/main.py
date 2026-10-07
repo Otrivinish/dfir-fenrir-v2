@@ -30,7 +30,8 @@ from auth.bootstrap import bootstrap_on_startup
 from auth.routes import router as auth_router
 from core.config import settings
 from core.database import SessionLocal
-from core.errors import ApiError, api_error_handler
+from core.errors import (ApiError, ValidationErrorBody, api_error_handler, http_error_handler,
+                         validation_error_handler)
 from entities.routes import router as entities_router
 from files.routes import router as files_router
 from notes.routes import router as notes_router
@@ -256,6 +257,12 @@ app = FastAPI(
 )
 # Flat {detail, code} error body for routes that raise core.errors.ApiError.
 app.add_exception_handler(ApiError, api_error_handler)
+# L4 (R50/R118/R134): every other HTTPException gets a status-derived code, and request validation
+# errors are {detail (one readable string), code "validation_error", errors [{loc, msg, type}]}.
+from fastapi.exceptions import RequestValidationError                       # noqa: E402
+from starlette.exceptions import HTTPException as StarletteHTTPException    # noqa: E402
+app.add_exception_handler(StarletteHTTPException, http_error_handler)
+app.add_exception_handler(RequestValidationError, validation_error_handler)
 
 
 async def _oserror_handler(request: Request, exc: OSError):
@@ -334,6 +341,14 @@ async def openapi_spec(_: User = Depends(current_user)) -> JSONResponse:
         description=app.description, terms_of_service=app.terms_of_service,
         contact=app.contact, license_info=app.license_info,
     )
+    # L4: FastAPI documents every 422 as HTTPValidationError {detail: [...]}; the handler above
+    # returns ValidationErrorBody, so the shared component describes what is really sent.
+    schemas = spec.get("components", {}).get("schemas", {})
+    if "HTTPValidationError" in schemas:
+        schemas["HTTPValidationError"] = ValidationErrorBody.model_json_schema(ref_template="#/components/schemas/{model}")
+        item = schemas["HTTPValidationError"].pop("$defs", {}).get("ValidationErrorItem")
+        if item:
+            schemas["ValidationErrorItem"] = item
     return JSONResponse(spec)
 
 

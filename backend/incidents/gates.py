@@ -82,6 +82,17 @@ def _blank(v) -> bool:
     return not (isinstance(v, str) and v.strip())
 
 
+def _cer_page(actions) -> tuple[str, str]:
+    """L3 (R133, K2 split Respond): the page (label, route) holding these actions: Containment, Eradication &
+    Recovery, or both when they span the two (route to the first that has one)."""
+    cats = {a.category for a in actions}
+    if cats and cats <= {"containment"}:
+        return "Containment", "containment"
+    if "containment" not in cats:
+        return "Eradication & Recovery", "eradication-recovery"
+    return "Containment and Eradication & Recovery", "containment"
+
+
 def _check(key: str, ok: bool, met_label: str, label: str, level: str = "block", **kw) -> GateItem:
     """A check: `met_label` when it holds; `label` (+ detail, fix_hint, route) when it doesn't."""
     if ok:
@@ -207,7 +218,7 @@ async def _gate1(db: AsyncSession, inc: Incident, milestones: dict,
         "No containment / eradication / recovery action open or in progress",
         f"{len(open_)} containment / eradication / recovery action(s) still open or in progress",
         detail=_names([f"{a.title} ({a.category}, {a.status.replace('_', ' ')})" for a in open_]),
-        fix_hint="Mark each Done or Deferred (with a reason) on Respond", route="respond"))
+        fix_hint=f"Mark each Done or Deferred (with a reason) on {_cer_page(open_)[0]}", route=_cer_page(open_)[1]))
     deferred = [a for a in actions if a.status == "deferred"]
     if deferred:
         no_reason = [a for a in deferred if _blank(a.defer_reason)]
@@ -215,7 +226,8 @@ async def _gate1(db: AsyncSession, inc: Incident, milestones: dict,
             "respond_deferred_reason_missing", not no_reason, "Every deferred action has a reason",
             f"{len(no_reason)} deferred action(s) without a reason", level="warn",
             detail=_names([f"{a.title} ({a.category})" for a in no_reason]),
-            fix_hint="Edit each on Respond and give the defer reason", route="respond"))
+            fix_hint=f"Edit each on {_cer_page(no_reason)[0]} and give the defer reason",
+            route=_cer_page(no_reason)[1]))
 
     now = utcnow()
     blocking = []
@@ -354,18 +366,21 @@ async def _evidence_checks(db: AsyncSession, inc: Incident) -> list[GateItem]:
             "evidence_working_copy_open", not out, "No working-copy download issued or in progress",
             f"{len(out)} working-copy download(s) issued or in progress", detail=_names(out),
             fix_hint="Let each download finish or its link expire (10 minutes), on Evidence", route="evidence"))
+    # K1: disclosure packages to law enforcement or a regulator (external custody) need the recipient's receipt;
+    # an internal one does not.
     packages = (await db.execute(
         select(LePackage, CustodyExport).join(CustodyExport, CustodyExport.id == LePackage.custody_export_id)
-        .where(LePackage.incident_id == inc.id).order_by(LePackage.prepared_at)
+        .where(LePackage.incident_id == inc.id, LePackage.purpose != "internal").order_by(LePackage.prepared_at)
     )).all()
     if packages:
         unacked = [p for p, x in packages if p.acknowledged_at is None and export_status(x) != "revoked"]
         checks.append(_check(
-            "le_package_unacknowledged", not unacked, "Every law-enforcement package acknowledged by its recipient",
-            f"{len(unacked)} law-enforcement package(s) not acknowledged by the recipient",
+            "le_package_unacknowledged", not unacked,
+            "Every law-enforcement or regulator disclosure package acknowledged by its recipient",
+            f"{len(unacked)} law-enforcement or regulator disclosure package(s) not acknowledged by the recipient",
             detail=_names([f"{p.case_reference} → {p.requesting_authority}" for p in unacked]),
-            fix_hint="Record the recipient's acknowledgement on Post-Incident → Reports → LE package",
-            route="post-incident/reports"))
+            fix_hint="Record the recipient's receipt on Evidence → Disclosure package",
+            route="evidence/disclosure"))
     return checks
 
 
@@ -513,7 +528,7 @@ async def evaluate_gate(db: AsyncSession, incident: Incident, gate: GateName, *,
     every legal deadline already due completed or waived (future ones carried forward); a cost entry
     or a business-impact assessment with content; every exhibit still held has a custodian and is
     on legal hold (else it must be disposed of), no working-copy download issued or in progress,
-    every LE package acknowledged; the IC's sign-off, and the DPO's for a breach. Warn: N/A
+    every law-enforcement / regulator disclosure package acknowledged; the IC's sign-off, and the DPO's for a breach. Warn: N/A
     checklist items without a reason, skipped tasks without a reason, open Preparation tasks, and
     the executive and full reports not generated after the last audited change. Exempt (met) for
     a false or benign positive.

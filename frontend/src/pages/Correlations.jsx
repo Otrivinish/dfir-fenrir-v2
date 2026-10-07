@@ -93,7 +93,6 @@ function IocRow({ item }) {
                 type="button"
                 className="btn ghost"
                 onClick={() => setExpanded(e => !e)}
-                style={{ fontSize: 11, padding: '1px 6px' }}
               >
                 {expanded ? 'less' : `+${item.incidents.length - 4} more`}
               </button>
@@ -148,7 +147,6 @@ function EntityRow({ item }) {
               type="button"
               className="btn ghost"
               onClick={() => setExpanded(e => !e)}
-              style={{ fontSize: 11, padding: '1px 6px' }}
             >
               {expanded ? 'less' : `+${item.incidents.length - 4} more`}
             </button>

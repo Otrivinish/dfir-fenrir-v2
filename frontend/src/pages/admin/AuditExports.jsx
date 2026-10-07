@@ -120,7 +120,7 @@ function GenerateModal({ onClose, onCreated }) {
                   placeholder="e.g. regulator subpoena ABC-123 / internal review"
                 />
               </label>
-              {error && <div className="alert err">{error}</div>}
+              {error && <div className="alert error">{error}</div>}
               <div style={{ fontSize: 11, color: 'var(--dim)' }}>
                 Slice ceiling is 50,000 rows. Tighten filters if your scope is broader.
                 Bundle on disk retains for 30 days; the download token is single-use, 24 h.
@@ -150,8 +150,8 @@ function GenerateModal({ onClose, onCreated }) {
                   <input
                     readOnly
                     value={keyShown ? result.bundle_password : '••••••••••••••••••••••••'}
-                    className="input"
-                    style={{ fontFamily: 'var(--font-mono)', fontSize: 13, paddingRight: 80 }}
+                    className="input compact"
+                    style={{ fontFamily: 'var(--font-mono)', paddingRight: 80 }}
                   />
                   <button
                     type="button"
@@ -172,8 +172,8 @@ function GenerateModal({ onClose, onCreated }) {
 
               <div style={{ display: 'grid', gap: 6 }}>
                 <label style={{ fontSize: 12, color: 'var(--muted)' }}>Download URL (single-use, 24 h)</label>
-                <input readOnly value={result.download_url} className="input"
-                       style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} />
+                <input readOnly value={result.download_url} className="input compact"
+                       style={{ fontFamily: 'var(--font-mono)' }} />
                 <a
                   href={result.download_url}
                   className="btn primary"
@@ -291,10 +291,10 @@ function VerifierCard({ defaultPem }) {
         <span style={{ color: 'var(--muted)' }}>Public key (PEM)</span>
         <textarea
           rows={5} value={pem} onChange={e => setPem(e.target.value)}
-          className="input" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
+          className="input compact" style={{ fontFamily: 'var(--font-mono)' }}
         />
       </label>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-2)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 'var(--space-2)' }}>
         <label style={{ display: 'grid', gap: 4, fontSize: 12 }}>
           <span style={{ color: 'var(--muted)' }}>audit.jsonl</span>
           <input type="file" onChange={e => setJsonlFile(e.target.files?.[0] || null)} />
@@ -309,7 +309,7 @@ function VerifierCard({ defaultPem }) {
           {busy ? 'Verifying…' : 'Verify'}
         </button>
       </div>
-      {err && <div className="alert err">{err}</div>}
+      {err && <div className="alert error">{err}</div>}
       {result && (
         <div className="alert" style={{
           background: result.ok ? 'var(--surface-2)' : 'rgba(248,81,73,0.12)',
@@ -363,9 +363,9 @@ export default function AuditExports() {
   }, [])
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div>
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 'var(--space-4)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-3)', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ flex: '1 1 240px', minWidth: 0 }}>
           <h2 style={{ margin: 0, fontSize: 16 }}>Audit exports</h2>
           <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 2 }}>
             Signed PDF + JSONL extracts of the tamper-evident audit log. Bundle on disk retains 30d;
@@ -374,7 +374,7 @@ export default function AuditExports() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-          <select value={scope} onChange={e => setScope(e.target.value)} className="input" style={{ width: 160 }}>
+          <select value={scope} onChange={e => setScope(e.target.value)} className="select compact" style={{ width: 160 }}>
             <option value="">All scopes</option>
             <option value="global">Global</option>
             <option value="incident">Incident-scoped</option>
@@ -383,16 +383,15 @@ export default function AuditExports() {
         </div>
       </div>
 
-      {error && <div className="alert err">{error}</div>}
+      {error && <div className="alert error">{error}</div>}
 
-      <div style={{
+      <div className="table-scroll" style={{
         background:   'var(--surface-2)',
         border:       '1px solid var(--border)',
         borderRadius: 'var(--radius)',
-        overflow:     'hidden',
       }}>
         <div style={{
-          display: 'grid',
+          display: 'grid', minWidth: 760,
           gridTemplateColumns: '170px 90px 70px 90px 1fr 130px 60px',
           gap: 'var(--space-3)',
           padding: 'var(--space-2) var(--space-3)',
@@ -415,7 +414,7 @@ export default function AuditExports() {
         )}
         {!loading && items.map(r => (
           <div key={r.id} style={{
-            display: 'grid',
+            display: 'grid', minWidth: 760,
             gridTemplateColumns: '170px 90px 70px 90px 1fr 130px 60px',
             gap: 'var(--space-3)',
             padding: 'var(--space-2) var(--space-3)',

@@ -8,9 +8,12 @@ Hash versioning:
   v1 — original payload (timestamp, user_id, username, action, resource_type,
        resource_id, details, ip_address). Existing rows retain `hash_version=v1`.
   v2 — adds outcome, session_id, role_at_time, resource_label, request_method,
-       request_path, request_id. New rows write `hash_version=v2`.
+       request_path, request_id. Rows written before AUD-1 retain `hash_version=v2`.
+  v3 — the v2 payload ("v": "v3") plus user_agent (AUD-1, 2026-10-06). New rows
+       write `hash_version=v3`.
 
-The verifier picks the canonicalisation by the row's `hash_version` column.
+The verifier picks the canonicalisation by the row's `hash_version` column
+(`canonical_payload`); no stored row is ever re-hashed.
 """
 import hashlib
 import json
@@ -21,14 +24,14 @@ from typing import Any, Optional
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from audit.context import get_audit_context
+from audit.context import get_audit_context, sanitize_user_agent
 from models import AuditLog
 
 # Single int key for pg_advisory_xact_lock — chosen arbitrarily, must be stable.
 _LOCK_KEY = 168000917  # 0xA001D17 → "A0 audit"
 
 GENESIS_HASH = "0" * 64
-HASH_VERSION_CURRENT = "v2"
+HASH_VERSION_CURRENT = "v3"
 
 
 def _canonical(payload: dict) -> bytes:
@@ -77,6 +80,14 @@ def _payload_v2(*, timestamp: datetime, user_id, username, role_at_time,
     }
 
 
+def _payload_v3(*, user_agent, **v2_fields) -> dict:
+    """v2 payload + the (sanitised) client user agent, so it is tamper-evident too."""
+    payload = _payload_v2(**v2_fields)
+    payload["v"] = "v3"
+    payload["user_agent"] = user_agent
+    return payload
+
+
 async def write_audit(
     db: AsyncSession,
     action: str,
@@ -109,6 +120,8 @@ async def write_audit(
     request_id     = request_id     if request_id     is not None else ctx.get("request_id")
     request_method = request_method if request_method is not None else ctx.get("request_method")
     request_path   = request_path   if request_path   is not None else ctx.get("request_path")
+    # An explicit value still wins; either way only the sanitised form is stored and hashed.
+    user_agent     = sanitize_user_agent(user_agent if user_agent is not None else ctx.get("user_agent"))
 
     # Serialise within the current transaction (audit chain integrity).
     await db.execute(text("SELECT pg_advisory_xact_lock(:k)").bindparams(k=_LOCK_KEY))
@@ -124,12 +137,12 @@ async def write_audit(
     # the column — asyncpg will reject the bind otherwise. The hash chain
     # serialises this value, so changing its shape is also a chain break.
     now = datetime.utcnow()
-    payload = _payload_v2(
+    payload = _payload_v3(
         timestamp=now,
         user_id=user_id, username=username, role_at_time=role_at_time,
         session_id=session_id, action=action, outcome=outcome,
         resource_type=resource_type, resource_id=resource_id, resource_label=resource_label,
-        ip_address=ip_address,
+        ip_address=ip_address, user_agent=user_agent,
         request_method=request_method, request_path=request_path, request_id=request_id,
         details=details,
     )
@@ -168,7 +181,7 @@ async def write_audit(
         forward_audit_row(
             action=action, username=username, resource_type=resource_type,
             resource_id=resource_id, outcome=outcome, ip_address=ip_address,
-            timestamp=now,
+            user_agent=user_agent, timestamp=now,
         )
     except Exception:  # noqa: BLE001 — never let forwarding break audit writes
         pass
@@ -176,25 +189,35 @@ async def write_audit(
     return row
 
 
-def verify_row_hash(row: AuditLog) -> bool:
-    """Recompute the row_hash of a stored row and compare. Tamper detector."""
+def canonical_payload(row: AuditLog) -> dict | None:
+    """The payload a stored row was hashed over, by its `hash_version` (None if unknown).
+    The signed audit export writes exactly this into audit.jsonl."""
     version = (row.hash_version or "v1")
     if version == "v1":
-        payload = _payload_v1(
+        return _payload_v1(
             timestamp=row.timestamp, user_id=row.user_id, username=row.username,
             action=row.action, resource_type=row.resource_type,
             resource_id=row.resource_id, details=row.details, ip_address=row.ip_address,
         )
-    elif version == "v2":
-        payload = _payload_v2(
-            timestamp=row.timestamp, user_id=row.user_id, username=row.username,
-            role_at_time=row.role_at_time, session_id=row.session_id,
-            action=row.action, outcome=row.outcome,
-            resource_type=row.resource_type, resource_id=row.resource_id,
-            resource_label=row.resource_label, ip_address=row.ip_address,
-            request_method=row.request_method, request_path=row.request_path,
-            request_id=row.request_id, details=row.details,
-        )
-    else:
+    if version not in ("v2", "v3"):
+        return None
+    v2_fields = dict(
+        timestamp=row.timestamp, user_id=row.user_id, username=row.username,
+        role_at_time=row.role_at_time, session_id=row.session_id,
+        action=row.action, outcome=row.outcome,
+        resource_type=row.resource_type, resource_id=row.resource_id,
+        resource_label=row.resource_label, ip_address=row.ip_address,
+        request_method=row.request_method, request_path=row.request_path,
+        request_id=row.request_id, details=row.details,
+    )
+    if version == "v2":
+        return _payload_v2(**v2_fields)
+    return _payload_v3(user_agent=row.user_agent, **v2_fields)
+
+
+def verify_row_hash(row: AuditLog) -> bool:
+    """Recompute the row_hash of a stored row and compare. Tamper detector."""
+    payload = canonical_payload(row)
+    if payload is None:
         return False
     return _row_hash(row.prev_hash, payload) == row.row_hash

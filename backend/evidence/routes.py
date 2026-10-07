@@ -56,8 +56,8 @@ from auth.deps import current_user, require_admin, require_analyst
 from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
-from incidents.access import (accessible_filter, get_accessible_incident, is_incident_lead, not_incident_lead,
-                              require_incident_person)
+from incidents.access import (LeadAccess, accessible_filter, get_accessible_incident, is_incident_lead,
+                              not_incident_lead, require_incident_lead, require_incident_person)
 from models import (AuditLog, BrowserHistoryUpload, CustodyExport, DefenderPdfImport, Entity, Evidence,
                     EvidenceCopy, ForensicImport, Incident, PCAPAnalysis, User, utcnow)
 from audit.service import verify_row_hash
@@ -74,7 +74,7 @@ from schemas import (ChainVerifyResult, CustodyEventOut, DisposeRequest, Evidenc
 from evidence import codec
 from evidence import working_copies as wcs
 from evidence.provenance import score_evidence
-from notifications.service import notify_custody_transfer
+from notifications.service import notify_custody_transfer, notify_custody_transfer_outcome, notify_disclosure_built
 
 from evidence.crypto import (EvidenceCryptoError, EvidenceIntegrityError, StoredFile, adelete_encrypted,
                              asha256_decrypted, awrite_encrypted, write_encrypted_stream)
@@ -546,6 +546,7 @@ def _audit_to_custody_event(row: AuditLog) -> CustodyEventOut:
         outcome=row.outcome,
         details=row.details or {},
         ip_address=row.ip_address,
+        user_agent=row.user_agent,
         created_at=row.timestamp,
         hash=row.row_hash,
         prev_hash=row.prev_hash,
@@ -582,11 +583,21 @@ async def incident_custody_log(
     """Global custody timeline — every evidence_* event for this incident
     (plus legacy `email_mint_evidence` / `webhistory_mint_evidence` rows),
     oldest first. Drawn from the hash-chained audit log (the authoritative
-    custody history), so each event carries its `hash`/`prev_hash`. Requires
+    custody history), so each event carries its `hash`/`prev_hash`. An event about an exhibit
+    (resource_type evidence) also carries `exhibit_identifier` and `exhibit_name` (K1). Requires
     access to the incident."""
     await _get_incident(db, incident_id, user)
     rows = await _incident_evidence_events(db, incident_id)
-    return [_audit_to_custody_event(r) for r in rows]
+    # K1 (R37): name each event's exhibit by its identifier (and name), not by a truncated id.
+    exhibits = {str(i): (ident, name) for i, ident, name in (await db.execute(
+        select(Evidence.id, Evidence.identifier, Evidence.name).where(Evidence.incident_id == incident_id))).all()}
+    out = []
+    for r in rows:
+        ev = _audit_to_custody_event(r)
+        if r.resource_type == "evidence" and r.resource_id in exhibits:
+            ev.exhibit_identifier, ev.exhibit_name = exhibits[r.resource_id]
+        out.append(ev)
+    return out
 
 
 @router.post(
@@ -634,19 +645,22 @@ async def incident_custody_chain_verify(
 @router.get(
     "/{incident_id}/evidence/exports",
     response_model=ExportList,
-    summary="List custody export bundles",
+    summary="List custody export bundles (deprecated: GET …/disclosures)",
+    deprecated=True,
+    responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}},
 )
 async def list_exports(
     incident_id: uuid.UUID,
-    user: User = Depends(require_admin),
+    lead: LeadAccess = Depends(require_incident_lead),
     db: AsyncSession = Depends(get_db),
     limit:  int           = Query(default=50, ge=1, le=200),
     cursor: Optional[str] = Query(default=None),
 ) -> ExportList:
     """List the custody export bundles created for an incident, newest first
-    (cursor-paginated). Admin only. Each item's status reflects expiry/consumed
-    overlay; secrets (download token, AES key) are never returned here."""
-    await _get_incident(db, incident_id, user)
+    (cursor-paginated). K1: incident lead or admin (403 not_incident_lead), as disclosure packages; every
+    disclosure package's download row is listed here too. Each item's status reflects expiry/consumed
+    overlay; secrets (download token, AES key) are never returned here. **Deprecated (K1):** use GET
+    …/disclosures."""
     offset = _decode_cursor(cursor)
 
     stmt = (
@@ -666,18 +680,19 @@ async def list_exports(
 @router.get(
     "/{incident_id}/evidence/exports/{export_id}",
     response_model=ExportOut,
-    summary="Get a custody export bundle",
+    summary="Get a custody export bundle (deprecated: GET …/disclosures/{id})",
+    deprecated=True,
+    responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}},
 )
 async def get_export(
     incident_id: uuid.UUID,
     export_id:   uuid.UUID,
-    user: User = Depends(require_admin),
+    lead: LeadAccess = Depends(require_incident_lead),
     db: AsyncSession = Depends(get_db),
 ) -> ExportOut:
     """Get one custody export bundle's metadata by id, scoped to the incident.
-    Admin only. Returns the export record with an expiry-aware status; does not
-    expose the one-time download token or encryption key."""
-    await _get_incident(db, incident_id, user)
+    K1: incident lead or admin (403 not_incident_lead). Returns the export record with an expiry-aware status;
+    does not expose the one-time download token or encryption key. **Deprecated (K1).**"""
     exp = (await db.execute(
         select(CustodyExport).where(
             CustodyExport.id == export_id,
@@ -703,10 +718,16 @@ async def get_evidence(
     db: AsyncSession = Depends(get_db),
 ) -> EvidenceOut:
     """Get the current state of a single evidence item (custodian, status,
-    hashes, acquisition metadata) by id within an incident. Requires access to
-    the incident. Returns 404 if the item is not part of this incident."""
+    hashes, acquisition metadata) by id within an incident, with the same derived
+    flags as the list (verified working copy, examination documentation, internal
+    transfers acknowledged / legacy). Requires access to the incident. Returns 404
+    if the item is not part of this incident."""
     await _get_incident(db, incident_id, user)
     ev = await _get_evidence(db, incident_id, evidence_id)
+    # K5 (R49): the list's derived flags, so GET agrees with the list.
+    ev.has_verified_working_copy = bool(await _verified_copy_ids(db, [ev.id]))
+    _apply_exam_flags(ev, await _examination_flags(db, [ev.id]))
+    _apply_transfer_counts(ev, await _transfer_ack_counts(db, [ev.id]))
     return _to_out(ev)
 
 
@@ -1629,8 +1650,8 @@ async def accept_transfer(
     nothing is pending. Custody passes to you and the request is cleared; audited as
     `evidence_transfer` (custody changed hands) with the condition, seals, requester and
     request time. Works on a closed incident so a request left at closure can be settled.
-    Returns the item."""
-    await _get_incident(db, incident_id, user)
+    The requester is notified in-app (L3). Returns the item."""
+    inc = await _get_incident(db, incident_id, user)
     ev = await _get_evidence(db, incident_id, evidence_id, for_update=True)
     if ev.pending_custodian_id is None:
         raise ApiError(status.HTTP_409_CONFLICT, "no_transfer_pending", "No custody transfer is pending")
@@ -1689,7 +1710,12 @@ async def accept_transfer(
         },
         ip_address=request.client.host if request.client else None,
     )
-    await db.commit()
+    if requested_by_id and requested_by_id != user.id:
+        await notify_custody_transfer_outcome(      # commits, then pushes
+            db, requester_id=requested_by_id, incident_id=incident_id,
+            incident_ref=inc.ref or str(incident_id), actor_username=user.username, outcome="accepted")
+    else:
+        await db.commit()
     return _to_out(ev)
 
 
@@ -1712,8 +1738,9 @@ async def decline_transfer(
     internal transfer, with a reason. Anyone else gets 403 not_transfer_party; 409
     no_transfer_pending when nothing is pending. Custody stays where it was; the request is
     cleared and audited as `evidence_transfer_declined` (`declined_as`: recipient |
-    requester | admin). Works on a closed incident. Returns the item."""
-    await _get_incident(db, incident_id, user)
+    requester | admin). Works on a closed incident. The requester is notified in-app unless they
+    cancelled it themselves (L3). Returns the item."""
+    inc = await _get_incident(db, incident_id, user)
     ev = await _get_evidence(db, incident_id, evidence_id, for_update=True)
     if ev.pending_custodian_id is None:
         raise ApiError(status.HTTP_409_CONFLICT, "no_transfer_pending", "No custody transfer is pending")
@@ -1736,6 +1763,7 @@ async def decline_transfer(
         "requested_at":    _utc_z(ev.pending_transfer_requested_at),
         "custodian_id":    str(ev.current_custodian_id) if ev.current_custodian_id else None,
     }
+    requested_by_id = ev.pending_transfer_by_id
     _clear_pending_transfer(ev)
     await write_audit(
         db, "evidence_transfer_declined",
@@ -1744,7 +1772,13 @@ async def decline_transfer(
         details=details,
         ip_address=request.client.host if request.client else None,
     )
-    await db.commit()
+    if requested_by_id and requested_by_id != user.id:
+        await notify_custody_transfer_outcome(      # commits, then pushes
+            db, requester_id=requested_by_id, incident_id=incident_id,
+            incident_ref=inc.ref or str(incident_id), actor_username=user.username,
+            outcome="declined" if declined_as == "recipient" else "cancelled")
+    else:
+        await db.commit()
     return _to_out(ev)
 
 
@@ -2159,7 +2193,11 @@ async def get_evidence_photo(
     "/{incident_id}/evidence/{evidence_id}/seal",
     response_model=EvidenceOut,
     summary="Seal the chain of custody",
-    responses={409: {"model": ApiErrorBody, "description": "transfer_pending"}},
+    responses={400: {"model": ApiErrorBody, "description": "confirm_required"},
+               409: {"model": ApiErrorBody, "description": "transfer_pending, incident_closed, already_sealed or "
+                                                           "evidence_not_active"},
+               422: {"model": ApiErrorBody, "description": "hash_mismatch (acquisition source vs target hash), or "
+                                                           "seal_fields_missing (body has `missing`: the field names)"}},
 )
 async def seal_evidence(
     incident_id: uuid.UUID,
@@ -2178,16 +2216,16 @@ async def seal_evidence(
     while a custody transfer awaits acceptance. After sealing, later
     edits are audited as post-seal amendments. Returns the sealed record."""
     if not req.confirm:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "confirm must be true to seal")
+        raise ApiError(status.HTTP_400_BAD_REQUEST, "confirm_required", "confirm must be true to seal")
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
     ev = await _get_evidence(db, incident_id, evidence_id, for_update=True)
     if ev.coc_sealed:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Evidence is already sealed")
+        raise ApiError(status.HTTP_409_CONFLICT, "already_sealed", "Evidence is already sealed")
     if ev.status != "active":
-        raise HTTPException(status.HTTP_409_CONFLICT,
-                            f"Cannot seal evidence in status '{ev.status}'")
+        raise ApiError(status.HTTP_409_CONFLICT, "evidence_not_active",
+                       f"Cannot seal evidence in status '{ev.status}'")
     _block_if_external(ev, "seal")
     _block_if_transfer_pending(ev)
 
@@ -2211,10 +2249,8 @@ async def seal_evidence(
         # different algorithms are advisory in the provenance score, never a block.
         if _comparable_hashes(ev.acquisition_hash_source, ev.acquisition_hash_target):
             if ev.acquisition_hash_source.lower() != ev.acquisition_hash_target.lower():
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    "Acquisition source and target hashes do not match — cannot seal",
-                )
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "hash_mismatch",
+                               "Acquisition source and target hashes do not match — cannot seal")
         # Live justification covers both 'live' and 'live_critical' (§7.1.3.1.1).
         if (ev.system_state or "").lower() in ("live", "live_critical") and not (ev.live_justification or "").strip():
             missing.append("live_justification")
@@ -2226,10 +2262,8 @@ async def seal_evidence(
             missing.append("photos")
 
     if missing:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            f"Cannot seal — required fields missing: {', '.join(missing)}",
-        )
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "seal_fields_missing",
+                       f"Cannot seal — required fields missing: {', '.join(missing)}", extra={"missing": missing})
 
     ev.coc_sealed       = True
     ev.coc_sealed_at    = utcnow()
@@ -2975,8 +3009,10 @@ _NOT_EXPORTABLE = ("destroyed", "verify_failed")
     "/{incident_id}/evidence/exports",
     response_model=ExportCreateResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Create a custody export bundle",
-    responses={status.HTTP_409_CONFLICT: {
+    summary="Create a custody export bundle (deprecated: POST …/disclosures)",
+    deprecated=True,
+    responses={status.HTTP_403_FORBIDDEN: {"model": ApiErrorBody, "description": "not_incident_lead"},
+               status.HTTP_409_CONFLICT: {
         "model": ApiErrorBody,
         "description": "evidence_not_exportable (an item is destroyed or verify_failed, also when that happened "
                        "while the bundle was built), or evidence_integrity_failed (an item's stored file failed "
@@ -2997,12 +3033,16 @@ async def create_export(
     incident_id: uuid.UUID,
     req:     ExportCreate,
     request: Request,
-    user:    User = Depends(require_admin),
+    lead:    LeadAccess = Depends(require_incident_lead),
     db:      AsyncSession = Depends(get_db),
 ) -> ExportCreateResponse:
-    """Build an AES-256-GCM-encrypted custody export bundle for the chosen
+    """**Deprecated (K1):** use `POST /api/incidents/{id}/disclosures` (a signed Disclosure package; purpose
+    internal for this use). This route still works, with the disclosure rights and notification.
+
+    Build an AES-256-GCM-encrypted custody export bundle for the chosen
     evidence items (`item_ids`), addressed to a recipient with a stated purpose
-    and acknowledgments. Admin only; all items must belong to the incident, and
+    and acknowledgments. K1: incident lead or admin (403 not_incident_lead; was admin only), and every other
+    active admin is notified in-app; all items must belong to the incident, and
     destroyed or verify_failed items are refused with 409 before anything is
     written. Only a digital item whose file is stored in FENRIR has its bytes in the
     bundle, and only such an item mints a working-copy ledger row; a
@@ -3031,6 +3071,7 @@ async def create_export(
     `pending` row whose build died with the server (older than 2 h, not building) is revoked by a
     sweep at startup and every minute (audited, reason abandoned_pending)."""
     building: list[uuid.UUID] = []          # R105: this request's export id while its build runs
+    user = lead.user
     try:
         return await _create_export(incident_id, req, request, user, db, building)
     finally:
@@ -3246,7 +3287,9 @@ async def _create_export(incident_id: uuid.UUID, req: ExportCreate, request: Req
         },
         ip_address=ip,
     )
-    await db.commit()
+    # K1: as for a disclosure package, every other active admin hears about it (commits).
+    await notify_disclosure_built(db, incident_id=inc.id, incident_ref=inc.ref or str(inc.id), builder=user,
+                                  purpose="evidence_export")
 
     return ExportCreateResponse(
         export=_to_export_out(export),

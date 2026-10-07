@@ -240,12 +240,12 @@ export default function BulkImportModal({ incidentId, onClose, onImported }) {
                   <label className="field-label" htmlFor="ioc-bulk-paste">Or paste directly</label>
                   <textarea
                     id="ioc-bulk-paste"
-                    className="input"
+                    className="input compact"
                     value={rawText}
                     onChange={(e) => setRawText(e.target.value)}
                     rows={8}
                     placeholder={EXAMPLE_PLAIN}
-                    style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
+                    style={{ fontFamily: 'var(--font-mono)' }}
                   />
                 </div>
 

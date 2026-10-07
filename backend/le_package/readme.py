@@ -8,8 +8,23 @@ from datetime import datetime, timezone
 from typing import Optional
 
 
+_PURPOSE_TITLE = {
+    "law_enforcement": "Law Enforcement Evidence Package",
+    "regulator":       "Regulator Disclosure Package",
+    "internal":        "Internal Disclosure Package",
+}
+_SECTION_DIR = {
+    "incident": "01_Incident", "timeline": "02_Timeline", "iocs": "03_IOCs", "forensic": "06_Forensic",
+    "comms": "07_Communications", "case_notes": "10_Case_Notes", "recovery": "11_Recovery",
+    "notifications": "12_Notifications", "sign_offs": "13_Sign_Offs",
+}
+
+
 def render_readme(
     *,
+    # K1: the Disclosure package purpose and the record sections it carries (builder.PURPOSE_SECTIONS)
+    purpose:              str = "law_enforcement",
+    sections:             tuple = tuple(_SECTION_DIR),
     # Case
     case_reference:       str,
     requesting_authority: str,
@@ -55,6 +70,8 @@ def render_readme(
         "court_order":  "Court order",
         "mla":          "Mutual Legal Assistance Treaty (MLAT)",
         "voluntary":    "Voluntary disclosure",
+        "statutory":    "Statutory obligation (e.g. GDPR Art. 33, NIS2 Art. 23)",
+        "internal":     "Internal disclosure",
         "other":        "Other (see CASE_INFO.json)",
     }.get(legal_basis, legal_basis)
 
@@ -70,7 +87,7 @@ def render_readme(
                     f"{trusted_timestamp.get('tsa') or 'the configured TSA'}, time {trusted_timestamp.get('time') or 'see token'}")
         tst_layout = "    MANIFEST.tst                        RFC 3161 time-stamp token over SHA-256(MANIFEST.json) (DER)\n"
         tst_verify = """
-5. Verify the trusted timestamp independently of this platform's clock:
+6. Verify the trusted timestamp independently of this platform's clock:
 
        openssl ts -verify -data MANIFEST.json -in MANIFEST.tst -CAfile <TSA CA certificate>
 """
@@ -85,11 +102,16 @@ def render_readme(
         filter_notes.append("Only Evidence items flagged `legal_hold = true` were included.")
     if not include_artifacts:
         filter_notes.append("Quarantine artifacts (`05_Artifacts/`) were **NOT** included — opt-in at generation only.")
+    left_out = [d for k, d in _SECTION_DIR.items() if k not in sections]
+    if left_out:
+        filter_notes.append(f"Purpose `{purpose}`: these record sections are not in this package: "
+                            + ", ".join(f"`{d}/`" for d in left_out) + ".")
     filter_block = ("\n".join(f"  - {n}" for n in filter_notes)) if filter_notes else "  - All evidence and all artifacts included."
 
     return f"""\
-# DFIR-FENRIR — Law Enforcement Evidence Package
+# DFIR-FENRIR — {_PURPOSE_TITLE.get(purpose, "Disclosure Package")}
 
+**Purpose:**              {purpose}
 **Case Reference:**       {case_reference}
 **Requesting Authority:** {requesting_authority}
 **Legal Basis:**          {legal_basis_label}
@@ -117,6 +139,7 @@ def render_readme(
 - **Platform:**           DFIR-FENRIR {platform_version}
 - **Bundle SHA-256:**     {bundle_sha256}
 - **Manifest SHA-256:**   {manifest_sha256}
+- **Signature:**          Ed25519 over MANIFEST.json (`MANIFEST.json.sig`, key `SIGNING_PUBLIC_KEY.pem`)
 - **HMAC-SHA-256 sig:**   {hmac_sha256}  *(key = SHA-256(bundle password))*
 - **Audit anchor row:**   {audit_anchor_row_id}
 - **Audit anchor hash:**  {audit_anchor_row_hash}
@@ -142,6 +165,8 @@ def render_readme(
     MANIFEST.txt                        Human-readable equivalent of MANIFEST.json
     INTEGRITY.sha256                    `sha256sum --check INTEGRITY.sha256` compatible
     INTEGRITY.sig                       HMAC-SHA-256 of MANIFEST.json, key = SHA-256(bundle password) (hex)
+    MANIFEST.json.sig                   Ed25519 signature over MANIFEST.json (raw 64 bytes)
+    SIGNING_PUBLIC_KEY.pem              The platform's Ed25519 public key (compare its fingerprint with the sender's)
 {tst_layout}
     01_Incident/                        Incident summary, closure checklist, lessons learned (JSON)
     02_Timeline/                        Chronological event log (CSV + JSON)
@@ -152,9 +177,9 @@ def render_readme(
     07_Communications/                  Comments, OOB log, stakeholders
     08_Audit/                           This incident's audit-log rows (hash-chained) + per-row verifier output
     09_Legal/                           Chain-of-custody SOP + tool provenance + TLP handling
-    10_Case_Notes/                      Append-only case notes (CSV), each with its content SHA-256 (present if any).
-                                        Recompute: SHA-256 of UTF-8 JSON, keys sorted, separators "," ":",
-                                        {{v:1, id, incident_id, author_id, created_at (as in the CSV), body,
+    10_Case_Notes/                      Append-only case notes (CSV + JSON), each with its content SHA-256 (present if any).
+                                        Recompute from Case_Notes.json: SHA-256 of UTF-8 JSON, keys sorted, separators "," ":",
+                                        {{v:1, id, incident_id, author_id, created_at (created_at_utc), body,
                                         corrects_id, source_scratchpad_id (null if empty), evidence_ids,
                                         entity_ids, ioc_ids, timeline_event_ids (sorted lists)}}
     11_Recovery/                        Recovery tracker (CSV): per compromised system, the restore point, who restored
@@ -166,6 +191,10 @@ def render_readme(
     13_Sign_Offs/                       Phase-gate sign-offs (CSV): the Incident Commander's and the DPO's, who signed which
                                         gate, on what basis and when, the statement and the SHA-256 of the gate state
                                         they signed; "current" = made since the last re-open (present if any).
+
+CSV cells that begin with `=`, `+`, `-`, `@`, TAB or CR carry a leading `'` (formula-escaped for spreadsheet
+safety; plain numbers are left as they are). Recompute a record's hash (case note, audit row) from the JSON
+files, never from a CSV cell; MANIFEST.json hashes each CSV file's bytes as written.
 
 ## How to open this package
 
@@ -253,6 +282,16 @@ sender. Tampering with any file in the package fails SHA-256 verification.
 
    The output must equal the contents of `INTEGRITY.sig` (and the
    **HMAC-SHA-256 sig** value above).
+
+5. Verify the Ed25519 signature (proves the platform's signing key signed
+   this manifest; no password needed):
+
+       openssl pkeyutl -verify -pubin -inkey SIGNING_PUBLIC_KEY.pem -rawin \\
+         -in MANIFEST.json -sigfile MANIFEST.json.sig
+
+   It must print `Signature Verified Successfully`. Confirm the key belongs to
+   the sender: its SHA-256 fingerprint is published by the platform
+   (`GET /api/version`, `audit_signing`) and can be read to you out of band.
 {tst_verify}
 ## Chain-of-custody declaration
 

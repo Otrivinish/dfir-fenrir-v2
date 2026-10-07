@@ -21,6 +21,9 @@
   padding: var(--space-2);
   position: sticky;
   top: var(--space-3);
+  /* A rail taller than the window scrolls itself, so its last items stay reachable. */
+  max-height: calc(100vh - 2 * var(--space-3));
+  overflow-y: auto;
 }
 
 /* Phase-grouped nav (used by the incident sub-nav). Pure visual grouping —
@@ -94,6 +97,7 @@
     align-items: center;
     overflow-x: auto;
     position: static;
+    max-height: none;
   }
   .sub-group { flex-direction: row; align-items: center; flex-shrink: 0; }
   .sub-group + .sub-group { margin-top: 0; margin-left: var(--space-2); }
@@ -121,26 +125,32 @@
   gap: var(--space-3);
   max-width: 480px;
 }
-.settings-form-actions {
+/* R138 (L3): .modal-actions is an alias (Handoffs, On-call modals) */
+.settings-form-actions,
+.modal-actions {
   display: flex;
   gap: var(--space-2);
   justify-content: flex-end;
 }
 
-/* Simple table used by Sessions / Teams / Roles */
-.settings-table {
+/* Simple table used by Sessions / Teams / Roles. R138 (L3): .data-table is an alias (On-call, Details, Integrations). */
+.settings-table,
+.data-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
 }
 .settings-table th,
-.settings-table td {
+.settings-table td,
+.data-table th,
+.data-table td {
   text-align: left;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
-.settings-table th {
+.settings-table th,
+.data-table th {
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 600;
@@ -148,8 +158,10 @@
   text-transform: uppercase;
   color: var(--dim);
 }
-.settings-table tbody tr:hover { background: var(--surface-2); }
-.settings-table td.actions { text-align: right; white-space: nowrap; }
+.settings-table tbody tr:hover,
+.data-table tbody tr:hover { background: var(--surface-2); }
+.settings-table td.actions,
+.data-table td.actions { text-align: right; white-space: nowrap; }
 /* Dense tables with many columns (e.g. IOCs): tighter cell padding so they fit their panel. */
 .settings-table.compact th,
 .settings-table.compact td { padding-left: 8px; padding-right: 8px; }

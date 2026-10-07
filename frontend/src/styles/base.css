@@ -74,3 +74,33 @@ input, select, textarea { font: inherit; color: inherit; }
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
 }
 .upload-progress-fill { height: 100%; background: var(--accent); transition: width 160ms ease; }
+
+/* ── R138 (L3): class names that were used without a rule ──
+   Aliases sit with their originals: .form-label / .form-error (auth.css), .modal-actions / .data-table
+   (settings.css), .settings-section (shell.css, = .panel), .settings-section-title (incidents.css, = .panel-h). */
+.mono { font-family: var(--font-mono); }
+/* Page and section wrappers: no look of their own, but they may shrink inside a flex or grid parent. */
+.page-wrap, .page-main, .page-content, .pi-content, .pi-checklist, .rec-page, .sn-page, .case-notes, .dtp-cal { min-width: 0; }
+/* Hook classes, deliberately without a rule: styled inline with tokens and kept as stable names for tests and
+   scoped queries: ct-verified(-text), ctx-oob(-label), dir-picker(-added, -list), dropzone / dragover,
+   figure-warning, file-figure-caption, file-report, legal-anchor-at, legal-article, legal-deadline-at,
+   oncall-oob, oob-editor, oob-list, oob-method, oob-none, oob-row, report-cap-warning, report-error,
+   search-terms, ttx-excluded. */
+
+/* ── Help page (L5) ─────────────────────────────────────────────────────
+   Topic list + article side by side; one column below 700 px. Inline `code` and
+   [[topic]] cross-links rendered by Help.jsx renderInline(). */
+.help-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: var(--space-4); }
+@media (max-width: 699px) { .help-layout { grid-template-columns: minmax(0, 1fr); } }
+.help-code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+  overflow-wrap: anywhere;
+}
+.help-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.help-link:hover, .help-link:focus-visible { text-decoration-thickness: 2px; }

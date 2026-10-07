@@ -10,7 +10,7 @@ import uuid
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import and_, exists, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
@@ -20,7 +20,7 @@ from core.errors import ApiError, ApiErrorBody
 import lolbins.service as lolbins_svc
 from incidents.access import get_accessible_incident
 from models import (BrowserHistoryUpload, DefenderPdfImport, EmailAnalysis, Entity, Evidence, ForensicImport, Incident,
-                    PCAPAnalysis, TimelineEvent, User)
+                    IOC, IocTimelineLink, PCAPAnalysis, TimelineEvent, User)
 from schemas import (
     TimelineEventBatchCreate,
     TimelineEventBatchResult,
@@ -28,6 +28,8 @@ from schemas import (
     TimelineEventList,
     TimelineEventOut,
     TimelineEventUpdate,
+    TimelineIocRef,
+    TimelineOrigin,
 )
 
 router = APIRouter()
@@ -77,6 +79,44 @@ def _server_generated(ev: TimelineEvent) -> bool:
     revert, decision, legal deadline), so no client may edit or delete it: 409
     system_event_immutable. Analyst annotations ("manual" and other labels) stay editable."""
     return bool(ev.is_system and (ev.system_source or "").strip().lower() in RESERVED_SYSTEM_SOURCES)
+
+
+# K3 (R39) — a key event: the analyst's flag (is_key), an ATT&CK tactic or technique, or an event the server
+# recorded itself (as J3's "Insert key timeline events" counts milestones). `?key=true` filters on KEY_EVENT;
+# _key_event is the same rule on a loaded row (an empty string counts as no ATT&CK, as in SQL).
+KEY_EVENT = or_(
+    TimelineEvent.is_key == True,  # noqa: E712
+    func.coalesce(TimelineEvent.mitre_tactic_id, "") != "",
+    func.coalesce(TimelineEvent.mitre_technique_id, "") != "",
+    and_(TimelineEvent.is_system == True,  # noqa: E712
+         func.lower(func.trim(TimelineEvent.system_source)).in_(RESERVED_SYSTEM_SOURCES)),
+)
+
+
+def _key_event(ev: TimelineEvent) -> bool:
+    return bool(ev.is_key or ev.mitre_tactic_id or ev.mitre_technique_id or _server_generated(ev))
+
+
+async def _decorate(db: AsyncSession, events) -> None:
+    """Read-only fields set on loaded rows: server_generated, key_event and the linked IOCs (one query)."""
+    links: dict[uuid.UUID, list[TimelineIocRef]] = {}
+    ids = [e.id for e in events]
+    if ids:
+        for ev_id, ioc_id, typ, value, mal in (await db.execute(
+            select(IocTimelineLink.timeline_event_id, IOC.id, IOC.type, IOC.value, IOC.malicious)
+            .join(IOC, IOC.id == IocTimelineLink.ioc_id)
+            .where(IocTimelineLink.timeline_event_id.in_(ids))
+            .order_by(IOC.value)
+        )).all():
+            links.setdefault(ev_id, []).append(TimelineIocRef(id=ioc_id, type=typ, value=value, malicious=mal))
+    for e in events:
+        e.server_generated = _server_generated(e)
+        e.key_event = _key_event(e)
+        e.linked_iocs = links.get(e.id, [])
+
+
+def _like(q: str) -> str:
+    return "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
 def _refuse_server_event(ev: TimelineEvent, verb: str) -> None:
@@ -182,13 +222,29 @@ async def list_timeline_events(
         description="event_time = oldest first (forensic chronological order, the default); "
                     "-event_time = newest first. A cursor only continues the order it came from "
                     "(400 otherwise)."),
+    entity_id:      Optional[uuid.UUID] = Query(default=None, description="Only events linked to this entity."),
+    ioc_id:         Optional[uuid.UUID] = Query(default=None, description="Only events linked to this IOC."),
+    ir_phase:       Optional[Literal["preparation", "detection_and_analysis", "containment_eradication_recovery",
+                                     "post_incident", "none"]] = Query(
+        default=None, description="Only events tagged with this 800-61 phase; none = no phase set."),
+    origin:         Optional[TimelineOrigin] = Query(
+        default=None, description="manual (analyst-entered), forensic_import (imported from an exhibit or an "
+                                  "analysis run) or system (recorded by FENRIR, or an analyst annotation)."),
+    key:            Optional[bool] = Query(default=None, description="true = key events only (key_event), "
+                                                                     "false = the others."),
+    q:              Optional[str] = Query(default=None, min_length=1, max_length=200, description=(
+        "Text search, case-insensitive, in description, hostname, log source, event type, raw log and the "
+        "ATT&CK ids and names.")),
 ) -> TimelineEventList:
     """List an incident's timeline events in forensic chronological order (event_time ASC),
     or newest first with `sort=-event_time`.
 
-    Cursor-paginated via `limit` and opaque `cursor`. Set `include_system=False` to omit
+    Cursor-paginated via `limit` and opaque `cursor`; the filters (entity_id, ioc_id, ir_phase,
+    origin, key, q) combine with AND and are applied before paging, so a cursor continues the
+    same filtered list (send the same filters with it). Set `include_system=False` to omit
     system-generated events; the response then carries `system_event_count` for those hidden.
-    Requires read access to the incident. Returns a paginated TimelineEventList.
+    Each event carries `key_event` (flagged, ATT&CK-tagged or server-recorded) and its
+    `linked_iocs`. Requires read access to the incident. Returns a paginated TimelineEventList.
     """
     await _get_incident(db, incident_id, user)
     desc = sort == "-event_time"
@@ -203,6 +259,25 @@ async def list_timeline_events(
     )
     if not include_system:
         stmt = stmt.where(TimelineEvent.is_system == False)  # noqa: E712
+    if entity_id is not None:
+        stmt = stmt.where(TimelineEvent.entity_id == entity_id)
+    if ioc_id is not None:
+        stmt = stmt.where(exists().where(IocTimelineLink.timeline_event_id == TimelineEvent.id,
+                                         IocTimelineLink.ioc_id == ioc_id))
+    if ir_phase == "none":
+        stmt = stmt.where(TimelineEvent.ir_phase.is_(None))
+    elif ir_phase is not None:
+        stmt = stmt.where(TimelineEvent.ir_phase == ir_phase)
+    if origin is not None:
+        stmt = stmt.where(TimelineEvent.origin == origin)
+    if key is not None:
+        stmt = stmt.where(KEY_EVENT if key else not_(KEY_EVENT))
+    if q and q.strip():
+        pat = _like(q.strip())
+        stmt = stmt.where(or_(*(func.coalesce(c, "").ilike(pat, escape="\\") for c in (
+            TimelineEvent.description, TimelineEvent.hostname, TimelineEvent.source, TimelineEvent.event_type,
+            TimelineEvent.raw_log, TimelineEvent.mitre_tactic_id, TimelineEvent.mitre_tactic_name,
+            TimelineEvent.mitre_technique_id, TimelineEvent.mitre_technique_name))))
 
     rows = (await db.execute(stmt.offset(offset).limit(limit + 1))).scalars().all()
 
@@ -211,7 +286,7 @@ async def list_timeline_events(
     umap        = await _username_map(db, [r.created_by_id for r in page])
     for r in page:
         r.created_by_username = umap.get(r.created_by_id)
-        r.server_generated = _server_generated(r)
+    await _decorate(db, page)
     await _resolve_provenance(db, page)
     items       = [TimelineEventOut.model_validate(r) for r in page]
     next_cursor = _encode_cursor(offset + limit, desc) if has_more else None
@@ -252,8 +327,8 @@ async def create_timeline_event(
     its `system_source` is a free label such as "manual", but the sources the server writes
     itself (closure, gate_override, milestone, triage, respond_action, respond_action_revert,
     decision, legal_deadline, ic_transfer) are refused with 422 `reserved_system_source`. Rejects events on
-    a closed incident with 409. Requires the analyst role and write access to the incident;
-    the action is audit-logged. Returns the created TimelineEventOut.
+    a closed incident with 409. `is_key=true` flags it a key event. Requires the analyst role and write
+    access to the incident; the action is audit-logged. Returns the created TimelineEventOut.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -283,6 +358,7 @@ async def create_timeline_event(
         is_system=req.is_system,
         system_source=req.system_source if req.is_system else None,
         external_safe=not req.is_system,
+        is_key=req.is_key,
         created_by_id=user.id,
     )
     db.add(ev)
@@ -298,11 +374,13 @@ async def create_timeline_event(
             "mitre_technique_id": ev.mitre_technique_id,
             "entity_id": str(ev.entity_id) if ev.entity_id else None,
             "description": ev.description[:120],
+            **({"is_key": True} if ev.is_key else {}),
         },
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
     ev.created_by_username = user.username
+    await _decorate(db, [ev])
     return TimelineEventOut.model_validate(ev)
 
 
@@ -334,7 +412,7 @@ async def update_timeline_event(
     `email_analysis_id`, `evidence_id` or `time_basis` set — keeps its recorded facts:
     event_time, hostname, source, event_type, description, raw_log: changing one returns 409
     `imported_fact_immutable` (sending the unchanged value is fine; descriptions compare
-    without surrounding whitespace); ir_phase, ATT&CK and entity_id stay editable, and linking
+    without surrounding whitespace); ir_phase, ATT&CK, is_key and entity_id stay editable, and linking
     an entity doesn't fill its hostname. Rejects edits on a closed incident with 409 `incident_closed` and
     returns 404 if the event is not in this incident. An event the server recorded itself
     (`server_generated`: is_system with a reserved system_source — closure, gate_override, milestone,
@@ -403,6 +481,8 @@ async def update_timeline_event(
         new["mitre_technique_id"] = req.mitre_technique_id
     if req.mitre_technique_name is not None and req.mitre_technique_name != (ev.mitre_technique_name or ""):
         new["mitre_technique_name"] = req.mitre_technique_name
+    if req.is_key is not None and req.is_key != ev.is_key:
+        new["is_key"] = req.is_key
 
     # C5 — every audited change records before and after.
     changed: dict[str, object] = {}
@@ -421,6 +501,7 @@ async def update_timeline_event(
     await db.commit()
     umap = await _username_map(db, [ev.created_by_id])
     ev.created_by_username = umap.get(ev.created_by_id)
+    await _decorate(db, [ev])
     await _resolve_provenance(db, [ev])
     return TimelineEventOut.model_validate(ev)
 
@@ -440,8 +521,8 @@ async def batch_create_timeline_events(
 ) -> TimelineEventBatchResult:
     """Bulk-create many timeline events from a forensic import in one request.
 
-    Each event is inserted independently; per-item failures are collected rather than aborting the
-    batch. An item whose `entity_id` is not an entity of this incident is skipped with an error;
+    Each event is inserted in its own savepoint; per-item failures are collected rather than
+    aborting the batch (a row the database rejects rolls back alone). An item whose `entity_id` is not an entity of this incident is skipped with an error;
     an empty `hostname` takes the linked entity's value. Imported events are never system events:
     an item's `is_system` / `system_source` are ignored. Rejects imports on a closed incident with
     409. Requires the analyst role and write access; the import is audit-logged. Returns a
@@ -463,6 +544,9 @@ async def batch_create_timeline_events(
         if item.entity_id and item.entity_id not in entity_values:
             errors.append(f"[{i}] entity_id {item.entity_id} is not an entity of this incident")
             continue
+        # K5 (R49): per-row savepoint (as iocs/routes.py batch create): without it, one row the
+        # database rejects left the session failed and lost the whole batch.
+        sp = await db.begin_nested()
         try:
             ev = TimelineEvent(
                 id=uuid.uuid4(),
@@ -479,14 +563,18 @@ async def batch_create_timeline_events(
                 mitre_tactic_name=item.mitre_tactic_name,
                 mitre_technique_id=item.mitre_technique_id,
                 mitre_technique_name=item.mitre_technique_name,
+                is_key=item.is_key,
                 origin="forensic_import",
                 created_by_id=user.id,
             )
             db.add(ev)
             await db.flush()
+            await sp.commit()
             created += 1
         except Exception as exc:
-            errors.append(f"[{i}] {exc}")
+            await sp.rollback()
+            # The exception class only: a DB error's text carries the SQL and the row's values.
+            errors.append(f"[{i}] rejected by the database ({type(exc).__name__})")
 
     await write_audit(
         db, "timeline_batch_import",

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../../api/client.js'
+import { useAuth } from '../../../hooks/useAuth.jsx'
 import { PISection } from './Reports.jsx'
 
 // Post-Incident → Costs & Impact (J3, R29): the business impact assessment and cost tracking,
@@ -41,7 +42,7 @@ const BIA_FIELDS = [
   { key: 'legal',         label: 'Legal Exposure' },
 ]
 
-function BusinessImpact({ inc }) {
+function BusinessImpact({ inc, viewer }) {
   const [form,    setForm]    = useState({ financial: '', operational: '', data_exposure: '', reputational: '', regulatory: '', legal: '', notes: '' })
   const [loading, setLoading] = useState(true)
   const [saving,  setSaving]  = useState(false)
@@ -93,13 +94,14 @@ function BusinessImpact({ inc }) {
           <div key={f.key} className="field">
             <label className="field-label">{f.label}</label>
             <textarea
-              className="input"
+              className="input compact"
               rows={3}
               value={form[f.key]}
               onChange={e => set(f.key, e.target.value)}
               maxLength={2048}
+              disabled={viewer}
               placeholder="Describe the impact…"
-              style={{ resize: 'vertical', fontSize: 13 }}
+              style={{ resize: 'vertical' }}
             />
           </div>
         ))}
@@ -107,21 +109,24 @@ function BusinessImpact({ inc }) {
       <div className="field" style={{ marginBottom: 'var(--space-3)' }}>
         <label className="field-label">Notes</label>
         <textarea
-          className="input"
+          className="input compact"
           rows={3}
           value={form.notes}
           onChange={e => set('notes', e.target.value)}
           maxLength={4096}
+          disabled={viewer}
           placeholder="Additional context, caveats, assumptions…"
-          style={{ resize: 'vertical', fontSize: 13 }}
+          style={{ resize: 'vertical' }}
         />
       </div>
       {error && <div className="alert error" style={{ marginBottom: 'var(--space-2)' }}><span className="alert-icon">!</span><span>{error}</span></div>}
       <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
         {saved && <span style={{ fontSize: 12, color: 'var(--ok)' }}>Saved</span>}
-        <button type="button" className="btn primary" onClick={save} disabled={saving} style={{ fontSize: 13 }}>
-          {saving ? 'Saving…' : 'Save business impact'}
-        </button>
+        {!viewer && (
+          <button type="button" className="btn primary" onClick={save} disabled={saving}>
+            {saving ? 'Saving…' : 'Save business impact'}
+          </button>
+        )}
       </div>
     </div>
   )
@@ -234,7 +239,7 @@ function CostModal({ incId, existing, onSaved, onClose }) {
   )
 }
 
-function CostTracking({ inc }) {
+function CostTracking({ inc, viewer }) {
   const [costs,   setCosts]   = useState([])
   const [summary, setSummary] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -330,9 +335,11 @@ function CostTracking({ inc }) {
                     }
                   </td>
                   <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>
-                    <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '2px 6px' }} onClick={() => setModal(c)}>Edit</button>
-                    {' '}
-                    <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '2px 6px', color: 'var(--crit)' }} onClick={() => remove(c.id)}>✕</button>
+                    {!viewer && (<>
+                      <button type="button" className="btn ghost" onClick={() => setModal(c)}>Edit</button>
+                      {' '}
+                      <button type="button" className="btn ghost" style={{ color: 'var(--crit)' }} onClick={() => remove(c.id)}>✕</button>
+                    </>)}
                   </td>
                 </tr>
               ))}
@@ -345,7 +352,7 @@ function CostTracking({ inc }) {
 
       {error && <div className="alert error" style={{ marginBottom: 'var(--space-2)' }}><span className="alert-icon">!</span><span>{error}</span></div>}
 
-      <button type="button" className="btn ghost" style={{ fontSize: 13 }} onClick={() => setModal('add')}>+ Add cost entry</button>
+      {!viewer && <button type="button" className="btn ghost" onClick={() => setModal('add')}>+ Add cost entry</button>}
 
       {modal && (
         <CostModal
@@ -362,13 +369,16 @@ function CostTracking({ inc }) {
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function CostsImpact({ inc }) {
+  // L2 (R43): a viewer reads the assessment and costs; writing them is analyst-only on the API.
+  const { user } = useAuth()
+  const viewer = user?.role === 'viewer'
   return (
     <div style={{ maxWidth: 960 }}>
       <PISection title="Business Impact Assessment">
-        <BusinessImpact inc={inc} />
+        <BusinessImpact inc={inc} viewer={viewer} />
       </PISection>
       <PISection title="Cost Tracking">
-        <CostTracking inc={inc} />
+        <CostTracking inc={inc} viewer={viewer} />
       </PISection>
     </div>
   )

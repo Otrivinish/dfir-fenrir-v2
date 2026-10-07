@@ -324,7 +324,7 @@ export default function WebBrowserHistory() {
   return (
     <section className="panel">
       <div className="panel-toolbar">
-        <h2 className="panel-h">Web Browser History</h2>
+        <h2 className="panel-h">Browser history</h2>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>
           Upload a browser history database or pick an exhibit → search, filter, promote to IOCs or the Timeline
         </span>
@@ -459,7 +459,7 @@ export default function WebBrowserHistory() {
                 {!u.parser_version && (u.evidence_id ? (
                   <span style={{ color: 'var(--ok)' }} title={EXHIBIT_HINT}>Registered as exhibit ✓</span>
                 ) : (
-                  <button type="button" className="btn ghost" style={{ fontSize: 12, padding: '2px 8px' }} title={EXHIBIT_HINT}
+                  <button type="button" className="btn ghost" title={EXHIBIT_HINT}
                           data-testid="webhist-legacy-register"
                           onClick={() => onMintEvidence(u)} disabled={ro}>Register as exhibit</button>
                 ))}

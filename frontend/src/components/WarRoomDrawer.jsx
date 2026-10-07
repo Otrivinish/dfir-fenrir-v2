@@ -432,7 +432,7 @@ export default function WarRoomDrawer({ incidentId, incidentRef, isClosed = fals
                 <span className="warroom-msg-time">{fmtTime(m.created_at)}</span>
                 {canPromote && (
                   <button type="button" className="btn ghost" data-promote-msg
-                          style={{ marginLeft: 'auto', padding: '0 6px', fontSize: 10 }}
+                          style={{ marginLeft: 'auto' }}
                           title="Promote to a timeline event or a decision"
                           onClick={() => setPromoting(m)}>
                     {promoted?.id === m.id ? `✓ ${promoted.target === 'decision' ? 'decision' : 'timeline'}` : 'Promote'}
@@ -473,7 +473,8 @@ export default function WarRoomDrawer({ incidentId, incidentRef, isClosed = fals
           </div>
         )}
 
-        {/* Input row */}
+        {/* Input row (L2, R43: not for a viewer; posting is analyst-only on the API) */}
+        {me?.role !== 'viewer' && (
         <div className="warroom-input-row">
           <textarea
             ref={inputRef}
@@ -496,6 +497,7 @@ export default function WarRoomDrawer({ incidentId, incidentRef, isClosed = fals
             aria-label="Send message"
           >↑</button>
         </div>
+        )}
       </aside>
       {promoting && (
         <PromoteDialog

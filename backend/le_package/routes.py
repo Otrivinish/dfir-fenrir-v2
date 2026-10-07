@@ -1,42 +1,40 @@
-"""LE-package routes.
+"""LE-package and Disclosure-package routes.
 
 Endpoints:
-  POST   /api/incidents/{id}/le-package   — generate. Incident lead only (admin,
-                                            or an analyst assigned IC / Deputy IC).
-                                            Returns LePackagePrepared with the
-                                            bundle KEK shown ONCE + download URL.
-  GET    /api/incidents/{id}/le-packages  — list history for the incident.
-                                            Incident lead only (LE packages are sensitive).
-  GET    /api/incidents/{id}/le-packages/{lp_id} — single row metadata (incident lead).
-  POST   /api/incidents/{id}/le-packages/{lp_id}/manual-ack — incident lead.
+  POST   /api/incidents/{id}/disclosures  — K1: build a Disclosure package (internal | law_enforcement |
+                                            regulator). Incident lead only (admin, or an analyst assigned
+                                            IC / Deputy IC). Password shown ONCE + download URL.
+  GET    /api/incidents/{id}/disclosures  — list (cursor-paginated, ?purpose=). Incident lead.
+  GET    /api/incidents/{id}/disclosures/{id} — one. Incident lead.
+  POST   /api/incidents/{id}/le-package   — deprecated (K1): a law_enforcement disclosure over all exhibits.
+  GET    /api/incidents/{id}/le-packages  — deprecated (K1): the law_enforcement disclosures.
+  GET    /api/incidents/{id}/le-packages/{lp_id} — deprecated (K1).
+  POST   /api/incidents/{id}/le-packages/{lp_id}/manual-ack — incident lead (any disclosure id).
 
 The encrypted bundle itself is downloaded via the existing single-use
 `/api/exports/{token}` endpoint (mounted by `evidence/download.py`). The
-LE-package builder reuses that CustodyExport lifecycle — no new download path.
+builder reuses that CustodyExport lifecycle — no new download path. Building,
+recording and custody-logging live in `le_package/disclosure.py`.
 """
 from __future__ import annotations
 
-import asyncio
-import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
-from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
-from evidence.crypto import EvidenceCryptoError, EvidenceIntegrityError
-from evidence.streaming import require_free_space
-from evidence.working_copies import freeze_for_integrity
+from evidence.routes import _decode_cursor, _encode_cursor
 from incidents.access import LeadAccess, require_incident_lead
-from le_package.builder import build_le_package, estimate_package_bytes
+from le_package.disclosure import NOT_DISCLOSABLE, create_disclosure
 from models import AuditLog, CustodyExport, Evidence, LePackage
-from notifications.service import notify_le_package_built
-from schemas import (LePackageAckRequest, LePackageAckResponse,
+from schemas import (DisclosureCreate, DisclosureCreated, DisclosureList, DisclosureOut, DisclosurePurpose,
+                     LePackageAckRequest, LePackageAckResponse,
                      LePackageList, LePackageManualAckRequest,
                      LePackageOut, LePackagePrepare, LePackagePrepared)
 
@@ -57,6 +55,7 @@ def _row_to_out(lp: LePackage, cust: CustodyExport,
         status_str = "expired"
     return LePackageOut(
         id=lp.id,
+        purpose=lp.purpose or "law_enforcement",
         incident_id=lp.incident_id,
         case_reference=lp.case_reference,
         requesting_authority=lp.requesting_authority,
@@ -99,13 +98,20 @@ def _row_to_out(lp: LePackage, cust: CustodyExport,
     )
 
 
+_EXTRA_FIELDS = ("eio_reference", "issuing_state", "executing_state", "mla_reference", "recipient_name",
+                 "recipient_role", "recipient_id_ref", "recipient_organisation", "recipient_address",
+                 "delivery_channel", "delivery_notes", "sender_declaration")
+
+
 @router.post("/{incident_id}/le-package", response_model=LePackagePrepared,
-             summary="Build a law-enforcement package",
+             summary="Build a law-enforcement package (deprecated: POST …/disclosures)", deprecated=True,
              responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"},
                         409: {"model": ApiErrorBody,
                               "description": "evidence_integrity_failed (an exhibit's stored file verified, then "
                                              "failed its integrity check while it was written into the package: "
-                                             "it changed during the build; nothing was built)"},
+                                             "it changed during the build; nothing was built), or "
+                                             "evidence_not_exportable (an exhibit was disposed, frozen or changed "
+                                             "while the package was built; nothing was recorded)"},
                         503: {"model": ApiErrorBody,
                               "description": "evidence_read_error (an exhibit's stored file verified, then could "
                                              "not be read while it was written into the package: nothing was "
@@ -119,212 +125,214 @@ async def prepare_le_package(
     lead:        LeadAccess = Depends(require_incident_lead),
     db:          AsyncSession = Depends(get_db),
 ) -> LePackagePrepared:
-    """Build a court-ready, encrypted law-enforcement handoff bundle for the
-    incident and anchor it in the hash-chained audit log. Incident lead only: an
-    admin, or an analyst (effective role) assigned as Incident Commander or Deputy
-    Incident Commander on this incident (403 code not_incident_lead; not visible:
-    404). When a non-admin builds it, every active admin gets an in-app
-    notification (incident ref only).
+    """**Deprecated (K1):** use `POST /api/incidents/{id}/disclosures` with `purpose: law_enforcement`. This
+    route still works and builds the same package: a law_enforcement Disclosure package over every exhibit of the
+    incident (or only those on legal hold), with the same rights, audit, custody rows and admin notification.
 
-    The bundle KEK is returned exactly once. The download URL is the standard
-    one-time `/api/exports/{token}` link (single use, 24-hour expiry). When
-    acknowledgment is enabled, a single-use ack URL is also returned.
+    Build a court-ready, encrypted law-enforcement handoff bundle for the incident and anchor it in the
+    hash-chained audit log (`le_package_generate`). Incident lead only: an admin, or an analyst (effective
+    role) assigned as Incident Commander or Deputy Incident Commander on this incident (403 code
+    not_incident_lead; not visible: 404). Every other active admin gets an in-app notification (incident ref
+    and purpose only). K1: MANIFEST.json is also signed with Ed25519 (MANIFEST.json.sig +
+    SIGNING_PUBLIC_KEY.pem), and every exhibit in the package gets an `evidence_export` custody row (plus a
+    working-copy ledger row and `evidence_copy_mint` when its bytes are in it).
+
+    The bundle password is returned exactly once. The download URL is the standard one-time
+    `/api/exports/{token}` link (single use, 24-hour expiry). When acknowledgment is enabled, a single-use ack
+    URL is also returned.
 
     M11 (owner, 2026-10-04): exhibits whose chain of custody is not sealed (unsealed drafts) are left
     out by default — listed in Evidence_Inventory.csv as "excluded: unsealed draft", with no custody
-    log or file. `include_unsealed_drafts: true` includes them (audited on the anchor row). The
-    inventory gains `coc_sealed`, `coc_sealed_at_utc`, `lawful_basis` and `package_inclusion`.
+    log or file. `include_unsealed_drafts: true` includes them (audited on the anchor row).
 
-    G2: the package is streamed into a staging file with bounded memory, whatever the
-    exhibit sizes, and published only when complete. Each exhibit is decrypted and
-    authenticated whole before it is written: one that is missing or unreadable is listed as
-    not included, as before. R3-2: one that fails an integrity check (tampered or corrupt) is
-    listed as `integrity_failed:<reason>`, and one whose SHA-256 differs from the recorded one
-    as `HASH_MISMATCH_AT_EXPORT`; the package is still built, and each such exhibit is frozen
-    (verify_failed, audited evidence_verify_failed, phase le_package). One that fails while it is
-    being written (it changed during the build) discards the whole package (409
-    evidence_integrity_failed / 503 evidence_read_error, nothing recorded). The evidence
-    volume must have room for the package's stored files plus a 1 GiB reserve (507
-    insufficient_storage, checked first). A multi-GiB package takes minutes: keep the
-    request open (the password is only in this response).
+    G2: the package is streamed into a staging file with bounded memory and published only when complete.
+    An exhibit that fails an integrity check while it is read is listed as `integrity_failed:<reason>` (or
+    `HASH_MISMATCH_AT_EXPORT`) and frozen; one that fails while it is being written discards the whole package
+    (409 evidence_integrity_failed / 503 evidence_read_error). The evidence volume must have room for the
+    package's stored files plus a 1 GiB reserve (507 insufficient_storage). A multi-GiB package takes
+    minutes: keep the request open (the password is only in this response).
     """
     user, inc = lead
-
-    # 1. Build the encrypted bundle, streamed into /evidence/.staging. Does not commit DB writes.
-    size_estimate = await estimate_package_bytes(db, inc.id, legal_hold_only=req.legal_hold_only,
-                                                 include_artifacts=req.include_artifacts,
-                                                 include_unsealed_drafts=req.include_unsealed_drafts)
-    require_free_space(size_estimate, "this LE package")
-    try:
-        build = await build_le_package(
-            db=db,
-            inc=inc,
-            user=user,
-            case_reference=req.case_reference,
-            requesting_authority=req.requesting_authority,
-            legal_basis=req.legal_basis,
-            retention_until=req.retention_until,
-            legal_hold_only=req.legal_hold_only,
-            include_artifacts=req.include_artifacts,
-            quarantine_path=settings.quarantine_path,
-            size_estimate=size_estimate,
-            include_unsealed_drafts=req.include_unsealed_drafts,
-        )
-    except EvidenceIntegrityError as e:
-        raise ApiError(status.HTTP_409_CONFLICT, "evidence_integrity_failed",
-                       "An exhibit's stored file changed while it was being written into the package: it failed "
-                       f"its integrity check ({e.reason or 'integrity'}). Nothing was built. Run Verify on the "
-                       "incident's exhibits, then build the package again.") from e
-    except EvidenceCryptoError as e:
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "evidence_read_error",
-                       "An exhibit's stored file stopped being readable while it was being written into the "
-                       "package (storage error). Nothing was built; the attempt was audited and admins were "
-                       "notified.") from e
-
-    # 2. Move the finished password-protected ZIP to /evidence/exports/{id}.zip.
-    export_id = uuid.uuid4()
-    rel_path  = f"exports/{export_id}.zip"
-    try:
-        await asyncio.to_thread(build.staged.commit, rel_path)               # not on the event loop
-    except BaseException:
-        await asyncio.to_thread(build.staged.discard)
-        raise
-
-    # 3. Create the CustodyExport row (owns the download token + lifecycle).
-    token      = secrets.token_urlsafe(32)
-    expires_at = _now_utc() + timedelta(hours=24)
-    # First/last 4 chars of the 24-char password — enough for OOB key-handoff
-    # confirmation without revealing the full secret.
-    key_hint   = f"{build.bundle_password[:4]}…{build.bundle_password[-4:]}"
-    recipient  = (req.recipient or req.requesting_authority)[:256]
-
-    cust = CustodyExport(
-        id=export_id,
-        incident_id=inc.id,
-        exported_by_id=user.id,
-        recipient=recipient,
-        purpose=f"LE package — {req.case_reference}",
-        acknowledgments=f"legal_basis={req.legal_basis}",
-        token=token,
-        status="ready",
-        file_path=rel_path,
-        file_size=build.bundle_size,
-        bundle_sha256=build.bundle_sha256,
-        key_hint=key_hint,
-        item_ids=[],            # LE package is incident-wide, not evidence-scoped
-        created_at=_now_utc(),
-        expires_at=expires_at,
+    d = await create_disclosure(
+        db, inc=inc, user=user, purpose="law_enforcement", case_reference=req.case_reference,
+        requesting_authority=req.requesting_authority, legal_basis=req.legal_basis,
+        recipient=(req.recipient or req.requesting_authority), retention_until=req.retention_until,
+        legal_hold_only=req.legal_hold_only, include_artifacts=req.include_artifacts,
+        include_unsealed_drafts=req.include_unsealed_drafts, item_ids=None,
+        extras={k: getattr(req, k) for k in _EXTRA_FIELDS}, enable_acknowledgment=req.enable_acknowledgment,
     )
-    db.add(cust)
-    await db.flush()
-
-    # 4. Write the tamper-evident audit anchor row. This is the LE-package's
-    #    proof-of-record in the platform's hash-chained audit log. Its
-    #    `details` carry the manifest + bundle hashes so a recipient with
-    #    authenticated access to the platform's audit log can verify the
-    #    bundle they received matches what was produced.
-    anchor_row = await write_audit(
-        db, "le_package_generate",
-        user_id=user.id, username=user.username, role_at_time=user.role,
-        outcome="success",
-        resource_type="le_package", resource_id=str(export_id),
-        resource_label=req.case_reference,
-        details={
-            "case_reference":       req.case_reference,
-            "requesting_authority": req.requesting_authority,
-            "legal_basis":          req.legal_basis,
-            "retention_until":      req.retention_until.isoformat() if req.retention_until else None,
-            "legal_hold_only":      req.legal_hold_only,
-            "include_artifacts":    req.include_artifacts,
-            "incident_id":          str(inc.id),
-            "incident_ref":         inc.ref,
-            "bundle_sha256":        build.bundle_sha256,
-            "manifest_sha256":      build.manifest_sha256,
-            "hmac_sha256":          build.hmac_sha256,
-            "file_count":           build.file_count,
-            "total_bytes":          build.total_bytes,
-            "evidence_count":       build.evidence_count,
-            "audit_row_count":      build.audit_row_count,
-            "custody_export_id":    str(export_id),
-            "expires_at":           expires_at.isoformat(),
-            "key_hint":             key_hint,
-            "include_unsealed_drafts": req.include_unsealed_drafts,
-            "unsealed_drafts_excluded": build.excluded_drafts,
-            "integrity_failures":   [{"evidence_id": str(f["evidence_id"]), "identifier": f["identifier"],
-                                      "integrity": f["integrity"]} for f in build.integrity_failures],
-        },
-    )
-
-    # Wizard C — optional one-shot acknowledgment token (recipient closes the
-    # chain by hitting /api/le-package-ack/{token}). Single-use, audit-logged.
-    ack_token = secrets.token_urlsafe(32) if req.enable_acknowledgment else None
-
-    # 5. Persist the LePackage row.
-    lp = LePackage(
-        id=uuid.uuid4(),
-        incident_id=inc.id,
-        custody_export_id=export_id,
-        case_reference=req.case_reference,
-        requesting_authority=req.requesting_authority,
-        legal_basis=req.legal_basis,
-        retention_until=req.retention_until,
-        legal_hold_only=req.legal_hold_only,
-        include_artifacts=req.include_artifacts,
-        prepared_by_id=user.id,
-        prepared_at=_now_utc(),
-        bundle_sha256=build.bundle_sha256,
-        manifest_sha256=build.manifest_sha256,
-        hmac_sha256=build.hmac_sha256,
-        audit_anchor_row_id=anchor_row.id,
-        file_count=build.file_count,
-        total_bytes=build.total_bytes,
-        evidence_count=build.evidence_count,
-        audit_row_count=build.audit_row_count,
-        # Wizard C
-        eio_reference          = req.eio_reference,
-        issuing_state          = req.issuing_state,
-        executing_state        = req.executing_state,
-        mla_reference          = req.mla_reference,
-        recipient_name         = req.recipient_name,
-        recipient_role         = req.recipient_role,
-        recipient_id_ref       = req.recipient_id_ref,
-        recipient_organisation = req.recipient_organisation,
-        recipient_address      = req.recipient_address,
-        delivery_channel       = req.delivery_channel,
-        delivery_notes         = req.delivery_notes,
-        sender_declaration     = req.sender_declaration,
-        # What protects the manifest: INTEGRITY.sig = HMAC-SHA-256 (no public-key signature).
-        # Rows created before 2026-10-03 say "ed25519": a wrong label (docs/reports.md §3).
-        signature_kind         = "hmac-sha256",
-        acknowledgment_token   = ack_token,
-    )
-    db.add(lp)
-    await db.flush()
-    # R3-2 / R95: an exhibit found tampered (or with another SHA-256) while the package was built is frozen
-    # through the verify-freeze path, like Verify and the export do.
-    for f in build.integrity_failures:
-        await freeze_for_integrity(db, f["evidence_id"], user=user, ip=None, incident_id=inc.id,
-                                   reason=f["reason"], recomputed=f["sha256_recomputed"], phase="le_package",
-                                   extra={"le_package_id": str(lp.id), "custody_export_id": str(export_id),
-                                          "integrity": f["integrity"]})
-    if user.role != "admin":
-        # Delegated (IC / Deputy) build: every active admin hears about it.
-        await notify_le_package_built(      # commits, then pushes
-            db, incident_id=inc.id, incident_ref=inc.ref or str(inc.id), builder_username=user.username)
-    else:
-        await db.commit()
-
-    base = _row_to_out(lp, cust, anchor_hash=anchor_row.row_hash)
+    base = _row_to_out(d.lp, d.cust, anchor_hash=d.anchor.row_hash)
     return LePackagePrepared(
         **base.model_dump(),
-        bundle_password=build.bundle_password,
-        download_url=f"/api/exports/{token}",
-        acknowledgment_url=(f"/api/le-package-ack/{ack_token}" if ack_token else None),
+        bundle_password=d.build.bundle_password,
+        download_url=f"/api/exports/{d.cust.token}",
+        acknowledgment_url=(f"/api/le-package-ack/{d.ack_token}" if d.ack_token else None),
     )
+
+
+# ── K1 (R36): Disclosure packages ───────────────────────────────────────────
+
+_PURPOSE_NEEDS = ("case_reference", "requesting_authority", "legal_basis")
+
+
+def _disclosure_out(lp: LePackage, cust: CustodyExport, anchor_hash: str | None) -> DisclosureOut:
+    return DisclosureOut(**_row_to_out(lp, cust, anchor_hash).model_dump(), item_ids=cust.item_ids or [])
+
+
+def _required(what: str) -> ApiError:
+    return ApiError(status.HTTP_422_UNPROCESSABLE_ENTITY, "disclosure_field_required", what)
+
+
+@router.post("/{incident_id}/disclosures", response_model=DisclosureCreated,
+             status_code=status.HTTP_201_CREATED, summary="Build a disclosure package",
+             responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"},
+                        404: {"model": ApiErrorBody, "description": "evidence_not_found (an item_id is not an "
+                                                                    "exhibit of this incident)"},
+                        409: {"model": ApiErrorBody,
+                              "description": "evidence_not_exportable (a chosen exhibit is destroyed or "
+                                             "verify_failed, or one was disposed, frozen or changed while the "
+                                             "package was built: nothing was disclosed), or "
+                                             "evidence_integrity_failed (an exhibit changed while it was "
+                                             "written into the package: nothing was built)"},
+                        422: {"model": ApiErrorBody,
+                              "description": "disclosure_field_required (law_enforcement / regulator need "
+                                             "case_reference, requesting_authority and a legal_basis other than "
+                                             "internal; eio needs eio_reference + issuing_state + "
+                                             "executing_state; mla needs mla_reference)"},
+                        503: {"model": ApiErrorBody, "description": "evidence_read_error"},
+                        507: {"model": ApiErrorBody, "description": "insufficient_storage"}})
+async def create_disclosure_package(
+    incident_id: uuid.UUID,
+    req:         DisclosureCreate,
+    lead:        LeadAccess = Depends(require_incident_lead),
+    db:          AsyncSession = Depends(get_db),
+) -> DisclosureCreated:
+    """K1 (owner, 2026-10-03): the one way exhibits leave FENRIR — Evidence › Export and the LE package merged.
+    Incident lead only: an admin, or an analyst assigned as Incident Commander or Deputy here (403
+    not_incident_lead; not visible: 404).
+
+    `purpose` picks the records that go with the exhibits (every package has 04_Evidence, 08_Audit and
+    09_Legal): law_enforcement = everything (incident, timeline, IOCs, forensic, communications, case notes,
+    recovery, notifications, sign-offs); regulator = incident, timeline, IOCs, recovery, notifications,
+    sign-offs; internal = incident, timeline, IOCs, forensic, case notes, recovery. Quarantine artifacts only
+    with `include_artifacts`.
+
+    Always signed: an Ed25519 signature over MANIFEST.json (MANIFEST.json.sig; SIGNING_PUBLIC_KEY.pem, the key in
+    GET /api/version), plus the HMAC-SHA-256 in INTEGRITY.sig and, when a TSA is configured, an RFC 3161 token.
+    Always custody-logged: every exhibit in it gets an `evidence_export` row in the custody log, and one whose
+    bytes are in it a working-copy ledger row (export) and `evidence_copy_mint`. Audited (`le_package_generate`
+    anchor, `details.purpose`); every other active admin is notified in-app.
+
+    `item_ids` omitted = every exhibit that can be disclosed (not destroyed or verify_failed); unsealed drafts
+    are left out unless `include_unsealed_drafts` (audited). Returns the record with the one-time
+    `bundle_password` (AES-256 ZIP) and `/api/exports/{token}` download URL (single use, 24 h), the drafts
+    left out and the exhibits that failed their integrity check (frozen). Built in this one streamed request
+    (G2): keep it open for a large package."""
+    user, inc = lead
+    if req.purpose != "internal":
+        missing = [f for f in _PURPOSE_NEEDS if not (getattr(req, f) or "").strip()]
+        if missing:
+            raise _required(f"A {req.purpose} disclosure needs {', '.join(missing)}.")
+        if req.legal_basis == "internal":
+            raise _required(f"A {req.purpose} disclosure needs a legal basis other than internal.")
+    if req.legal_basis == "eio" and not all((getattr(req, f) or "").strip()
+                                            for f in ("eio_reference", "issuing_state", "executing_state")):
+        raise _required("Legal basis eio needs eio_reference, issuing_state and executing_state.")
+    if req.legal_basis == "mla" and not (req.mla_reference or "").strip():
+        raise _required("Legal basis mla needs mla_reference.")
+
+    if req.item_ids is None:
+        item_ids = list((await db.execute(
+            select(Evidence.id).where(Evidence.incident_id == inc.id, Evidence.status.notin_(NOT_DISCLOSABLE))
+        )).scalars())
+    else:
+        item_ids = list(dict.fromkeys(req.item_ids))
+        rows = (await db.execute(select(Evidence).where(Evidence.incident_id == inc.id,
+                                                        Evidence.id.in_(item_ids)))).scalars().all()
+        missing = sorted(set(map(str, item_ids)) - {str(e.id) for e in rows})
+        if missing:
+            raise ApiError(status.HTTP_404_NOT_FOUND, "evidence_not_found",
+                           f"Not an exhibit of this incident: {', '.join(missing)}")
+        blocked = sorted(f"{e.identifier} ({e.status})" for e in rows if e.status in NOT_DISCLOSABLE)
+        if blocked:
+            raise ApiError(status.HTTP_409_CONFLICT, "evidence_not_exportable",
+                           "Destroyed or verify-failed exhibits cannot be disclosed: " + ", ".join(blocked))
+
+    authority = (req.requesting_authority or "").strip() or "Internal"
+    org = (req.recipient_organisation or "").strip()
+    d = await create_disclosure(
+        db, inc=inc, user=user, purpose=req.purpose,
+        case_reference=(req.case_reference or "").strip() or (inc.ref or str(inc.id)),
+        requesting_authority=authority, legal_basis=req.legal_basis or "internal",
+        recipient=f"{req.recipient_name.strip()}, {org}" if org else req.recipient_name.strip(),
+        retention_until=req.retention_until, legal_hold_only=False, include_artifacts=req.include_artifacts,
+        include_unsealed_drafts=req.include_unsealed_drafts, item_ids=item_ids,
+        extras={k: getattr(req, k) for k in _EXTRA_FIELDS}, enable_acknowledgment=req.enable_acknowledgment,
+    )
+    out = _disclosure_out(d.lp, d.cust, d.anchor.row_hash)
+    return DisclosureCreated(
+        **out.model_dump(),
+        bundle_password=d.build.bundle_password,
+        download_url=f"/api/exports/{d.cust.token}",
+        acknowledgment_url=(f"/api/le-package-ack/{d.ack_token}" if d.ack_token else None),
+        unsealed_drafts_excluded=d.build.excluded_drafts,
+        integrity_failures=[{"evidence_id": str(f["evidence_id"]), "identifier": f["identifier"],
+                             "integrity": f["integrity"]} for f in d.build.integrity_failures],
+    )
+
+
+def _disclosure_query(incident_id: uuid.UUID):
+    return (select(LePackage, CustodyExport, AuditLog.row_hash)
+            .join(CustodyExport, CustodyExport.id == LePackage.custody_export_id)
+            .outerjoin(AuditLog, AuditLog.id == LePackage.audit_anchor_row_id)
+            .where(LePackage.incident_id == incident_id))
+
+
+@router.get("/{incident_id}/disclosures", response_model=DisclosureList, summary="List disclosure packages",
+            responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}})
+async def list_disclosures(
+    incident_id: uuid.UUID,
+    _: LeadAccess = Depends(require_incident_lead),
+    db: AsyncSession = Depends(get_db),
+    purpose: Optional[DisclosurePurpose] = Query(default=None),
+    limit:  int           = Query(default=50, ge=1, le=200),
+    cursor: Optional[str] = Query(default=None),
+) -> DisclosureList:
+    """The incident's disclosure packages (LE packages built before K1 included, purpose law_enforcement),
+    newest first, cursor-paginated, optionally by `purpose`. Status reflects the one-time download (ready |
+    consumed | expired | revoked). Never returns the password or the download token. Incident lead only (403
+    not_incident_lead)."""
+    offset = _decode_cursor(cursor)
+    q = _disclosure_query(incident_id)
+    if purpose:
+        q = q.where(LePackage.purpose == purpose)
+    rows = (await db.execute(q.order_by(LePackage.prepared_at.desc(), LePackage.id)
+                             .offset(offset).limit(limit + 1))).all()
+    items = [_disclosure_out(lp, cust, h) for lp, cust, h in rows[:limit]]
+    return DisclosureList(items=items, next_cursor=_encode_cursor(offset + limit) if len(rows) > limit else None)
+
+
+@router.get("/{incident_id}/disclosures/{disclosure_id}", response_model=DisclosureOut,
+            summary="Get a disclosure package",
+            responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"},
+                       404: {"model": ApiErrorBody, "description": "disclosure_not_found"}})
+async def get_disclosure(
+    incident_id: uuid.UUID,
+    disclosure_id: uuid.UUID,
+    _: LeadAccess = Depends(require_incident_lead),
+    db: AsyncSession = Depends(get_db),
+) -> DisclosureOut:
+    """One disclosure package by id (its record, exhibits, hashes, audit anchor hash and download status).
+    Incident lead only (403 not_incident_lead). Record a receipt with POST …/le-packages/{id}/manual-ack (the
+    same id)."""
+    row = (await db.execute(_disclosure_query(incident_id).where(LePackage.id == disclosure_id))).first()
+    if not row:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "disclosure_not_found", "Disclosure package not found")
+    return _disclosure_out(*row)
 
 
 @router.get("/{incident_id}/le-packages", response_model=LePackageList,
-            summary="List law-enforcement packages",
+            summary="List law-enforcement packages (deprecated: GET …/disclosures)", deprecated=True,
             responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}})
 async def list_le_packages(
     incident_id: uuid.UUID,
@@ -334,12 +342,10 @@ async def list_le_packages(
     """List all law-enforcement packages prepared for the incident, newest
     first, with their custody-export status and audit anchor hash. Incident lead
     only (LE packages are sensitive): an admin, or an analyst assigned as Incident
-    Commander or Deputy here (403 code not_incident_lead). Returns `{items: [...]}`."""
+    Commander or Deputy here (403 code not_incident_lead). Returns `{items: [...]}`. **Deprecated (K1):** use
+    GET …/disclosures; this lists only the law_enforcement ones."""
     rows = (await db.execute(
-        select(LePackage, CustodyExport, AuditLog.row_hash)
-        .join(CustodyExport, CustodyExport.id == LePackage.custody_export_id)
-        .outerjoin(AuditLog,  AuditLog.id == LePackage.audit_anchor_row_id)
-        .where(LePackage.incident_id == incident_id)
+        _disclosure_query(incident_id).where(LePackage.purpose == "law_enforcement")
         .order_by(LePackage.prepared_at.desc())
     )).all()
     items = [_row_to_out(lp, cust, anchor_hash=h) for lp, cust, h in rows]
@@ -347,7 +353,7 @@ async def list_le_packages(
 
 
 @router.get("/{incident_id}/le-packages/{lp_id}", response_model=LePackageOut,
-            summary="Get a law-enforcement package",
+            summary="Get a law-enforcement package (deprecated: GET …/disclosures/{id})", deprecated=True,
             responses={403: {"model": ApiErrorBody, "description": "not_incident_lead"}})
 async def get_le_package(
     incident_id: uuid.UUID,
@@ -391,7 +397,8 @@ async def manual_ack_le_package(
     lead:        LeadAccess = Depends(require_incident_lead),
     db:          AsyncSession = Depends(get_db),
 ) -> LePackageAckResponse:
-    """Record an attested receipt for an LE package on behalf of an external
+    """Record an attested receipt for an LE package — or any disclosure package (K1: the disclosure id) — on
+    behalf of an external
     recipient who cannot use the URL ack page (offline / paper-only handoffs).
     Incident lead only (admin, or an analyst assigned as Incident Commander or
     Deputy here; 403 code not_incident_lead); optionally links a scanned-receipt

@@ -395,7 +395,7 @@ export default function TimelineImport() {
     <section className="panel">
       {/* Header */}
       <div className="panel-toolbar">
-        <h2 className="panel-h">Timeline Import</h2>
+        <h2 className="panel-h">Logs &amp; triage</h2>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>
           Parse artifact → triage → promote to timeline
         </span>
@@ -1084,7 +1084,6 @@ function TriageRow({ event: e, sourceTz, clockOffset, checked, onToggle, onIoc, 
           <button
             type="button"
             className="btn ghost"
-            style={{ fontSize: 12, padding: '2px 6px' }}
             onClick={onIoc}
             disabled={isClosed}
             title={isClosed ? 'Closed incidents are read-only' : 'Add as IOC'}

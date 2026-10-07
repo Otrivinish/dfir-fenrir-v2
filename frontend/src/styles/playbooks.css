@@ -209,6 +209,23 @@
 .pb-suggest-head { font-size: 13px; font-weight: 600; color: var(--text); }
 .pb-suggest .btn { white-space: nowrap; }
 
+/* Task rows (L1, R45): five columns; in a narrow column the title goes first, full width,
+   and the controls sit two per row. */
+.pb-task-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; container-type: inline-size; }
+.pb-task-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr) 170px 220px 80px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  align-items: start;
+}
+@container (max-width: 680px) {
+  .pb-task-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .pb-task-row > .pb-task-main { grid-column: 1 / -1; order: -1; }
+}
 .pb-task-note { color: var(--dim); font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
 /* The due-date field in a task row is control-size compact (base.css rule 5). */
 .pb-due { min-width: 0; }

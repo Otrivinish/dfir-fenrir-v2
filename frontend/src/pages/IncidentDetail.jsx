@@ -42,13 +42,16 @@ function toEpoch(v) {
 
 // A rail count badge: hidden when there is nothing to count.
 const badge = (n, title) => (n ? { text: String(n), title } : null)
+// K2: "done/total" for a Respond page (snapshot respond_containment / respond_eradication_recovery).
+const doneOf = (c, noun) => (c?.total > 0
+  ? { text: `${c.done}/${c.total}`, title: `${c.done} of ${c.total} ${noun} done (${c.open} open or in progress)` } : null)
 
 // Left rail (IncidentRail), in NIST SP 800-61 R3 order: Situation and Details to orient, then
 // Command and Notify (who runs the response, who must be told), then Detection &
 // Analysis with evidence before the analysis built on it, then response and
 // close-out. `phase` gives a group label that phase's glyph and --phase-* colour
 // (Notify is not a phase: neutral). `count(snapshot)` is the item's live count.
-// Labels only: the route segments never change, so bookmarks and links still work.
+// Old route segments redirect (App.jsx): entities → scope (K2), respond → containment (K2).
 const NAV_GROUPS = [
   {
     label: null,                       // orient row — ungrouped at the top
@@ -82,10 +85,9 @@ const NAV_GROUPS = [
     phase: 'detection_and_analysis',
     items: [
       { to: 'evidence', label: 'Evidence',             count: s => badge(s.evidence, `${s.evidence} evidence items`) },
-      { to: 'files',    label: 'Supporting documents', count: s => badge(s.files, `${s.files} files`) },
       { to: 'forensic', label: 'Examine' },
       { to: 'timeline', label: 'Timeline',             count: s => badge(s.timeline, `${s.timeline} events`) },
-      { to: 'entities', label: 'Entities',             count: s => badge(s.entities, `${s.entities} entities`) },
+      { to: 'scope',    label: 'Scope',                count: s => badge(s.entities, `${s.entities} entities in scope (${s.affected_systems} compromised)`) },
       { to: 'iocs',     label: 'IOCs',                 count: s => badge(s.iocs, `${s.iocs} IOCs`) },
       { to: 'mitre',    label: 'ATT&CK & attribution' },
       { to: 'notes',    label: 'Case notes' },
@@ -95,11 +97,14 @@ const NAV_GROUPS = [
     label: 'Containment, Eradication & Recovery',
     phase: 'containment_eradication_recovery',
     items: [
-      { to: 'respond', label: 'Respond', count: s => badge(s.respond_open, `${s.respond_open} of ${s.respond_total} actions open or in progress`) },
-      { to: 'recovery', label: 'Recovery', count: s => s.recovery?.total > 0
+      // K2 (R38): the Respond board split in three, so first-hour containment has its own entry.
+      { to: 'containment',          label: 'Containment',            count: s => doneOf(s.respond_containment, 'containment actions') },
+      { to: 'eradication-recovery', label: 'Eradication & Recovery', count: s => doneOf(s.respond_eradication_recovery, 'eradication and recovery actions') },
+      { to: 'recovery', label: 'Recovery tracker', count: s => s.recovery?.total > 0
         ? { text: `${s.recovery.validated}/${s.recovery.total - s.recovery.not_required}`,
             title: `${s.recovery.validated} of ${s.recovery.total - s.recovery.not_required} systems validated` +
                    (s.recovery.not_required ? ` (${s.recovery.not_required} not required)` : '') } : null },
+      { to: 'decisions', label: 'Decisions', count: s => badge(s.decisions, `${s.decisions} decisions recorded`) },
     ],
   },
   {
@@ -239,14 +244,26 @@ export default function IncidentDetail() {
   // Bumped by a tab after a write that can change the rail's counts → IncidentRail re-reads the snapshot.
   const [railRev, setRailRev] = useState(0)
   const bumpRail = useCallback(() => setRailRev(r => r + 1), [])
+  // K2 (R38): time in phase for the stepper, from GET …/phase-history (re-read when the phase or status changes).
+  const [phaseHistory, setPhaseHistory] = useState(null)
+  useEffect(() => {
+    if (!inc?.id) return
+    let cancelled = false
+    api.getIncidentPhaseHistory(inc.id).then(h => { if (!cancelled) setPhaseHistory(h) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [inc?.id, inc?.phase, inc?.status])
   const [presenceUsers, setPresenceUsers] = useState([])
   const presenceWsRef  = useRef(null)
   const presencePingRef = useRef(null)
 
+  // L3 (R48): only the newest read may land (a slow read of incident A can't overwrite B, or a newer read of A).
+  const refreshSeq = useRef(0)
   const refresh = useCallback(async () => {
+    const n = ++refreshSeq.current
     setLoading(true); setError('')
     try {
       const r = await api.getIncident(id)
+      if (n !== refreshSeq.current) return
       setInc(r)
       setDraft(pickEditable(r))
       setOccurredAt(toEntryValue(r.occurred_at))
@@ -255,9 +272,9 @@ export default function IncidentDetail() {
       setEradicatedAt(toEntryValue(r.eradicated_at))
       setRecoveredAt(toEntryValue(r.recovered_at))
     } catch (e) {
-      setError(e.message || 'Incident not found.')
+      if (n === refreshSeq.current) setError(e.message || 'Incident not found.')
     } finally {
-      setLoading(false)
+      if (n === refreshSeq.current) setLoading(false)
     }
   }, [id])
   useEffect(() => { refresh() }, [refresh])
@@ -477,8 +494,9 @@ export default function IncidentDetail() {
   if (!inc) return null
 
   const justSaved = !dirty && savedAt > 0 && Date.now() - savedAt < 4000
-  // Only the next undeclared milestone is offered; none once all three are set.
-  const nextMilestone = canWrite ? MILESTONES.find(m => !inc[m.field]) : undefined
+  // Only the next undeclared milestone is offered; none once all three are set, and none in
+  // Post-Incident (L3, R47: a missing time is then set on Details).
+  const nextMilestone = canWrite && inc.phase !== 'post_incident' ? MILESTONES.find(m => !inc[m.field]) : undefined
   // Close is offered in Post-Incident, and in any phase for a false / benign positive
   // (the API enforces the same rule). Resolve = move to Post-Incident via the phase modal.
   const canClose  = inc.phase === 'post_incident' || ['false_positive', 'benign_positive'].includes(inc.triage_state)
@@ -506,7 +524,7 @@ export default function IncidentDetail() {
             />
           )}
         </div>
-        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', alignItems: 'center' }}>
           {dirty     && <span className="dirty-dot" title="Unsaved changes">●</span>}
           {justSaved && <span className="saved-tag">SAVED</span>}
           {!isClosed && !editing && (
@@ -518,12 +536,14 @@ export default function IncidentDetail() {
                   onClick={() => setDeclaring(nextMilestone)}
                 >Declare {nextMilestone.label}</button>
               )}
-              <button
-                className="btn"
-                type="button"
-                onClick={() => navigate('handoffs?new=1')}
-                data-header-handoff
-              >Shift handoff</button>
+              {canWrite && (
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() => navigate('handoffs?new=1')}
+                  data-header-handoff
+                >Shift handoff</button>
+              )}
               {canWrite && (
                 <button
                   className="btn"
@@ -577,6 +597,7 @@ export default function IncidentDetail() {
       <div className={`status-band ${isClosed ? 'closed' : ''}`}>
         <PhaseStepper
           current={inc.phase}
+          history={phaseHistory?.phase === inc.phase ? phaseHistory : null}
           disabled={isClosed || !canWrite || editLock}
           onPhaseClick={isClosed || !canWrite || editLock ? undefined : setPhaseTarget}
           hint={!isClosed && canWrite && editLock ? 'Save or discard your Details edits to change the phase.' : null}

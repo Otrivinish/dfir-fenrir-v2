@@ -84,6 +84,10 @@ class Manifest:
                                     "row_hash are on the platform's record of the package.",
                 "hmac_sig":         "INTEGRITY.sig = HMAC-SHA-256(MANIFEST.json), key = SHA-256(bundle password). "
                                     "Whoever holds the (out-of-band) bundle password can re-derive and compare.",
+                "signature":        "MANIFEST.json.sig = Ed25519 signature over MANIFEST.json (raw 64 bytes) under "
+                                    "SIGNING_PUBLIC_KEY.pem, the platform's signing key (fingerprint in its GET "
+                                    "/api/version): `openssl pkeyutl -verify -pubin -inkey SIGNING_PUBLIC_KEY.pem "
+                                    "-rawin -in MANIFEST.json -sigfile MANIFEST.json.sig`.",
                 "trusted_timestamp": "MANIFEST.tst (when present) = RFC-3161 Time-Stamp Token over "
                                     "sha256(MANIFEST.json) from an external TSA. Verify independently of "
                                     "this platform's clock: `openssl ts -verify -data MANIFEST.json -in MANIFEST.tst`.",

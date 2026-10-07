@@ -65,6 +65,9 @@ export default function IOCs() {
   const navigate = useNavigate()
   // J5: Block opens the Respond action form prefilled (not for viewers or closed incidents).
   const canContain = !isClosed && user?.role !== 'viewer'
+  // L2 (R43): a viewer gets no write controls (the API refuses them); ro = closed or viewer.
+  const viewer = user?.role === 'viewer'
+  const ro = isClosed || viewer
 
   const [allIocs, setAllIocs]               = useState([])
   const [iocs, setIocs]                     = useState([])
@@ -289,6 +292,7 @@ export default function IOCs() {
         case 'confidence': return i.confidence ?? 50
         case 'tags':       return (i.tags?.length || 0)
         case 'added':      return i.added_at || ''
+        case 'seen':       return i.first_seen_at || ''
         case 'seen_in':    return (corrMap[i.id]?.length || 0)
         default:           return ''
       }
@@ -316,6 +320,8 @@ export default function IOCs() {
             <option value="">All types</option>
             {IOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
           </select>
+          {/* L4 (R137): Scan = outbound OSINT enrichment, analyst role and up. */}
+          {!viewer && (
           <div ref={pickerRef} style={{ position: 'relative', display: 'inline-flex' }}>
             <button
               type="button"
@@ -345,7 +351,7 @@ export default function IOCs() {
               aria-haspopup="true"
               aria-expanded={pickerOpen}
               title="Choose enrichment sources"
-              style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, padding: '0 8px' }}
+              style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0 }}
             >
               ▾
             </button>
@@ -440,6 +446,7 @@ export default function IOCs() {
               </div>
             )}
           </div>
+          )}
           <button
             type="button"
             className="btn ghost"
@@ -449,6 +456,7 @@ export default function IOCs() {
           >
             Export
           </button>
+          {!viewer && (<>
           <button
             type="button"
             className="btn ghost"
@@ -467,6 +475,7 @@ export default function IOCs() {
           >
             + Add IOC
           </button>
+          </>)}
         </div>
       </div>
 
@@ -488,7 +497,7 @@ export default function IOCs() {
         <div className="panel-empty">
           <div className="panel-empty-mark" aria-hidden="true">◌</div>
           <div>No IOCs yet.</div>
-          {!isClosed && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Click "Add IOC" to record an indicator.</div>}
+          {!ro && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Click "Add IOC" to record an indicator.</div>}
         </div>
       ) : (
         <div className="table-scroll">
@@ -502,6 +511,8 @@ export default function IOCs() {
                 <th style={{ width: 90, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('confidence')}>Confidence{sortArrow('confidence')}</th>
                 <th style={{ width: 160, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('tags')}>Tags{sortArrow('tags')}</th>
                 <th style={{ width: 130, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('added')}>Added{sortArrow('added')}</th>
+                <th style={{ width: 130, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('seen')}
+                    title="Earliest and latest time of the timeline events linked to the IOC">First / last seen{sortArrow('seen')}</th>
                 <th style={{ width: 80, cursor: 'pointer', userSelect: 'none' }} onClick={() => toggleSort('seen_in')}>Seen in{sortArrow('seen_in')}</th>
                 <th className="actions">Actions</th>
               </tr>
@@ -590,6 +601,17 @@ export default function IOCs() {
                   >
                     {formatLocal(i.added_at).slice(0, 16)}
                   </td>
+                  {/* K4: from the linked timeline events (server-side); — when none is linked */}
+                  <td data-testid="ioc-seen"
+                      title={i.first_seen_at ? `First seen ${formatLocal(i.first_seen_at)}\nLast seen ${formatLocal(i.last_seen_at)}` : 'No linked timeline events'}
+                      style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
+                    {i.first_seen_at ? (
+                      <>
+                        <div>{formatLocal(i.first_seen_at).slice(0, 16)}</div>
+                        {i.last_seen_at !== i.first_seen_at && <div>{formatLocal(i.last_seen_at).slice(0, 16)}</div>}
+                      </>
+                    ) : '—'}
+                  </td>
                   <td style={{ textAlign: 'center' }}>
                     {corrMap[i.id]?.length > 0 && (
                       <button
@@ -597,12 +619,8 @@ export default function IOCs() {
                         className="btn ghost"
                         onClick={() => setCorrTarget({ ioc: i, incidents: corrMap[i.id] })}
                         title={`Also seen in ${corrMap[i.id].length} other incident${corrMap[i.id].length !== 1 ? 's' : ''}`}
-                        style={{
-                          fontSize: 11,
-                          padding: '2px 6px',
-                          color: 'var(--accent)',
-                          fontFamily: 'var(--font-mono)',
-                        }}
+                        style={{ color: 'var(--accent)',
+                          fontFamily: 'var(--font-mono)' }}
                       >
                         ⋈ {corrMap[i.id].length}
                       </button>
@@ -614,26 +632,27 @@ export default function IOCs() {
                       return rc && (
                         <button type="button" className="btn ghost" data-row-contain={rc.template}
                                 title={`New containment action (${rc.template}) linked to this IOC`}
-                                onClick={() => navigate(rc.href)}
-                                style={{ fontSize: 11, padding: '2px 6px' }}>{rc.label}</button>
+                                onClick={() => navigate(rc.href)}>{rc.label}</button>
                       )
                     })()}
+                    {/* L4 (R137): Enrich is an outbound OSINT lookup, analyst role and up (the API 403s viewers). */}
+                    {!viewer && (
                     <button
                       type="button"
                       className="btn ghost"
                       onClick={() => enrichOne(i)}
                       disabled={enrichingId === i.id}
                       title="Enrich this indicator (VT, AbuseIPDB, Shodan, GreyNoise, URLScan)"
-                      style={{ fontSize: 11, padding: '2px 6px' }}
                     >
                       {enrichingId === i.id ? '…' : enrichResults[i.id] ? '↻' : 'Enrich'}
                     </button>
+                    )}
+                    {!viewer && (<>
                     <button
                       type="button"
                       className="btn ghost"
                       onClick={() => setEditTarget(i)}
                       disabled={isClosed}
-                      style={{ fontSize: 11, padding: '2px 6px' }}
                     >
                       Edit
                     </button>
@@ -642,15 +661,15 @@ export default function IOCs() {
                       className="btn ghost"
                       onClick={() => onDelete(i)}
                       disabled={isClosed || busy}
-                      style={{ fontSize: 11, padding: '2px 6px' }}
                     >
                       Delete
                     </button>
+                    </>)}
                   </td>
                 </tr>,
                 isExpanded && (
                   <tr key={`${i.id}-detail`}>
-                    <td colSpan={9} style={{ paddingTop: 0, paddingBottom: 'var(--space-3)' }}>
+                    <td colSpan={10} style={{ paddingTop: 0, paddingBottom: 'var(--space-3)' }}>
                       <div style={{
                         display: 'flex', flexDirection: 'column', gap: 'var(--space-3)',
                         padding: 'var(--space-3)',
@@ -684,40 +703,31 @@ export default function IOCs() {
                             type="button"
                             className="btn"
                             onClick={() => markIoc(i, true)}
-                            disabled={isClosed || busy}
+                            disabled={ro || busy}
                             aria-pressed={i.malicious === true}
-                            style={{
-                              fontSize: 11,
-                              color: i.malicious === true ? 'var(--crit)' : 'var(--muted)',
+                            style={{ color: i.malicious === true ? 'var(--crit)' : 'var(--muted)',
                               borderColor: i.malicious === true ? 'color-mix(in srgb, var(--crit) 50%, transparent)' : undefined,
-                              background:  i.malicious === true ? 'color-mix(in srgb, var(--crit) 14%, transparent)' : undefined,
-                            }}
+                              background:  i.malicious === true ? 'color-mix(in srgb, var(--crit) 14%, transparent)' : undefined }}
                           >⚠ Mark Malicious</button>
                           <button
                             type="button"
                             className="btn"
                             onClick={() => markIoc(i, false)}
-                            disabled={isClosed || busy}
+                            disabled={ro || busy}
                             aria-pressed={i.malicious === false}
-                            style={{
-                              fontSize: 11,
-                              color: i.malicious === false ? 'var(--ok)' : 'var(--muted)',
+                            style={{ color: i.malicious === false ? 'var(--ok)' : 'var(--muted)',
                               borderColor: i.malicious === false ? 'color-mix(in srgb, var(--ok) 50%, transparent)' : undefined,
-                              background:  i.malicious === false ? 'color-mix(in srgb, var(--ok) 14%, transparent)' : undefined,
-                            }}
+                              background:  i.malicious === false ? 'color-mix(in srgb, var(--ok) 14%, transparent)' : undefined }}
                           >✓ Mark Clean</button>
                           <button
                             type="button"
                             className="btn"
                             onClick={() => markIoc(i, null)}
-                            disabled={isClosed || busy}
+                            disabled={ro || busy}
                             aria-pressed={i.malicious == null}
-                            style={{
-                              fontSize: 11,
-                              color: i.malicious == null ? 'var(--text)' : 'var(--muted)',
+                            style={{ color: i.malicious == null ? 'var(--text)' : 'var(--muted)',
                               borderColor: i.malicious == null ? 'var(--border-strong)' : undefined,
-                              background:  i.malicious == null ? 'var(--surface-2)' : undefined,
-                            }}
+                              background:  i.malicious == null ? 'var(--surface-2)' : undefined }}
                           >? Mark Unknown</button>
                         </div>
 
@@ -747,12 +757,10 @@ export default function IOCs() {
                             <button
                               type="button"
                               className="btn ghost"
-                              onClick={() => !isClosed && startNotesEdit(i)}
-                              disabled={isClosed}
+                              onClick={() => !ro && startNotesEdit(i)}
+                              disabled={ro}
                               title={isClosed ? 'Closed incidents are read-only' : 'Click to edit notes (⌘/Ctrl+Enter to save · Esc to cancel)'}
-                              style={{
-                                padding: 'var(--space-2)',
-                                textAlign: 'left',
+                              style={{ textAlign: 'left',
                                 fontFamily: 'var(--font-body)',
                                 fontWeight: 400,
                                 whiteSpace: 'pre-wrap',
@@ -760,8 +768,7 @@ export default function IOCs() {
                                 minHeight: 40,
                                 width: '100%',
                                 justifyContent: 'flex-start',
-                                alignItems: 'flex-start',
-                              }}
+                                alignItems: 'flex-start' }}
                             >
                               {i.notes || <span style={{ color: 'var(--dim)' }}>— click to add notes —</span>}
                             </button>
@@ -769,9 +776,9 @@ export default function IOCs() {
                         </div>
 
                         {/* Linked timeline events */}
-                        <IocTimelineLinks incidentId={inc.id} ioc={i} isClosed={isClosed} />
+                        <IocTimelineLinks incidentId={inc.id} ioc={i} isClosed={ro} onChanged={load} />
 
-                        <LinkedCaseNotes incidentId={inc.id} kind="ioc" targetId={i.id} isClosed={isClosed} />
+                        <LinkedCaseNotes incidentId={inc.id} kind="ioc" targetId={i.id} isClosed={ro} />
 
                         {/* Provenance — when & who added this IOC */}
                         <div style={{ fontSize: 11, color: 'var(--dim)' }}>
@@ -882,7 +889,8 @@ function TagChips({ tags }) {
 // "Load more events" button fetches the next page on request.
 const LINK_PICKER_PAGE = 500
 
-function IocTimelineLinks({ incidentId, ioc, isClosed }) {
+// onChanged: a link was added or removed (the list re-reads first / last seen).
+function IocTimelineLinks({ incidentId, ioc, isClosed, onChanged }) {
   const [links, setLinks]   = useState([])
   const [events, setEvents] = useState([])
   const [eventsCursor, setEventsCursor] = useState(null)   // next_cursor of the last page read
@@ -936,6 +944,7 @@ function IocTimelineLinks({ incidentId, ioc, isClosed }) {
       await api.linkIocTimelineEvent(incidentId, ioc.id, pick)
       setPick('')
       await load()
+      onChanged?.()
     } catch (e) {
       setErr(e.message || 'Could not link event')
     } finally {
@@ -947,6 +956,7 @@ function IocTimelineLinks({ incidentId, ioc, isClosed }) {
     try {
       await api.unlinkIocTimelineEvent(incidentId, ioc.id, eventId)
       await load()
+      onChanged?.()
     } catch (e) {
       setErr(e.message || 'Could not unlink event')
     } finally {
@@ -982,7 +992,7 @@ function IocTimelineLinks({ incidentId, ioc, isClosed }) {
                   onClick={() => removeLink(l.event_id)}
                   disabled={busy}
                   title="Unlink this event"
-                  style={{ fontSize: 11, padding: '0 6px', flexShrink: 0 }}
+                  style={{ flexShrink: 0 }}
                 >×</button>
               )}
             </div>
@@ -992,10 +1002,10 @@ function IocTimelineLinks({ incidentId, ioc, isClosed }) {
       {!isClosed && (
         <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
           <select
-            className="select"
+            className="select compact"
             value={pick}
             onChange={(e) => setPick(e.target.value)}
-            style={{ flex: 1, fontSize: 12 }}
+            style={{ flex: 1 }}
           >
             <option value="">
               {candidates.length ? '— link a timeline event —'
@@ -1012,7 +1022,6 @@ function IocTimelineLinks({ incidentId, ioc, isClosed }) {
             className="btn ghost"
             onClick={addLink}
             disabled={!pick || busy}
-            style={{ fontSize: 12 }}
           >
             Link
           </button>
@@ -1023,7 +1032,7 @@ function IocTimelineLinks({ incidentId, ioc, isClosed }) {
               onClick={loadMoreEvents}
               disabled={loadingMore}
               title={`The picker lists ${events.length} events so far; load the next ${LINK_PICKER_PAGE}`}
-              style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+              style={{ whiteSpace: 'nowrap' }}
               data-link-load-more
             >
               {loadingMore ? 'Loading…' : 'Load more events'}
@@ -1545,13 +1554,13 @@ function ExportModal({ incidentId, allIocs, onClose }) {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-2)', marginTop: 'var(--space-2)', padding: 'var(--space-2)', background: 'var(--surface-2)', borderRadius: 6 }}>
               <label style={{ fontSize: 12 }}>
                 <div style={{ marginBottom: 2, color: 'var(--muted)' }}>Action</div>
-                <select className="input" value={mdeConfig.action} onChange={e => setMde('action', e.target.value)} style={{ width: '100%', fontSize: 12 }}>
+                <select className="input compact" value={mdeConfig.action} onChange={e => setMde('action', e.target.value)} style={{ width: '100%' }}>
                   {MDE_ACTIONS.map(a => <option key={a}>{a}</option>)}
                 </select>
               </label>
               <label style={{ fontSize: 12 }}>
                 <div style={{ marginBottom: 2, color: 'var(--muted)' }}>Severity</div>
-                <select className="input" value={mdeConfig.severity} onChange={e => setMde('severity', e.target.value)} style={{ width: '100%', fontSize: 12 }}>
+                <select className="input compact" value={mdeConfig.severity} onChange={e => setMde('severity', e.target.value)} style={{ width: '100%' }}>
                   {MDE_SEVERITIES.map(s => <option key={s}>{s}</option>)}
                 </select>
               </label>
@@ -1572,11 +1581,11 @@ function ExportModal({ incidentId, allIocs, onClose }) {
               <label style={{ fontSize: 12, gridColumn: '1 / -1' }}>
                 <div style={{ marginBottom: 2, color: 'var(--muted)' }}>MITRE Techniques (comma-separated, e.g. T1059, T1046)</div>
                 <input
-                  type="text" className="input"
+                  type="text" className="input compact"
                   placeholder="T1059, T1046"
                   value={mdeConfig.mitre_techniques}
                   onChange={e => setMde('mitre_techniques', e.target.value)}
-                  style={{ width: '100%', fontSize: 12 }}
+                  style={{ width: '100%' }}
                 />
               </label>
               <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
@@ -1630,7 +1639,6 @@ function ExportModal({ incidentId, allIocs, onClose }) {
                         onClick={() => download(p.id)}
                         disabled={busy || count === 0}
                         title={count === 0 ? 'No compatible IOCs for this platform' : `Download ${p.sub}`}
-                        style={{ fontSize: 12 }}
                       >
                         {busy ? 'Downloading…' : 'Download'}
                       </button>
@@ -1667,7 +1675,6 @@ function ExportModal({ incidentId, allIocs, onClose }) {
                         onClick={() => download(id)}
                         disabled={busy || count === 0}
                         title={count === 0 ? 'No IOCs to export' : 'Download defanged plain-text list'}
-                        style={{ fontSize: 12 }}
                       >
                         {busy ? 'Downloading…' : 'Download'}
                       </button>
@@ -1754,7 +1761,6 @@ function CorrelationModal({ ioc, incidents, onClose }) {
                     <Link
                       to={`/incidents/${inc.id}/iocs`}
                       className="btn ghost"
-                      style={{ fontSize: 11, padding: '2px 8px' }}
                       onClick={onClose}
                     >
                       View ›

@@ -199,6 +199,28 @@ async def notify_custody_transfer(
     await commit_and_push(db)
 
 
+async def notify_custody_transfer_outcome(
+    db: AsyncSession,
+    requester_id: uuid.UUID,
+    incident_id: uuid.UUID,
+    incident_ref: str,
+    actor_username: str,
+    outcome: str,
+):
+    """L3 (R47): tell the requester of an internal custody transfer that it was accepted or declined
+    (outcome "accepted" | "declined" | "cancelled"). The incident ref only, like the request itself.
+    Commits, then pushes."""
+    await _create_and_push(
+        db,
+        requester_id,
+        type="custody_transfer",
+        title=f"Custody transfer {outcome} by {actor_username}",
+        body=f"Your custody transfer request on {incident_ref} was {outcome}",
+        incident_id=incident_id,
+    )
+    await commit_and_push(db)
+
+
 async def notify_assignment(
     db: AsyncSession,
     assignee_id: uuid.UUID,
@@ -220,24 +242,31 @@ async def notify_assignment(
     await commit_and_push(db)
 
 
-async def notify_le_package_built(
+_DISCLOSURE_PURPOSE_LABEL = {"law_enforcement": "law enforcement", "regulator": "regulator", "internal": "internal",
+                             "evidence_export": "evidence export"}
+
+
+async def notify_disclosure_built(
     db: AsyncSession,
     incident_id: uuid.UUID,
     incident_ref: str,
-    builder_username: str,
+    builder: User,
+    purpose: str,
 ):
-    """Tell every active admin that a non-admin incident lead built a law-enforcement
-    package (E3). The incident ref only. Commits, then pushes."""
+    """K1: tell every active admin except the builder that a Disclosure package was built (E3 told them only
+    of a non-admin lead's LE package). The incident ref and the purpose only. In-app only, so Dark Operation
+    allows it. Commits, then pushes."""
     admins = (await db.execute(
-        select(User).where(User.is_active == True, User.role == "admin")  # noqa: E712
+        select(User).where(User.is_active == True, User.role == "admin", User.id != builder.id)  # noqa: E712
     )).scalars().all()
+    label = _DISCLOSURE_PURPOSE_LABEL.get(purpose, purpose)
     for admin in admins:
         await _create_and_push(
             db,
             admin.id,
-            type="le_package",
-            title=f"LE package built on {incident_ref}",
-            body=f"{builder_username} built a law-enforcement package as incident lead",
+            type="disclosure",
+            title=f"Disclosure package built on {incident_ref}",
+            body=f"{builder.username} built a disclosure package ({label})",
             incident_id=incident_id,
         )
     await commit_and_push(db)
@@ -273,9 +302,12 @@ async def notify_incident_created(
     db: AsyncSession,
     creator_id: uuid.UUID,
     incident_id: uuid.UUID,
-    incident_title: str,
+    incident_ref: str,
+    creator_username: str,
+    severity: str,
 ):
-    """Notify all active users except the creator of a new incident."""
+    """Notify every active user who can see a new incident, except its creator. The ref and severity
+    only, never the title (L3, R47: like every other notification)."""
     users = await _incident_recipients(db, incident_id)
     for user in users:
         if user.id == creator_id:
@@ -284,8 +316,8 @@ async def notify_incident_created(
             db,
             user.id,
             type="incident_created",
-            title="New incident opened",
-            body=incident_title,
+            title=f"New incident {incident_ref}",
+            body=f"{creator_username} opened {incident_ref} (severity {severity})",
             incident_id=incident_id,
         )
     await commit_and_push(db)
@@ -321,16 +353,26 @@ async def notify_siem_incident(
     await commit_and_push(db)
 
 
+# NIST SP 800-61 R3 phase names (L3, R47: "Containment Eradication Recovery" lost its comma and "&").
+PHASE_LABEL = {
+    "preparation":                      "Preparation",
+    "detection_and_analysis":           "Detection & Analysis",
+    "containment_eradication_recovery": "Containment, Eradication & Recovery",
+    "post_incident":                    "Post-Incident Activity",
+}
+
+
 async def notify_phase_changed(
     db: AsyncSession,
     actor_id: uuid.UUID,
     incident_id: uuid.UUID,
     incident_ref: str,
-    incident_title: str,
+    actor_username: str,
     new_phase: str,
 ):
-    """Notify all active users (except the actor) that an incident's phase changed."""
-    phase_label = new_phase.replace("_", " ").title()
+    """Notify every active user who can see the incident (except the actor) that its phase changed.
+    The ref only, never the title (L3, R47)."""
+    phase_label = PHASE_LABEL.get(new_phase, new_phase)
     users = await _incident_recipients(db, incident_id)
     for user in users:
         if user.id == actor_id:
@@ -340,7 +382,7 @@ async def notify_phase_changed(
             user.id,
             type="phase_changed",
             title=f"{incident_ref} → {phase_label}",
-            body=incident_title,
+            body=f"{actor_username} moved {incident_ref} to {phase_label}",
             incident_id=incident_id,
         )
     await commit_and_push(db)

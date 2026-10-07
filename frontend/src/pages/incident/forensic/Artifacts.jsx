@@ -345,7 +345,6 @@ function ArtifactCard({ artifact, incidentId, isClosed, isSelected, onSelect, on
             download
             onClick={(e) => e.stopPropagation()}
             className="btn ghost"
-            style={{ fontSize: 11 }}
             title="Download (password-protected ZIP, password: infected)"
           >
             Download
@@ -354,7 +353,6 @@ function ArtifactCard({ artifact, incidentId, isClosed, isSelected, onSelect, on
             <button
               type="button"
               className="btn ghost"
-              style={{ fontSize: 11 }}
               title="Create SHA-256 + MD5 IOCs for this file (skips ones the incident already has)"
               onClick={(e) => { e.stopPropagation(); onPromote() }}
             >
@@ -365,7 +363,6 @@ function ArtifactCard({ artifact, incidentId, isClosed, isSelected, onSelect, on
             <button
               type="button"
               className="btn ghost"
-              style={{ fontSize: 11 }}
               onClick={(e) => { e.stopPropagation(); onDelete() }}
             >
               Delete

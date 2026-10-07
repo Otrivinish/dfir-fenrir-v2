@@ -21,6 +21,7 @@ from api_tokens.service import effective_role, resolve_token
 from audit.context import enrich_user_context
 from core.config import settings
 from core.database import get_db
+from core.errors import ApiError
 from core.redis_client import get_redis
 from core.security import hash_token
 from models import User, UserSession
@@ -189,7 +190,7 @@ async def current_session(
 def require_role(*allowed: str):
     async def _check(user: User = Depends(current_user)) -> User:
         if user.role not in allowed:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, f"Requires role: {allowed}")
+            raise ApiError(status.HTTP_403_FORBIDDEN, "insufficient_role", f"Requires role: {allowed}")
         return user
     return _check
 

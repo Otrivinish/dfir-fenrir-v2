@@ -9,6 +9,14 @@ from core.config import settings
 from core.outbound_policy import outbound_block_reasons
 
 
+def _as_utc(v: datetime) -> datetime:
+    """L4 (R131): audit_logs.timestamp is a naive UTC column (hashed as stored, so it stays naive); the API
+    marks it UTC, so it serialises with a trailing Z. Display only: neither the row nor its hash changes."""
+    if isinstance(v, datetime):
+        return v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v.astimezone(timezone.utc)
+    return v
+
+
 # ─── Auth ───────────────────────────────────────────────────────────────────
 
 class SetupRequest(BaseModel):
@@ -417,8 +425,14 @@ class IncidentOut(BaseModel):
         from_attributes = True
 
 
+class IncidentListItem(IncidentOut):
+    incident_commander: Optional[str] = Field(default=None, description=(
+        "L3 (R48): username of the incident's Incident Commander (the earliest assignment of the "
+        "incident_commander role); null when none is assigned. List responses only."))
+
+
 class IncidentList(BaseModel):
-    items:       list[IncidentOut]
+    items:       list[IncidentListItem]
     next_cursor: Optional[str] = None
 
 
@@ -555,7 +569,7 @@ class IncidentGates(BaseModel):
     items:       list[GateResult]
 
 
-IncidentCapability = Literal["read_audit_log", "manage_le_package", "set_teams", "override_gate",
+IncidentCapability = Literal["read_audit_log", "manage_le_package", "manage_disclosures", "set_teams", "override_gate",
                              "remove_any_assignment", "assign_lead_roles", "remove_own_assignment",
                              "replace_playbook", "sign_off_ic", "sign_off_dpo"]
 
@@ -566,7 +580,8 @@ class IncidentAccess(BaseModel):
                                       "role cap applies) assigned as Incident Commander or Deputy "
                                       "Incident Commander on this incident.")
     capabilities: list[IncidentCapability] = Field(
-        description="read_audit_log, manage_le_package (build/list/acknowledge LE packages), set_teams, "
+        description="read_audit_log, manage_le_package (build/list/acknowledge LE packages), manage_disclosures "
+                    "(K1: build/list/acknowledge disclosure packages), set_teams, "
                     "override_gate, remove_any_assignment: the incident lead. assign_lead_roles (create or "
                     "remove IC / Deputy assignments): the lead, or, while no active analyst or admin holds "
                     "IC / Deputy, the incident's creator or today's on-call analyst. "
@@ -786,6 +801,45 @@ class IncidentStartChecks(BaseModel):
     items:    list[StartCheck] = Field(description="Only the checks that apply to this incident.")
 
 
+# ─── Time in phase (K2, R38) ─────────────────────────────────────────────────
+# Read from the append-only audit log (incidents/phase_history.py): incident_create, the
+# incident_update rows that changed the phase, incident_close and incident_reopen.
+
+class PhasePeriod(BaseModel):
+    """One stay in a phase. Moving back to a phase starts a new period; a close ends the period and a
+    re-open starts a new one."""
+    phase:            Phase
+    entered_at:       datetime
+    left_at:          Optional[datetime] = Field(default=None, description="When the incident left the phase (a phase "
+                                                                           "change or the close). Null while current.")
+    duration_seconds: Optional[int]      = Field(default=None, description="left_at − entered_at. Null while current: "
+                                                                           "count from entered_at.")
+    ended_by:         Optional[Literal["phase_change", "close"]] = None
+
+
+class PhaseTotal(BaseModel):
+    phase:   Phase
+    seconds: int = Field(description="Total of the phase's finished periods.")
+    periods: int = Field(description="How many finished periods were added up.")
+
+
+class IncidentPhaseHistory(BaseModel):
+    """K2 (R38): time in the current phase and how long each earlier phase took. All times UTC."""
+    phase:      Phase    = Field(description="The incident's phase now.")
+    entered_at: datetime = Field(description="Start of the current (last) period: time in phase = now − entered_at "
+                                             "while open, or the last period's duration_seconds once closed.")
+    closed:     bool     = Field(description="The incident is closed: the last period has ended (left_at = the close).")
+    periods:    list[PhasePeriod] = Field(description="Oldest first.")
+    completed:  list[PhaseTotal]  = Field(description="Per phase, the finished periods added up (phases with none are "
+                                                      "left out), in 800-61 order.")
+
+
+class RespondCategoryCount(BaseModel):
+    total: int = Field(description="Actions in this category, any status.")
+    done:  int = Field(description="Status done.")
+    open:  int = Field(description="Status open or in_progress.")
+
+
 class IncidentSnapshot(BaseModel):
     """At-a-glance per-incident counts for the Details landing tab and the
     incident rail's live counts.
@@ -809,6 +863,11 @@ class IncidentSnapshot(BaseModel):
     respond_total:    int = Field(description="All Respond actions, any status (done, deferred and "
                                               "reverted included).")
     handoffs_pending: int = Field(description="Shift handoffs not yet acknowledged (status pending).")
+    respond_containment: RespondCategoryCount = Field(description="K2: Respond actions with category containment.")
+    respond_eradication_recovery: RespondCategoryCount = Field(description="K2: Respond actions with category "
+                                                                         "eradication or recovery.")
+    decisions:        int = Field(description="K2: decisions recorded (Respond › Decisions).")
+    phase_history:    IncidentPhaseHistory = Field(description="K2: time in phase; see GET …/phase-history.")
     recovery:         RecoverySummary = Field(description="Recovery tracker roll-up (I1): per-state counts over "
                                                           "the in-scope systems; see GET …/recovery.")
     notifications:    StakeholderNotificationSummary = Field(description="Stakeholder notification tracker roll-up (I2); "
@@ -870,6 +929,10 @@ class IOCOut(BaseModel):
     lolbin_name:     Optional[str] = None
     # Set on the list endpoint only; null when no containment action applies.
     containment:     Optional[ContainmentOut] = None
+    # K4 — set on the list endpoint only: earliest / latest event_time of the linked timeline
+    # events; null when no event is linked.
+    first_seen_at:   Optional[datetime] = None
+    last_seen_at:    Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -1274,7 +1337,9 @@ TIME_OFFSET_DESCRIPTION = (
 LawfulBasis  = Literal["ir", "consent", "warrant", "court_order", "eio", "mla", "lia", "other"]
 SystemState  = Literal["powered_off", "live", "live_critical", "unknown"]
 # Collection-wizard slice (ISO/IEC 27037 §7) — see docs/coc-collection-wizard-slice.md
-DeviceType       = Literal["computer", "peripheral", "storage", "mobile", "network", "cctv"]
+# K1 (R37): email_export, vendor_report and network_capture are data exports with no device to tag.
+DeviceType       = Literal["computer", "peripheral", "storage", "mobile", "network", "cctv",
+                           "email_export", "vendor_report", "network_capture"]
 HandlingMode     = Literal["collect", "acquire"]
 AcquisitionScope = Literal["full_image", "logical"]
 
@@ -1429,7 +1494,9 @@ _LAWFUL_BASIS_DOC = ("Lawful basis for the acquisition: ir = incident response (
 _SYSTEM_STATE_DOC = ("State of the system when acquired: powered_off (forensic image), live (justify in "
                      "live_justification), live_critical (live, could not be powered off; justify), unknown")
 _DEVICE_TYPES_DOC = ("ISO/IEC 27037 §7 device types (a list): computer, peripheral, storage (media), mobile, "
-                     "network (device), cctv (CCTV / video surveillance)")
+                     "network (device), cctv (CCTV / video surveillance); for data handed over as an export: "
+                     "email_export (.eml / .msg / mailbox export), vendor_report (an EDR / vendor report), "
+                     "network_capture (a PCAP / firewall or proxy log export)")
 _HANDLING_MODE_DOC = "ISO/IEC 27037 §7 handling: collect (seize the device) or acquire (copy the data)"
 _ACQUISITION_SCOPE_DOC = ("full_image (a complete image) or logical (selected data; give "
                           "logical_acquisition_rationale)")
@@ -1904,7 +1971,8 @@ class UploadSessionCreate(BaseModel):
                     "body again (authoritative). Enum values: tlp red | amber_strict | amber | green | clear; "
                     "lawful_basis ir | consent | warrant | court_order | eio | mla | lia | other; system_state "
                     "powered_off | live | live_critical | unknown; device_types [computer | peripheral | storage | "
-                    "mobile | network | cctv]; handling_mode collect | acquire; acquisition_scope full_image | "
+                    "mobile | network | cctv | email_export | vendor_report | network_capture]; handling_mode "
+                    "collect | acquire; acquisition_scope full_image | "
                     "logical; target_hash_scope uploaded_file | container_media; collected_as_role defr | des; "
                     "browser (webhistory) chrome | edge | brave | firefox. Only the schema is checked here: "
                     "the witness, entity, identifier and hash checks run at `complete`.")
@@ -2170,9 +2238,18 @@ class CustodyEventOut(BaseModel):
     outcome:      Optional[str] = None
     details:      dict = Field(default_factory=dict)
     ip_address:   Optional[str] = None
+    user_agent:   Optional[str] = None
     created_at:   datetime
     hash:         Optional[str] = None
     prev_hash:    Optional[str] = None
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_utc(cls, v: datetime) -> datetime:   # L4 (R131): the audit row's naive UTC time
+        return _as_utc(v)
+    # K1 (R37): the exhibit an evidence event is about (resource_type evidence), by its identifier.
+    exhibit_identifier: Optional[str] = None
+    exhibit_name:       Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -2850,6 +2927,14 @@ class DecisionList(BaseModel):
 # ─── Timeline events ─────────────────────────────────────────────────────────
 
 TimelineOrigin = Literal["manual", "forensic_import", "system"]
+
+
+class TimelineIocRef(BaseModel):
+    """K3: an IOC linked to a timeline event (link / unlink with POST / DELETE …/iocs/{ioc_id}/timeline-links)."""
+    id:        UUID
+    type:      str
+    value:     str
+    malicious: Optional[bool] = None
 # C5 — how an imported event's UTC time was worked out (forensic/parser.py): explicit (the record
 # states UTC/an offset), assumed_tz (naive, read in the import's source_tz), inferred_year (BSD
 # syslog, year from the exhibit's acquisition time). 'missing' = no time: never promoted.
@@ -2923,6 +3008,13 @@ class TimelineEventOut(BaseModel):
     promoted_from_kind:   Optional[Literal["warroom", "comment"]] = Field(default=None, description=(
         "J4: promoted from a War Room message (warroom) or a comment (comment); promoted_from_id is its id."))
     promoted_from_id:     Optional[UUID] = None
+    is_key:               bool = Field(default=False, description="K3: an analyst flagged it a key event (PATCH is_key).")
+    key_event:            bool = Field(default=False, description=(
+        "Read-only. A key event: flagged (is_key), ATT&CK-tagged (a tactic or technique set), or recorded by the "
+        "server itself (server_generated). What ?key=true lists, and the Situation board's Key timeline."))
+    linked_iocs:          list[TimelineIocRef] = Field(default_factory=list, description=(
+        "K3: the IOCs linked to this event, by value. Link / unlink with POST / DELETE "
+        "…/iocs/{ioc_id}/timeline-links."))
 
     class Config:
         from_attributes = True
@@ -2950,6 +3042,7 @@ class TimelineEventCreate(BaseModel):
                     "writes itself (closure, gate_override, milestone, triage, respond_action, "
                     "respond_action_revert, decision, legal_deadline, ic_transfer) are refused: 422 reserved_system_source. "
                     "Ignored by the batch import.")
+    is_key:               bool            = Field(default=False, description="K3: flag it a key event.")
 
 
 class TimelineEventUpdate(BaseModel):
@@ -2966,6 +3059,8 @@ class TimelineEventUpdate(BaseModel):
     mitre_tactic_name:    Optional[str]   = Field(default=None, max_length=64)
     mitre_technique_id:   Optional[str]   = Field(default=None, max_length=16)
     mitre_technique_name: Optional[str]   = Field(default=None, max_length=128)
+    is_key:               Optional[bool]  = Field(default=None, description="K3: flag / unflag it a key event. "
+                                                                            "Allowed on imported events too.")
 
 
 class TimelineEventList(BaseModel):
@@ -3486,6 +3581,11 @@ class DetectionBundle(BaseModel):
 class AuditLogEntryOut(BaseModel):
     id:             UUID
     timestamp:      datetime
+
+    @field_validator("timestamp")
+    @classmethod
+    def _timestamp_utc(cls, v: datetime) -> datetime:
+        return _as_utc(v)
     user_id:        Optional[UUID] = None
     username:       Optional[str]  = None
     role_at_time:   Optional[str]  = None
@@ -3496,6 +3596,8 @@ class AuditLogEntryOut(BaseModel):
     resource_label: Optional[str]  = None
     details:        dict = Field(default_factory=dict)
     ip_address:     Optional[str]  = None
+    user_agent:     Optional[str]  = Field(None, description="Client User-Agent, sanitised (no control "
+                                           "characters, at most 512). Part of the row hash from hash v3.")
     request_method: Optional[str]  = None
     request_path:   Optional[str]  = None
     request_id:     Optional[str]  = None
@@ -4074,6 +4176,13 @@ class LePackagePrepare(BaseModel):
                                    "with no custody log or file. Audited.")
 
 
+# K1 (R36): one Disclosure package replaces Evidence › Export and the LE package.
+DisclosurePurpose = Literal["internal", "law_enforcement", "regulator"]
+# The LE bases plus statutory (a legal obligation to report, e.g. GDPR Art. 33, NIS2 Art. 23) and internal.
+DisclosureLegalBasis = Literal["warrant", "subpoena", "court_order", "eio", "mla", "voluntary", "other",
+                               "statutory", "internal"]
+
+
 class LePackageOut(BaseModel):
     id:                    UUID
     incident_id:           UUID
@@ -4119,11 +4228,16 @@ class LePackageOut(BaseModel):
     sender_declaration:      Optional[str] = None
     signature_kind:          Optional[str] = Field(
         default=None,
-        description="How MANIFEST.json is protected: hmac-sha256 (INTEGRITY.sig, keyed with "
-                    "SHA-256 of the bundle password). Packages built before 2026-10-03 say ed25519, "
-                    "a wrong label: they are HMAC-SHA-256 too.")
+        description="How MANIFEST.json is protected. ed25519+hmac-sha256 (K1, 2026-10-06 on): an Ed25519 "
+                    "signature (MANIFEST.json.sig, verify with SIGNING_PUBLIC_KEY.pem; the key's fingerprint is "
+                    "in GET /api/version) plus the HMAC in INTEGRITY.sig. hmac-sha256: INTEGRITY.sig only, keyed "
+                    "with SHA-256 of the bundle password. Packages built before 2026-10-03 say ed25519, a wrong "
+                    "label: they are HMAC-SHA-256 only.")
     acknowledged_at:         Optional[datetime] = None
     acknowledged_by_name:    Optional[str] = None
+    purpose:                 DisclosurePurpose = Field(
+        default="law_enforcement",
+        description="K1: internal | law_enforcement | regulator. Packages built before K1 are law_enforcement.")
 
     class Config:
         from_attributes = True
@@ -4137,6 +4251,69 @@ class LePackagePrepared(LePackageOut):
     download_url:       str
     # When enable_acknowledgment was True, the recipient-facing ack URL.
     acknowledgment_url: Optional[str] = None
+
+
+class DisclosureCreate(BaseModel):
+    """K1: build a Disclosure package — exhibits plus the purpose's records, always signed (Ed25519 over
+    MANIFEST.json) and custody-logged per exhibit. law_enforcement and regulator need case_reference,
+    requesting_authority and legal_basis (422 disclosure_field_required); internal defaults them."""
+    purpose:                 DisclosurePurpose
+    item_ids:                Optional[list[UUID]] = Field(
+        default=None, max_length=5000,
+        description="Exhibits to disclose. Omitted or null: every exhibit that can be disclosed (not destroyed, "
+                    "not verify_failed). []: none (records only). A destroyed or verify_failed exhibit is refused "
+                    "(409 evidence_not_exportable); one of another incident is 404.")
+    recipient_name:          str = Field(min_length=1, max_length=256,
+                                         description="The person who receives the package (all purposes).")
+    case_reference:          Optional[str] = Field(default=None, max_length=128,
+                                                   description="Required for law_enforcement / regulator; internal "
+                                                               "defaults to the incident ref.")
+    requesting_authority:    Optional[str] = Field(default=None, max_length=256,
+                                                   description="The authority / regulator (required for "
+                                                               "law_enforcement / regulator; internal: optional).")
+    legal_basis:             Optional[DisclosureLegalBasis] = Field(
+        default=None, description="Required for law_enforcement / regulator (internal is not allowed for them); "
+                                  "internal defaults to internal.")
+    retention_until:         Optional[datetime] = None
+    include_artifacts:       bool = Field(default=False, description="Add the quarantine artifacts (opt-in).")
+    include_unsealed_drafts: bool = Field(
+        default=False, description="Include exhibits whose chain of custody is not sealed. Default: listed in "
+                                   "Evidence_Inventory.csv as \"excluded: unsealed draft\" with no custody log or "
+                                   "file. Audited.")
+    eio_reference:           Optional[str] = Field(default=None, max_length=128)
+    issuing_state:           Optional[str] = Field(default=None, max_length=64)
+    executing_state:         Optional[str] = Field(default=None, max_length=64)
+    mla_reference:           Optional[str] = Field(default=None, max_length=128)
+    recipient_role:          Optional[str] = Field(default=None, max_length=128)
+    recipient_id_ref:        Optional[str] = Field(default=None, max_length=128)
+    recipient_organisation:  Optional[str] = Field(default=None, max_length=256)
+    recipient_address:       Optional[str] = Field(default=None, max_length=4096)
+    delivery_channel:        Optional[DeliveryChannel] = None
+    delivery_notes:          Optional[str] = Field(default=None, max_length=4096)
+    sender_declaration:      Optional[str] = Field(default=None, max_length=4096)
+    enable_acknowledgment:   bool = Field(default=False, description="Mint a single-use recipient receipt URL.")
+
+
+class DisclosureOut(LePackageOut):
+    item_ids: list[UUID] = Field(default_factory=list,
+                                 description="The exhibits in the package (unsealed drafts left out are not listed).")
+
+
+class DisclosureCreated(DisclosureOut):
+    """Returned once. bundle_password is the only copy (not stored)."""
+    bundle_password:          str
+    download_url:             str
+    acknowledgment_url:       Optional[str] = None
+    unsealed_drafts_excluded: list[str] = Field(default_factory=list,
+                                                description="Identifiers of the drafts left out.")
+    integrity_failures:       list[dict] = Field(
+        default_factory=list, description="{evidence_id, identifier, integrity} of exhibits that failed their "
+                                          "integrity check while the package was built (now frozen).")
+
+
+class DisclosureList(BaseModel):
+    items:       list[DisclosureOut]
+    next_cursor: Optional[str] = None
 
 
 # Acknowledgment loop — recipient hits the URL emitted on creation.

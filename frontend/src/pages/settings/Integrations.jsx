@@ -211,7 +211,7 @@ function WebhookPanel() {
           <input className="input" type="url" value={teams} onChange={e => { setTeams(e.target.value); setOk('') }}
             placeholder={cfg.teams_url_set ? 'Paste new URL to replace, or leave blank' : 'https://xxx.webhook.office.com/…'} />
           {cfg.teams_url_set && !teams && (
-            <button type="button" className="btn ghost" style={{ fontSize: 11, marginTop: 4 }}
+            <button type="button" className="btn ghost" style={{ marginTop: 4 }}
               onClick={async () => { await api.saveWebhookConfig({ teams_url: '' }); setCfg(c => ({ ...c, teams_url_set: false, teams_url_preview: null })) }}>
               Remove Teams URL
             </button>
@@ -221,7 +221,7 @@ function WebhookPanel() {
           <input className="input" type="url" value={slack} onChange={e => { setSlack(e.target.value); setOk('') }}
             placeholder={cfg.slack_url_set ? 'Paste new URL to replace, or leave blank' : 'https://hooks.slack.com/services/…'} />
           {cfg.slack_url_set && !slack && (
-            <button type="button" className="btn ghost" style={{ fontSize: 11, marginTop: 4 }}
+            <button type="button" className="btn ghost" style={{ marginTop: 4 }}
               onClick={async () => { await api.saveWebhookConfig({ slack_url: '' }); setCfg(c => ({ ...c, slack_url_set: false, slack_url_preview: null })) }}>
               Remove Slack URL
             </button>
@@ -289,19 +289,21 @@ function SiemInboundPanel() {
         Authenticate with <code style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>X-Fenrir-Key: &lt;key&gt;</code> header.
       </p>
 
-      <table className="data-table" style={{ width: '100%', marginBottom: 'var(--space-4)' }}>
-        <thead><tr><th>SIEM</th><th>Endpoint</th></tr></thead>
-        <tbody>
-          {endpoints.map(ep => (
-            <tr key={ep.label}>
-              <td>{ep.label}</td>
-              <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                POST {BASE_URL}{ep.path}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="table-scroll">
+        <table className="data-table" style={{ width: '100%', marginBottom: 'var(--space-4)' }}>
+          <thead><tr><th>SIEM</th><th>Endpoint</th></tr></thead>
+          <tbody>
+            {endpoints.map(ep => (
+              <tr key={ep.label}>
+                <td>{ep.label}</td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                  POST {BASE_URL}{ep.path}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
         <span style={{ fontSize: 13 }}>
@@ -521,31 +523,31 @@ function SyslogPanel() {
             </FieldRow>
 
             <FieldRow label={`CA bundle (PEM, optional)${cfg.ca_bundle_set ? ' — set' : ''}`}>
-              <textarea className="input" rows={3} value={draft.ca_bundle} onChange={setDraftK('ca_bundle')}
+              <textarea className="input compact" rows={3} value={draft.ca_bundle} onChange={setDraftK('ca_bundle')}
                 placeholder={cfg.ca_bundle_set ? 'Paste new PEM to replace, leave blank to keep' : '-----BEGIN CERTIFICATE-----\n…'}
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }} />
+                style={{ fontFamily: 'var(--font-mono)' }} />
               {cfg.ca_bundle_set && (
-                <button type="button" className="btn ghost" style={{ fontSize: 11, marginTop: 4 }}
+                <button type="button" className="btn ghost" style={{ marginTop: 4 }}
                         onClick={() => clearPem('ca_bundle')}>Remove saved CA bundle</button>
               )}
             </FieldRow>
 
             <FieldRow label={`Client certificate (PEM, mTLS — optional)${cfg.client_cert_set ? ' — set' : ''}`}>
-              <textarea className="input" rows={3} value={draft.client_cert} onChange={setDraftK('client_cert')}
+              <textarea className="input compact" rows={3} value={draft.client_cert} onChange={setDraftK('client_cert')}
                 placeholder={cfg.client_cert_set ? 'Paste new PEM to replace, leave blank to keep' : '-----BEGIN CERTIFICATE-----\n…'}
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }} />
+                style={{ fontFamily: 'var(--font-mono)' }} />
               {cfg.client_cert_set && (
-                <button type="button" className="btn ghost" style={{ fontSize: 11, marginTop: 4 }}
+                <button type="button" className="btn ghost" style={{ marginTop: 4 }}
                         onClick={() => clearPem('client_cert')}>Remove client certificate</button>
               )}
             </FieldRow>
 
             <FieldRow label={`Client key (PEM, mTLS — optional)${cfg.client_key_set ? ' — set' : ''}`}>
-              <textarea className="input" rows={3} value={draft.client_key} onChange={setDraftK('client_key')}
+              <textarea className="input compact" rows={3} value={draft.client_key} onChange={setDraftK('client_key')}
                 placeholder={cfg.client_key_set ? '••••••••' : '-----BEGIN PRIVATE KEY-----\n…'}
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }} autoComplete="new-password" />
+                style={{ fontFamily: 'var(--font-mono)' }} autoComplete="new-password" />
               {cfg.client_key_set && (
-                <button type="button" className="btn ghost" style={{ fontSize: 11, marginTop: 4 }}
+                <button type="button" className="btn ghost" style={{ marginTop: 4 }}
                         onClick={() => clearPem('client_key')}>Remove client key</button>
               )}
             </FieldRow>

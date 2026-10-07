@@ -124,15 +124,18 @@ async def list_iocs(
     db: AsyncSession = Depends(get_db),
     type:   Optional[IocType] = Query(default=None),
     tag:    Optional[str]     = Query(default=None, description="Filter by tag (canonical lowercase-dashed); a value with no usable characters is 422 invalid_tag"),
+    entity_id: Optional[uuid.UUID] = Query(default=None, description="Only IOCs linked to this entity (K4)"),
     limit:  int               = Query(default=50, ge=1, le=200),
     cursor: Optional[str]     = Query(default=None),
 ) -> IOCList:
     """List indicators of compromise for an incident, newest first.
 
-    Supports optional filtering by `type` and `tag` (canonical lowercase-dashed),
-    and cursor-based pagination via `limit` and `cursor`. Each item is enriched
-    with threat-intel match info, a LOLBins flag for file_path IOCs and its
-    `containment` state from the Respond board (blocked / pending, or null).
+    Supports optional filtering by `type`, `tag` (canonical lowercase-dashed) and
+    `entity_id`, and cursor-based pagination via `limit` and `cursor`. Each item is
+    enriched with threat-intel match info, a LOLBins flag for file_path IOCs, its
+    `containment` state from the Respond board (blocked / pending, or null) and
+    `first_seen_at` / `last_seen_at`: the earliest and latest `event_time` of the timeline
+    events linked to it (null when none are linked).
     Requires an authenticated user with access to the incident. Returns a
     paginated `IOCList` with `items` and `next_cursor`.
     """
@@ -146,6 +149,8 @@ async def list_iocs(
     )
     if type:
         stmt = stmt.where(IOC.type == type)
+    if entity_id:
+        stmt = stmt.where(IOC.entity_id == entity_id)
     if tag:
         from core.tags import canonical_tag_or_422
         # Whole-tag, case-folded match on the `json` text (see list_incidents); 422 invalid_tag
@@ -179,9 +184,19 @@ async def list_iocs(
     # Resolve adder usernames for display (batched)
     umap = await _username_map(db, [i.added_by_id for i in items])
     containment = await containment_map(db, RespondAction.ioc_id, [i.id for i in items])
+    # K4 (R40): first / last seen = the linked timeline events' earliest / latest time (one grouped query).
+    seen = {r.ioc_id: (r.first, r.last) for r in (await db.execute(
+        select(IocTimelineLink.ioc_id,
+               func.min(TimelineEvent.event_time).label("first"),
+               func.max(TimelineEvent.event_time).label("last"))
+        .join(TimelineEvent, TimelineEvent.id == IocTimelineLink.timeline_event_id)
+        .where(IocTimelineLink.ioc_id.in_([i.id for i in items]))
+        .group_by(IocTimelineLink.ioc_id)
+    )).all()} if items else {}
     for ioc in items:
         ioc.added_by_username = umap.get(ioc.added_by_id)
         ioc.containment = containment.get(ioc.id)
+        ioc.first_seen_at, ioc.last_seen_at = seen.get(ioc.id, (None, None))
 
     next_cursor = _encode_cursor(offset + limit) if has_more else None
     return IOCList(items=items, next_cursor=next_cursor)
@@ -402,15 +417,17 @@ async def scan_ti(
 
 _OUTBOUND_409 = {409: {"model": ApiErrorBody, "description": "outbound_confirmation_required (Dark Operation or "
                                                                "TLP:RED incident; body has `reason`)"}}
+_OUTBOUND_403 = {403: {"model": ApiErrorBody, "description": "insufficient_role (a viewer: outbound OSINT needs the "
+                                                               "analyst role, L4 R137)"}}
 
 
 @router.post("/{incident_id}/iocs/enrich-all", response_model=IocEnrichAllResponse,
-             summary="Enrich all incident IOCs via OSINT", responses=_OUTBOUND_409)
+             summary="Enrich all incident IOCs via OSINT", responses={**_OUTBOUND_409, **_OUTBOUND_403})
 async def enrich_all_iocs(
     incident_id: uuid.UUID,
     req: IocEnrichAllRequest,
     request: Request,
-    user: User = Depends(current_user),
+    user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> IocEnrichAllResponse:
     """Enrich all IOCs for an incident with OSINT sources (cached where possible).
@@ -418,8 +435,8 @@ async def enrich_all_iocs(
     Uses the caller-supplied `sources` from the request body, or all available
     sources when none are given; capped at the 500 most recent IOCs. Runs
     sequentially per IOC (parallel within each IOC's sources) to avoid hammering
-    external rate limits. Results are cached in EnrichmentCache. Requires an
-    authenticated user with access to the incident. Returns an
+    external rate limits. Results are cached in EnrichmentCache. Requires the
+    analyst role (outbound OSINT; viewers 403 insufficient_role) and access to the incident. Returns an
     `IocEnrichAllResponse` with counts and per-IOC enrichment results.
     On a Dark Operation or TLP:RED incident: 409 outbound_confirmation_required
     unless `confirm_outbound` is true; a confirmed run is audited first as
@@ -489,20 +506,20 @@ async def enrich_all_iocs(
 # FastAPI matches the longer path segment first.
 
 @router.post("/{incident_id}/iocs/{ioc_id}/enrich",
-             summary="Enrich a single IOC via OSINT", responses=_OUTBOUND_409)
+             summary="Enrich a single IOC via OSINT", responses={**_OUTBOUND_409, **_OUTBOUND_403})
 async def enrich_single_ioc(
     incident_id: uuid.UUID,
     ioc_id: uuid.UUID,
     request: Request,
     confirm_outbound: bool = Query(default=False, description="Required (true) on a Dark Operation "
                                    "or TLP:RED incident: the lookup leaves the platform. Audited."),
-    user: User = Depends(current_user),
+    user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> list[EnrichResultItem]:
     """Enrich a single IOC against all available OSINT sources applicable to its
     type (cached where possible). Returns 404 if the IOC is not found on the
-    incident. Requires an authenticated user with access to the incident.
-    Returns a list of `EnrichResultItem`, one per source (empty if none apply).
+    incident. Requires the analyst role (outbound OSINT; viewers 403 insufficient_role) and
+    access to the incident. Returns a list of `EnrichResultItem`, one per source (empty if none apply).
     On a Dark Operation or TLP:RED incident: 409 outbound_confirmation_required
     unless `confirm_outbound=true`; a confirmed lookup is audited first as
     `outbound_manual_lookup` (sources, IOC type; no value).
@@ -652,13 +669,14 @@ async def _get_ioc(db: AsyncSession, incident_id: uuid.UUID, ioc_id: uuid.UUID) 
         select(IOC).where(IOC.id == ioc_id, IOC.incident_id == incident_id)
     )).scalar_one_or_none()
     if not ioc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "IOC not found")
+        raise ApiError(status.HTTP_404_NOT_FOUND, "ioc_not_found", "IOC not found")
     return ioc
 
 
 @router.get("/{incident_id}/iocs/{ioc_id}/timeline-links",
             response_model=IocTimelineLinkList,
-            summary="List timeline events linked to an IOC")
+            summary="List timeline events linked to an IOC",
+            responses={404: {"model": ApiErrorBody, "description": "ioc_not_found or incident_not_found"}})
 async def list_ioc_timeline_links(
     incident_id: uuid.UUID,
     ioc_id: uuid.UUID,
@@ -687,7 +705,10 @@ async def list_ioc_timeline_links(
 @router.post("/{incident_id}/iocs/{ioc_id}/timeline-links",
              response_model=IocTimelineLinkOut,
              status_code=status.HTTP_201_CREATED,
-             summary="Link a timeline event to an IOC")
+             summary="Link a timeline event to an IOC",
+             responses={404: {"model": ApiErrorBody, "description": "ioc_not_found, timeline_event_not_found or "
+                                                                    "incident_not_found"},
+                        409: {"model": ApiErrorBody, "description": "incident_closed or already_linked"}})
 async def link_ioc_timeline_event(
     incident_id: uuid.UUID,
     ioc_id: uuid.UUID,
@@ -704,7 +725,7 @@ async def link_ioc_timeline_event(
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
     await _get_ioc(db, incident_id, ioc_id)
 
     ev = (await db.execute(
@@ -714,7 +735,7 @@ async def link_ioc_timeline_event(
         )
     )).scalar_one_or_none()
     if not ev:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Timeline event not found")
+        raise ApiError(status.HTTP_404_NOT_FOUND, "timeline_event_not_found", "Timeline event not found")
 
     db.add(IocTimelineLink(
         id=uuid.uuid4(), ioc_id=ioc_id, timeline_event_id=ev.id, created_by_id=user.id,
@@ -723,7 +744,7 @@ async def link_ioc_timeline_event(
         await db.flush()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "This event is already linked to the IOC")
+        raise ApiError(status.HTTP_409_CONFLICT, "already_linked", "This event is already linked to the IOC")
 
     await write_audit(
         db, "ioc_timeline_link",
@@ -737,7 +758,9 @@ async def link_ioc_timeline_event(
 
 
 @router.delete("/{incident_id}/iocs/{ioc_id}/timeline-links/{event_id}",
-               summary="Unlink a timeline event from an IOC")
+               summary="Unlink a timeline event from an IOC",
+               responses={404: {"model": ApiErrorBody, "description": "link_not_found or incident_not_found"},
+                          409: {"model": ApiErrorBody, "description": "incident_closed"}})
 async def unlink_ioc_timeline_event(
     incident_id: uuid.UUID,
     ioc_id: uuid.UUID,
@@ -753,7 +776,7 @@ async def unlink_ioc_timeline_event(
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
 
     link = (await db.execute(
         select(IocTimelineLink).where(
@@ -762,7 +785,7 @@ async def unlink_ioc_timeline_event(
         )
     )).scalar_one_or_none()
     if not link:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Link not found")
+        raise ApiError(status.HTTP_404_NOT_FOUND, "link_not_found", "Link not found")
     await db.delete(link)
     await write_audit(
         db, "ioc_timeline_unlink",

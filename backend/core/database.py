@@ -1051,4 +1051,21 @@ _INPLACE_MIGRATIONS: list[str] = [
     "WHERE promoted_from_id IS NOT NULL",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_decisions_promoted_from ON decisions(promoted_from_kind, promoted_from_id) " +
     "WHERE promoted_from_id IS NOT NULL",
+
+    # K1 (R36) — a Disclosure package's purpose. Existing rows are LE packages: the constant default fills them
+    # without a rewrite (PG 11+: metadata-only ADD COLUMN), and the CHECK scans le_packages once (one row per
+    # package built; small), well inside the 5 s lock_timeout.
+    "ALTER TABLE le_packages ADD COLUMN IF NOT EXISTS purpose VARCHAR(24) NOT NULL DEFAULT 'law_enforcement'",
+    _add_check_if_missing("le_packages", "ck_le_packages_purpose_k1",
+                          "purpose IN ('internal', 'law_enforcement', 'regulator')"),
+
+    # K3 (R39) — the analyst's "key event" flag on a timeline event. The constant default fills existing rows
+    # without a rewrite (metadata-only ADD COLUMN), well inside the 5 s lock_timeout.
+    "ALTER TABLE timeline_events ADD COLUMN IF NOT EXISTS is_key BOOLEAN NOT NULL DEFAULT false",
+    # K2 (R38) — time in phase is read from the append-only audit log (incident_create / _update / _close /
+    # _reopen rows), on every snapshot. A partial index over the incident rows keeps that (and the gates'
+    # last-re-opened lookup) off a full scan. Building it takes SHARE on audit_logs (inserts wait; about
+    # 3 000 rows on 2026-10-07, milliseconds); IF NOT EXISTS makes a re-run a no-op.
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_incident_resource ON audit_logs(resource_id, action) "
+    "WHERE resource_type = 'incident'",
 ]

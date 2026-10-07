@@ -340,6 +340,8 @@ def _row_block(idx: int, row: AuditLog) -> KeepTogether:
         extras.append(f"<b>session</b> <font face=\"Courier\">{_pesc(str(row.session_id)[:8])}…</font>")
     if extras:
         parts.append(Paragraph(" &nbsp;·&nbsp; ".join(extras), meta_style))
+    if row.user_agent:
+        parts.append(Paragraph(f"<b>User agent</b> &nbsp; {_pesc(row.user_agent)}", meta_style))
 
     det = _format_details(row.details)
     if det:

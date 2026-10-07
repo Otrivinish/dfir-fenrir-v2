@@ -27,20 +27,21 @@ from incidents.access import (DPO_ROLE_KEY, LEAD_ROLE_KEYS, accessible_filter, g
                               held_role_keys, incident_capabilities, is_incident_dpo, is_incident_lead,
                               not_incident_lead, require_incident_person)
 from incidents.gates import GATE_LABEL, GATES, evaluate_gate, gate_state, sign_off_out
+from incidents.phase_history import phase_history
 from incidents.reference import assign as assign_reference
 from incidents.start_checks import evaluate as evaluate_start_checks
-from models import (ClosureChecklistItem, Entity, EntityEvent, EntityFile, Evidence, IOC, Incident,
+from models import (ClosureChecklistItem, Decision, Entity, EntityEvent, EntityFile, Evidence, IOC, Incident,
                     IncidentAssignment, IncidentGateSignOff, IncidentHandoff, OperationalRole, PlaybookTask, RespondAction, Team,
                     TimelineEvent, User, incident_teams, user_team, utcnow)
-from notifications.service import notify_assignment, notify_incident_created, notify_phase_changed
+from notifications.service import PHASE_LABEL, notify_assignment, notify_incident_created, notify_phase_changed
 from outbound_webhooks.service import suppressed_by_outbound_policy
 from recovery.service import rollup as recovery_rollup
 from stakeholder_notifications.service import (record_level as record_severity_level, rollup as notifications_rollup,
                                                sync as sync_notifications)
 from schemas import (INCIDENT_CREATE_REQUIRED, GateName, GateResult, GateSignOffCreate, GateSignOffOut, GateUnmetBody,
                      IncidentAccess, IncidentClose, IncidentCreate,
-                     IncidentGates, IncidentList, IncidentOut, IncidentReopen, IncidentSnapshot, IncidentStartChecks,
-                     IncidentUpdate, IncidentState, Phase, Severity, Tlp)
+                     IncidentGates, IncidentList, IncidentListItem, IncidentOut, IncidentPhaseHistory, IncidentReopen, IncidentSnapshot,
+                     IncidentStartChecks, IncidentUpdate, IncidentState, Phase, RespondCategoryCount, Severity, Tlp)
 
 router = APIRouter()
 
@@ -257,7 +258,7 @@ async def list_incidents(
     tag (canonical lowercase-dashed), mine (only incidents the caller
     created) and ref (exact incident reference, legacy INC-NNNN or
     PREFIX-YYYY-NNNNN). Paginate with limit (1-200) and the opaque cursor. Returns
-    {items, next_cursor}.
+    {items, next_cursor}; each item also carries `incident_commander` (the IC's username, or null).
     """
     offset = _decode_cursor(cursor)
 
@@ -281,7 +282,20 @@ async def list_incidents(
     rows = (await db.execute(stmt)).scalars().all()
 
     has_more = len(rows) > limit
-    items = [IncidentOut.model_validate(r) for r in rows[:limit]]
+    page = rows[:limit]
+    # L3 (R48): each incident's Incident Commander (earliest IC assignment), one query for the page.
+    ic_by_incident: dict = {}
+    if page:
+        for inc_id, username in (await db.execute(
+            select(IncidentAssignment.incident_id, IncidentAssignment.username)
+            .join(OperationalRole, OperationalRole.id == IncidentAssignment.role_id)
+            .where(IncidentAssignment.incident_id.in_([r.id for r in page]),
+                   OperationalRole.key == "incident_commander")
+            .order_by(IncidentAssignment.assigned_at, IncidentAssignment.id)
+        )).all():
+            ic_by_incident.setdefault(inc_id, username)
+    items = [IncidentListItem.model_validate(r).model_copy(update={"incident_commander": ic_by_incident.get(r.id)})
+             for r in page]
     next_cursor = _encode_cursor(offset + limit) if has_more else None
     return IncidentList(items=items, next_cursor=next_cursor)
 
@@ -509,7 +523,7 @@ async def create_incident(
         await db.commit()
     await db.refresh(inc)
     await _fire_hooks(db, "incident_created", inc)
-    await notify_incident_created(db, user.id, inc.id, inc.title)
+    await notify_incident_created(db, user.id, inc.id, inc.ref or str(inc.id), user.username, inc.severity)
     return IncidentOut.model_validate(inc)
 
 
@@ -566,13 +580,21 @@ async def get_incident_snapshot(
     # Incident rail counts (D2).
     files = await _count(EntityFile)
     rs_rows = (await db.execute(
-        select(RespondAction.status, func.count())
+        select(RespondAction.category, RespondAction.status, func.count())
         .where(RespondAction.incident_id == incident_id)
-        .group_by(RespondAction.status)
+        .group_by(RespondAction.category, RespondAction.status)
     )).all()
-    rs_by_status = {row[0]: int(row[1]) for row in rs_rows}
+    rs_by_status: dict[str, int] = {}
+    for _cat, st, n in rs_rows:
+        rs_by_status[st] = rs_by_status.get(st, 0) + int(n)
     respond_open  = rs_by_status.get("open", 0) + rs_by_status.get("in_progress", 0)
     respond_total = sum(rs_by_status.values())
+
+    def _respond(cats: tuple[str, ...]) -> RespondCategoryCount:   # K2: the split Respond pages' rail counts
+        rows = [(st, int(n)) for cat, st, n in rs_rows if cat in cats]
+        return RespondCategoryCount(total=sum(n for _, n in rows), done=sum(n for st, n in rows if st == "done"),
+                                    open=sum(n for st, n in rows if st in ("open", "in_progress")))
+    decisions = await _count(Decision)
     handoffs_pending = int((await db.execute(
         select(func.count()).select_from(IncidentHandoff)
         .where(IncidentHandoff.incident_id == incident_id, IncidentHandoff.status == "pending")
@@ -586,7 +608,32 @@ async def get_incident_snapshot(
         files=files, respond_open=respond_open, respond_total=respond_total,
         handoffs_pending=handoffs_pending, recovery=await recovery_rollup(db, inc),
         notifications=notifications, start_checks=await evaluate_start_checks(db, inc, notifications),
+        respond_containment=_respond(("containment",)),
+        respond_eradication_recovery=_respond(("eradication", "recovery")),
+        decisions=decisions, phase_history=await phase_history(db, inc),
     )
+
+
+# ─── Time in phase (K2, R38) ─────────────────────────────────────────────────
+
+@router.get("/{incident_id}/phase-history", response_model=IncidentPhaseHistory, summary="Get the time in each phase")
+async def get_incident_phase_history(
+    incident_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> IncidentPhaseHistory:
+    """How long the incident has been in its current phase, and how long each earlier phase took. Read
+    from the incident's append-only audit rows: incident_create (the opening phase, from created_at), every
+    incident_update that changed the phase, incident_close (ends the current period) and incident_reopen
+    (starts a new one). Moving back to a phase starts a new period. Any user with access to the incident
+    may read; also in GET …/snapshot as phase_history.
+
+    Returns {phase, entered_at (start of the current period), closed, periods[] oldest first, each
+    {phase, entered_at, left_at, duration_seconds, ended_by phase_change|close} (left_at and duration
+    null while current), completed[] {phase, seconds, periods}: each phase's finished periods added up}.
+    All times UTC."""
+    inc = await get_accessible_incident(db, incident_id, user)
+    return await phase_history(db, inc)
 
 
 # ─── Incident-start checks (I4) ──────────────────────────────────────────────
@@ -740,7 +787,7 @@ async def get_incident_access(
     Not visible: 404. is_lead is true for an admin, or for an analyst (effective role: an
     API token's role cap applies) assigned as Incident Commander or Deputy Incident
     Commander here; a viewer is never lead, even when assigned. Removing the assignment
-    ends the rights on the next request. capabilities: read_audit_log, manage_le_package,
+    ends the rights on the next request. capabilities: read_audit_log, manage_le_package, manage_disclosures,
     set_teams, override_gate, remove_any_assignment, replace_playbook (lead); assign_lead_roles (lead, or,
     while no active analyst/admin holds IC or Deputy, the creator or today's on-call
     analyst); remove_own_assignment (analysts and admins)."""
@@ -1030,16 +1077,19 @@ async def update_incident(
                                  user_id=user.id)
     await db.commit()
     await db.refresh(inc)
+    # L3 (R47): a phase and a severity change in one update fire both events (each through
+    # _fire_hooks, i.e. the outbound policy), the severity one is no longer dropped.
     if "phase" in changed:
         await _fire_hooks(db, "phase_changed", inc,
-                          extra_facts=[{"name": "New Phase", "value": inc.phase.replace("_", " ").title()}])
-        await notify_phase_changed(
-            db, user.id, inc.id,
-            inc.ref or str(inc.id), inc.title, inc.phase,
-        )
-    elif "severity" in changed:
+                          extra_facts=[{"name": "New Phase", "value": PHASE_LABEL.get(inc.phase, inc.phase)}])
+    if "severity" in changed:
         await _fire_hooks(db, "severity_changed", inc,
                           extra_facts=[{"name": "New Severity", "value": inc.severity.title()}])
+    if "phase" in changed:
+        await notify_phase_changed(
+            db, user.id, inc.id,
+            inc.ref or str(inc.id), user.username, inc.phase,
+        )
     return IncidentOut.model_validate(inc)
 
 
@@ -1168,7 +1218,7 @@ async def close_incident(
     )
     await db.commit()
     await db.refresh(inc)
-    await _fire_hooks(db, "incident_resolved", inc)
+    await _fire_hooks(db, "incident_resolved", inc)   # event key kept (B3); the card reads "Incident Closed" (L3, R47)
     return IncidentOut.model_validate(inc)
 
 

@@ -1,4 +1,8 @@
+// The 14 ATT&CK Enterprise tactics in matrix order (K4: TA0043 and TA0042, the pre-compromise
+// tactics, come first).
 export const MITRE_TACTICS = [
+  { id: 'TA0043', name: 'Reconnaissance' },
+  { id: 'TA0042', name: 'Resource Development' },
   { id: 'TA0001', name: 'Initial Access' },
   { id: 'TA0002', name: 'Execution' },
   { id: 'TA0003', name: 'Persistence' },
@@ -14,6 +18,28 @@ export const MITRE_TACTICS = [
 ]
 
 export const MITRE_TECHNIQUES = {
+  TA0043: [
+    { id: 'T1595', name: 'Active Scanning' },
+    { id: 'T1592', name: 'Gather Victim Host Information' },
+    { id: 'T1589', name: 'Gather Victim Identity Information' },
+    { id: 'T1590', name: 'Gather Victim Network Information' },
+    { id: 'T1591', name: 'Gather Victim Org Information' },
+    { id: 'T1598', name: 'Phishing for Information' },
+    { id: 'T1597', name: 'Search Closed Sources' },
+    { id: 'T1596', name: 'Search Open Technical Databases' },
+    { id: 'T1593', name: 'Search Open Websites/Domains' },
+    { id: 'T1594', name: 'Search Victim-Owned Websites' },
+  ],
+  TA0042: [
+    { id: 'T1650', name: 'Acquire Access' },
+    { id: 'T1583', name: 'Acquire Infrastructure' },
+    { id: 'T1586', name: 'Compromise Accounts' },
+    { id: 'T1584', name: 'Compromise Infrastructure' },
+    { id: 'T1587', name: 'Develop Capabilities' },
+    { id: 'T1585', name: 'Establish Accounts' },
+    { id: 'T1588', name: 'Obtain Capabilities' },
+    { id: 'T1608', name: 'Stage Capabilities' },
+  ],
   TA0001: [
     { id: 'T1190', name: 'Exploit Public-Facing Application' },
     { id: 'T1566', name: 'Phishing' },
@@ -136,6 +162,8 @@ export const MITRE_TECHNIQUES = {
 
 export function tacticColor(tacticId) {
   const map = {
+    TA0043: 'var(--low)',     // Reconnaissance
+    TA0042: 'var(--med)',     // Resource Development
     TA0001: 'var(--crit)',    // Initial Access
     TA0002: 'var(--high)',    // Execution
     TA0003: 'var(--med)',     // Persistence

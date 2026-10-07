@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useOutletContext, useSearchParams } from 'react-router-dom'
+import { Link, useOutletContext, useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { formatLocalShort } from '../../lib/datetime.js'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
@@ -55,11 +55,22 @@ async function listAll(listFn, incidentId) {
 }
 
 
+// K2 (R38): the Respond board is three rail pages (routes containment, eradication-recovery, decisions;
+// /respond redirects to containment). Every page loads the same actions + decisions, for the links.
+const VIEWS = {
+  containment:          { title: 'Containment',            cats: ['containment'] },
+  eradication_recovery: { title: 'Eradication & Recovery', cats: ['eradication', 'recovery'] },
+  decisions:            { title: 'Decisions',              cats: [] },
+}
+
 // ── Main component ────────────────────────────────────────────────────────
 
-export default function Respond() {
-  const { inc, bumpRail } = useOutletContext()
-  const isClosed = inc?.status === 'closed'
+export default function Respond({ view = 'containment' }) {
+  const { title: viewTitle, cats: viewCats } = VIEWS[view] ?? VIEWS.containment
+  const showDecisions = view === 'decisions'
+  const { inc, bumpRail, canEdit } = useOutletContext()
+  // L2 (R43): canEdit = analyst/admin on an open incident; viewers get the closed (read-only) cards.
+  const ro = !canEdit
 
   const [actions,   setActions]   = useState([])
   const [decisions, setDecisions] = useState([])
@@ -79,12 +90,12 @@ export default function Respond() {
   useEffect(() => {
     const tpl = TEMPLATE_BY_ID[searchParams.get('new_action') || '']
     if (!searchParams.get('new_action')) return
-    if (tpl && !isClosed) {
+    if (tpl && !ro) {
       setModal({ type: 'action', category: tpl.category, prefill: {
         template: tpl, entityId: searchParams.get('entity_id') || '', iocId: searchParams.get('ioc_id') || '' } })
     }
     setSearchParams(p => { ['new_action', 'entity_id', 'ioc_id'].forEach(k => p.delete(k)); return p }, { replace: true })
-  }, [searchParams, setSearchParams, isClosed])
+  }, [searchParams, setSearchParams, ro])
 
   // The board needs only actions + decisions; the Target picker loads entities / IOCs itself
   // when the action modal opens (ActionModal), so neither slows nor fails the board.
@@ -190,15 +201,18 @@ export default function Respond() {
     }
   }
 
-  const totalActions = actions.length
-  const doneActions  = actions.filter(a => a.status === 'done').length
+  const viewActions  = actions.filter(a => viewCats.includes(a.category))
+  const totalActions = viewActions.length
+  const doneActions  = viewActions.filter(a => a.status === 'done').length
 
   return (
-    <section className="panel">
+    <section className="panel" data-respond-view={view}>
       <div className="panel-toolbar">
         <div>
-          <h2 className="panel-h" style={{ marginBottom: 4 }}>Respond</h2>
-          {totalActions > 0 && (
+          <h2 className="panel-h" style={{ marginBottom: 4 }}>{viewTitle}</h2>
+          {showDecisions ? (
+            <div className="respond-sub">{decisions.length} decision{decisions.length !== 1 ? 's' : ''} logged</div>
+          ) : totalActions > 0 && (
             <div style={{ color: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11, display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
               {doneActions}/{totalActions} actions done
               <span style={{ display: 'inline-block', width: 100, height: 6, background: 'var(--surface-2)', borderRadius: 3 }}>
@@ -208,10 +222,12 @@ export default function Respond() {
                   height: '100%', background: 'var(--accent)', borderRadius: 3,
                 }} />
               </span>
-              · {decisions.length} decision{decisions.length !== 1 ? 's' : ''} logged
             </div>
           )}
         </div>
+        {view === 'eradication_recovery' && (
+          <Link to="../recovery" className="btn ghost" data-recovery-link>Recovery tracker →</Link>
+        )}
       </div>
 
       {error && (
@@ -224,8 +240,8 @@ export default function Respond() {
         <div className="panel-empty"><div>Loading…</div></div>
       ) : (
         <div className="respond-board-wrap">
-        <div className="respond-board">
-          {(['containment', 'eradication', 'recovery']).map(cat => (
+        <div className={`respond-board cols-${showDecisions ? 1 : viewCats.length}`}>
+          {viewCats.map(cat => (
             <BoardColumn
               key={cat}
               title={cat.charAt(0).toUpperCase() + cat.slice(1)}
@@ -246,17 +262,17 @@ export default function Respond() {
                   onEdit={() => setModal({ type: 'action-edit', action })}
                   onDelete={() => onActionDelete(action)}
                   onRevert={(reason) => onActionRevert(action, reason)}
-                  isClosed={isClosed}
+                  isClosed={ro}
                   busy={busy}
                 />
               )}
               emptyHint={`No ${cat} actions yet. Use templates or add a custom action.`}
-              onAdd={!isClosed ? () => setModal({ type: 'action', category: cat }) : null}
+              onAdd={!ro ? () => setModal({ type: 'action', category: cat }) : null}
               addLabel="+ Add action"
             />
           ))}
 
-          <BoardColumn
+          {showDecisions && <BoardColumn
             title="Decisions"
             color={COLUMN_COLOR.decisions}
             items={decisions}
@@ -268,14 +284,14 @@ export default function Respond() {
                 usernameOf={usernameOf}
                 onEdit={() => setModal({ type: 'decision-edit', decision: dec })}
                 onDelete={() => onDecisionDelete(dec)}
-                isClosed={isClosed}
+                isClosed={ro}
                 busy={busy}
               />
             )}
             emptyHint="No decisions recorded yet."
-            onAdd={!isClosed ? () => setModal({ type: 'decision' }) : null}
+            onAdd={!ro ? () => setModal({ type: 'decision' }) : null}
             addLabel="+ Record decision"
-          />
+          />}
         </div>
         </div>
       )}
@@ -379,7 +395,7 @@ function BoardColumn({ title, color, items, renderItem, emptyHint, onAdd, addLab
             type="button"
             className="btn primary"
             onClick={onAdd}
-            style={{ fontSize: 11, padding: '2px 8px', whiteSpace: 'nowrap' }}
+            style={{ whiteSpace: 'nowrap' }}
           >
             {addLabel}
           </button>
@@ -543,12 +559,10 @@ function ActionCard({ action, decision, task, usernameOf, onStatusChange, onEdit
         {!isClosed && !isReverted && (
           <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
             <button type="button" className="btn ghost" onClick={() => setRevertOpen(o => !o)} disabled={busy}
-                    style={{ padding: '1px 6px', fontSize: 10, color: 'var(--high)' }}
+                    style={{ color: 'var(--high)' }}
                     title="Revert this action — records reason and auto-logs to timeline">↩</button>
-            <button type="button" className="btn ghost" onClick={onEdit} disabled={busy}
-                    style={{ padding: '1px 6px', fontSize: 10 }}>Edit</button>
-            <button type="button" className="btn ghost" onClick={onDelete} disabled={busy}
-                    style={{ padding: '1px 6px', fontSize: 10 }}>✕</button>
+            <button type="button" className="btn ghost" onClick={onEdit} disabled={busy}>Edit</button>
+            <button type="button" className="btn ghost" onClick={onDelete} disabled={busy}>✕</button>
           </div>
         )}
       </div>
@@ -560,24 +574,23 @@ function ActionCard({ action, decision, task, usernameOf, onStatusChange, onEdit
           display: 'flex', flexDirection: 'column', gap: 4,
         }}>
           <textarea
-            className="input"
+            className="input compact"
             value={revertReason}
             onChange={e => setRevertReason(e.target.value)}
             rows={2}
             maxLength={4096}
             placeholder="Why is this being reverted? (e.g. false positive, system restored)"
-            style={{ fontSize: 11, resize: 'vertical' }}
+            style={{ resize: 'vertical' }}
             autoFocus
           />
           <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
             <button type="button" className="btn ghost"
                     onClick={() => { setRevertOpen(false); setRevertReason('') }}
-                    disabled={reverting}
-                    style={{ padding: '1px 6px', fontSize: 10 }}>Cancel</button>
+                    disabled={reverting}>Cancel</button>
             <button type="button" className="btn ghost"
                     onClick={submitRevert}
                     disabled={reverting || !revertReason.trim()}
-                    style={{ padding: '1px 6px', fontSize: 10, color: 'var(--high)' }}>
+                    style={{ color: 'var(--high)' }}>
               {reverting ? 'Reverting…' : '↩ Confirm revert'}
             </button>
           </div>
@@ -605,10 +618,8 @@ function DecisionCard({ decision, linkedActions, usernameOf, onEdit, onDelete, i
         <span className={`pill ${om.pill}`} style={{ fontSize: 10 }}>{om.label}</span>
         {!isClosed && (
           <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-            <button type="button" className="btn ghost" onClick={onEdit} disabled={busy}
-                    style={{ padding: '1px 6px', fontSize: 10 }}>Edit</button>
-            <button type="button" className="btn ghost" onClick={onDelete} disabled={busy}
-                    style={{ padding: '1px 6px', fontSize: 10 }}>✕</button>
+            <button type="button" className="btn ghost" onClick={onEdit} disabled={busy}>Edit</button>
+            <button type="button" className="btn ghost" onClick={onDelete} disabled={busy}>✕</button>
           </div>
         )}
       </div>
@@ -828,7 +839,6 @@ function ActionModal({ incidentId, category, editing, prefill, decisions, tasks,
                       type="button"
                       className="btn"
                       onClick={() => pickTemplate(TEMPLATE_BY_ID[tpl.id])}
-                      style={{ fontSize: 12, padding: '4px 10px' }}
                     >
                       {tpl.title}
                     </button>
@@ -841,7 +851,6 @@ function ActionModal({ incidentId, category, editing, prefill, decisions, tasks,
                 type="button"
                 className="btn ghost"
                 onClick={() => pickTemplate(null)}
-                style={{ fontSize: 12 }}
               >
                 Custom action…
               </button>

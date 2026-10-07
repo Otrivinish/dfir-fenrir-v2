@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
-import { formatLocal, formatLocalShort } from '../../lib/datetime.js'
-import { MITRE_TACTICS, tacticColor } from '../../lib/mitre.js'
+import { useAuth } from '../../hooks/useAuth.jsx'
+import { formatLocal } from '../../lib/datetime.js'
 import Analytics from './post_incident/Analytics.jsx'
 import Reports, { LR_FIELDS, LR_REMEDIATION } from './post_incident/Reports.jsx'
 import CostsImpact from './post_incident/CostsImpact.jsx'
@@ -14,7 +14,6 @@ import CostsImpact from './post_incident/CostsImpact.jsx'
 const TABS = [
   { to: 'analytics',    label: 'Analytics' },
   { to: 'lessons',      label: 'Lessons Learned' },
-  { to: 'attack-chain', label: 'Attack Chain' },
   { to: 'costs',        label: 'Costs & Impact' },
   { to: 'reports',      label: 'Reports' },
   { to: 'closure',      label: 'Closure Checklist' },
@@ -22,8 +21,10 @@ const TABS = [
 
 // ─── Closure Checklist ────────────────────────────────────────────────────────
 
-function ClosureChecklist({ inc }) {
+function ClosureChecklist({ inc, viewer }) {
   const isClosed = inc?.status === 'closed'
+  // L2 (R43): a viewer gets the closed-incident (read-only) view; the API refuses their writes.
+  const ro = isClosed || viewer
   const [items,   setItems]   = useState([])
   const [users,   setUsers]   = useState([])
   const [loading, setLoading] = useState(true)
@@ -52,7 +53,7 @@ function ClosureChecklist({ inc }) {
   useEffect(() => { load() }, [load])
 
   async function toggle(item) {
-    if (busy[item.id] || isClosed) return
+    if (busy[item.id] || ro) return
     setBusy(b => ({ ...b, [item.id]: true }))
     try {
       const updated = await api.toggleClosureItem(inc.id, item.id, !item.checked)
@@ -66,7 +67,7 @@ function ClosureChecklist({ inc }) {
 
   // I5: mark / unmark "not applicable"; the reason is optional (Gate 2 warns when it is missing).
   async function setNa(item, notApplicable, reason) {
-    if (busy[item.id] || isClosed) return
+    if (busy[item.id] || ro) return
     setBusy(b => ({ ...b, [item.id]: true }))
     setRowError(r => { const n = { ...r }; delete n[item.id]; return n })
     try {
@@ -111,7 +112,7 @@ function ClosureChecklist({ inc }) {
   }
 
   async function deleteItem(item) {
-    if (busy[item.id] || isClosed) return
+    if (busy[item.id] || ro) return
     if (!window.confirm(`Delete "${item.label}"?\n\nThis removes the item from this incident's checklist.`)) return
     setBusy(b => ({ ...b, [item.id]: true }))
     try {
@@ -137,11 +138,11 @@ function ClosureChecklist({ inc }) {
           <div className="pi-progress-fill" style={{ width: `${pct}%` }} />
         </div>
         <span className="pi-progress-label">{checked} / {items.length} complete</span>
-        {!isClosed && !adding && (
+        {!ro && !adding && (
           <button
             type="button"
             className="btn primary"
-            style={{ fontSize: 12, padding: '4px 12px', flexShrink: 0 }}
+            style={{ flexShrink: 0 }}
             onClick={() => setAdding(true)}
           >
             + Add item
@@ -149,11 +150,11 @@ function ClosureChecklist({ inc }) {
         )}
       </div>
 
-      {adding && !isClosed && (
+      {adding && !ro && (
         <div style={{ marginTop: 'var(--space-3)', display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
           <input
             autoFocus
-            className="input"
+            className="input compact"
             placeholder="New checklist item label…"
             value={newLabel}
             onChange={e => setNewLabel(e.target.value)}
@@ -163,12 +164,11 @@ function ClosureChecklist({ inc }) {
               if (e.key === 'Enter')  { e.preventDefault(); createItem() }
               if (e.key === 'Escape') { setNewLabel(''); setAdding(false) }
             }}
-            style={{ flex: 1, fontSize: 13 }}
+            style={{ flex: 1 }}
           />
           <button
             type="button"
             className="btn primary"
-            style={{ fontSize: 12, padding: '4px 12px' }}
             onClick={createItem}
             disabled={!newLabel.trim() || creating}
           >
@@ -177,7 +177,6 @@ function ClosureChecklist({ inc }) {
           <button
             type="button"
             className="btn ghost"
-            style={{ fontSize: 12, padding: '4px 12px' }}
             onClick={() => { setNewLabel(''); setAdding(false) }}
             disabled={creating}
           >
@@ -194,7 +193,7 @@ function ClosureChecklist({ inc }) {
             users={users}
             busyToggle={!!busy[item.id]}
             error={rowError[item.id]}
-            isClosed={isClosed}
+            isClosed={ro}
             onToggle={() => toggle(item)}
             onNa={(na, reason) => setNa(item, na, reason)}
             onMeta={(payload) => patchMeta(item, payload)}
@@ -253,7 +252,7 @@ function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onNa
           )}
           {naOpen && (
             <div style={{ marginTop: 'var(--space-2)', display: 'flex', gap: 'var(--space-2)', alignItems: 'flex-start' }}>
-              <input autoFocus className="input" style={{ flex: 1, fontSize: 12 }} maxLength={2000}
+              <input autoFocus className="input compact" style={{ flex: 1 }} maxLength={2000}
                      aria-label={`Why "${item.label}" is not applicable`}
                      placeholder="Why it is not applicable (recommended)"
                      value={naDraft} onChange={e => setNaDraft(e.target.value)}
@@ -261,9 +260,9 @@ function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onNa
                        if (e.key === 'Enter')  { e.preventDefault(); onNa(true, naDraft.trim()); setNaOpen(false) }
                        if (e.key === 'Escape') { setNaOpen(false) }
                      }} />
-              <button type="button" className="btn primary" style={{ fontSize: 12, padding: '4px 10px' }}
+              <button type="button" className="btn primary"
                       onClick={() => { onNa(true, naDraft.trim()); setNaOpen(false) }}>Mark N/A</button>
-              <button type="button" className="btn ghost" style={{ fontSize: 12, padding: '4px 10px' }}
+              <button type="button" className="btn ghost"
                       onClick={() => setNaOpen(false)}>Cancel</button>
             </div>
           )}
@@ -299,19 +298,19 @@ function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onNa
             <div style={{ marginTop: 'var(--space-2)', display: 'flex', gap: 'var(--space-2)', alignItems: 'flex-start' }}>
               <textarea
                 autoFocus
-                className="input"
+                className="input compact"
                 rows={2}
                 value={notesDraft}
                 onChange={e => setNotesDraft(e.target.value)}
                 maxLength={4096}
-                style={{ flex: 1, fontSize: 12, resize: 'vertical' }}
+                style={{ flex: 1, resize: 'vertical' }}
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveNotes() }
                   if (e.key === 'Escape') { setNotesDraft(item.notes || ''); setEditingNote(false) }
                 }}
               />
-              <button type="button" className="btn primary" style={{ fontSize: 12, padding: '4px 10px' }} onClick={saveNotes}>Save</button>
-              <button type="button" className="btn ghost"   style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => { setNotesDraft(item.notes || ''); setEditingNote(false) }}>Cancel</button>
+              <button type="button" className="btn primary" onClick={saveNotes}>Save</button>
+              <button type="button" className="btn ghost" onClick={() => { setNotesDraft(item.notes || ''); setEditingNote(false) }}>Cancel</button>
             </div>
           )}
         </div>
@@ -320,12 +319,12 @@ function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onNa
         {!isClosed && (
           <div style={{ display: 'flex', gap: 'var(--space-1)', flexShrink: 0 }}>
             {item.not_applicable ? (
-              <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '2px 6px' }}
+              <button type="button" className="btn ghost"
                       onClick={() => onNa(false)} disabled={busyToggle} title="This item applies after all">
                 Clear N/A
               </button>
             ) : !item.checked && !naOpen && item.item_key !== 'incident_closed' && (
-              <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '2px 6px' }}
+              <button type="button" className="btn ghost"
                       onClick={() => { setNaDraft(item.na_reason || ''); setNaOpen(true) }} disabled={busyToggle}
                       title="Mark not applicable, with a reason">
                 N/A
@@ -335,7 +334,6 @@ function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onNa
               <button
                 type="button"
                 className="btn ghost"
-                style={{ fontSize: 11, padding: '2px 6px' }}
                 title={item.notes ? 'Edit note' : 'Add note'}
                 onClick={() => setEditingNote(true)}
               >
@@ -345,7 +343,6 @@ function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onNa
             <button
               type="button"
               className="btn ghost"
-              style={{ fontSize: 11, padding: '2px 6px' }}
               onClick={() => setExpanded(x => !x)}
               title="Assign owner"
             >
@@ -354,7 +351,7 @@ function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onNa
             <button
               type="button"
               className="btn ghost"
-              style={{ fontSize: 11, padding: '2px 6px', color: 'var(--crit)' }}
+              style={{ color: 'var(--crit)' }}
               onClick={onDelete}
               disabled={busyToggle}
               title="Delete this item from the checklist"
@@ -370,8 +367,7 @@ function ChecklistRow({ item, users, busyToggle, error, isClosed, onToggle, onNa
       {expanded && !isClosed && (
         <div style={{ marginTop: 'var(--space-2)', paddingLeft: 32 }}>
           <select
-            className="select"
-            style={{ fontSize: 12 }}
+            className="select compact"
             value={item.assigned_to_id || ''}
             onChange={e => { assignUser(e.target.value || null); setExpanded(false) }}
           >
@@ -468,8 +464,9 @@ const CLOSE_REQUIRED = [
   ['report_security_recommendations', 'recommendations'],
 ]
 
-// "Insert key timeline events": key = server milestones (phase, triage, decisions, respond actions,
-// closure …) and ATT&CK-tagged events, listed before the rest; at most this many lines.
+// "Insert key timeline events": key = the server's key_event (K3: flagged by an analyst, ATT&CK-tagged, or
+// recorded by FENRIR: milestones, triage, decisions, respond actions, closure …), listed before the rest;
+// at most this many lines.
 const TL_INSERT_MAX = 50
 
 function llFromApi(data) {
@@ -541,15 +538,15 @@ function StringList({ value, onChange, placeholder, disabled }) {
         <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 4 }}>
           <span style={{ flex: 1, fontSize: 13 }}>{item}</span>
           {!disabled && (
-            <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '2px 6px' }}
+            <button type="button" className="btn ghost"
               onClick={() => onChange(value.filter((_, j) => j !== i))}>✕</button>
           )}
         </div>
       ))}
       {!disabled && (
         <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 4 }}>
-          <input className="input" value={draft} onChange={e => setDraft(e.target.value)}
-            placeholder={placeholder} maxLength={512} style={{ flex: 1, fontSize: 13 }}
+          <input className="input compact" value={draft} onChange={e => setDraft(e.target.value)}
+            placeholder={placeholder} maxLength={512} style={{ flex: 1 }}
             onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add() } }} />
           <button type="button" className="btn ghost" onClick={add} disabled={!draft.trim()}>Add</button>
         </div>
@@ -560,7 +557,7 @@ function StringList({ value, onChange, placeholder, disabled }) {
 
 // ─── LessonsLearned component ─────────────────────────────────────────────────
 
-function LessonsLearned({ inc }) {
+function LessonsLearned({ inc, viewer }) {
   const isClosed = inc?.status === 'closed'
   const [form,    setForm]    = useState(EMPTY_LL)
   const [loading, setLoading] = useState(true)
@@ -613,7 +610,7 @@ function LessonsLearned({ inc }) {
         events.push(...page.items)
         cursor = page.next_cursor
       } while (cursor)
-      const isKey = e => e.is_system || e.mitre_tactic_id || e.mitre_technique_id
+      const isKey = e => e.key_event
       const key   = events.filter(isKey)
       const rest  = events.filter(e => !isKey(e))
       if (!events.length) { setInsertNote('No timeline events to insert.'); return }
@@ -642,7 +639,8 @@ function LessonsLearned({ inc }) {
 
   if (loading) return <div className="pi-loading">Loading…</div>
 
-  const disabled = isClosed   // everything except action items, which stay editable after Close
+  // Everything except action items, which stay editable after Close. L2 (R43): a viewer edits nothing.
+  const disabled = isClosed || viewer
   const missing  = CLOSE_REQUIRED.filter(([k]) => !String(form[k] || '').trim()).map(([, label]) => label)
 
   // ── effectiveness helpers
@@ -693,7 +691,7 @@ function LessonsLearned({ inc }) {
               key={s}
               type="button"
               className={`btn ${form.status === s ? 'primary' : 'ghost'}`}
-              style={{ fontSize: 12, padding: '3px 10px', textTransform: 'capitalize' }}
+              style={{ textTransform: 'capitalize' }}
               onClick={() => !disabled && set('status', s)}
               disabled={disabled}
             >
@@ -701,7 +699,7 @@ function LessonsLearned({ inc }) {
             </button>
           ))}
         </div>
-        <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={openExport}>
+        <button type="button" className="btn ghost" onClick={openExport}>
           Export HTML
         </button>
       </div>
@@ -801,13 +799,10 @@ function LessonsLearned({ inc }) {
                         key={r}
                         type="button"
                         className="btn ghost"
-                        style={{
-                          fontSize: 12, padding: '3px 10px',
-                          textTransform: 'capitalize',
+                        style={{ textTransform: 'capitalize',
                           borderColor: d.rating === r ? RATING_COLORS[r] : undefined,
                           color:       d.rating === r ? RATING_COLORS[r] : undefined,
-                          fontWeight:  d.rating === r ? 600 : 400,
-                        }}
+                          fontWeight:  d.rating === r ? 600 : 400 }}
                         onClick={() => !disabled && setEff(dim.id, 'rating', d.rating === r ? '' : r)}
                         disabled={disabled}
                       >
@@ -816,10 +811,10 @@ function LessonsLearned({ inc }) {
                     ))}
                   </div>
                 </div>
-                <input className="input" value={d.notes || ''} maxLength={512} disabled={disabled}
+                <input className="input compact" value={d.notes || ''} maxLength={512} disabled={disabled}
                   placeholder="Notes (optional)…"
                   onChange={e => setEff(dim.id, 'notes', e.target.value)}
-                  style={{ fontSize: 12 }} />
+ />
               </div>
             )
           })}
@@ -860,10 +855,10 @@ function LessonsLearned({ inc }) {
                 <div style={{ flex: 1, height: 12, background: 'var(--surface-2)', borderRadius: 3, overflow: 'hidden' }}>
                   <div style={{ width: `${pct}%`, minWidth: pct > 0 ? 4 : 0, height: '100%', background: 'var(--accent)', borderRadius: 3 }} />
                 </div>
-                <input type="number" className="input" min={0} disabled={disabled}
+                <input type="number" className="input compact" min={0} disabled={disabled}
                   value={form[ph.key]} placeholder="—"
                   onChange={e => set(ph.key, e.target.value)}
-                  style={{ width: 80, fontSize: 12, textAlign: 'right' }} />
+                  style={{ width: 80, textAlign: 'right' }} />
                 <span style={{ fontSize: 12, color: 'var(--muted)', minWidth: 24 }}>min</span>
               </div>
             )
@@ -877,30 +872,31 @@ function LessonsLearned({ inc }) {
           <div style={{ color: 'var(--dim)', fontSize: 13, marginBottom: 'var(--space-2)' }}>No action items yet.</div>
         )}
         {form.action_items.map(ai => (
-          <div key={ai.id} style={{ display: 'grid', gridTemplateColumns: '1fr 120px 110px 90px 90px 32px', gap: 'var(--space-1)', marginBottom: 'var(--space-2)', alignItems: 'center' }}>
-            <input className="input" value={ai.action} maxLength={512}
-              placeholder="Action…" style={{ fontSize: 12 }}
+          <div key={ai.id} className="pi-ai-row">
+            <input className="input compact" value={ai.action} maxLength={512} disabled={viewer}
+              placeholder="Action…"
               onChange={e => updateAI(ai.id, 'action', e.target.value)} />
-            <input className="input" value={ai.owner} maxLength={128}
-              placeholder="Owner" style={{ fontSize: 12 }}
+            <input className="input compact" value={ai.owner} maxLength={128} disabled={viewer}
+              placeholder="Owner"
               onChange={e => updateAI(ai.id, 'owner', e.target.value)} />
-            <input type="date" className="input" value={ai.due_date || ''}
-              style={{ fontSize: 12 }}
+            <input type="date" className="input compact" value={ai.due_date || ''} disabled={viewer}
               onChange={e => updateAI(ai.id, 'due_date', e.target.value)} />
-            <select className="select" value={ai.priority} style={{ fontSize: 12 }}
+            <select className="select compact" value={ai.priority} disabled={viewer}
               onChange={e => updateAI(ai.id, 'priority', e.target.value)}>
               {AI_PRIORITIES.map(p => <option key={p} value={p} style={{ textTransform: 'capitalize' }}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>)}
             </select>
-            <select className="select" value={ai.status} style={{ fontSize: 12 }}
+            <select className="select compact" value={ai.status} disabled={viewer}
               onChange={e => updateAI(ai.id, 'status', e.target.value)}>
               {AI_STATUSES.map(s => <option key={s} value={s}>{s.replace('_', ' ')}</option>)}
             </select>
-            <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '0 6px' }}
-              onClick={() => removeAI(ai.id)}>✕</button>
+            {!viewer && (
+              <button type="button" className="btn ghost" aria-label="Remove action item"
+                onClick={() => removeAI(ai.id)}>✕</button>
+            )}
           </div>
         ))}
         <div style={{ marginTop: 'var(--space-1)', display: 'flex', gap: 'var(--space-2)', fontSize: 11, color: 'var(--dim)', flexWrap: 'wrap', alignItems: 'center' }}>
-          <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={addAI}>+ Add action item</button>
+          {!viewer && <button type="button" className="btn ghost" onClick={addAI}>+ Add action item</button>}
           {form.action_items.length > 0 && (
             <span>Action · Owner · Due date · Priority · Status</span>
           )}
@@ -913,26 +909,26 @@ function LessonsLearned({ inc }) {
           <div style={{ color: 'var(--dim)', fontSize: 13, marginBottom: 'var(--space-2)' }}>No improvements recorded.</div>
         )}
         {form.control_improvements.map(ci => (
-          <div key={ci.id} style={{ display: 'grid', gridTemplateColumns: '1fr 110px 90px 32px', gap: 'var(--space-1)', marginBottom: 'var(--space-2)', alignItems: 'center' }}>
-            <input className="input" value={ci.recommendation} maxLength={512} disabled={disabled}
-              placeholder="Recommendation…" style={{ fontSize: 12 }}
+          <div key={ci.id} className="pi-ci-row">
+            <input className="input compact" value={ci.recommendation} maxLength={512} disabled={disabled}
+              placeholder="Recommendation…"
               onChange={e => updateCI(ci.id, 'recommendation', e.target.value)} />
-            <select className="select" value={ci.category} disabled={disabled} style={{ fontSize: 12 }}
+            <select className="select compact" value={ci.category} disabled={disabled}
               onChange={e => updateCI(ci.id, 'category', e.target.value)}>
               {CTRL_CATEGORIES.map(c => <option key={c} value={c} style={{ textTransform: 'capitalize' }}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>)}
             </select>
-            <select className="select" value={ci.priority} disabled={disabled} style={{ fontSize: 12 }}
+            <select className="select compact" value={ci.priority} disabled={disabled}
               onChange={e => updateCI(ci.id, 'priority', e.target.value)}>
               {CTRL_PRIORITIES.map(p => <option key={p} value={p} style={{ textTransform: 'capitalize' }}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>)}
             </select>
             {!disabled && (
-              <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '0 6px' }}
+              <button type="button" className="btn ghost"
                 onClick={() => removeCI(ci.id)}>✕</button>
             )}
           </div>
         ))}
         {!disabled && (
-          <button type="button" className="btn ghost" style={{ fontSize: 12, marginTop: 'var(--space-1)' }} onClick={addCI}>+ Add improvement</button>
+          <button type="button" className="btn ghost" style={{ marginTop: 'var(--space-1)' }} onClick={addCI}>+ Add improvement</button>
         )}
       </LLSection>
 
@@ -966,271 +962,14 @@ function LessonsLearned({ inc }) {
       {/* ── Footer ───────────────────────────────────────────────────────── */}
       {error && <div className="pi-error" style={{ marginBottom: 'var(--space-3)' }}>{error}</div>}
 
-      <div className="pi-lessons-footer">
-        {saved && <span className="pi-saved-flash">Saved</span>}
-        <button className="btn primary pi-save-btn" onClick={save} disabled={saving}>
-          {saving ? 'Saving…' : isClosed ? 'Save action items' : 'Save lessons learned'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ─── Attack Chain ────────────────────────────────────────────────────────────
-
-function AttackChain({ inc }) {
-  const [events,  setEvents]  = useState([])
-  const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState(null)
-
-  useEffect(() => {
-    // Fetch all timeline events in one shot (limit=500 covers any realistic incident)
-    const fetchAll = async () => {
-      const results = []
-      let cursor = null
-      do {
-        const page = await api.listTimelineEvents(inc.id, { limit: 500, ...(cursor ? { cursor } : {}) })
-        results.push(...page.items)
-        cursor = page.next_cursor
-      } while (cursor)
-      return results
-    }
-    fetchAll()
-      .then(setEvents)
-      .catch(e => setError(e.message || 'Failed to load timeline'))
-      .finally(() => setLoading(false))
-  }, [inc.id])
-
-  if (loading) return <div className="pi-loading">Building attack chain…</div>
-  if (error)   return <div className="pi-error">{error}</div>
-
-  // Filter to MITRE-tagged events; sort chronologically
-  const tagged = events
-    .filter(e => e.mitre_tactic_id)
-    .sort((a, b) => new Date(a.event_time) - new Date(b.event_time))
-
-  if (tagged.length === 0) return (
-    <div className="pi-empty" style={{ padding: 'var(--space-6)' }}>
-      <div className="panel-empty-mark" aria-hidden="true">◌</div>
-      <div>No MITRE-tagged timeline events yet.</div>
-      <div style={{ color: 'var(--dim)', fontSize: 12 }}>
-        Tag events with a tactic and technique in the Timeline tab to build the attack chain.
-      </div>
-    </div>
-  )
-
-  // Build swimlanes — one per observed tactic, canonical ATT&CK order
-  const observedIds = new Set(tagged.map(e => e.mitre_tactic_id))
-  const lanes = MITRE_TACTICS.filter(t => observedIds.has(t.id))
-  for (const id of observedIds) {
-    if (!lanes.some(l => l.id === id)) {
-      const sample = tagged.find(e => e.mitre_tactic_id === id)
-      lanes.push({ id, name: sample?.mitre_tactic_name || id })
-    }
-  }
-  const laneIdx = Object.fromEntries(lanes.map((l, i) => [l.id, i]))
-
-  // Time range + horizontal mapping (with 4% lateral padding)
-  const timeNums = tagged.map(e => new Date(e.event_time).getTime())
-  const t0   = Math.min(...timeNums)
-  const t1   = Math.max(...timeNums)
-  const span = Math.max(1, t1 - t0)
-  const xPct = (ts) => 4 + ((new Date(ts).getTime() - t0) / span) * 92
-
-  const LANE_H  = 56
-  const LABEL_W = 200
-  const totalH  = lanes.length * LANE_H
-  const laneY   = (i) => i * LANE_H + LANE_H / 2
-
-  // Axis ticks
-  const tickCount = span > 1 ? 5 : 1
-  const ticks = []
-  for (let i = 0; i < tickCount; i++) {
-    const frac = tickCount > 1 ? i / (tickCount - 1) : 0
-    ticks.push({ pct: 4 + frac * 92, iso: new Date(t0 + span * frac).toISOString() })
-  }
-
-  return (
-    <div>
-      {/* Swimlane chain */}
-      <div style={{
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius)',
-        background: 'var(--surface)',
-        overflow: 'hidden',
-        marginBottom: 'var(--space-5)',
-      }}>
-        <div style={{ display: 'flex' }}>
-          {/* Lane labels */}
-          <div style={{
-            width: LABEL_W,
-            flexShrink: 0,
-            borderRight: '1px solid var(--border)',
-            background: 'var(--surface-2)',
-          }}>
-            {lanes.map((l, i) => {
-              const color = tacticColor(l.id)
-              const count = tagged.filter(e => e.mitre_tactic_id === l.id).length
-              return (
-                <div key={l.id} style={{
-                  height: LANE_H,
-                  padding: '0 var(--space-3)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  justifyContent: 'center',
-                  borderBottom: i < lanes.length - 1 ? '1px solid var(--border)' : 'none',
-                  borderLeft: `3px solid ${color}`,
-                }}>
-                  <div style={{
-                    fontSize: 10, fontFamily: 'var(--font-mono)',
-                    fontWeight: 700, color, letterSpacing: '0.05em',
-                  }}>{l.id}</div>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', lineHeight: 1.2 }}>
-                    {l.name}
-                  </div>
-                  <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono)' }}>
-                    {count} event{count !== 1 ? 's' : ''}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-
-          {/* Plot area */}
-          <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
-            {/* Lane bands */}
-            {lanes.map((l, i) => (
-              <div key={l.id} style={{
-                height: LANE_H,
-                borderBottom: i < lanes.length - 1 ? '1px solid var(--border)' : 'none',
-                background: i % 2 === 1 ? 'var(--surface-2)' : 'transparent',
-              }} />
-            ))}
-
-            {/* Connectors */}
-            <svg
-              width="100%"
-              height={totalH}
-              style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
-            >
-              {tagged.slice(0, -1).map((e, i) => {
-                const next = tagged[i + 1]
-                return (
-                  <line key={i}
-                    x1={`${xPct(e.event_time)}%`}
-                    y1={laneY(laneIdx[e.mitre_tactic_id])}
-                    x2={`${xPct(next.event_time)}%`}
-                    y2={laneY(laneIdx[next.mitre_tactic_id])}
-                    strokeWidth="1.5"
-                    strokeDasharray="4 4"
-                    style={{ stroke: 'var(--border-strong)' }}
-                  />
-                )
-              })}
-            </svg>
-
-            {/* Event dots */}
-            <div style={{ position: 'absolute', inset: 0 }}>
-              {tagged.map(ev => {
-                const color = tacticColor(ev.mitre_tactic_id)
-                const techLabel = ev.mitre_technique_id || ev.mitre_tactic_id
-                const tip = `${formatLocalShort(ev.event_time)}\n${techLabel}\n${ev.description || ''}`
-                return (
-                  <div key={ev.id}
-                    title={tip}
-                    style={{
-                      position: 'absolute',
-                      left: `${xPct(ev.event_time)}%`,
-                      top:  `${laneY(laneIdx[ev.mitre_tactic_id])}px`,
-                      width: 12, height: 12,
-                      transform: 'translate(-50%, -50%)',
-                      background: color,
-                      border: '2px solid var(--surface)',
-                      borderRadius: '50%',
-                      boxShadow: '0 0 0 1px var(--border-strong)',
-                      cursor: 'help',
-                    }}
-                  />
-                )
-              })}
-            </div>
-          </div>
+      {!viewer && (
+        <div className="pi-lessons-footer">
+          {saved && <span className="pi-saved-flash">Saved</span>}
+          <button className="btn primary pi-save-btn" onClick={save} disabled={saving}>
+            {saving ? 'Saving…' : isClosed ? 'Save action items' : 'Save lessons learned'}
+          </button>
         </div>
-
-        {/* Time axis */}
-        <div style={{
-          display: 'flex',
-          borderTop: '1px solid var(--border)',
-          background: 'var(--surface-2)',
-        }}>
-          <div style={{ width: LABEL_W, flexShrink: 0, borderRight: '1px solid var(--border)' }} />
-          <div style={{ flex: 1, position: 'relative', height: 24 }}>
-            {ticks.map((tk, i) => (
-              <div key={i} style={{
-                position: 'absolute',
-                left: `${tk.pct}%`,
-                top: 0, height: 24,
-                transform: 'translateX(-50%)',
-                fontSize: 10,
-                fontFamily: 'var(--font-mono)',
-                color: 'var(--muted)',
-                display: 'flex',
-                alignItems: 'center',
-                whiteSpace: 'nowrap',
-              }}>
-                {formatLocalShort(tk.iso)}
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Chronological event list */}
-      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--space-4)' }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--muted)', marginBottom: 'var(--space-3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Chronological sequence · {tagged.length} event{tagged.length !== 1 ? 's' : ''}
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
-          {tagged.map(ev => {
-            const color = tacticColor(ev.mitre_tactic_id)
-            return (
-              <div key={ev.id} style={{
-                display: 'flex',
-                alignItems: 'baseline',
-                gap: 'var(--space-3)',
-                padding: 'var(--space-2) var(--space-3)',
-                background: 'var(--surface)',
-                border: '1px solid var(--border)',
-                borderLeft: `2px solid ${color}`,
-                borderRadius: 'var(--radius-sm)',
-                fontSize: 12,
-              }}>
-                <span style={{
-                  fontFamily: 'var(--font-mono)', fontSize: 11,
-                  color: 'var(--muted)', whiteSpace: 'nowrap', flexShrink: 0,
-                }}>
-                  {formatLocalShort(ev.event_time)}
-                </span>
-                <span style={{
-                  fontFamily: 'var(--font-mono)', fontSize: 10,
-                  color, whiteSpace: 'nowrap', flexShrink: 0,
-                }}>
-                  {ev.mitre_technique_id || ev.mitre_tactic_id}
-                </span>
-                <span style={{ color: 'var(--text)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {ev.event_type && <span style={{ color: 'var(--accent)', marginRight: 6 }}>{ev.event_type}</span>}
-                  {ev.description}
-                </span>
-                {ev.hostname && (
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--dim)', flexShrink: 0 }}>
-                    {ev.hostname}
-                  </span>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -1258,8 +997,7 @@ export default function PostIncident() {
 
 // One route element per sub-tab (App.jsx); each reads the incident from the outlet context.
 export function AnalyticsTab()   { const { inc } = useOutletContext(); return <Analytics        inc={inc} /> }
-export function LessonsTab()     { const { inc } = useOutletContext(); return <LessonsLearned   inc={inc} /> }
-export function AttackChainTab() { const { inc } = useOutletContext(); return <AttackChain      inc={inc} /> }
+export function LessonsTab()     { const { inc } = useOutletContext(); const { user } = useAuth(); return <LessonsLearned inc={inc} viewer={user?.role === 'viewer'} /> }
 export function CostsTab()       { const { inc } = useOutletContext(); return <CostsImpact      inc={inc} /> }
 export function ReportsTab()     { const { inc } = useOutletContext(); return <Reports          inc={inc} /> }
-export function ClosureTab()     { const { inc } = useOutletContext(); return <ClosureChecklist inc={inc} /> }
+export function ClosureTab()     { const { inc } = useOutletContext(); const { user } = useAuth(); return <ClosureChecklist inc={inc} viewer={user?.role === 'viewer'} /> }

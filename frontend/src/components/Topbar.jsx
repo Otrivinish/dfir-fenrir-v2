@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth.jsx'
 import ThemePicker from './ThemePicker.jsx'
@@ -22,8 +23,21 @@ export default function Topbar() {
   const loc = useLocation()
   const { signOut } = useAuth()
   const here = crumbFromPath(loc.pathname)
+  // R138 (L3): publish the bar's real height as --topbar-h. Below 700 px it wraps into rows, and the
+  // fixed War Room drawer (warroom.css) must start under it, not at a fixed 52 px.
+  const barRef = useRef(null)
+  useEffect(() => {
+    const el = barRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const root = document.documentElement
+    const publish = () => root.style.setProperty('--topbar-h', `${el.offsetHeight}px`)
+    publish()
+    const ro = new ResizeObserver(publish)
+    ro.observe(el)
+    return () => { ro.disconnect(); root.style.removeProperty('--topbar-h') }
+  }, [])
   return (
-    <header className="topbar">
+    <header className="topbar" ref={barRef}>
       <span className="crumb">FENRIR // <b>{here}</b></span>
       <span className="topbar-tag">Operational</span>
 
