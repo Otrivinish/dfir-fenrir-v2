@@ -1066,6 +1066,6 @@ _INPLACE_MIGRATIONS: list[str] = [
     # _reopen rows), on every snapshot. A partial index over the incident rows keeps that (and the gates'
     # last-re-opened lookup) off a full scan. Building it takes SHARE on audit_logs (inserts wait; about
     # 3 000 rows on 2026-10-07, milliseconds); IF NOT EXISTS makes a re-run a no-op.
-    "CREATE INDEX IF NOT EXISTS ix_audit_logs_incident_resource ON audit_logs(resource_id, action) "
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_incident_resource ON audit_logs(resource_id, action) " +
     "WHERE resource_type = 'incident'",
 ]
