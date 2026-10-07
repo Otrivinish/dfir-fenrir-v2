@@ -142,13 +142,13 @@ export default function ValidatedTools() {
                 <td style={{ fontSize: 12, color: 'var(--muted)' }} title={t.scope || ''}>{t.validation_ref || '—'}</td>
                 <td style={{ fontSize: 12, color: 'var(--muted)' }}>{[t.validated_by, t.validated_at].filter(Boolean).join(' · ') || '—'}</td>
                 <td>
-                  <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '2px 8px' }}
+                  <button type="button" className="btn ghost"
                           onClick={() => toggleActive(t)} disabled={busy}>
                     {t.is_active ? '✓ active' : 'inactive'}
                   </button>
                 </td>
                 <td>
-                  <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '2px 8px', color: 'var(--crit)' }}
+                  <button type="button" className="btn ghost" style={{ color: 'var(--crit)' }}
                           onClick={() => remove(t)} disabled={busy}>Delete</button>
                 </td>
               </tr>

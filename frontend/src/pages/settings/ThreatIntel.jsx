@@ -85,7 +85,7 @@ function AddFeedModal({ onClose, onCreated }) {
               </div>
               <div className="field">
                 <label className="field-label" htmlFor="af-url">Feed URL</label>
-                <input id="af-url" className="input" value={url} onChange={(e) => setUrl(e.target.value)} required maxLength={512} placeholder="https://…" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} />
+                <input id="af-url" className="input compact" value={url} onChange={(e) => setUrl(e.target.value)} required maxLength={512} placeholder="https://…" style={{ fontFamily: 'var(--font-mono)' }} />
                 <div className="field-hint">Must use https://. Private/RFC-1918 addresses are blocked.</div>
               </div>
               <div className="form-row">
@@ -168,17 +168,17 @@ function GlobalIocBrowser() {
       <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-3)', alignItems: 'center' }}>
         <form onSubmit={search} style={{ display: 'flex', gap: 'var(--space-2)', flex: 1 }}>
           <input
-            className="input"
+            className="input compact"
             placeholder="Search value…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            style={{ maxWidth: 300, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+            style={{ maxWidth: 300, fontFamily: 'var(--font-mono)' }}
           />
           <select className="select" value={typeF} onChange={(e) => { setTypeF(e.target.value); load({ type: e.target.value, cursor: null }) }}>
             <option value="">All types</option>
             {IOC_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
           </select>
-          <button type="submit" className="btn ghost" style={{ fontSize: 12 }}>Search</button>
+          <button type="submit" className="btn ghost">Search</button>
         </form>
         <span style={{ color: 'var(--muted)', fontSize: 12 }}>
           {total.toLocaleString()} total
@@ -213,7 +213,7 @@ function GlobalIocBrowser() {
       )}
       {cursor && (
         <div style={{ marginTop: 'var(--space-3)', textAlign: 'center' }}>
-          <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={() => load({ cursor })}>
+          <button type="button" className="btn ghost" onClick={() => load({ cursor })}>
             Load more
           </button>
         </div>
@@ -356,15 +356,15 @@ export default function ThreatIntel() {
             </button>
           )}
           {feeds.length > 0 && (
-            <button type="button" className="btn ghost" onClick={onInit} disabled={initBusy} style={{ fontSize: 12 }}>
+            <button type="button" className="btn ghost" onClick={onInit} disabled={initBusy}>
               {initBusy ? '…' : '+ Add Defaults'}
             </button>
           )}
-          <button type="button" className="btn ghost" onClick={() => setAddOpen(true)} style={{ fontSize: 12 }}>
+          <button type="button" className="btn ghost" onClick={() => setAddOpen(true)}>
             + Custom Feed
           </button>
           {feeds.length > 0 && (
-            <button type="button" className="btn ghost" onClick={onPullAll} disabled={pullAllBusy} style={{ fontSize: 12 }}>
+            <button type="button" className="btn ghost" onClick={onPullAll} disabled={pullAllBusy}>
               {pullAllBusy ? 'Queued…' : 'Pull All'}
             </button>
           )}
@@ -376,7 +376,6 @@ export default function ThreatIntel() {
                   key={t}
                   type="button"
                   className={`btn ${tab === t ? 'primary' : 'ghost'}`}
-                  style={{ fontSize: 12 }}
                   onClick={() => setTab(t)}
                 >
                   {t === 'feeds' ? 'Feeds' : 'IOC Database'}
@@ -443,7 +442,6 @@ export default function ThreatIntel() {
                         <button
                           type="button"
                           className="btn ghost"
-                          style={{ fontSize: 12 }}
                           onClick={() => onPull(feed)}
                           disabled={isPulling}
                         >
@@ -452,7 +450,6 @@ export default function ThreatIntel() {
                         <button
                           type="button"
                           className="btn ghost"
-                          style={{ fontSize: 12 }}
                           onClick={() => onToggle(feed)}
                         >
                           {feed.enabled ? 'Disable' : 'Enable'}
@@ -460,7 +457,7 @@ export default function ThreatIntel() {
                         <button
                           type="button"
                           className="btn ghost"
-                          style={{ fontSize: 12, color: 'var(--crit)' }}
+                          style={{ color: 'var(--crit)' }}
                           onClick={() => onDelete(feed)}
                         >
                           Delete

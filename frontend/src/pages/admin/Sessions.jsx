@@ -64,8 +64,8 @@ export default function AdminSessions() {
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
           <input
-            className="input"
-            style={{ fontSize: 12, padding: '4px 10px', width: 200 }}
+            className="input compact"
+            style={{ width: 200 }}
             placeholder="Filter by user, IP, label…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
@@ -73,7 +73,6 @@ export default function AdminSessions() {
           <button
             type="button"
             className="btn ghost"
-            style={{ fontSize: 12 }}
             onClick={load}
             disabled={loading || busy}
           >↻ Refresh</button>
@@ -147,7 +146,7 @@ export default function AdminSessions() {
                   <button
                     type="button"
                     className="btn ghost"
-                    style={{ fontSize: 12, color: s.is_current ? undefined : 'var(--crit)' }}
+                    style={{ color: s.is_current ? undefined : 'var(--crit)' }}
                     onClick={() => onRevoke(s)}
                     disabled={busy || s.is_current}
                     title={s.is_current ? 'Use sign-out to end your own session' : `Revoke ${s.username}'s session`}

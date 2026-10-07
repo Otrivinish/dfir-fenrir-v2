@@ -188,7 +188,7 @@ export default function DefenderPdfImport() {
   return (
     <section className="panel">
       <div className="panel-toolbar">
-        <h2 className="panel-h">Defender Import</h2>
+        <h2 className="panel-h">Vendor reports</h2>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>
           Parse a Microsoft Defender incident PDF → review suggested IOCs, Entities, and Timeline events before committing
         </span>

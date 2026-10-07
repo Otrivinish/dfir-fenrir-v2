@@ -154,7 +154,7 @@ export default function Comments() {
         />
       )}
 
-      {!isClosed && (
+      {!isClosed && user?.role !== 'viewer' && (   /* L2 (R43): posting is analyst-only on the API */
         <form className="comment-compose" onSubmit={submit}>
           <textarea
             className="input"

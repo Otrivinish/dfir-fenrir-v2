@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
+from core.errors import ApiError
+from costs.iso4217 import ISO_4217
 from incidents.access import get_accessible_incident
 from models import BusinessImpact, IncidentCost, Incident, User, COST_CATEGORIES, IR_PHASES
 
@@ -20,6 +22,15 @@ router = APIRouter()
 
 async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) -> Incident:
     return await get_accessible_incident(db, incident_id, user)
+
+
+def _currency(raw: str) -> str:
+    """The upper-cased ISO 4217 code; 422 invalid_currency otherwise (K5/R49: static list)."""
+    code = raw.strip().upper()
+    if code not in ISO_4217:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_currency",
+                       "currency must be an ISO 4217 code, e.g. EUR or USD")
+    return code
 
 
 # ── Business Impact ───────────────────────────────────────────────────────────
@@ -252,16 +263,15 @@ async def create_cost(
 ):
     """Record a new cost line item against an incident.
 
-    Validates the category against the allowed set, the currency as a 3-letter ISO code, and the
-    optional IR phase; invalid values return 422. Requires the analyst role and write access; the
+    Validates the category against the allowed set, the currency against ISO 4217 (422 code
+    invalid_currency), and the optional IR phase; invalid values return 422. Requires the analyst role and write access; the
     creation is audit-logged. Returns the created cost entry.
     """
     await _get_incident(db, incident_id, user)
     if body.category not in COST_CATEGORIES:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             f"category must be one of {sorted(COST_CATEGORIES)}")
-    if len(body.currency) != 3:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "currency must be a 3-letter ISO code")
+    currency = _currency(body.currency)
     if body.ir_phase and body.ir_phase not in IR_PHASES:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                             f"ir_phase must be one of {sorted(IR_PHASES)}")
@@ -271,7 +281,7 @@ async def create_cost(
         category=body.category,
         description=body.description.strip(),
         amount=Decimal(str(body.amount)),
-        currency=body.currency.upper(),
+        currency=currency,
         ir_phase=body.ir_phase or None,
         is_estimated=body.is_estimated,
         incurred_at=body.incurred_at,
@@ -306,8 +316,8 @@ async def update_cost(
 ):
     """Partially update a cost line item on an incident.
 
-    Only provided fields are applied; category, currency and IR phase are re-validated and invalid
-    values return 422. Returns 404 if the cost entry is not in this incident. Requires the analyst
+    Only provided fields are applied; category, currency (ISO 4217, 422 code invalid_currency) and
+    IR phase are re-validated and invalid values return 422. Returns 404 if the cost entry is not in this incident. Requires the analyst
     role and write access; the change is audit-logged. Returns the updated cost entry.
     """
     await _get_incident(db, incident_id, user)
@@ -329,9 +339,7 @@ async def update_cost(
     if body.amount is not None:
         c.amount = Decimal(str(body.amount))
     if body.currency is not None:
-        if len(body.currency) != 3:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "currency must be 3 letters")
-        c.currency = body.currency.upper()
+        c.currency = _currency(body.currency)
     if body.ir_phase is not None:
         if body.ir_phase and body.ir_phase not in IR_PHASES:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid ir_phase")

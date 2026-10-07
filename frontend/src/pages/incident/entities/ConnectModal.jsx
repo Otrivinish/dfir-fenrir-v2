@@ -134,7 +134,6 @@ export default function ConnectModal({
                   <button
                     type="button"
                     className={`btn ${!reversed ? 'primary' : 'ghost'}`}
-                    style={{ fontSize: 12, padding: '4px 10px' }}
                     onClick={() => setReversed(false)}
                   >
                     {sourceName} → other
@@ -142,7 +141,6 @@ export default function ConnectModal({
                   <button
                     type="button"
                     className={`btn ${reversed ? 'primary' : 'ghost'}`}
-                    style={{ fontSize: 12, padding: '4px 10px' }}
                     onClick={() => setReversed(true)}
                   >
                     other → {sourceName}

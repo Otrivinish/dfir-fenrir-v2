@@ -187,12 +187,12 @@ export default function BulkImportModal({ incidentId, onClose, onImported }) {
                   <label className="field-label" htmlFor="bulk-paste">Or paste CSV directly</label>
                   <textarea
                     id="bulk-paste"
-                    className="input"
+                    className="input compact"
                     value={csvText}
                     onChange={(e) => setCsvText(e.target.value)}
                     rows={8}
                     placeholder={EXAMPLE_CSV}
-                    style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
+                    style={{ fontFamily: 'var(--font-mono)' }}
                   />
                 </div>
 

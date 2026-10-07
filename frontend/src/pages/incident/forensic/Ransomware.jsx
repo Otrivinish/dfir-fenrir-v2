@@ -205,7 +205,7 @@ export default function Ransomware() {
   return (
     <section className="panel">
       <div className="panel-toolbar">
-        <h2 className="panel-h">Ransomware Note Analysis</h2>
+        <h2 className="panel-h">Ransom note</h2>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>
           Paste the ransom note or related text → extract wallets, deadlines, and contact channels
         </span>
@@ -213,12 +213,12 @@ export default function Ransomware() {
 
       <div style={{ marginBottom: 'var(--space-3)' }}>
         <textarea
-          className="input"
+          className="input compact"
           value={text}
           onChange={e => setText(e.target.value)}
           rows={8}
           placeholder="Paste the ransom note text here…"
-          style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
+          style={{ width: '100%', fontFamily: 'var(--font-mono)', resize: 'vertical' }}
         />
         <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
           <button type="button" className="btn primary" onClick={onExtract} disabled={!text.trim()}>
@@ -269,7 +269,6 @@ export default function Ransomware() {
                           <button
                             type="button"
                             className="btn ghost"
-                            style={{ fontSize: 12, padding: '2px 8px' }}
                             onClick={() => setIocTarget(w)}
                             disabled={ro}
                           >

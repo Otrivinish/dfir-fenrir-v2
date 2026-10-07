@@ -142,7 +142,7 @@ export default function EmailAnalyzer() {
   return (
     <div className="stack" style={{ gap: 'var(--space-4)' }}>
       <div className="panel" style={{ padding: 'var(--space-3)' }}>
-        <h3 className="panel-h">Email analyzer <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· phishing triage</span></h3>
+        <h2 className="panel-h">Email <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· phishing triage</span></h2>
         <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>
           Paste raw headers/source, or choose one or more <code>.eml</code>/<code>.msg</code> files — or a single{' '}
           <code>.zip</code> of them to analyze as a batch. Parsing, header inspection, and Safelink decoding all
@@ -166,9 +166,9 @@ export default function EmailAnalyzer() {
           ))}
         </div>
         {mode === 'upload' ? <>
-        <textarea className="input" rows={6} value={raw} onChange={e => setRaw(e.target.value)}
+        <textarea className="input compact" rows={6} value={raw} onChange={e => setRaw(e.target.value)}
                   placeholder="Paste raw email headers or full source here…"
-                  style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} disabled={busy || files.length > 0} />
+                  style={{ fontFamily: 'var(--font-mono)' }} disabled={busy || files.length > 0} />
         <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', marginTop: 'var(--space-2)', flexWrap: 'wrap' }}>
           <input type="file" multiple accept=".eml,.msg,.zip,message/rfc822,application/vnd.ms-outlook,application/zip,text/plain"
                  disabled={busy || !!raw.trim()} onChange={e => setFiles(Array.from(e.target.files || []))} />
@@ -185,7 +185,7 @@ export default function EmailAnalyzer() {
         <div className="field-hint" data-testid="email-register-hint" style={{ marginTop: 'var(--space-1)' }}>
           Registers first: each message (or the pasted source) is added to Evidence as an <strong>unsealed draft exhibit</strong> —
           hashed, encrypted, custody-logged — and then that exhibit is analysed. A message whose SHA-256 matches an exhibit
-          already registered is analysed as that exhibit. Complete and seal the draft in Evidence › Items.
+          already registered is analysed as that exhibit. Complete and seal the draft in Evidence › Exhibits.
         </div>
         </> : (
           <div className="form-row" style={{ alignItems: 'flex-end' }}>
@@ -208,8 +208,8 @@ export default function EmailAnalyzer() {
               Batch complete: <strong>{batchResult.analyzed.length}</strong> analyzed
               {batchResult.skipped.length > 0 && <>, <strong>{batchResult.skipped.length}</strong> skipped</>}
               {batchResult.errors.length > 0 && <>, <strong style={{ color: 'var(--crit)' }}>{batchResult.errors.length}</strong> errors</>}.
-              {' '}<button className="btn ghost" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => setBatchFilter(batchResult.batch_id)}>Filter history to this batch</button>
-              {batchFilter && <button className="btn ghost" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => setBatchFilter(null)}>Clear filter</button>}
+              {' '}<button className="btn ghost" onClick={() => setBatchFilter(batchResult.batch_id)}>Filter history to this batch</button>
+              {batchFilter && <button className="btn ghost" onClick={() => setBatchFilter(null)}>Clear filter</button>}
             </div>
             {(batchResult.skipped.length > 0 || batchResult.errors.length > 0) && (
               <details style={{ marginTop: 4 }}>
@@ -278,7 +278,7 @@ export default function EmailAnalyzer() {
               <h4 className="panel-h" style={{ marginTop: 'var(--space-4)', display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
                 Email preview
                 {a.body_html && (
-                  <button className="btn ghost" style={{ fontSize: 11, padding: '2px 8px', fontWeight: 400 }}
+                  <button className="btn ghost" style={{ fontWeight: 400 }}
                           onClick={() => setShowHtmlPreview(v => !v)}>
                     {showHtmlPreview ? 'Show plain text' : 'Show sanitized HTML'}
                   </button>
@@ -313,7 +313,7 @@ export default function EmailAnalyzer() {
             <details style={{ marginTop: 'var(--space-3)' }}>
               <summary style={{ cursor: 'pointer', color: 'var(--accent)', fontSize: 12 }}>Full raw headers</summary>
               <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
-                <button className="btn ghost" style={{ fontSize: 11, padding: '2px 8px' }}
+                <button className="btn ghost"
                         onClick={() => navigator.clipboard?.writeText(a.raw_headers)}>Copy</button>
               </div>
               <pre style={{ fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
@@ -480,7 +480,7 @@ export default function EmailAnalyzer() {
             {batchFilter && (
               <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--muted)' }}>
                 · filtered to batch {batchFilter.slice(0, 8)}
-                <button className="btn ghost" style={{ fontSize: 11, padding: '1px 6px', marginLeft: 6 }} onClick={() => setBatchFilter(null)}>clear</button>
+                <button className="btn ghost" style={{ marginLeft: 6 }} onClick={() => setBatchFilter(null)}>clear</button>
               </span>
             )}
           </h4>

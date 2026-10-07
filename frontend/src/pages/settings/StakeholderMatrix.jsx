@@ -94,7 +94,6 @@ export default function StakeholderMatrix() {
           <button
             type="button"
             className="btn primary"
-            style={{ fontSize: 12 }}
             onClick={() => setAdding(true)}
           >+ Add rule</button>
         )}
@@ -180,10 +179,9 @@ export default function StakeholderMatrix() {
                     </td>
                     <td className="actions">
                       <button type="button" className="btn ghost"
-                              style={{ fontSize: 11 }}
                               onClick={() => setEditing(rule.id)}>Edit</button>
                       <button type="button" className="btn ghost"
-                              style={{ fontSize: 11, color: 'var(--crit)' }}
+                              style={{ color: 'var(--crit)' }}
                               onClick={() => remove(rule)}
                               disabled={busy}>Delete</button>
                     </td>
@@ -274,10 +272,10 @@ function RuleForm({ initial, onSave, onCancel, busy }) {
         </div>
       </fieldset>
       <div style={{ display: 'flex', gap: 'var(--space-1)', marginBottom: 4 }}>
-        <button type="submit"  className="btn primary" style={{ fontSize: 12 }} disabled={busy || !role.trim()}>
+        <button type="submit"  className="btn primary" disabled={busy || !role.trim()}>
           {busy ? 'Saving…' : (initial ? 'Save' : 'Add')}
         </button>
-        <button type="button"  className="btn ghost"   style={{ fontSize: 12 }} onClick={onCancel} disabled={busy}>
+        <button type="button"  className="btn ghost" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
       </div>

@@ -47,7 +47,8 @@ import Evidence from './pages/incident/Evidence.jsx'
 import EvidenceItems from './pages/incident/evidence/Items.jsx'
 import EvidenceCustodyLog from './pages/incident/evidence/CustodyLog.jsx'
 import EvidenceAuditChain from './pages/incident/evidence/AuditChain.jsx'
-import EvidenceExport from './pages/incident/evidence/Export.jsx'
+import EvidenceRegister from './pages/incident/evidence/Register.jsx'
+import EvidenceDisclosure from './pages/incident/evidence/Disclosure.jsx'
 import EvidenceSOP from './pages/incident/evidence/SOP.jsx'
 import Forensic from './pages/incident/Forensic.jsx'
 import IOCs from './pages/incident/IOCs.jsx'
@@ -74,7 +75,7 @@ import CommsOOB from './pages/incident/comms/OOB.jsx'
 import CommsStakeholders from './pages/incident/comms/Stakeholders.jsx'
 import CommsNotifications from './pages/incident/comms/Notifications.jsx'
 import StakeholderMatrix from './pages/settings/StakeholderMatrix.jsx'
-import PostIncident, { AnalyticsTab as PIAnalytics, LessonsTab as PILessons, AttackChainTab as PIAttackChain,
+import PostIncident, { AnalyticsTab as PIAnalytics, LessonsTab as PILessons,
          CostsTab as PICosts, ReportsTab as PIReports, ClosureTab as PIClosure } from './pages/incident/PostIncident.jsx'
 import AuditLog from './pages/incident/AuditLog.jsx'
 import Assignments from './pages/incident/Assignments.jsx'
@@ -180,16 +181,24 @@ export default function App() {
                 <Route path="playbook"        element={<Playbook />} />
                 <Route path="timeline"        element={<Timeline />} />
                 <Route path="iocs"            element={<IOCs />} />
-                <Route path="entities"        element={<Entities />} />
-                <Route path="files"           element={<Files />} />
+                {/* K2 (R38): Entities + Affected systems are one Scope list; the old path redirects. */}
+                <Route path="scope"           element={<Entities />} />
+                <Route path="entities"        element={<RedirectTo to="scope" />} />
+                <Route path="files"           element={<RedirectTo to="evidence/documents" />} />
                 <Route path="notes"           element={<Notes />} />
+                {/* K1 (R36): Evidence sub-tabs in lifecycle order; the old paths redirect. */}
                 <Route path="evidence" element={<Evidence />}>
-                  <Route index               element={<Navigate to="items" replace />} />
-                  <Route path="items"        element={<EvidenceItems />} />
+                  <Route index               element={<Navigate to="exhibits" replace />} />
+                  <Route path="register"     element={<EvidenceRegister />} />
+                  <Route path="exhibits"     element={<EvidenceItems />} />
                   <Route path="custody-log"  element={<EvidenceCustodyLog />} />
-                  <Route path="audit-chain"  element={<EvidenceAuditChain />} />
-                  <Route path="export"       element={<EvidenceExport />} />
+                  <Route path="integrity"    element={<EvidenceAuditChain />} />
+                  <Route path="disclosure"   element={<EvidenceDisclosure />} />
                   <Route path="sop"          element={<EvidenceSOP />} />
+                  <Route path="documents"    element={<Files />} />
+                  <Route path="items"        element={<RedirectTo to="evidence/exhibits" />} />
+                  <Route path="audit-chain"  element={<RedirectTo to="evidence/integrity" />} />
+                  <Route path="export"       element={<RedirectTo to="evidence/disclosure" />} />
                 </Route>
                 <Route path="forensic" element={<Forensic />}>
                   <Route index               element={<Navigate to="collections" replace />} />
@@ -207,7 +216,11 @@ export default function App() {
                   <Route path="artifacts"      element={<Artifacts />} />
                   <Route path="collections"    element={<Collections />} />
                 </Route>
-                <Route path="respond"         element={<Respond />} />
+                {/* K2 (R38): the Respond board is three rail pages; /respond (and ?new_action=…) redirects. */}
+                <Route path="containment"          element={<Respond key="containment" view="containment" />} />
+                <Route path="eradication-recovery" element={<Respond key="eradication_recovery" view="eradication_recovery" />} />
+                <Route path="decisions"            element={<Respond key="decisions" view="decisions" />} />
+                <Route path="respond"              element={<RedirectTo to="containment" />} />
                 <Route path="recovery"        element={<Recovery />} />
                 <Route path="comms" element={<Comms />}>
                   <Route index                   element={<Navigate to="comments" replace />} />
@@ -225,7 +238,8 @@ export default function App() {
                   <Route index               element={<Navigate to="analytics" replace />} />
                   <Route path="analytics"    element={<PIAnalytics />} />
                   <Route path="lessons"      element={<PILessons />} />
-                  <Route path="attack-chain" element={<PIAttackChain />} />
+                  {/* K4: Attack Chain is folded into the ATT&CK view (mitre, under Coverage) */}
+                  <Route path="attack-chain" element={<RedirectTo to="mitre" />} />
                   <Route path="costs"        element={<PICosts />} />
                   <Route path="reports"      element={<PIReports />} />
                   <Route path="closure"      element={<PIClosure />} />

@@ -3,6 +3,7 @@ import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { useAuth } from '../../../hooks/useAuth.jsx'
 import { formatLocal } from '../../../lib/datetime.js'
+import { csvSafe } from '../../../lib/csvSafe.js'
 import { useOutboundConfirm } from '../../../components/OutboundConfirm.jsx'
 
 // ─── Extraction regexes ───────────────────────────────────────────────────────
@@ -114,7 +115,7 @@ function triggerDownload(blob, filename) {
 
 function csvEsc(v) {
   if (v == null) return ''
-  const s = String(v).replace(/"/g, '""')
+  const s = csvSafe(v).replace(/"/g, '""')   // R129: formula-escaped
   return /[,"\n\r]/.test(s) ? `"${s}"` : s
 }
 
@@ -438,7 +439,7 @@ export default function OSINTLookup() {
     <section className="panel">
       {outboundDialog}
       <div className="panel-toolbar">
-        <h2 className="panel-h">OSINT Lookup</h2>
+        <h2 className="panel-h">OSINT</h2>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>
           Paste raw text → extract indicators → enrich selectively
         </span>
@@ -525,12 +526,12 @@ export default function OSINTLookup() {
       {/* Input area */}
       <div style={{ marginBottom: 'var(--space-3)' }}>
         <textarea
-          className="input"
+          className="input compact"
           value={text}
           onChange={e => setText(e.target.value)}
           rows={5}
           placeholder="Paste log output, alert text, IOC feeds, or raw data — IPv4, IPv6, domains, hashes, URLs are auto-extracted"
-          style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
+          style={{ width: '100%', fontFamily: 'var(--font-mono)', resize: 'vertical' }}
         />
         <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-2)', alignItems: 'center' }}>
           <button type="button" className="btn primary" onClick={onExtract} disabled={!text.trim()}>
@@ -566,15 +567,14 @@ export default function OSINTLookup() {
                 return n > 0 ? <option key={v} value={v}>{l} ({n})</option> : null
               })}
             </select>
-            <button
+            {!viewer && <button
               type="button"
               className="btn ghost"
               onClick={enrichAll}
               disabled={enriching.size > 0 || enabledSources.size === 0}
-              style={{ fontSize: 13 }}
             >
               {enriching.size > 0 ? `Enriching…` : `Enrich all visible (${visible.length})`}
-            </button>
+            </button>}
             {selected.size > 0 && (
               <button
                 type="button"
@@ -590,20 +590,20 @@ export default function OSINTLookup() {
                 Add {selected.size} to IOCs
               </button>
             )}
-            <button type="button" className="btn ghost" style={{ fontSize: 13 }}
+            <button type="button" className="btn ghost"
               onClick={() => exportPlainCsv(extracted, inc.ref)}>
               Export CSV
             </button>
-            <button type="button" className="btn ghost" style={{ fontSize: 13 }}
+            <button type="button" className="btn ghost"
               onClick={() => exportEnrichedCsv(extracted, results, sources, inc.ref)}
               disabled={Object.keys(results).length === 0}>
               Export CSV (enriched)
             </button>
-            <button type="button" className="btn ghost" style={{ fontSize: 13 }}
+            <button type="button" className="btn ghost"
               onClick={() => previewReport(extracted, results, sources, inc, user)}>
               Preview report
             </button>
-            <button type="button" className="btn ghost" style={{ fontSize: 13 }}
+            <button type="button" className="btn ghost"
               onClick={() => downloadReport(extracted, results, sources, inc, user)}>
               Download report (HTML)
             </button>
@@ -644,7 +644,7 @@ export default function OSINTLookup() {
                       n.has(item.id) ? n.delete(item.id) : n.add(item.id)
                       return n
                     })}
-                    onEnrich={() => enrichOne(item)}
+                    onEnrich={viewer ? null : () => enrichOne(item)}
                     onAddIoc={() => setIocTarget(item)}
                     isClosed={ro}
                   />
@@ -693,7 +693,6 @@ export default function OSINTLookup() {
                   <button
                     type="button"
                     className="btn ghost"
-                    style={{ fontSize: 12, padding: '2px 8px' }}
                     onClick={() => loadSession(s)}
                     disabled={isActive}
                   >
@@ -702,7 +701,7 @@ export default function OSINTLookup() {
                   <button
                     type="button"
                     className="btn ghost"
-                    style={{ fontSize: 12, padding: '2px 8px', color: 'var(--crit)' }}
+                    style={{ color: 'var(--crit)' }}
                     onClick={() => removeSession(s.id)}
                     aria-label="Delete session"
                   >
@@ -769,21 +768,22 @@ function IndicatorRow({ item, incId, matches, sources, enabledSources, result, i
           )}
         </td>
         <td onClick={e => e.stopPropagation()}>
+          {/* L4 (R137): no onEnrich for a viewer (outbound OSINT is analyst and up; the API 403s). */}
+          {onEnrich && (
           <button
             type="button"
             className="btn ghost"
-            style={{ fontSize: 12, padding: '2px 8px' }}
             onClick={onEnrich}
             disabled={isEnriching || enabledSources.size === 0}
           >
             {isEnriching ? '…' : result ? '↻ Re-enrich' : 'Enrich'}
           </button>
+          )}
         </td>
         <td className="actions" onClick={e => e.stopPropagation()}>
           <button
             type="button"
             className="btn ghost"
-            style={{ fontSize: 12, padding: '2px 6px' }}
             onClick={onAddIoc}
             disabled={isClosed}
           >

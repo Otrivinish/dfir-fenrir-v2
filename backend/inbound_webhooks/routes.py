@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -42,20 +42,23 @@ SIEM_DEDUP_WINDOW = timedelta(hours=24)
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
-async def _verify_key(db: AsyncSession, provided: str) -> None:
+async def _verify_key(db: AsyncSession, provided: Optional[str]) -> None:
+    """403 with a flat {detail, code}: inbound_not_configured, invalid_key_configuration, or invalid_key (a
+    wrong or missing X-Fenrir-Key: L4 R118, a missing header was FastAPI's list-shaped 422)."""
     row = (await db.execute(
         select(PlatformSetting).where(PlatformSetting.key == "inbound.siem_key")
     )).scalar_one_or_none()
     if not row:
-        raise HTTPException(403, "Inbound webhook not configured — generate a key in Settings → Integrations")
+        raise ApiError(403, "inbound_not_configured",
+                       "Inbound webhook not configured — generate a key in Settings → Integrations")
     try:
         stored = decrypt_secret(row.encrypted_value)
     except Exception:
-        raise HTTPException(403, "Invalid key configuration")
+        raise ApiError(403, "invalid_key_configuration", "Invalid key configuration")
     # Constant-time compare — a plain `!=` leaks the shared secret byte-by-byte
     # via response timing. encode() because compare_digest wants equal-type args.
     if not hmac.compare_digest(stored.encode("utf-8"), (provided or "").encode("utf-8")):
-        raise HTTPException(403, "Invalid X-Fenrir-Key")
+        raise ApiError(403, "invalid_key", "Invalid or missing X-Fenrir-Key")
 
 
 async def _read_body(request: Request) -> dict:
@@ -328,7 +331,8 @@ async def _intake(db: AsyncSession, alert: Alert) -> SiemIntakeOut:
 
 
 _DOC_TAIL = (
-    " Authenticated via the shared `X-Fenrir-Key` header (403 on mismatch), checked before the body is read."
+    " Authenticated via the shared `X-Fenrir-Key` header (403 invalid_key when missing or wrong), checked before the"
+    " body is read."
     " The body must be a JSON object of at most 1 MiB (413 payload_too_large); invalid JSON, a non-object or a"
     " wrongly typed core field is 422 invalid_json / payload_not_object / invalid_field (`field`)."
     " A re-fire (same source + alert id, or the same rule + extracted indicators) within 24 h of the last firing"
@@ -343,7 +347,8 @@ def _desc(text: str) -> str:
     return " ".join(text.split()) + _DOC_TAIL
 
 
-_RESPONSES = {403: {"description": "Missing/invalid X-Fenrir-Key or no key configured"},
+_RESPONSES = {403: {"model": ApiErrorBody, "description": "invalid_key (missing or wrong X-Fenrir-Key), "
+                    "inbound_not_configured or invalid_key_configuration"},
               413: {"model": ApiErrorBody, "description": "payload_too_large"},
               422: {"model": ApiErrorBody, "description": "invalid_json, payload_not_object or invalid_field"}}
 _BODY = {"requestBody": {"required": True, "content": {"application/json": {
@@ -360,7 +365,7 @@ _BODY = {"requestBody": {"required": True, "content": {"application/json": {
     Alert id = `sid`; rule = search_name; category = `result.category` / `result.incident_type`."""))
 async def inbound_splunk(
     request: Request,
-    x_fenrir_key: str = Header(...),
+    x_fenrir_key: Optional[str] = Header(default=None, description="The shared inbound key (Settings → Integrations)."),
     db: AsyncSession = Depends(get_db),
 ) -> SiemIntakeOut:
     """Splunk alert -> incident, or attached to its open incident (see the route description)."""
@@ -379,7 +384,7 @@ async def inbound_splunk(
     Alert id = `SystemAlertId`; rule = AlertType / AlertName / title."""))
 async def inbound_sentinel(
     request: Request,
-    x_fenrir_key: str = Header(...),
+    x_fenrir_key: Optional[str] = Header(default=None, description="The shared inbound key (Settings → Integrations)."),
     db: AsyncSession = Depends(get_db),
 ) -> SiemIntakeOut:
     """Sentinel alert -> incident, or attached to its open incident (see the route description)."""
@@ -399,7 +404,7 @@ async def inbound_sentinel(
     rule = rule.id / rule.name; category = `event.category`."""))
 async def inbound_elastic(
     request: Request,
-    x_fenrir_key: str = Header(...),
+    x_fenrir_key: Optional[str] = Header(default=None, description="The shared inbound key (Settings → Integrations)."),
     db: AsyncSession = Depends(get_db),
 ) -> SiemIntakeOut:
     """Elastic alert -> incident, or attached to its open incident (see the route description)."""

@@ -237,7 +237,6 @@ function PlaybookCard({ tpl, isAdmin, onOpen, onExecute, onDelete }) {
             type="button"
             className="btn ghost"
             onClick={() => onDelete(tpl)}
-            style={{ padding: '0 12px' }}
             title="Delete template"
           >
             ×
@@ -722,8 +721,8 @@ function StepRow({ step, idx, total, onChange, onRemove, disabled }) {
           {idx + 1}.
         </span>
         <input
-          className="input"
-          style={{ flex: 1, padding: '5px 8px', fontSize: 13 }}
+          className="input compact"
+          style={{ flex: 1 }}
           placeholder="Step title"
           value={step.title}
           onChange={(e) => onChange('title', e.target.value)}
@@ -731,8 +730,8 @@ function StepRow({ step, idx, total, onChange, onRemove, disabled }) {
           maxLength={512}
         />
         <select
-          className="select"
-          style={{ padding: '5px 8px', fontSize: 11, minWidth: 160 }}
+          className="select compact"
+          style={{ minWidth: 160 }}
           value={step.phase}
           onChange={(e) => onChange('phase', e.target.value)}
           disabled={disabled}
@@ -748,8 +747,8 @@ function StepRow({ step, idx, total, onChange, onRemove, disabled }) {
         >×</button>
       </div>
       <textarea
-        className="input"
-        style={{ fontSize: 12, padding: '4px 8px', marginLeft: 28, resize: 'none', rows: 1 }}
+        className="input compact"
+        style={{ marginLeft: 28, resize: 'none', rows: 1 }}
         rows={1}
         placeholder="Optional description"
         value={step.description}

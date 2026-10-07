@@ -209,7 +209,9 @@ INCIDENTS = [
         },
         "affected_systems": (
             "SolarWinds Orion Server (SVRORION01), Exchange Server (SVRMAIL01), "
-            "Domain Controllers (DC01, DC02), ADFS Server (SVRADFS01)"
+            # One entry per host: parse_systems splits on commas (K5/R49 — "Domain Controllers
+            # (DC01, DC02)" became two bogus entities).
+            "Domain Controller (DC01), Domain Controller (DC02), ADFS Server (SVRADFS01)"
         ),
         "containment_actions": (
             "Isolated SolarWinds server from network. "

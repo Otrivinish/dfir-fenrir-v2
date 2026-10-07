@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useOutletContext, Link } from 'react-router-dom'
+import { useAuth } from '../../hooks/useAuth.jsx'
 import { api } from '../../api/client.js'
 import { PHASE, labelOf } from '../../lib/incidentVocab.js'
 import { formatLocal } from '../../lib/datetime.js'
@@ -14,6 +15,9 @@ const STATUS_LABEL = {
 export default function Playbook() {
   const { inc, bumpRail, access } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  // L2 (R43): a viewer reads the plan but can't change it (the API refuses them): no write buttons, read-only rows.
+  const { user } = useAuth()
+  const viewer = user?.role === 'viewer'
   // Replace is the incident lead's (IC / Deputy) or an admin's: the API says so in /access (I3).
   const canReplace = !!access?.capabilities?.includes('replace_playbook')
 
@@ -145,26 +149,30 @@ export default function Playbook() {
             )}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', alignItems: 'center' }}>
           <Link
             to="/playbooks"
             className="btn"
             style={{ textDecoration: 'none' }}
             title="Browse the playbook template library"
           >Browse library</Link>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setModal({ apply: '' })}
-            disabled={isClosed || templates.length === 0}
-            title={isClosed ? 'Closed incidents are read-only' : 'Apply a template'}
-          >Apply template</button>
-          <button
-            type="button"
-            className="btn primary"
-            onClick={() => setModal('add')}
-            disabled={isClosed}
-          >+ Add task</button>
+          {!viewer && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setModal({ apply: '' })}
+              disabled={isClosed || templates.length === 0}
+              title={isClosed ? 'Closed incidents are read-only' : 'Apply a template'}
+            >Apply template</button>
+          )}
+          {!viewer && (
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => setModal('add')}
+              disabled={isClosed}
+            >+ Add task</button>
+          )}
         </div>
       </div>
 
@@ -179,7 +187,7 @@ export default function Playbook() {
         </div>
       )}
 
-      {!loading && !isClosed && openSuggestions.length > 0 && (
+      {!loading && !isClosed && !viewer && openSuggestions.length > 0 && (
         <div className="pb-suggest" role="note" aria-labelledby="pb-suggest-head">
           <span id="pb-suggest-head" className="pb-suggest-head">
             Suggested for {labelOf('incident_type', inc.incident_type)}:
@@ -199,7 +207,7 @@ export default function Playbook() {
         <div className="panel-empty">
           <div className="panel-empty-mark" aria-hidden="true">▤</div>
           <div>No tasks yet.</div>
-          {!isClosed && (
+          {!isClosed && !viewer && (
             <div style={{ color: 'var(--dim)', fontSize: 12 }}>
               Apply a seeded template (NIST 800-61 R3, CISA Federal IR, CISA Vulnerability Response)
               or add custom tasks.
@@ -217,7 +225,8 @@ export default function Playbook() {
             onAssigneeChange={onAssigneeChange}
             onDueChange={onDueChange}
             onDelete={onDelete}
-            isClosed={isClosed}
+            isClosed={isClosed || viewer}
+            canDelete={!viewer}
             busy={busy}
           />
         ))
@@ -271,7 +280,7 @@ export default function Playbook() {
 
 // ── Phase group ───────────────────────────────────────────────────────────
 
-function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange, onDueChange, onDelete, isClosed, busy }) {
+function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange, onDueChange, onDelete, isClosed, canDelete, busy }) {
   return (
     <div style={{ marginBottom: 'var(--space-4)' }}>
       <h3 style={{
@@ -287,18 +296,9 @@ function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange
           {group.done}/{group.total}
         </span>
       </h3>
-      <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <ul className="pb-task-list">
         {group.tasks.map(t => (
-          <li key={t.id} style={{
-            display: 'grid',
-            gridTemplateColumns: '120px 1fr 170px 220px 70px',
-            gap: 'var(--space-2)',
-            padding: 'var(--space-2) var(--space-3)',
-            background: 'var(--surface-2)',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius)',
-            alignItems: 'start',
-          }}>
+          <li key={t.id} className="pb-task-row">
             <div>
               <select
                 className="select compact"
@@ -312,7 +312,7 @@ function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange
                 ))}
               </select>
             </div>
-            <div>
+            <div className="pb-task-main">
               <div style={{
                 fontWeight: 500,
                 textDecoration: t.status === 'done' || t.status === 'skipped' ? 'line-through' : 'none',
@@ -377,13 +377,14 @@ function PhaseGroup({ group, users, usernameOf, onStatusChange, onAssigneeChange
               {t.overdue && <div className="pb-overdue"><span aria-hidden="true">! </span>Overdue</div>}
             </div>
             <div style={{ textAlign: 'right' }}>
-              <button
-                type="button"
-                className="btn ghost"
-                onClick={() => onDelete(t)}
-                disabled={isClosed || busy}
-                style={{ padding: '2px 8px', fontSize: 11 }}
-              >Delete</button>
+              {canDelete && (
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={() => onDelete(t)}
+                  disabled={isClosed || busy}
+                >Delete</button>
+              )}
             </div>
           </li>
         ))}

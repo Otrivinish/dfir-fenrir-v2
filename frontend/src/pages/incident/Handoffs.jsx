@@ -55,21 +55,21 @@ function ListBuilder({ items, onChange, fields, addLabel }) {
       {textFields.map(f => (
         <input
           key={f.key}
-          className="input"
+          className="input compact"
           value={values[f.key] ?? ''}
           onChange={e => onChange(f.key, e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') add() }}
           placeholder={f.label}
-          style={{ flex: f.flex ?? 1, minWidth: 80, fontSize: 13, padding: '5px 8px' }}
+          style={{ flex: f.flex ?? 1, minWidth: 80 }}
         />
       ))}
       {selectFields.map(f => (
         <select
           key={f.key}
-          className="select"
+          className="select compact"
           value={values[f.key] ?? f.default}
           onChange={e => onChange(f.key, e.target.value)}
-          style={{ width: 'auto', flex: '0 0 auto', minWidth: 110, fontSize: 11, padding: '3px 6px' }}
+          style={{ width: 'auto', flex: '0 0 auto', minWidth: 110 }}
         >
           {(f.options ?? []).map(o => (
             <option key={o} value={o}>{o.replace('_', ' ')}</option>
@@ -120,7 +120,7 @@ function ListBuilder({ items, onChange, fields, addLabel }) {
           type="button"
           className="btn ghost"
           onClick={add}
-          style={{ fontSize: 11, flexShrink: 0, padding: '3px 10px' }}
+          style={{ flexShrink: 0 }}
         >
           {addLabel ?? '+ Add'}
         </button>
@@ -157,16 +157,16 @@ function QuestionsBuilder({ questions, onChange }) {
       ))}
       <div style={{ display: 'flex', gap: 6 }}>
         <input
-          className="input"
+          className="input compact"
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') add() }}
           placeholder="What is still unanswered?"
-          style={{ flex: 1, fontSize: 12, padding: '3px 7px' }}
+          style={{ flex: 1 }}
         />
         <button type="button" className="btn ghost"
                 onClick={add}
-                style={{ fontSize: 11, padding: '3px 10px', flexShrink: 0 }}>
+                style={{ flexShrink: 0 }}>
           + Add
         </button>
       </div>
@@ -266,7 +266,7 @@ function HandoffCard({ h, currentUserId, onAck }) {
             {h.status}
           </span>
           {isIncoming && isPending && (
-            <button className="btn" style={{ fontSize: 12, padding: '2px 10px' }} onClick={onAck}>
+            <button className="btn" onClick={onAck}>
               Acknowledge
             </button>
           )}

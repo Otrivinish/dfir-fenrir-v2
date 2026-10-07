@@ -493,7 +493,7 @@ forwarder = SyslogForwarder()
 
 def forward_audit_row(*, action: str, username: Optional[str], resource_type: Optional[str],
                       resource_id: Optional[str], outcome: Optional[str], ip_address: Optional[str],
-                      timestamp: datetime) -> None:
+                      timestamp: datetime, user_agent: Optional[str] = None) -> None:
     """Push an audit-log row onto the forwarder queue (non-blocking)."""
     if not forwarder.is_enabled():
         return
@@ -515,6 +515,7 @@ def forward_audit_row(*, action: str, username: Optional[str], resource_type: Op
             "rid":      resource_id or "-",
             "outcome":  outcome or "-",
             "ip":       ip_address or "-",
+            "ua":       user_agent or "-",   # already sanitised by write_audit; _sd_escape strips controls again
         },
         message=f"{action} user={username or '-'} resource={resource_type or '-'}:{resource_id or '-'} outcome={outcome or '-'}",
     )

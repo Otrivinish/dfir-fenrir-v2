@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api/client.js'
 import { formatLocal } from '../../lib/datetime.js'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
+import { AuditClientLine, AuditRequestFields } from '../../components/AuditRequestInfo.jsx'
 
 // ─── Shared helpers (mirror per-incident AuditLog.jsx) ───────────────────────
 
@@ -49,20 +50,16 @@ function AuditRow({ ev }) {
           gap: 'var(--space-3)',
           padding: 'var(--space-2) var(--space-3)',
           alignItems: 'start',
-          cursor: hasDetail ? 'pointer' : 'default',
+          cursor: 'pointer',
         }}
-        onClick={() => hasDetail && setExpanded(x => !x)}
+        onClick={() => setExpanded(x => !x)}
       >
-        {/* Timestamp + IP */}
+        {/* Timestamp + METHOD IP · client */}
         <div>
           <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
             {formatLocal(ev.timestamp)}
           </div>
-          {ev.ip_address && (
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--dim)', marginTop: 2 }}>
-              {ev.request_method} {ev.ip_address}
-            </div>
-          )}
+          <AuditClientLine ev={ev} />
         </div>
 
         {/* User */}
@@ -100,11 +97,9 @@ function AuditRow({ ev }) {
         </div>
 
         {/* Expand toggle */}
-        {hasDetail && (
-          <span style={{ color: 'var(--muted)', fontSize: 11, userSelect: 'none' }}>
-            {expanded ? '▲' : '▼'}
-          </span>
-        )}
+        <span style={{ color: 'var(--muted)', fontSize: 11, userSelect: 'none' }}>
+          {expanded ? '▲' : '▼'}
+        </span>
       </div>
 
       {expanded && (
@@ -113,12 +108,15 @@ function AuditRow({ ev }) {
           borderTop: '1px solid var(--border)',
           display: 'flex', flexDirection: 'column', gap: 'var(--space-2)',
         }}>
-          <pre style={{
-            margin: 0, fontFamily: 'var(--font-mono)', fontSize: 11,
-            color: 'var(--muted)', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-          }}>
-            {JSON.stringify(ev.details, null, 2)}
-          </pre>
+          <AuditRequestFields ev={ev} />
+          {hasDetail && (
+            <pre style={{
+              margin: 0, fontFamily: 'var(--font-mono)', fontSize: 11,
+              color: 'var(--muted)', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+            }}>
+              {JSON.stringify(ev.details, null, 2)}
+            </pre>
+          )}
           <div style={{ display: 'flex', gap: 'var(--space-4)', fontSize: 10, color: 'var(--dim)', fontFamily: 'var(--font-mono)' }}>
             <span>row_hash: {ev.row_hash?.slice(0, 16)}…</span>
             <span>prev_hash: {ev.prev_hash?.slice(0, 16)}…</span>
@@ -149,9 +147,8 @@ function FilterBar({ onApply }) {
   }
 
   return (
-    <form onSubmit={handleSubmit} style={{
-      display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end',
-      marginBottom: 'var(--space-3)',
+    <form onSubmit={handleSubmit} className="panel-toolbar" style={{
+      justifyContent: 'flex-start', gap: 'var(--space-2)', alignItems: 'flex-end',
     }}>
       <input
         className="input" placeholder="Action contains…"
@@ -163,15 +160,15 @@ function FilterBar({ onApply }) {
         value={username} onChange={e => setUsername(e.target.value)}
         style={{ width: 140 }}
       />
-      <select className="input" value={resourceType} onChange={e => setResourceType(e.target.value)} style={{ width: 160 }}>
+      <select className="select" value={resourceType} onChange={e => setResourceType(e.target.value)} style={{ width: 160 }}>
         <option value="">All resource types</option>
         {RESOURCE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
       </select>
-      <div style={{ width: 240 }}>
+      <div style={{ width: 240, maxWidth: '100%' }}>
         <LocalDateTimePicker value={dateFrom} onChange={setDateFrom}
                              placeholder="From — YYYY-MM-DD HH:mm:ss" hint={false} clearable />
       </div>
-      <div style={{ width: 240 }}>
+      <div style={{ width: 240, maxWidth: '100%' }}>
         <LocalDateTimePicker value={dateTo} onChange={setDateTo}
                              placeholder="To — YYYY-MM-DD HH:mm:ss" hint={false} clearable />
       </div>

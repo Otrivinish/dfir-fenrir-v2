@@ -149,7 +149,7 @@ export function RegisterExhibitModal({ file, onConfirm, onClose }) {
   }
 
   const done = {
-    registered: `Registered as draft exhibit ${result?.evidence_identifier}. Complete its acquisition record and seal it in Evidence › Items.`,
+    registered: `Registered as draft exhibit ${result?.evidence_identifier}. Complete its acquisition record and seal it in Evidence › Exhibits.`,
     sha256_match: `An exhibit with the same SHA-256 already exists: linked to ${result?.evidence_identifier} (no second copy).`,
     already_registered: `Already registered as ${result?.evidence_identifier}.`,
   }[result?.exhibit_link]

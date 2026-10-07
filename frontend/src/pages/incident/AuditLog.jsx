@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { formatLocal } from '../../lib/datetime.js'
+import { AuditClientLine, AuditRequestFields } from '../../components/AuditRequestInfo.jsx'
 
 // Derive colour from action suffix — avoids exhaustive mapping for an open vocabulary.
 function actionColor(action) {
@@ -161,11 +162,7 @@ export default function AuditLog() {
                 <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
                   {formatLocal(ev.timestamp)}
                 </div>
-                {ev.request_method && (
-                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--dim)', marginTop: 2 }}>
-                    {ev.request_method} {ev.ip_address}
-                  </div>
-                )}
+                <AuditClientLine ev={ev} />
               </div>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
@@ -214,17 +211,18 @@ export default function AuditLog() {
                   </div>
                 )}
 
-                {ev.details && Object.keys(ev.details).length > 0 && (
-                  <details style={{ marginTop: 4 }}>
-                    <summary style={{ cursor: 'pointer', color: 'var(--muted)', fontSize: 12 }}>details</summary>
+                <details style={{ marginTop: 4 }}>
+                  <summary style={{ cursor: 'pointer', color: 'var(--muted)', fontSize: 12 }}>details</summary>
+                  <div style={{ marginTop: 4 }}><AuditRequestFields ev={ev} /></div>
+                  {ev.details && Object.keys(ev.details).length > 0 && (
                     <pre style={{
                       margin: '4px 0 0', fontSize: 10, color: 'var(--muted)',
                       background: 'var(--bg)', padding: 'var(--space-2)',
                       borderRadius: 'var(--radius-sm)', overflow: 'auto',
                       whiteSpace: 'pre-wrap', wordBreak: 'break-all',
                     }}>{JSON.stringify(ev.details, null, 2)}</pre>
-                  </details>
-                )}
+                  )}
+                </details>
 
                 <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--dim)', marginTop: 4 }}>
                   hash: {ev.row_hash.slice(0, 16)}…

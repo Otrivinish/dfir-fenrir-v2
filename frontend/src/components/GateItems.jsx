@@ -96,7 +96,7 @@ function SignOffRow({ incidentId, gateName, role, signed, allowed, onSigned }) {
       ) : <span style={{ color: 'var(--muted)' }}>not signed</span>}
       {allowed && !open && (
         <div>
-          <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={() => setOpen(true)}
+          <button type="button" className="btn ghost" onClick={() => setOpen(true)}
                   data-signoff-open={role}>
             {signed ? 'Sign again' : `Sign off as ${ROLE_LABEL[role]}`}
           </button>
@@ -113,11 +113,11 @@ function SignOffRow({ incidentId, gateName, role, signed, allowed, onSigned }) {
             {n < REASON_MIN ? ` At least ${REASON_MIN} characters (${n} so far).` : ''}
           </span>
           <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)' }}>
-            <button type="button" className="btn primary" style={{ fontSize: 12 }} disabled={busy || n < REASON_MIN}
+            <button type="button" className="btn primary" disabled={busy || n < REASON_MIN}
                     onClick={submit} data-signoff-submit={role}>
               {busy ? 'Signing…' : 'Sign off'}
             </button>
-            <button type="button" className="btn ghost" style={{ fontSize: 12 }} disabled={busy}
+            <button type="button" className="btn ghost" disabled={busy}
                     onClick={() => { setOpen(false); setError(null) }}>Cancel</button>
           </div>
           {error && <div className="alert error" role="alert"><span className="alert-icon">!</span><span>{error}</span></div>}

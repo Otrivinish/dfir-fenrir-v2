@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client.js'
 import { formatLocal, formatLocalShort } from '../../lib/datetime.js'
 import { MITRE_TACTICS, MITRE_TECHNIQUES, tacticColor } from '../../lib/mitre.js'
@@ -8,6 +8,9 @@ import { labelOf } from '../../lib/incidentVocab.js'
 import { matchEntity } from '../../lib/entityMatch.js'
 import { OffsetMark, fmtOffset } from '../../components/ClockOffset.jsx'
 import LinkedCaseNotes from '../../components/LinkedCaseNotes.jsx'
+import { SEV_PALETTE } from '../../components/SevBadge.jsx'
+import { csvSafe } from '../../lib/csvSafe.js'
+import { useAuth } from '../../hooks/useAuth.jsx'
 
 // Maps 800-61 R3 phase keys to display labels.
 const IR_PHASE_LABELS = {
@@ -16,6 +19,11 @@ const IR_PHASE_LABELS = {
   containment_eradication_recovery: 'Containment / Eradication / Recovery',
   post_incident: 'Post-Incident',
 }
+
+// K3 (R39): the filters are URL query params, sent as-is to GET …/timeline (the server filters before paging).
+const FILTER_KEYS = ['ir_phase', 'entity_id', 'ioc_id', 'origin', 'key', 'q']
+const ORIGIN_LABELS = { manual: 'Manual', forensic_import: 'Imported', system: 'System' }
+const MAL_CHIP = { background: SEV_PALETTE.critical.bg, color: SEV_PALETTE.critical.text, borderColor: SEV_PALETTE.critical.border }
 
 // ─── Export helpers ───────────────────────────────────────────────────────────
 
@@ -36,7 +44,7 @@ function exportCsv(events, incRef) {
                 'recorded_event_time', 'clock_offset_seconds']
   const esc = v => {
     if (v == null) return ''
-    const s = String(v).replace(/"/g, '""')
+    const s = csvSafe(v).replace(/"/g, '""')   // R129: formula-escaped
     return /[,"\n\r]/.test(s) ? `"${s}"` : s
   }
   const rows = [COLS.join(','), ...events.map(ev => COLS.map(c => esc(ev[c])).join(','))]
@@ -47,6 +55,7 @@ function exportCsv(events, incRef) {
 }
 
 const TACTIC_HEX = {
+  TA0043: '#10b981', TA0042: '#a78bfa',
   TA0001: '#f43f5e', TA0002: '#f59e0b', TA0003: '#a78bfa',
   TA0004: '#f59e0b', TA0005: '#22d3ee', TA0006: '#f43f5e',
   TA0007: '#10b981', TA0008: '#f59e0b', TA0009: '#a78bfa',
@@ -245,6 +254,39 @@ body{background:#07080b;color:#d9dde5;font-family:-apple-system,'Segoe UI',Robot
 export default function Timeline() {
   const { inc, bumpRail } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  // L2 (R43): a viewer gets no write controls (the API refuses them); rows are read-only as on a closed incident.
+  const { user } = useAuth()
+  const viewer = user?.role === 'viewer'
+  const navigate = useNavigate()
+
+  // K3 filters: in the URL (deep links such as ?entity_id=… and reloads keep them); q is debounced.
+  const [sp, setSp] = useSearchParams()
+  const filterKey = JSON.stringify(FILTER_KEYS.map(k => sp.get(k) || ''))
+  const filters = useMemo(() => Object.fromEntries(
+    JSON.parse(filterKey).map((v, i) => [FILTER_KEYS[i], v]).filter(([, v]) => v)
+  ), [filterKey])
+  const filtered = Object.keys(filters).length > 0
+  // From the live URL, not the render's params: two quick changes (a select, then the debounced search)
+  // must not overwrite each other.
+  const setFilter = useCallback((k, v) => setSp(() => {
+    const p = new URLSearchParams(window.location.search)
+    if (v) p.set(k, v); else p.delete(k)
+    return p
+  }, { replace: true }), [setSp])
+  const [qText, setQText] = useState(() => sp.get('q') || '')
+  useEffect(() => {
+    const t = setTimeout(() => { if (qText.trim() !== (sp.get('q') || '')) setFilter('q', qText.trim()) }, 300)
+    return () => clearTimeout(t)
+  }, [qText, sp, setFilter])
+  const clearFilters = () => { setQText(''); setSp(p => { FILTER_KEYS.forEach(k => p.delete(k)); return p }, { replace: true }) }
+  const [entityOpts, setEntityOpts] = useState([])
+  const [iocOpts, setIocOpts] = useState([])
+  useEffect(() => {
+    let live = true
+    api.listAllEntities(inc.id).then(l => { if (live) setEntityOpts(l) }).catch(() => {})
+    api.listAllPages(api.listIocs, inc.id, {}, 200).then(l => { if (live) setIocOpts(l) }).catch(() => {})
+    return () => { live = false }
+  }, [inc.id])
 
   const [events, setEvents]       = useState([])
   const [loading, setLoading]     = useState(true)
@@ -287,7 +329,7 @@ export default function Timeline() {
       let cursor = null
       let res
       do {
-        res = await api.listTimelineEvents(inc.id, { limit: 500, include_system: showSystem, ...(cursor ? { cursor } : {}) })
+        res = await api.listTimelineEvents(inc.id, { limit: 500, include_system: showSystem, ...filters, ...(cursor ? { cursor } : {}) })
         for (const ev of res.items) byId.set(ev.id, ev)
         cursor = res.next_cursor
       } while (cursor)
@@ -308,7 +350,7 @@ export default function Timeline() {
         setLolbinHitIds(new Set(hits.map(h => h.event_id)))
       })
       .catch(() => {}) // enrichment failure is silent
-  }, [inc.id, showSystem])
+  }, [inc.id, showSystem, filters])
 
   const lolbinHitMap = useMemo(() => {
     const m = new Map()
@@ -317,6 +359,12 @@ export default function Timeline() {
   }, [lolbinHits])
 
   useEffect(() => { load() }, [load])
+  // ?add=1 (the Situation board's "+ event") opens the Add event form once.
+  useEffect(() => {
+    if (sp.get('add') !== '1') return
+    if (!isClosed && !viewer) setModalOpen(true)
+    setSp(p => { p.delete('add'); return p }, { replace: true })
+  }, [sp, setSp, isClosed, viewer])
   // After a write: re-read the list and the rail's counts.
   const reload = useCallback(() => { bumpRail?.(); return load() }, [bumpRail, load])
 
@@ -367,6 +415,7 @@ export default function Timeline() {
         >
           ⚙ {showSystem ? 'Hide system' : 'Show system'}
         </button>
+        {!viewer && (<>
         <button
           type="button"
           className="btn"
@@ -378,6 +427,16 @@ export default function Timeline() {
         </button>
         <button
           type="button"
+          className="btn"
+          onClick={() => navigate('../forensic/timeline-import')}
+          disabled={isClosed}
+          data-testid="tl-import"
+          title={isClosed ? 'Closed incidents are read-only' : 'Import events from an exhibit or a log file (Examine › Logs & triage)'}
+        >
+          ⇪ Import
+        </button>
+        <button
+          type="button"
           className="btn primary"
           onClick={() => setModalOpen(true)}
           disabled={isClosed}
@@ -385,6 +444,36 @@ export default function Timeline() {
         >
           + Add event
         </button>
+        </>)}
+      </div>
+
+      <div className="panel-toolbar tl-filters" role="search" aria-label="Filter the timeline" data-testid="tl-filters">
+        <div className="tl-filter-group">
+          <select className="select" aria-label="IR phase" value={filters.ir_phase || ''} onChange={e => setFilter('ir_phase', e.target.value)}>
+            <option value="">All phases</option>
+            {Object.entries(IR_PHASE_LABELS).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            <option value="none">No phase set</option>
+          </select>
+          <select className="select" aria-label="Entity" value={filters.entity_id || ''} onChange={e => setFilter('entity_id', e.target.value)}>
+            <option value="">All entities</option>
+            {entityOpts.map(en => <option key={en.id} value={en.id}>{labelOf('entity_type', en.type)} · {en.value}</option>)}
+          </select>
+          <select className="select" aria-label="IOC" value={filters.ioc_id || ''} onChange={e => setFilter('ioc_id', e.target.value)}>
+            <option value="">All IOCs</option>
+            {iocOpts.map(i => <option key={i.id} value={i.id}>{i.type} · {i.value.length > 48 ? i.value.slice(0, 47) + '…' : i.value}</option>)}
+          </select>
+          <select className="select" aria-label="Source" value={filters.origin || ''} onChange={e => setFilter('origin', e.target.value)}>
+            <option value="">All sources</option>
+            {Object.entries(ORIGIN_LABELS).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+          </select>
+          <label className="tl-key-toggle">
+            <input type="checkbox" checked={filters.key === 'true'} onChange={e => setFilter('key', e.target.checked ? 'true' : '')} />
+            ★ Key events only
+          </label>
+          <input className="input" type="search" aria-label="Search the timeline" placeholder="Search description, host, source…"
+                 value={qText} onChange={e => setQText(e.target.value)} maxLength={200} />
+        </div>
+        {filtered && <button type="button" className="btn ghost" onClick={clearFilters}>Clear filters</button>}
       </div>
 
       {error && (
@@ -420,11 +509,16 @@ export default function Timeline() {
 
       {loading ? (
         <div className="panel-empty"><div>Loading…</div></div>
+      ) : events.length === 0 && filtered ? (
+        <div className="panel-empty" data-testid="tl-no-match">
+          <div>No events match these filters.</div>
+          <button type="button" className="btn ghost" onClick={clearFilters}>Clear filters</button>
+        </div>
       ) : events.length === 0 ? (
         <div className="panel-empty">
           <div className="panel-empty-mark" aria-hidden="true">◌</div>
           <div>No timeline events yet.</div>
-          {!isClosed && (
+          {!isClosed && !viewer && (
             <div style={{ color: 'var(--dim)', fontSize: 12 }}>
               Click &ldquo;Add event&rdquo; to record the first observed event.
             </div>
@@ -438,7 +532,7 @@ export default function Timeline() {
           onToggle={toggle}
           onEdit={setEditEvent}
           onDelete={onDelete}
-          isClosed={isClosed}
+          isClosed={isClosed || viewer}
           busy={busy}
           lolbinHitIds={lolbinHitIds}
           lolbinHitMap={lolbinHitMap}
@@ -630,7 +724,13 @@ function TimelineSpine({ incidentId, events, expandedId, onToggle, onEdit, onDel
                 }}
               >
                 {/* badges row */}
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 6, alignItems: 'center' }}>
+                <div className="tl-badges" style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 6, alignItems: 'center' }}>
+                  {ev.key_event && (
+                    <span className="pill tl-key" data-key-event={ev.is_key ? 'flagged' : 'derived'}
+                          title={ev.is_key ? 'Key event (flagged by an analyst)' : 'Key event: ATT&CK-tagged or recorded by FENRIR'}>
+                      ★ Key
+                    </span>
+                  )}
                   {ev.event_type && (
                     <span className="pill" style={{ fontSize: 11 }}>{ev.event_type}</span>
                   )}
@@ -698,6 +798,17 @@ function TimelineSpine({ incidentId, events, expandedId, onToggle, onEdit, onDel
                     <span style={{ color: 'var(--dim)' }}>{IR_PHASE_LABELS[ev.ir_phase] || ev.ir_phase}</span>
                   )}
                 </div>
+                {ev.linked_iocs?.length > 0 && (
+                  <div className="link-chips tl-iocs" data-testid="tl-ioc-chips">
+                    {ev.linked_iocs.map(i => (
+                      <span key={i.id} className="link-chip" data-chip="ioc" data-malicious={i.malicious === true ? 'true' : undefined}
+                            style={i.malicious === true ? MAL_CHIP : undefined}
+                            title={`IOC ${i.type}: ${i.value}${i.malicious === true ? ' (malicious)' : ''}`}>
+                        ⌖ {i.value}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* expanded body */}
@@ -874,8 +985,38 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
   const [tacticName, setTacticName]   = useState(event?.mitre_tactic_name || '')
   const [techniqueId, setTechniqueId]     = useState(event?.mitre_technique_id || '')
   const [techniqueName, setTechniqueName] = useState(event?.mitre_technique_name || '')
+  // K3: the key-event flag, and the IOCs linked to the event (staged; applied on save through the
+  // IOC ↔ timeline link API, each link / unlink audited by the server).
+  const [isKey, setIsKey]             = useState(!!event?.is_key)
+  const origIocIds                    = useMemo(() => (event?.linked_iocs || []).map(i => i.id), [event])
+  const [iocIds, setIocIds]           = useState(origIocIds)
+  const [iocs, setIocs]               = useState(event?.linked_iocs || [])
   const [busy, setBusy]   = useState(false)
   const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let live = true
+    api.listAllPages(api.listIocs, incidentId, {}, 200)
+      .then(list => { if (live) setIocs(prev => [...list, ...prev.filter(p => !list.some(x => x.id === p.id))]) })
+      .catch(() => {})
+    return () => { live = false }
+  }, [incidentId])
+  const iocById = (id) => iocs.find(i => i.id === id)
+
+  // After the event is saved: link the added IOCs, unlink the removed ones. A failure is a warning
+  // (the event itself is saved).
+  const applyIocLinks = async (eventId) => {
+    const add = iocIds.filter(id => !origIocIds.includes(id))
+    const drop = origIocIds.filter(id => !iocIds.includes(id))
+    const failed = []
+    for (const id of add) {
+      try { await api.linkIocTimelineEvent(incidentId, id, eventId) } catch (e) { failed.push(`link ${iocById(id)?.value || id}: ${e.message}`) }
+    }
+    for (const id of drop) {
+      try { await api.unlinkIocTimelineEvent(incidentId, id, eventId) } catch (e) { failed.push(`unlink ${iocById(id)?.value || id}: ${e.message}`) }
+    }
+    return failed.length ? `The event was saved, but some IOC links failed (${failed.join('; ')}).` : null
+  }
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
@@ -931,8 +1072,9 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
           mitre_tactic_name:    tacticName,
           mitre_technique_id:   techniqueId,
           mitre_technique_name: techniqueName,
+          is_key:               isKey,
         })
-        onCreated()
+        onCreated(await applyIocLinks(event.id))
         return
       }
       const entityId = pinnedId || null
@@ -956,6 +1098,7 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
           mitre_tactic_name:    tacticName,
           mitre_technique_id:   techniqueId,
           mitre_technique_name: techniqueName,
+          is_key:               isKey,
         })
       } else {
         saved = await api.createTimelineEvent(incidentId, {
@@ -971,15 +1114,17 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
           mitre_tactic_name:    tacticName      || null,
           mitre_technique_id:   techniqueId     || null,
           mitre_technique_name: techniqueName   || null,
+          is_key:               isKey,
         })
       }
-      let warning = null
+      let warning = await applyIocLinks(saved?.id ?? event.id)
       if (addHost) {
         try {
           const ent = await api.createEntity(incidentId, { type: 'host', value: hostText })
           await api.updateTimelineEvent(incidentId, saved?.id ?? event.id, { entity_id: ent.id })
         } catch (err2) {
-          warning = `The event was saved, but “${hostText}” could not be added to Entities and linked: ${err2.message || 'request failed'}`
+          warning = `The event was saved, but “${hostText}” could not be added to Entities and linked: ${err2.message || 'request failed'}` +
+                    (warning ? ` ${warning}` : '')
         }
       }
       onCreated(warning)
@@ -1132,8 +1277,7 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                     {' · '}
                     <button type="button" className="btn ghost" data-testid="tl-unlink"
                             onClick={() => setPinnedId(null)}
-                            title="Remove the link; the hostname text stays"
-                            style={{ padding: '0 6px', fontSize: 11 }}>Unlink</button>
+                            title="Remove the link; the hostname text stays">Unlink</button>
                   </div>
                 ) : suggestion ? (
                   <div className="field-hint" role="status">
@@ -1143,8 +1287,7 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                     {' · '}
                     <button type="button" className="btn ghost" data-testid="tl-link"
                             onClick={() => setPinnedId(suggestion.id)}
-                            title="Link this event to the entity"
-                            style={{ padding: '0 6px', fontSize: 11 }}>Link</button>
+                            title="Link this event to the entity">Link</button>
                   </div>
                 ) : hostText ? (
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: 'var(--muted)' }}>
@@ -1226,26 +1369,56 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                 </div>
               </div>
 
+              {/* K3: linked IOCs + key-event flag */}
+              <div className="field">
+                <label className="field-label" htmlFor="tl-ioc-add">Linked IOCs</label>
+                {iocIds.length > 0 && (
+                  <div className="link-chips tl-modal-iocs" data-testid="tl-modal-iocs">
+                    {iocIds.map(id => {
+                      const i = iocById(id)
+                      return (
+                        <span key={id} className="link-chip" data-chip="ioc" title={i ? `${i.type}: ${i.value}` : id}>
+                          ⌖ {i?.value || id}
+                          <button type="button" className="case-note-chip-x" aria-label={`Unlink ${i?.value || 'IOC'}`}
+                                  onClick={() => setIocIds(prev => prev.filter(x => x !== id))}>×</button>
+                        </span>
+                      )
+                    })}
+                  </div>
+                )}
+                <select id="tl-ioc-add" className="select" value=""
+                        onChange={(e) => { const v = e.target.value; if (v) setIocIds(prev => prev.includes(v) ? prev : [...prev, v]) }}>
+                  <option value="">{iocs.length ? '+ Link an IOC…' : 'No IOCs in this incident yet'}</option>
+                  {iocs.filter(i => !iocIds.includes(i.id)).map(i => (
+                    <option key={i.id} value={i.id}>{i.type} · {i.value.length > 60 ? i.value.slice(0, 59) + '…' : i.value}</option>
+                  ))}
+                </select>
+              </div>
+              <label className="tl-key-toggle">
+                <input type="checkbox" checked={isKey} onChange={(e) => setIsKey(e.target.checked)} data-testid="tl-is-key" />
+                ★ Key event — show it on the Situation board&rsquo;s key timeline
+              </label>
+
               {/* Raw log (collapsible) */}
               <div className="field">
                 <button
                   type="button"
                   className="btn ghost"
                   onClick={() => setShowRaw(v => !v)}
-                  style={{ padding: '2px 0', fontSize: 12, color: 'var(--muted)' }}
+                  style={{ color: 'var(--muted)' }}
                 >
                   {showRaw ? '▲ Hide raw log' : '▼ Add raw log snippet'}
                 </button>
                 {showRaw && (
                   <textarea
-                    className="input"
+                    className="input compact"
                     value={rawLog}
                     onChange={(e) => setRawLog(e.target.value)}
                     rows={5}
                     maxLength={4000}
                     disabled={locked}
                     placeholder="Paste the relevant raw log entry here…"
-                    style={{ fontFamily: 'var(--font-mono)', fontSize: 11, marginTop: 6 }}
+                    style={{ fontFamily: 'var(--font-mono)', marginTop: 6 }}
                   />
                 )}
               </div>

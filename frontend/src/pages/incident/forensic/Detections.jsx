@@ -35,7 +35,7 @@ function CopyButton({ text }) {
 
 // ─── Tab 1: YARA Rules ────────────────────────────────────────────────────────
 
-function RuleCard({ rule, onToggle, onDelete }) {
+function RuleCard({ rule, onToggle, onDelete, viewer }) {
   const [expanded, setExpanded] = useState(false)
   return (
     <div className={`det-rule-card${rule.is_active ? '' : ' det-rule-inactive'}`}
@@ -65,12 +65,14 @@ function RuleCard({ rule, onToggle, onDelete }) {
         <button className="btn ghost det-action-btn" onClick={() => setExpanded(e => !e)}>
           {expanded ? '▲' : '▼'} Rule
         </button>
+        {!viewer && (<>
         <button className="btn ghost det-action-btn" onClick={() => onToggle(rule)}
                 style={{ color: rule.is_active ? 'var(--med)' : 'var(--ok)' }}>
           {rule.is_active ? 'Disable' : 'Enable'}
         </button>
         <button className="btn ghost det-action-btn" style={{ color: 'var(--crit)' }}
                 onClick={() => onDelete(rule.id)}>✕</button>
+        </>)}
       </div>
       {expanded && (
         <pre className="det-rule-content">{rule.rule_content}</pre>
@@ -79,7 +81,8 @@ function RuleCard({ rule, onToggle, onDelete }) {
   )
 }
 
-function YaraRules() {
+// L2 (R43): a viewer reads the rule library; adding, toggling and deleting need the analyst role.
+function YaraRules({ viewer }) {
   const [rules,       setRules]       = useState([])
   const [loading,     setLoading]     = useState(true)
   const [showAdd,     setShowAdd]     = useState(false)
@@ -151,9 +154,11 @@ function YaraRules() {
           {active > 0   && <span className="det-stat-ok">{active} active</span>}
           {inactive > 0 && <span className="det-stat-muted">{inactive} disabled</span>}
         </div>
-        <button className="btn primary det-add-btn" onClick={() => setShowAdd(s => !s)}>
-          {showAdd ? 'Cancel' : '+ Add Rule'}
-        </button>
+        {!viewer && (
+          <button className="btn primary det-add-btn" onClick={() => setShowAdd(s => !s)}>
+            {showAdd ? 'Cancel' : '+ Add Rule'}
+          </button>
+        )}
       </div>
 
       {showAdd && (
@@ -200,7 +205,7 @@ function YaraRules() {
       ) : (
         <div className="det-rule-list">
           {rules.map(r => (
-            <RuleCard key={r.id} rule={r} onToggle={toggle} onDelete={deleteRule} />
+            <RuleCard key={r.id} rule={r} onToggle={toggle} onDelete={deleteRule} viewer={viewer} />
           ))}
         </div>
       )}
@@ -318,7 +323,7 @@ function ScanResults({ inc, viewer }) {
         ) : (
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
           {matches.length > 0 && (
-            <button className="btn ghost" onClick={clearAll} style={{ color: 'var(--muted)', fontSize: 12 }}>
+            <button className="btn ghost" onClick={clearAll} style={{ color: 'var(--muted)' }}>
               Clear all
             </button>
           )}
@@ -416,10 +421,10 @@ function DetectionQueries({ inc }) {
             {CATEGORY_ORDER.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
           {queries.length > 0 && (
-            <button className="btn ghost" style={{ fontSize: 12 }} onClick={copyAll}>Copy all</button>
+            <button className="btn ghost" onClick={copyAll}>Copy all</button>
           )}
           <a href={api.detectionsDownloadUrl(inc.id)} download
-             className="btn ghost" style={{ fontSize: 12, textDecoration: 'none' }}>
+             className="btn ghost" style={{ textDecoration: 'none' }}>
             ↓ ZIP
           </a>
         </div>
@@ -470,7 +475,7 @@ export default function Detections() {
         ))}
       </div>
       <div className="det-content">
-        {tab === 0 && <YaraRules />}
+        {tab === 0 && <YaraRules viewer={viewer} />}
         {tab === 1 && <ScanResults inc={inc} viewer={viewer} />}
         {tab === 2 && <DetectionQueries inc={inc} />}
       </div>

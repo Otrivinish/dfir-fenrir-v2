@@ -44,6 +44,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import verify_row_hash
+from audit_export.signing import public_key_pem, sign_bytes
 from artifacts import store as artifact_store
 from evidence.crypto import EvidenceCryptoError, EvidenceIntegrityError, iter_decrypted
 from evidence.streaming import StagedOutput
@@ -52,6 +53,7 @@ from le_package.manifest import Manifest, hmac_manifest
 from le_package.readme import render_readme
 from le_package.sop import CHAIN_OF_CUSTODY_SOP
 from case_notes.hashing import LINK_FIELDS, content_sha256, created_at_text
+from core.csv_safe import csv_safe
 from recovery.service import scope_rows as recovery_scope_rows, to_out as recovery_to_out
 from stakeholder_notifications.service import obligations as sn_obligations, to_out as sn_to_out
 from incidents.gates import sign_off_history as gate_sign_off_history
@@ -62,6 +64,15 @@ from models import (Artifact, AuditLog, BrowserHistoryUpload, CaseNote, Comment,
 
 
 PLATFORM_VERSION = "v2.0.0"
+
+# K1 (R36): what each Disclosure package purpose carries besides the exhibits (04_Evidence), the incident's audit
+# rows (08_Audit) and the legal notes (09_Legal), which every package has. Artifacts are opt-in for all.
+PURPOSE_SECTIONS = {
+    "law_enforcement": ("incident", "timeline", "iocs", "forensic", "comms", "case_notes", "recovery",
+                        "notifications", "sign_offs"),
+    "regulator":       ("incident", "timeline", "iocs", "recovery", "notifications", "sign_offs"),
+    "internal":        ("incident", "timeline", "iocs", "forensic", "case_notes", "recovery"),
+}
 
 
 def _iso_z(dt: datetime | None) -> str | None:
@@ -75,12 +86,13 @@ def _iso_z(dt: datetime | None) -> str | None:
 
 
 def _csv_bytes(header: list[str], rows: list[list[Any]]) -> bytes:
-    """CSV with UTF-8 BOM (Excel-friendly) and CRLF line endings."""
+    """CSV with UTF-8 BOM (Excel-friendly) and CRLF line endings. Cells are formula-escaped (R129,
+    core.csv_safe); the JSON twins keep the raw values, which is what any hash is recomputed from."""
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
     w.writerow(header)
     for r in rows:
-        w.writerow(["" if v is None else v for v in r])
+        w.writerow(["" if v is None else csv_safe(v) for v in r])
     return buf.getvalue().encode("utf-8-sig")
 
 
@@ -261,7 +273,8 @@ def _abandon_bundle(out: StagedOutput, oz, entry) -> None:
 
 
 async def estimate_package_bytes(db: AsyncSession, inc_id: uuid.UUID, *, legal_hold_only: bool,
-                                 include_artifacts: bool, include_unsealed_drafts: bool = False) -> int:
+                                 include_artifacts: bool, include_unsealed_drafts: bool = False,
+                                 item_ids: list[uuid.UUID] | None = None) -> int:
     """The stored bytes a package of this incident would embed: its exhibits' plaintext (with the
     legal-hold filter; M11: sealed ones only unless drafts are included) and, when included, its
     quarantined artifacts. For the free-space check and the ZIP64 decision; the records (timeline,
@@ -271,6 +284,8 @@ async def estimate_package_bytes(db: AsyncSession, inc_id: uuid.UUID, *, legal_h
         Evidence.storage_path.isnot(None), Evidence.nonce_hex.isnot(None))
     if legal_hold_only:
         q = q.where(Evidence.legal_hold.is_(True))
+    if item_ids is not None:
+        q = q.where(Evidence.id.in_(item_ids))
     if not include_unsealed_drafts:
         q = q.where(Evidence.coc_sealed.is_(True))
     total = int((await db.execute(q)).scalar() or 0)
@@ -469,18 +484,24 @@ EXCLUDED_DRAFT = "excluded: unsealed draft"
 async def _section_evidence(
     db: AsyncSession, inc_id: uuid.UUID,
     *, legal_hold_only: bool, include_unsealed_drafts: bool = False,
-    manifest: Manifest, zf: zipfile.ZipFile,
-) -> tuple[int, list[dict], int]:
-    """Returns (exhibits included, integrity failures to freeze, unsealed drafts excluded). M11 (owner,
-    2026-10-04): an exhibit whose chain of custody is not sealed is listed in the inventory as "excluded:
-    unsealed draft" with no custody log and no file, unless the lead opted in."""
+    manifest: Manifest, zf: zipfile.ZipFile, item_ids: list[uuid.UUID] | None = None,
+) -> tuple[int, list[dict], list[str], list[dict]]:
+    """Returns (exhibits included, integrity failures to freeze, identifiers of the unsealed drafts excluded,
+    per included exhibit {evidence_id, identifier, bytes_included, sha256_verified} for its custody rows). M11
+    (owner, 2026-10-04): an exhibit whose chain of custody is not sealed is listed in the inventory as "excluded:
+    unsealed draft" with no custody log and no file, unless the lead opted in. K1: `item_ids` (not None) limits
+    the package to those exhibits."""
     q = select(Evidence).where(Evidence.incident_id == inc_id)
     if legal_hold_only:
         q = q.where(Evidence.legal_hold.is_(True))
+    if item_ids is not None:
+        q = q.where(Evidence.id.in_(item_ids))
     listed = (await db.execute(q.order_by(Evidence.collected_at.asc(), Evidence.id.asc()))).scalars().all()
     excluded = {e.id for e in listed if not e.coc_sealed and not include_unsealed_drafts}
     items = [e for e in listed if e.id not in excluded]
     failures: list[dict] = []
+    disclosed = {e.id: {"evidence_id": e.id, "identifier": e.identifier, "bytes_included": False,
+                        "sha256_verified": None} for e in items}
 
     header = ["id", "kind", "identifier", "name", "description", "tlp", "status",
               "original_filename", "file_size_bytes", "mime_type",
@@ -562,6 +583,7 @@ async def _section_evidence(
         elif entry is not None:
             sha256_now = entry["sha256"]
             integrity_note = "hash_at_export_matches_recorded" if sha256_now == ev.sha256 else "HASH_MISMATCH_AT_EXPORT"
+            disclosed[ev.id].update(bytes_included=True, sha256_verified=sha256_now == ev.sha256)
             if integrity_note == "HASH_MISMATCH_AT_EXPORT":
                 failures.append({"evidence_id": ev.id, "identifier": ev.identifier, "reason": "hash_mismatch",
                                  "integrity": integrity_note, "sha256_recomputed": sha256_now})
@@ -598,7 +620,8 @@ async def _section_evidence(
         manifest.add(path=meta_path, data=meta_bytes, mime="application/json",
                      source="evidence table + computed at export")
 
-    return len(items), failures, len(excluded)
+    return (len(items), failures, sorted(e.identifier for e in listed if e.id in excluded),
+            list(disclosed.values()))
 
 
 async def _section_artifacts(
@@ -738,6 +761,10 @@ async def _section_case_notes(db: AsyncSession, inc_id: uuid.UUID, manifest: Man
              *[";".join(sorted(str(x) for x in getattr(n, f) or [])) for f in LINK_FIELDS],
              n.content_sha256, "yes" if content_sha256(n) == n.content_sha256 else "NO"] for n in notes]
     _add_file(zf, manifest, "10_Case_Notes/Case_Notes.csv", _csv_bytes(header, rows), "text/csv", "case_notes table")
+    # R129: the raw values for the content_sha256 recompute (the CSV cells are formula-escaped).
+    json_rows = [{h: r[i] for i, h in enumerate(header)} for r in rows]
+    _add_file(zf, manifest, "10_Case_Notes/Case_Notes.json",
+              _json_bytes({"note_count": len(json_rows), "notes": json_rows}), "application/json", "case_notes table")
 
 
 async def _section_recovery(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
@@ -824,7 +851,7 @@ def _audit_files(zf: zipfile.ZipFile, manifest: Manifest, rows: list) -> tuple[i
     asyncio.to_thread. Returns (row_count, verifier_text_bytes)."""
     header = ["timestamp_utc", "user_id", "username", "role_at_time", "action",
               "outcome", "resource_type", "resource_id", "resource_label",
-              "request_method", "request_path", "request_id", "ip_address",
+              "request_method", "request_path", "request_id", "ip_address", "user_agent",
               "details_json", "hash_version", "row_hash", "prev_hash"]
     csv_rows = [[
         _iso_z(r.timestamp),
@@ -833,7 +860,7 @@ def _audit_files(zf: zipfile.ZipFile, manifest: Manifest, rows: list) -> tuple[i
         r.action, r.outcome or "",
         r.resource_type or "", r.resource_id or "", r.resource_label or "",
         r.request_method or "", r.request_path or "", r.request_id or "",
-        r.ip_address or "",
+        r.ip_address or "", r.user_agent or "",
         json.dumps(r.details or {}, default=str),
         r.hash_version or "v1",
         r.row_hash, r.prev_hash,
@@ -898,8 +925,10 @@ def _section_legal(manifest: Manifest, zf: zipfile.ZipFile, *, tlp: str) -> None
         "platform":               f"DFIR-FENRIR {PLATFORM_VERSION}",
         "package_builder":        "backend/le_package/builder.py",
         "hash_algorithms":        ["sha256", "sha512"],
-        "manifest_signature":     "HMAC-SHA-256 over MANIFEST.json (INTEGRITY.sig); key = SHA-256 of the "
-                                  "bundle password. A shared-secret MAC, not a public-key signature",
+        "manifest_signature":     "Ed25519 over MANIFEST.json (MANIFEST.json.sig, raw 64 bytes; public key "
+                                  "SIGNING_PUBLIC_KEY.pem, fingerprint in the platform's GET /api/version), plus an "
+                                  "HMAC-SHA-256 over MANIFEST.json (INTEGRITY.sig; key = SHA-256 of the bundle "
+                                  "password, a shared-secret MAC)",
         "bundle_encryption":      "Outer envelope: AES-256 password-protected ZIP (WinZip AE-2: AES-256 in CTR "
                                   "mode, key derived from the password with PBKDF2-HMAC-SHA1 (1,000 iterations), "
                                   "10-byte HMAC-SHA1 authentication code per entry), holding le_package.zip; one-time 24-character "
@@ -934,7 +963,8 @@ class BuildResult:
     __slots__ = ("staged", "bundle_size", "bundle_sha256", "manifest_sha256",
                  "hmac_sha256", "bundle_password", "file_count", "total_bytes",
                  "evidence_count", "audit_row_count", "manifest_json_bytes",
-                 "generated_at_iso", "integrity_failures", "excluded_drafts")
+                 "generated_at_iso", "integrity_failures", "excluded_drafts", "disclosed",
+                 "manifest_signature_b64")
 
     def __init__(self, **kw: Any) -> None:
         for k in self.__slots__:
@@ -955,6 +985,8 @@ async def build_le_package(
     quarantine_path:    str,
     size_estimate:      int | None = None,
     include_unsealed_drafts: bool = False,
+    purpose:            str = "law_enforcement",
+    item_ids:           list[uuid.UUID] | None = None,
 ) -> BuildResult:
     """Build the encrypted bundle, streamed into a staging file (G2). Does not touch DB write state.
     `size_estimate` = estimate_package_bytes() when the caller already has it. A stored exhibit that
@@ -988,7 +1020,8 @@ async def build_le_package(
     if size_estimate is None:
         size_estimate = await estimate_package_bytes(db, inc.id, legal_hold_only=legal_hold_only,
                                                      include_artifacts=include_artifacts,
-                                                     include_unsealed_drafts=include_unsealed_drafts)
+                                                     include_unsealed_drafts=include_unsealed_drafts,
+                                                     item_ids=item_ids)
     staged, oz, entry = await asyncio.to_thread(_open_bundle, bundle_password, size_estimate)
     try:
         return await _build_into(entry, staged, oz, db=db, inc=inc, user=user, case_reference=case_reference,
@@ -996,7 +1029,8 @@ async def build_le_package(
                                  retention_until=retention_until, legal_hold_only=legal_hold_only,
                                  include_artifacts=include_artifacts, quarantine_path=quarantine_path,
                                  bundle_password=bundle_password, generated_at_iso=generated_at_iso,
-                                 include_unsealed_drafts=include_unsealed_drafts)
+                                 include_unsealed_drafts=include_unsealed_drafts, purpose=purpose,
+                                 item_ids=item_ids)
     except BaseException:
         await asyncio.to_thread(_abandon_bundle, staged, oz, entry)
         raise
@@ -1006,7 +1040,8 @@ async def _build_into(entry, staged: StagedOutput, oz, *, db: AsyncSession, inc:
                       case_reference: str, requesting_authority: str, legal_basis: str,
                       retention_until: datetime | None, legal_hold_only: bool, include_artifacts: bool,
                       quarantine_path: str, bundle_password: str, generated_at_iso: str,
-                      include_unsealed_drafts: bool = False) -> BuildResult:
+                      include_unsealed_drafts: bool = False, purpose: str = "law_enforcement",
+                      item_ids: list[uuid.UUID] | None = None) -> BuildResult:
     """The package itself, written as a ZIP into the outer envelope's entry (an unseekable stream: the
     inner entries use data descriptors, ZIP64 where one needs it)."""
     with zipfile.ZipFile(entry, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1017,6 +1052,7 @@ async def _build_into(entry, staged: StagedOutput, oz, *, db: AsyncSession, inc:
 
         # CASE_INFO.json — added first, hashed into manifest.
         case_info = {
+            "purpose":              purpose,
             "case_reference":       case_reference,
             "requesting_authority": requesting_authority,
             "legal_basis":          legal_basis,
@@ -1025,6 +1061,9 @@ async def _build_into(entry, staged: StagedOutput, oz, *, db: AsyncSession, inc:
                 "legal_hold_only":   legal_hold_only,
                 "include_artifacts": include_artifacts,
                 "include_unsealed_drafts": include_unsealed_drafts,
+                "exhibits": "selected" if item_ids is not None else "all",
+                "sections": ["evidence", "audit", "legal", *PURPOSE_SECTIONS[purpose],
+                             *(["artifacts"] if include_artifacts else [])],
             },
             "incident": {
                 "id":  str(inc.id),
@@ -1040,27 +1079,37 @@ async def _build_into(entry, staged: StagedOutput, oz, *, db: AsyncSession, inc:
         manifest.add(path="CASE_INFO.json", data=ci_bytes,
                      mime="application/json", source="LE-package request payload")
 
-        # Content sections
-        await _section_incident(db, inc, manifest, zf)
-        await _section_timeline(db, inc.id, manifest, zf)
-        await _section_iocs(db, inc.id, manifest, zf)
-        evidence_count, integrity_failures, excluded_drafts = await _section_evidence(
+        # Content sections (K1: the purpose picks the records; exhibits, audit and legal are always in).
+        sections = PURPOSE_SECTIONS[purpose]
+        if "incident" in sections:
+            await _section_incident(db, inc, manifest, zf)
+        if "timeline" in sections:
+            await _section_timeline(db, inc.id, manifest, zf)
+        if "iocs" in sections:
+            await _section_iocs(db, inc.id, manifest, zf)
+        evidence_count, integrity_failures, excluded_drafts, disclosed = await _section_evidence(
             db, inc.id, legal_hold_only=legal_hold_only, include_unsealed_drafts=include_unsealed_drafts,
-            manifest=manifest, zf=zf,
+            manifest=manifest, zf=zf, item_ids=item_ids,
         )
         if include_artifacts:
             await _section_artifacts(
                 db, inc.id, manifest=manifest, zf=zf,
                 settings_quarantine_path=quarantine_path,
             )
-        await _section_forensic(db, inc.id, manifest, zf)
-        await _section_comms(db, inc.id, manifest, zf)
+        if "forensic" in sections:
+            await _section_forensic(db, inc.id, manifest, zf)
+        if "comms" in sections:
+            await _section_comms(db, inc.id, manifest, zf)
         audit_row_count, _ = await _section_audit(db, inc.id, manifest, zf)
         _section_legal(manifest, zf, tlp=inc.tlp)
-        await _section_case_notes(db, inc.id, manifest, zf)
-        await _section_recovery(db, inc.id, manifest, zf)
-        await _section_notifications(db, inc.id, manifest, zf)
-        await _section_sign_offs(db, inc.id, manifest, zf)
+        if "case_notes" in sections:
+            await _section_case_notes(db, inc.id, manifest, zf)
+        if "recovery" in sections:
+            await _section_recovery(db, inc.id, manifest, zf)
+        if "notifications" in sections:
+            await _section_notifications(db, inc.id, manifest, zf)
+        if "sign_offs" in sections:
+            await _section_sign_offs(db, inc.id, manifest, zf)
 
         # Manifest, integrity, README — written LAST so all sections are accounted for.
         manifest_json = _json_bytes(manifest.to_json())
@@ -1087,8 +1136,15 @@ async def _build_into(entry, staged: StagedOutput, oz, *, db: AsyncSession, inc:
         hmac_key   = hashlib.sha256(bundle_password.encode("utf-8")).digest()
         hmac_hex   = hmac_manifest(manifest_json, hmac_key)
         zf.writestr("INTEGRITY.sig", hmac_hex.encode("ascii"))
+        # K1: every package is signed — a raw 64-byte Ed25519 signature over MANIFEST.json under the platform's
+        # signing key (the audit-export key; its fingerprint is in GET /api/version), verifiable by anyone.
+        signature = sign_bytes(manifest_json)
+        zf.writestr("MANIFEST.json.sig", signature)
+        zf.writestr("SIGNING_PUBLIC_KEY.pem", public_key_pem().encode("ascii"))
 
         readme = render_readme(
+            purpose=purpose,
+            sections=sections,
             case_reference=case_reference,
             requesting_authority=requesting_authority,
             legal_basis=legal_basis,
@@ -1143,4 +1199,6 @@ async def _build_into(entry, staged: StagedOutput, oz, *, db: AsyncSession, inc:
         generated_at_iso=generated_at_iso,
         integrity_failures=integrity_failures,
         excluded_drafts=excluded_drafts,
+        disclosed=disclosed,
+        manifest_signature_b64=base64.b64encode(signature).decode("ascii"),
     )

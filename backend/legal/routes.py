@@ -40,6 +40,18 @@ def _ensure_open(inc: Incident) -> None:
                        "but not added, deleted or re-anchored. Re-open the incident first.")
 
 
+# K5 (R41): an anchor is when the organisation became aware, so it can't be in the future;
+# same clock-skew allowance as incidents.routes.DETECTED_AT_SKEW.
+ANCHOR_SKEW = timedelta(minutes=2)
+
+
+def _check_anchor(anchor: datetime, field: str) -> None:
+    """422 anchor_in_future when `anchor` is later than now + ANCHOR_SKEW."""
+    if _as_utc(anchor) > _now_utc() + ANCHOR_SKEW:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "anchor_in_future",
+                       f"{field} cannot be in the future: the anchor is when the organisation became aware")
+
+
 def _reason(raw: Optional[str], code: str, field: str) -> str:
     """The trimmed justification; 422 `code` unless it is 10–2000 characters."""
     text = (raw or "").strip()
@@ -415,7 +427,7 @@ class InitBody(BaseModel):
 
 @router.post("/{incident_id}/legal/deadlines/initialize", status_code=status.HTTP_201_CREATED,
              summary="Initialize deadlines from templates",
-             responses={**_CLOSED_409, 422: {"model": ApiErrorBody, "description": "anchor_required"}})
+             responses={**_CLOSED_409, 422: {"model": ApiErrorBody, "description": "anchor_required or anchor_in_future"}})
 async def initialize_deadlines(
     incident_id: uuid.UUID,
     body: InitBody,
@@ -425,7 +437,8 @@ async def initialize_deadlines(
     """Create regulatory deadlines for an incident by expanding the named regulation templates.
 
     Each regulation's anchor is `anchors[REG]`, else `breach_detected_at`, else the incident's
-    `detected_at`; with none of these, 422 code anchor_required and nothing is created. Each
+    `detected_at`; with none of these, 422 code anchor_required and nothing is created. An anchor
+    later than now (2-minute clock-skew allowance) is 422 code anchor_in_future. Each
     template's `deadline_at` is its anchor plus its window (the NIS2 final report: one calendar
     month). Idempotent: a template row the incident already has (same regulation, article and
     obligation) is skipped, so re-initialising never duplicates. A closed incident returns 409
@@ -449,6 +462,7 @@ async def initialize_deadlines(
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "anchor_required",
                            f"No anchor for {reg}: the incident has no Detected time. "
                            f"Pass breach_detected_at or anchors.{reg}, or set the incident's detected_at.")
+        _check_anchor(anchors[reg][0], f"The {reg} anchor")
 
     existing = set((await db.execute(
         select(RegulatoryDeadline.regulation, RegulatoryDeadline.article, RegulatoryDeadline.obligation)
@@ -505,7 +519,7 @@ class DeadlineCreate(BaseModel):
 
 @router.post("/{incident_id}/legal/deadlines", status_code=status.HTTP_201_CREATED,
              summary="Create a regulatory deadline",
-             responses={**_CLOSED_409, 422: {"model": ApiErrorBody, "description": "anchor_required"}})
+             responses={**_CLOSED_409, 422: {"model": ApiErrorBody, "description": "anchor_required or anchor_in_future"}})
 async def create_deadline(
     incident_id: uuid.UUID,
     body: DeadlineCreate,
@@ -515,9 +529,10 @@ async def create_deadline(
     """Create a single custom regulatory deadline for an incident.
 
     `deadline_at` = anchor + `deadline_hours`, where the anchor is `breach_detected_at` or, when
-    omitted, the incident's `detected_at` (422 code anchor_required when neither is set). A
-    closed incident returns 409 code incident_closed. Requires the analyst role; audit-logged.
-    Returns the created deadline.
+    omitted, the incident's `detected_at` (422 code anchor_required when neither is set; 422 code
+    anchor_in_future when it is later than now, 2-minute skew allowance). A closed incident
+    returns 409 code incident_closed. Requires the analyst role; audit-logged. Returns the
+    created deadline.
     """
     inc = await _get_incident(db, incident_id, user)
     _ensure_open(inc)
@@ -526,6 +541,7 @@ async def create_deadline(
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "anchor_required",
                        "No anchor: the incident has no Detected time. Pass breach_detected_at "
                        "or set the incident's detected_at.")
+    _check_anchor(anchor, "breach_detected_at")
     d = RegulatoryDeadline(
         incident_id=incident_id,
         regulation=body.regulation,
@@ -561,7 +577,8 @@ class DeadlineUpdate(BaseModel):
 
 @router.patch("/{incident_id}/legal/deadlines/{deadline_id}", summary="Update a regulatory deadline",
               responses={**_CLOSED_409,
-                         422: {"model": ApiErrorBody, "description": "notes_required or reason_required"}})
+                         422: {"model": ApiErrorBody,
+                               "description": "notes_required, reason_required or anchor_in_future"}})
 async def update_deadline(
     incident_id: uuid.UUID,
     deadline_id: uuid.UUID,
@@ -575,7 +592,8 @@ async def update_deadline(
     - Waiving needs `completion_notes` of 10+ characters as the justification (422 code
       notes_required); a waived deadline's notes can't be blanked.
     - Re-anchor: `breach_detected_at` + `reason` (10+ characters, else 422 code reason_required)
-      moves the anchor and recomputes `deadline_at`; audited with old and new values. A closed
+      moves the anchor and recomputes `deadline_at`; audited with old and new values. A new
+      anchor later than now (2-minute skew allowance) is 422 code anchor_in_future. A closed
       incident returns 409 code incident_closed for a re-anchor; status and notes updates stay
       allowed after closure.
     - Completing the NIS2 72h incident notification re-anchors the open NIS2 final report to
@@ -595,6 +613,7 @@ async def update_deadline(
     if body.breach_detected_at is not None:
         _ensure_open(inc)
         reanchor_reason = _reason(body.reason, "reason_required", "reason")
+        _check_anchor(body.breach_detected_at, "breach_detected_at")
 
     valid_statuses = {"pending", "in_progress", "completed", "waived"}
     status_changed_to = None

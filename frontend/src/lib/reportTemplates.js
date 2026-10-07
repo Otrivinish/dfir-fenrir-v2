@@ -37,7 +37,7 @@ const PHASE_LABEL = {
   preparation: 'Preparation',
   detection_and_analysis: 'Detection & Analysis',
   containment_eradication_recovery: 'Containment, Eradication & Recovery',
-  post_incident_activity: 'Post-Incident Activity',
+  post_incident: 'Post-Incident Activity',   // L3 (R48): the phase value is post_incident (the raw key showed)
 }
 
 function sevHex(s)  { return SEV_HEX[s]  || '#64748b' }
@@ -69,6 +69,7 @@ const STAKEHOLDER_TYPE_LABEL = {
 // MITRE tactic colours for the standalone report (the app's tacticColor()
 // returns theme CSS variables that don't exist in the exported HTML).
 const TACTIC_HEX = {
+  'TA0043':'#64748b','TA0042':'#a16207',
   'TA0001':'#ef4444','TA0002':'#f97316','TA0003':'#f59e0b','TA0004':'#eab308',
   'TA0005':'#22c55e','TA0006':'#14b8a6','TA0007':'#06b6d4','TA0008':'#3b82f6',
   'TA0009':'#8b5cf6','TA0010':'#ec4899','TA0011':'#f43f5e','TA0040':'#94a3b8',
@@ -1080,7 +1081,7 @@ function generateProReport(data, opts = {}) {
            <td style="text-transform:capitalize">${esc((c.category || '').replace(/_/g, ' '))}</td>
            <td>${esc(c.description || '')}</td>
            <td class="mono" style="text-align:right">${esc(costMoney(c.currency, Number(c.amount) || 0))}</td>
-           <td style="text-transform:capitalize">${esc((c.ir_phase || '').replace(/_/g, ' '))}</td>
+           <td>${esc(c.ir_phase ? phaseLabel(c.ir_phase) : '')}</td>
          </tr>`).join('')}</tbody>
        </table></div>`
     : ((bia && bia.financial) ? '' : '<div class="placeholder-box"><strong>[ NO COSTS RECORDED ]</strong></div>')}` },

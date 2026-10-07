@@ -33,6 +33,9 @@ function fileType(f) {
 export default function Files() {
   const { inc, bumpRail, canEdit } = useOutletContext()
   const isClosed = inc?.status === 'closed'
+  // L2 (R43): canEdit = analyst/admin on an open incident; a viewer gets no write controls (the API refuses them).
+  const ro = !canEdit
+  const viewer = ro && !isClosed
 
   const [files, setFiles]       = useState([])
   const [entities, setEntities] = useState([])
@@ -158,15 +161,17 @@ export default function Files() {
           style={{ display: 'none' }}
           onChange={onPickFiles}
         />
-        <button
-          type="button"
-          className="btn primary"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={isClosed || busy}
-          title={isClosed ? 'Closed incidents are read-only' : 'Upload files (non-malicious — screenshots, logs, notes)'}
-        >
-          {busy ? 'Working…' : '+ Upload files'}
-        </button>
+        {!viewer && (
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isClosed || busy}
+            title={isClosed ? 'Closed incidents are read-only' : 'Upload files (non-malicious — screenshots, logs, notes)'}
+          >
+            {busy ? 'Working…' : '+ Upload files'}
+          </button>
+        )}
       </div>
 
       <p style={{ fontSize: 12, color: 'var(--dim)', marginBottom: 'var(--space-3)' }}>
@@ -188,7 +193,7 @@ export default function Files() {
         <div className="panel-empty">
           <div className="panel-empty-mark" aria-hidden="true">▤</div>
           <div>No files yet.</div>
-          {!isClosed && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Click "Upload files" to add screenshots, logs, or notes.</div>}
+          {!ro && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Click "Upload files" to add screenshots, logs, or notes.</div>}
         </div>
       ) : (
         <div className="table-scroll">
@@ -243,7 +248,7 @@ export default function Files() {
                         Include
                       </label>
                       {f.include_in_report && canEdit && (
-                        <button type="button" className="btn ghost" onClick={() => openFigure(f)} disabled={busy} style={{ fontSize: 11 }}>
+                        <button type="button" className="btn ghost" onClick={() => openFigure(f)} disabled={busy}>
                           Caption
                         </button>
                       )}
@@ -260,8 +265,8 @@ export default function Files() {
                 </td>
                 <td>
                   {f.evidence_id ? <ExhibitPill file={f} /> : canEdit ? (
-                    <button type="button" className="btn ghost" onClick={() => setRegistering(f)} disabled={isClosed || busy}
-                            style={{ fontSize: 11, whiteSpace: 'nowrap' }} title="Copy this file into Evidence as a draft exhibit with chain of custody">
+                    <button type="button" className="btn ghost" onClick={() => setRegistering(f)} disabled={ro || busy}
+                            style={{ whiteSpace: 'nowrap' }} title="Copy this file into Evidence as a draft exhibit with chain of custody">
                       Register as exhibit
                     </button>
                   ) : <span style={{ color: 'var(--dim)', fontSize: 12 }}>—</span>}
@@ -270,18 +275,17 @@ export default function Files() {
                   <a
                     className="btn ghost"
                     href={api.incidentFileDownloadUrl(inc.id, f.id)}
-                    style={{ fontSize: 11 }}
                     title="Download"
                   >
                     Download
                   </a>
-                  <button type="button" className="btn ghost" onClick={() => setLinkTarget(f)} disabled={isClosed} style={{ fontSize: 11 }}>
+                  <button type="button" className="btn ghost" onClick={() => setLinkTarget(f)} disabled={ro}>
                     {f.entity_id ? 'Re-link' : 'Link'}
                   </button>
-                  <button type="button" className="btn ghost" onClick={() => setRenaming(f)} disabled={isClosed || busy} style={{ fontSize: 11 }}>
+                  <button type="button" className="btn ghost" onClick={() => setRenaming(f)} disabled={ro || busy}>
                     Rename
                   </button>
-                  <button type="button" className="btn ghost" onClick={() => setDeleting(f)} disabled={isClosed || busy}>
+                  <button type="button" className="btn ghost" onClick={() => setDeleting(f)} disabled={ro || busy}>
                     Delete
                   </button>
                 </td>

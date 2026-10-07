@@ -19,6 +19,10 @@ const TYPE_COLOR = {
   custody_transfer: 'med',
   assignment:       'med',
   le_package:       'high',
+  disclosure:       'high',
+  legal_deadline:   'high',                   // L3 (R47): these three had no colour (fell back to muted)
+  stakeholder_notification: 'high',
+  stored_file_unreadable:   'crit',
 }
 
 let toastId = 0

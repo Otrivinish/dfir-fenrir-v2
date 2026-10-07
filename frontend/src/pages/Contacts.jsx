@@ -41,7 +41,7 @@ function VerifyLine({ contact: c, canVerify, onVerified }) {
     }}>
       <span className="ct-verified-text">{verifiedLabel(c)}</span>
       {canVerify && (
-        <button className="btn ghost" type="button" style={{ fontSize: 12, marginLeft: 'auto' }}
+        <button className="btn ghost" type="button" style={{ marginLeft: 'auto' }}
                 disabled={busy} onClick={verify} aria-label={`Mark ${c.name} verified`}>
           {busy ? 'Saving…' : 'Mark verified'}
         </button>

@@ -3,7 +3,7 @@
 ZIP layout (encrypted via WinZip AES-256, openable with any standard tool):
 
     audit.pdf              — human-readable rendering (ReportLab)
-    audit.jsonl            — canonical v2 payloads, lex-sorted keys, LF terminated
+    audit.jsonl            — each row's hashed payload (v1/v2/v3 by hash_version), lex-sorted keys, LF terminated
     audit.jsonl.sig        — 64-byte raw Ed25519 signature over audit.jsonl
     public_key.pem         — Ed25519 public key (PEM, SubjectPublicKeyInfo)
     manifest.json          — export metadata (filters, anchors, hashes, fingerprint)
@@ -36,6 +36,7 @@ from typing import Any, BinaryIO
 import pyzipper
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audit.service import canonical_payload
 from audit_export.pdf import render_pdf
 from evidence.timestamping import timestamp_sha256
 from audit_export.signing import (
@@ -93,12 +94,36 @@ Verification (after extracting)
 
 4. Confirm `manifest.json.chain.first_prev_hash` equals audit.jsonl's
    first record's `prev_hash`, and `manifest.json.chain.last_row_hash`
-   equals the last record's `row_hash`. The slice is a contiguous
-   segment of the issuing instance's tamper-evident chain.
+   equals the last record's `row_hash`. Only an unfiltered export is a
+   contiguous segment of the issuing instance's chain (each record's
+   `prev_hash` is the previous record's `row_hash`). A filtered export
+   (one incident, a user, an action, a time window) holds only the
+   matching rows: their `prev_hash` values point at rows left out, so
+   check each row on its own with step 5.
 
 5. Optionally recompute each row's hash:
      row_hash = sha256(prev_hash_ascii || canonical_json(payload))
-   The chain in this slice should reproduce byte-for-byte.
+   canonical_json = JSON with sorted keys, separators "," and ":", and
+   non-ASCII escaped (Python's json.dumps defaults otherwise). Each
+   record's `payload` is exactly what was hashed; its fields depend on
+   the record's `hash_version`:
+     v1  timestamp, user_id, username, action, resource_type,
+         resource_id, details, ip_address
+     v2  v1 + v ("v2"), role_at_time, session_id, outcome,
+         resource_label, request_method, request_path, request_id
+     v3  v2 with v = "v3", + user_agent (the client's User-Agent,
+         sanitised); rows written from 2026-10-06 on
+   A slice may mix versions; the chain links across them unchanged.
+
+    import hashlib, json
+    for line in open("audit.jsonl", encoding="utf-8"):
+        rec = json.loads(line)
+        canon = json.dumps(rec["payload"], sort_keys=True, separators=(",", ":"))
+        ok = hashlib.sha256((rec["prev_hash"] + canon).encode("utf-8")).hexdigest() == rec["row_hash"]
+        print("OK  " if ok else "FAIL", rec["hash_version"], rec["id"])
+
+   Every row must print OK. In an unfiltered slice each record's
+   `prev_hash` also equals the previous record's `row_hash`.
 
 Reference: NIST SP 800-86 §3.1.2, ISO/IEC 27037 §6.1.
 """
@@ -121,40 +146,18 @@ def _password_hint(password: str) -> str:
 
 
 # ── Canonical JSONL ──────────────────────────────────────────────────────────
-# The same payload shape `audit.service._payload_v2` writes into the chain.
-# Re-derive it here so a verifier can recompute row_hash without round-trip
-# through the platform.
-
-def _canonical_payload(row: AuditLog) -> dict[str, Any]:
-    """Reproduce the v2 canonical payload from a stored row."""
-    return {
-        "v":               "v2",
-        "timestamp":       row.timestamp.isoformat(),
-        "user_id":         str(row.user_id) if row.user_id else None,
-        "username":        row.username,
-        "role_at_time":    row.role_at_time,
-        "session_id":      str(row.session_id) if row.session_id else None,
-        "action":          row.action,
-        "outcome":         row.outcome,
-        "resource_type":   row.resource_type,
-        "resource_id":     row.resource_id,
-        "resource_label":  row.resource_label,
-        "ip_address":      row.ip_address,
-        "request_method":  row.request_method,
-        "request_path":    row.request_path,
-        "request_id":      row.request_id,
-        "details":         row.details or {},
-    }
-
+# Each record carries the exact payload the row was hashed over — the same
+# `audit.service.canonical_payload` the in-app verifier uses, picked by the row's
+# hash_version (v1/v2/v3) — so a recipient can recompute row_hash offline.
 
 def _jsonl_record(row: AuditLog) -> dict[str, Any]:
     """One JSONL line: chain fields + canonical payload, lex-sorted at serialize."""
     return {
         "id":           str(row.id),
-        "hash_version": row.hash_version or "v2",
+        "hash_version": row.hash_version or "v1",
         "prev_hash":    row.prev_hash,
         "row_hash":     row.row_hash,
-        "payload":      _canonical_payload(row),
+        "payload":      canonical_payload(row),
     }
 
 
@@ -249,9 +252,10 @@ async def build_audit_export(
         },
         "verification": {
             "spec": (
-                "Outer bundle: AES-256-GCM, 12-byte nonce prefix + ciphertext + 16-byte tag. "
+                "Outer bundle: a ZIP encrypted with WinZip AES-256 (AE-2), password delivered out of band. "
                 "Inner audit.jsonl is signed by audit.jsonl.sig under public_key.pem. "
-                "Each JSONL record exposes prev_hash/row_hash; row_hash recomputes as "
+                "Each JSONL record exposes hash_version/prev_hash/row_hash and the hashed payload "
+                "(v1/v2/v3 shape by hash_version; v3 adds user_agent); row_hash recomputes as "
                 "sha256(prev_hash_ascii || canonical_json(payload)) per audit/service.py."
             ),
         },

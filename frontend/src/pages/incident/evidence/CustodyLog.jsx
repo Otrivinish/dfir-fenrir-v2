@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
-import { CUSTODY_ACTION_COLOR, CUSTODY_ACTION_LABEL } from '../../../lib/custodyLabels.js'
+import { CUSTODY_ACTION_COLOR, CUSTODY_ACTION_LABEL, custodySubject } from '../../../lib/custodyLabels.js'
 
 // G-fix FE-L8: the labels and colours live in lib/custodyLabels.js (shared with the item detail).
 const ACTION_COLOR = CUSTODY_ACTION_COLOR
@@ -109,9 +109,9 @@ export default function CustodyLog() {
                   {ev.resource_id && (
                     <>
                       {' · '}
-                      <span style={{ color: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                        {ev.resource_type === 'custody_export' ? 'export' : 'item'}{' '}
-                        {ev.resource_id.slice(0, 8)}…
+                      <span style={{ color: 'var(--muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}
+                            data-testid="custody-subject" title={`${ev.resource_type} ${ev.resource_id}`}>
+                        {custodySubject(ev)}
                       </span>
                     </>
                   )}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
+import { useAuth } from '../../hooks/useAuth.jsx'
 import { api } from '../../api/client.js'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 import { formatLocal } from '../../lib/datetime.js'
@@ -18,14 +19,16 @@ const REG_LABELS = {
 }
 
 // Colour accents per regulation (CSS token–compatible).
+// K5 (R41): regulation colours are theme tokens (styles/tokens.css --reg-*), text-safe per theme.
 const REG_COLORS = {
-  GDPR:    '#3b82f6',
-  NIS2:    '#8b5cf6',
-  DORA:    '#f59e0b',
-  PCI_DSS: '#ef4444',
-  HIPAA:   '#10b981',
-  CCPA:    '#06b6d4',
+  GDPR:    'var(--reg-gdpr)',
+  NIS2:    'var(--reg-nis2)',
+  DORA:    'var(--reg-dora)',
+  PCI_DSS: 'var(--reg-pci)',
+  HIPAA:   'var(--reg-hipaa)',
+  CCPA:    'var(--reg-ccpa)',
 }
+const tint = (color, pct) => `color-mix(in srgb, ${color} ${pct}%, transparent)`
 
 const VALID_STATUSES = ['pending', 'in_progress', 'completed', 'waived']
 const STATUS_LABELS  = { pending: 'Pending', in_progress: 'In Progress', completed: 'Completed', waived: 'Waived' }
@@ -150,7 +153,7 @@ function InitPanel({ inc, onDone }) {
                   padding: '5px 14px',
                   borderRadius: 'var(--radius)',
                   border: `2px solid ${on ? REG_COLORS[reg] : 'var(--border)'}`,
-                  background: on ? `${REG_COLORS[reg]}22` : 'var(--surface-2)',
+                  background: on ? tint(REG_COLORS[reg], 13) : 'var(--surface-2)',
                   color: on ? REG_COLORS[reg] : 'var(--muted)',
                   fontWeight: on ? 700 : 400,
                   fontSize: 13,
@@ -323,7 +326,7 @@ function DeadlineActionModal({ mode, d, onConfirm, onClose }) {
 
 // ── Deadline card ──────────────────────────────────────────────────────────────
 
-function DeadlineCard({ d, incId, isClosed, onUpdated, onDeleted }) {
+function DeadlineCard({ d, incId, isClosed, readOnly, onUpdated, onDeleted }) {
   const [expanded,  setExpanded]  = useState(false)
   const [notesDraft, setNotesDraft] = useState(d.completion_notes || '')
   // Follow the server's notes when they change (e.g. a waiver justification saved via the dialog).
@@ -400,7 +403,7 @@ function DeadlineCard({ d, incId, isClosed, onUpdated, onDeleted }) {
           fontWeight: 700,
           padding: '2px 8px',
           borderRadius: 3,
-          background: `${regColor}22`,
+          background: tint(regColor, 13),
           color: regColor,
           flexShrink: 0,
           fontFamily: 'var(--font-mono)',
@@ -479,68 +482,70 @@ function DeadlineCard({ d, incId, isClosed, onUpdated, onDeleted }) {
         </div>
       )}
 
-      {/* Actions row */}
+      {/* Actions row (L2, R43: not for a viewer; the API refuses them) */}
+      {!readOnly && (
       <div style={{ display: 'flex', gap: 'var(--space-1)', marginTop: 'var(--space-2)', flexWrap: 'wrap' }}>
         {!done && d.status !== 'in_progress' && (
-          <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px' }}
+          <button type="button" className="btn ghost"
             onClick={() => setStatus('in_progress')} disabled={saving}>
             Mark In Progress
           </button>
         )}
         {!done && (
-          <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px', color: 'var(--ok)' }}
+          <button type="button" className="btn ghost" style={{ color: 'var(--ok)' }}
             onClick={() => setExpanded(x => !x)} disabled={saving}>
             {expanded ? 'Cancel' : 'Mark Completed'}
           </button>
         )}
         {!done && (
-          <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px', color: 'var(--dim)' }}
+          <button type="button" className="btn ghost" style={{ color: 'var(--dim)' }}
             onClick={() => setAction('waive')} disabled={saving}>
             Waive
           </button>
         )}
         {done && (
-          <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px' }}
+          <button type="button" className="btn ghost"
             onClick={() => setStatus('pending')} disabled={saving}>
             Reopen
           </button>
         )}
         {!isClosed && (
-          <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px' }}
+          <button type="button" className="btn ghost"
             onClick={() => setAction('reanchor')} disabled={saving}>
             Re-anchor
           </button>
         )}
         {!isClosed && (
-          <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '3px 8px', color: 'var(--crit)', marginLeft: 'auto' }}
+          <button type="button" className="btn ghost" style={{ color: 'var(--crit)', marginLeft: 'auto' }}
             onClick={() => setAction('delete')} disabled={saving}>
             Delete
           </button>
         )}
       </div>
+      )}
 
       {/* Completion notes panel */}
-      {expanded && (
+      {expanded && !readOnly && (
         <div style={{ marginTop: 'var(--space-2)', paddingTop: 'var(--space-2)', borderTop: '1px solid var(--border)' }}>
           <label style={{ fontSize: 12, color: 'var(--muted)', display: 'block', marginBottom: 'var(--space-1)' }}>
             Completion notes (optional)
           </label>
           <textarea
             autoFocus
-            className="input"
+            className="input compact"
             rows={3}
             value={notesDraft}
             onChange={e => setNotesDraft(e.target.value)}
             maxLength={4096}
-            style={{ width: '100%', fontSize: 12, resize: 'vertical', marginBottom: 'var(--space-2)' }}
+            style={{ width: '100%', resize: 'vertical', marginBottom: 'var(--space-2)' }}
             placeholder="Reference numbers, timestamps, contact names…"
           />
           <div style={{ display: 'flex', gap: 'var(--space-1)' }}>
-            <button type="button" className="btn primary" style={{ fontSize: 12 }}
+            <button type="button" className="btn primary"
               onClick={() => setStatus('completed')} disabled={saving}>
               {saving ? 'Saving…' : 'Confirm Completed'}
             </button>
-            <button type="button" className="btn ghost" style={{ fontSize: 12 }}
+            <button type="button" className="btn ghost"
               onClick={saveNotes} disabled={saving}>
               Save notes only
             </button>
@@ -671,6 +676,8 @@ function AddDeadlineModal({ inc, onCreated, onClose }) {
 
 export default function Legal() {
   const { inc, isClosed, bumpLegal } = useOutletContext()
+  const { user } = useAuth()
+  const viewer = user?.role === 'viewer'
 
   const [deadlines,    setDeadlines]    = useState([])
   const [loading,      setLoading]      = useState(true)
@@ -744,8 +751,8 @@ export default function Legal() {
               {overdueCount} OVERDUE
             </span>
           )}
-          {!isClosed && (
-            <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={() => setShowAdd(true)}>
+          {!isClosed && !viewer && (
+            <button type="button" className="btn ghost" onClick={() => setShowAdd(true)}>
               + Add custom
             </button>
           )}
@@ -760,7 +767,7 @@ export default function Legal() {
       )}
 
       {deadlines.length === 0 ? (
-        isClosed ? <div className="panel-empty">No regulatory deadlines.</div> : <InitPanel inc={inc} onDone={changed} />
+        isClosed || viewer ? <div className="panel-empty">No regulatory deadlines.</div> : <InitPanel inc={inc} onDone={changed} />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
           {Object.entries(grouped).map(([reg, items]) => (
@@ -772,7 +779,7 @@ export default function Legal() {
                 letterSpacing: '0.08em',
                 color: REG_COLORS[reg] || 'var(--muted)',
                 marginBottom: 'var(--space-2)',
-                borderBottom: `1px solid ${REG_COLORS[reg] || 'var(--border)'}44`,
+                borderBottom: `1px solid ${REG_COLORS[reg] ? tint(REG_COLORS[reg], 27) : 'var(--border)'}`,
                 paddingBottom: 'var(--space-1)',
               }}>
                 {REG_LABELS[reg] || reg}
@@ -784,6 +791,7 @@ export default function Legal() {
                     d={d}
                     incId={inc.id}
                     isClosed={isClosed}
+                    readOnly={viewer}
                     onUpdated={onUpdated}
                     onDeleted={onDeleted}
                   />
@@ -792,12 +800,12 @@ export default function Legal() {
             </div>
           ))}
 
-          {!isClosed && (
+          {!isClosed && !viewer && (
             <div style={{ marginTop: 'var(--space-2)' }}>
               {showMoreInit ? (
                 <InitPanel inc={inc} onDone={() => { setShowMoreInit(false); changed() }} />
               ) : (
-                <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={() => setShowMoreInit(true)}>
+                <button type="button" className="btn ghost" onClick={() => setShowMoreInit(true)}>
                   + Initialize additional regulation
                 </button>
               )}

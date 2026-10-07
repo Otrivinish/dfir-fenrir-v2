@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect } from 'react'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
+import { useAuth } from '../../../hooks/useAuth.jsx'
 
 // Technique risk-level → CSS token
 function techniqueToken(type) {
@@ -166,6 +167,9 @@ function EntryCard({ entry }) {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function LOLBins() {
+  // L2 (R43): the reference sync is admin-only on the API (403 for analysts and viewers).
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'admin'
   const [entries,  setEntries]  = useState([])
   const [status,   setStatus]   = useState(null)
   const [loading,  setLoading]  = useState(true)
@@ -237,13 +241,15 @@ export default function LOLBins() {
           <span style={{ color: 'var(--dim)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
             Last sync: {syncTs}
           </span>
-          <button
-            type="button" className="btn ghost"
-            style={{ fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' }}
-            onClick={handleSync} disabled={syncing}
-          >
-            {syncing ? '⟳ Syncing…' : '⟳ Force sync'}
-          </button>
+          {isAdmin && (
+            <button
+              type="button" className="btn ghost"
+              style={{ marginLeft: 'auto', whiteSpace: 'nowrap' }}
+              onClick={handleSync} disabled={syncing}
+            >
+              {syncing ? '⟳ Syncing…' : '⟳ Force sync'}
+            </button>
+          )}
         </div>
       )}
 
@@ -259,19 +265,21 @@ export default function LOLBins() {
             Database not yet synced
           </div>
           <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 'var(--space-3)' }}>
-            FENRIR syncs LOLBAS and GTFOBins on first request. Check back in a moment, or force a sync now.
+            FENRIR syncs LOLBAS and GTFOBins on first request. Check back in a moment{isAdmin ? ', or force a sync now' : ''}.
           </div>
-          <button type="button" className="btn primary" onClick={handleSync} disabled={syncing}>
-            {syncing ? '⟳ Syncing…' : '⟳ Sync now'}
-          </button>
+          {isAdmin && (
+            <button type="button" className="btn primary" onClick={handleSync} disabled={syncing}>
+              {syncing ? '⟳ Syncing…' : '⟳ Sync now'}
+            </button>
+          )}
         </div>
       )}
 
       {/* Search + platform filter */}
       <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-3)', flexWrap: 'wrap' }}>
         <input
-          className="input"
-          style={{ flex: 1, minWidth: 200, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+          className="input compact"
+          style={{ flex: 1, minWidth: 200, fontFamily: 'var(--font-mono)' }}
           value={q}
           onChange={e => handleSearch(e.target.value)}
           placeholder="Search binary name, technique, description…"
@@ -281,7 +289,6 @@ export default function LOLBins() {
             <button
               key={val} type="button"
               className={`btn ${platform === val ? 'primary' : 'ghost'}`}
-              style={{ fontSize: 12 }}
               onClick={() => handlePlatform(val)}
             >{label}</button>
           ))}

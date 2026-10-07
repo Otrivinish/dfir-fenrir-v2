@@ -205,6 +205,7 @@
 .toast--med    { border-left-color: var(--med); }
 .toast--high   { border-left-color: var(--high); }
 .toast--muted  { border-left-color: var(--muted); }
+.toast--crit   { border-left-color: var(--crit); }
 
 /* Shrinking progress bar at the top */
 .toast-bar {
@@ -226,6 +227,8 @@
 .toast--ok   .toast-bar { background: var(--ok); }
 .toast--med  .toast-bar { background: var(--med); }
 .toast--high .toast-bar { background: var(--high); }
+.toast--crit .toast-bar { background: var(--crit); }
+.toast--muted .toast-bar { background: var(--muted); }
 
 .toast-content {
   padding: 10px 12px 10px 14px;

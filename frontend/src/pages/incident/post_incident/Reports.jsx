@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../../../api/client.js'
+import { useAuth } from '../../../hooks/useAuth.jsx'
 import { REPORT_SECTION_OPTIONS, TEMPLATE_META, generateReport, generateSkeleton, injectReportSha256 } from '../../../lib/reportTemplates.js'
-import LePackage from './LePackage.jsx'
 
 // ── Lessons & Remediation (report narratives) ───────────────────────────────
 // Six plain-text fields that feed §09 Lessons Learned and §10 Remediation Plan, on the
@@ -225,6 +225,10 @@ const DEFAULT_SECTIONS = Object.fromEntries(REPORT_SECTION_OPTIONS.map(o => [o.k
 const TLP_OPTIONS = ['TLP:CLEAR', 'TLP:GREEN', 'TLP:AMBER', 'TLP:AMBER+STRICT', 'TLP:RED']
 
 export default function Reports({ inc }) {
+  // L2 (R43): a viewer generates and downloads reports, but saving to Report history is analyst-only
+  // (the API refuses it), so the save is skipped instead of ending in an error.
+  const { user } = useAuth()
+  const viewer = user?.role === 'viewer'
   const [templateId, setTemplateId] = useState('executive')
   const [mode,       setMode]       = useState('full')
   const [logo,       setLogo]       = useState(loadLogo)
@@ -445,7 +449,9 @@ export default function Reports({ inc }) {
       html,
     }
     const bytes = new Blob([JSON.stringify(payload)]).size
-    if (bytes > SAVE_MAX_BYTES) {
+    if (viewer) {
+      // not saved: Report history is written by analysts and admins
+    } else if (bytes > SAVE_MAX_BYTES) {
       problems.push(`Not saved to report history: the report is ${fmtBytes(bytes)}, over the ${fmtBytes(SAVE_MAX_BYTES)} `
         + 'save limit. Untick some figures in Supporting documents (or the Figures section) and generate it again.')
     } else {
@@ -567,11 +573,11 @@ export default function Reports({ inc }) {
                   style={{ display: 'none' }}
                   onChange={handleLogoFile}
                 />
-                <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={() => fileRef.current?.click()}>
+                <button type="button" className="btn ghost" onClick={() => fileRef.current?.click()}>
                   {logo ? 'Change logo' : 'Upload logo'}
                 </button>
                 {logo && (
-                  <button type="button" className="btn ghost" style={{ fontSize: 12, color: 'var(--crit)' }} onClick={clearLogo}>
+                  <button type="button" className="btn ghost" style={{ color: 'var(--crit)' }} onClick={clearLogo}>
                     Remove
                   </button>
                 )}
@@ -583,12 +589,11 @@ export default function Reports({ inc }) {
               <label className="field-label" htmlFor="report-footer" style={{ marginBottom: 'var(--space-1)', display: 'block' }}>Footer text</label>
               <input
                 id="report-footer"
-                className="input"
+                className="input compact"
                 value={footer}
                 onChange={e => handleFooter(e.target.value)}
                 placeholder="e.g. Acme Security Operations Centre — Confidential"
                 maxLength={256}
-                style={{ fontSize: 12 }}
               />
             </div>
           </div>
@@ -628,10 +633,10 @@ export default function Reports({ inc }) {
                 </label>
                 <select
                   id="rpt-class"
-                  className="select"
+                  className="select compact"
                   value={classification}
                   onChange={e => setClassification(e.target.value)}
-                  style={{ width: '100%', fontSize: 12 }}
+                  style={{ width: '100%' }}
                 >
                   <option value="">— inherit from incident TLP —</option>
                   {TLP_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
@@ -644,12 +649,11 @@ export default function Reports({ inc }) {
                 </label>
                 <input
                   id="rpt-aud"
-                  className="input"
+                  className="input compact"
                   value={audience}
                   onChange={e => setAudience(e.target.value)}
                   placeholder="e.g. CISO + Board"
                   maxLength={128}
-                  style={{ fontSize: 12 }}
                 />
               </div>
 
@@ -769,7 +773,6 @@ export default function Reports({ inc }) {
           className="btn primary"
           onClick={() => generate('preview')}
           disabled={loading}
-          style={{ fontSize: 14, padding: '8px 20px' }}
         >
           {loading ? 'Building report…' : 'Preview in new tab'}
         </button>
@@ -859,7 +862,7 @@ export default function Reports({ inc }) {
                         className="btn ghost"
                         title={`Click to copy:\n${r.sha256}`}
                         onClick={() => navigator.clipboard?.writeText(r.sha256)}
-                        style={{ padding: '1px 6px', fontFamily: 'var(--font-mono)', fontSize: 10 }}
+                        style={{ fontFamily: 'var(--font-mono)' }}
                       >{r.sha256.slice(0, 12)}…</button>
                     </td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
@@ -872,7 +875,6 @@ export default function Reports({ inc }) {
                       <button
                         type="button"
                         className="btn ghost"
-                        style={{ fontSize: 11 }}
                         onClick={() => { setDownloadTarget(r); setAccessReason('') }}
                       >↓ Download</button>
                     </td>
@@ -946,7 +948,15 @@ export default function Reports({ inc }) {
         </div>
       )}
 
-      <LePackage inc={inc} />
+      {/* K1 (R36): the LE package moved to Evidence › Disclosure package (one signed package per purpose). */}
+      <div className="alert info" role="status" style={{ marginTop: 'var(--space-4)' }} data-testid="reports-disclosure-link">
+        <span className="alert-icon">i</span>
+        <span>
+          Law-enforcement, regulator and internal handoffs are built as a{' '}
+          <Link to={`/incidents/${encodeURIComponent(inc.id)}/evidence/disclosure`}>disclosure package</Link>{' '}
+          under Evidence › Disclosure package.
+        </span>
+      </div>
     </div>
   )
 }

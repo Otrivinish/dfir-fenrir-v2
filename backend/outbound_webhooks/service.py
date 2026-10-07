@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from core.outbound_policy import outbound_allowed
 from core.security import decrypt_secret
+from notifications.service import PHASE_LABEL
 from models import Incident, PlatformSetting
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,11 @@ _EVENT_EMOJI = {
     "phase_changed":     "🔄",
     "severity_changed":  "⚠",
     "incident_resolved": "✅",
+}
+# Card titles that differ from the event key (L3, R47): the close event keeps its key (B3, audited as
+# `event`), but closing is not "resolving" any more (Resolve = move to Post-Incident).
+_EVENT_LABEL = {
+    "incident_resolved": "Incident Closed",
 }
 
 
@@ -134,14 +140,14 @@ async def dispatch_incident_event(
         return
 
     emoji   = _EVENT_EMOJI.get(event, "ℹ")
-    label   = event.replace("_", " ").title()
+    label   = _EVENT_LABEL.get(event, event.replace("_", " ").title())
     ref     = f" [{inc_ref}]" if inc_ref else ""
     title   = f"{emoji} {label}{ref}: {inc_title}"
     color   = _SEV_COLOR.get(inc_severity, "22D3EE")
 
     facts: list[dict] = [
         {"name": "Severity", "value": inc_severity.title()},
-        {"name": "Phase",    "value": inc_phase.replace("_", " ").title()},
+        {"name": "Phase",    "value": PHASE_LABEL.get(inc_phase, inc_phase)},
     ]
     if extra_facts:
         facts.extend(extra_facts)

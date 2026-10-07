@@ -144,18 +144,17 @@ export default function ThreatActors() {
         borderRadius: 'var(--radius)',
       }}>
         <input
-          className="input"
+          className="input compact"
           type="search"
           placeholder="Search name or alias…"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          style={{ flex: '1 1 200px', maxWidth: 340, fontSize: 13 }}
+          style={{ flex: '1 1 200px', maxWidth: 340 }}
         />
         <select
-          className="select"
+          className="select compact"
           value={motivation}
           onChange={e => setMotivation(e.target.value)}
-          style={{ fontSize: 12 }}
         >
           <option value="">All motivations</option>
           {MOTIVATIONS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
@@ -414,8 +413,8 @@ function ActorDetailDrawer({ actor, isAdmin, onClose, onEdit, onDeleted }) {
 
       {isAdmin && !actor.is_system && (
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-          <button type="button" className="btn ghost" onClick={onEdit} style={{ fontSize: 12 }}>Edit</button>
-          <button type="button" className="btn ghost" onClick={handleDelete} style={{ fontSize: 12, color: 'var(--crit)' }}>Delete</button>
+          <button type="button" className="btn ghost" onClick={onEdit}>Edit</button>
+          <button type="button" className="btn ghost" onClick={handleDelete} style={{ color: 'var(--crit)' }}>Delete</button>
         </div>
       )}
 

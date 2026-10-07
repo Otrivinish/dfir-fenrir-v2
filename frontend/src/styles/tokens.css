@@ -15,8 +15,8 @@
 
   /* Text */
   --text:  #d9dde5;
-  --muted: #7a8595;
-  --dim:   #4b5462;
+  --muted: #919cac;
+  --dim:   #808a99;
 
   /* Brand / status */
   --accent:      #22d3ee;
@@ -73,12 +73,23 @@
   --entity-domain:  #38bdf8;
   --entity-email:   #10b981;
   --entity-service: #fb923c;
-  --entity-network: #8b5cf6;
+  --entity-network: #9163fd;
   --entity-group:   #94a3b8;
-  --entity-other:   #6b7280;
+  --entity-other:   #7b8290;
+
+  /* Regulation colours (Legal tab badges, borders, countdowns) — K5, ≥ 4.5:1 on surface */
+  --reg-gdpr:  #60a5fa;
+  --reg-nis2:  #a78bfa;
+  --reg-dora:  #f59e0b;
+  --reg-pci:   #f87171;
+  --reg-hipaa: #34d399;
+  --reg-ccpa:  #22d3ee;
 }
 
 [data-theme="nordic-calm"] {
+  /* L2 (R46, 2026-10-07): --muted, --dim, the status colours and the entity colours were darkened
+     (same OKLCH hue/chroma) so text reaches >= 4.5:1 on --bg, --surface, --surface-2 and on its own
+     14 % tint (alerts, clock chips). The dark themes lightened --muted/--dim the same way. */
   --bg:            #f7f8fa;
   --surface:       #ffffff;
   --surface-2:     #f1f3f6;
@@ -86,17 +97,17 @@
   --border-strong: #d1d5db;
 
   --text:  #111827;
-  --muted: #6b7280;
-  --dim:   #9ca3af;
+  --muted: #505664;
+  --dim:   #5e646f;
 
-  --accent:      #3b82f6;
+  --accent:      #145dce;
   --accent-soft: #dbeafe;
   --accent-fg:   #ffffff;
-  --crit: #dc2626;
-  --high: #ea580c;
-  --med:  #d97706;
-  --low:  #2563eb;
-  --ok:   #059669;
+  --crit: #c20212;
+  --high: #ad3e01;
+  --med:  #975105;
+  --low:  #1a57de;
+  --ok:   #06714e;
   /* IR phase colours: hue family from the NIST CSF 2.0 function colours
      (Prep=Protect violet, Detect=Detect yellow, C/E/R=Respond red, Post=Recover green),
      lower chroma than --crit/--high/--med/--low and SEV_PALETTE so severity shouts and
@@ -122,15 +133,30 @@
   --heading-letter-spacing: -0.01em;
   --heading-transform: none;
 
-  --entity-host:    #0ea5e9;
-  --entity-user:    #d97706;
+  --entity-host:    #0274a6;
+  --entity-user:    #a55a09;
   --entity-ip:      #7c3aed;
   --entity-domain:  #2563eb;
-  --entity-email:   #059669;
-  --entity-service: #ea580c;
+  --entity-email:   #0c7d57;
+  --entity-service: #bf4607;
   --entity-network: #6d28d9;
-  --entity-group:   #6b7280;
-  --entity-other:   #9ca3af;
+  --entity-group:   #676e7c;
+  --entity-other:   #686e79;
+
+  /* SEV_PALETTE text on a light surface (SevBadge.jsx reads var(--sev-*-text, <hex>)): the shared bright
+     hex is 1.9-2.5:1 on its own tint over white, so the light theme darkens the text only. The dark
+     themes don't set these and keep the canonical hex. */
+  --sev-crit-text: #bf081d;
+  --sev-high-text: #9e5202;
+  --sev-med-text:  #7e6804;
+  --sev-low-text:  #06772f;
+
+  --reg-gdpr:  #1d4ed8;
+  --reg-nis2:  #6d28d9;
+  --reg-dora:  #92400e;
+  --reg-pci:   #b91c1c;
+  --reg-hipaa: #065f46;
+  --reg-ccpa:  #155e75;
 }
 
 [data-theme="aurora-night"] {
@@ -141,8 +167,8 @@
   --border-strong: #3a3a60;
 
   --text:  #e6e7f0;
-  --muted: #8a8db1;
-  --dim:   #5a5d7a;
+  --muted: #9da0c5;
+  --dim:   #8b8fae;
 
   --accent:      #a78bfa;
   --accent-soft: rgba(167,139,250,0.18);
@@ -188,5 +214,12 @@
   --entity-service: #fb923c;
   --entity-network: #a78bfa;
   --entity-group:   #94a3b8;
-  --entity-other:   #6b7280;
+  --entity-other:   #818896;
+
+  --reg-gdpr:  #60a5fa;
+  --reg-nis2:  #c084fc;
+  --reg-dora:  #fbbf24;
+  --reg-pci:   #f87171;
+  --reg-hipaa: #34d399;
+  --reg-ccpa:  #22d3ee;
 }

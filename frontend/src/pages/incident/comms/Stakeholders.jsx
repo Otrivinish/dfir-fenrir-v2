@@ -143,7 +143,7 @@ export default function Stakeholders() {
     <>
       <StakeholderBoard
         source={source}
-        readOnly={isClosed}
+        readOnly={isClosed || user?.role === 'viewer'}
         reloadToken={reloadToken}
         toolbarExtra={canUseDirectory && (
           <button className="btn" type="button" onClick={() => setPickerOpen(true)}>Add from directory</button>
@@ -460,8 +460,8 @@ function StakeholderCard({ stakeholder: s, readOnly, extra, onEdit, onDelete }) 
           display: 'flex', gap: 'var(--space-2)', justifyContent: 'flex-end',
           borderTop: '1px solid var(--border)', paddingTop: 'var(--space-2)', marginTop: 'auto',
         }}>
-          <button className="btn" type="button" style={{ fontSize: 12 }} onClick={onEdit}>Edit</button>
-          <button className="btn" type="button" style={{ fontSize: 12, color: 'var(--crit)' }} onClick={onDelete}>Remove</button>
+          <button className="btn" type="button" onClick={onEdit}>Edit</button>
+          <button className="btn" type="button" style={{ color: 'var(--crit)' }} onClick={onDelete}>Remove</button>
         </div>
       )}
     </div>
@@ -536,7 +536,7 @@ function StakeholderModal({ form: initialForm, noun, saving, onSave, onClose }) 
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-2)' }}>
               <label className="label" style={{ margin: 0 }}>Contact methods</label>
-              <button className="btn" type="button" style={{ fontSize: 12 }} onClick={addMethod}>+ Add</button>
+              <button className="btn" type="button" onClick={addMethod}>+ Add</button>
             </div>
             {form.contact_methods.length === 0 && (
               <div style={{ fontSize: 12, color: 'var(--dim)', padding: 'var(--space-2) 0' }}>
@@ -567,7 +567,7 @@ function StakeholderModal({ form: initialForm, noun, saving, onSave, onClose }) 
                 <button
                   className="btn"
                   type="button"
-                  style={{ color: 'var(--crit)', fontSize: 12, padding: '2px 8px' }}
+                  style={{ color: 'var(--crit)' }}
                   onClick={() => removeMethod(i)}
                 >✕</button>
               </div>
@@ -622,12 +622,12 @@ function ImportModal({ csvText, setCsvText, preview, result, importing, onParse,
             </p>
 
             <textarea
-              className="input"
+              className="input compact"
               value={csvText}
               onChange={e => setCsvText(e.target.value)}
               rows={8}
               placeholder="name,title,organization,type,email,phone,signal,whatsapp,notes&#10;Alice Smith,CISO,Acme Corp,internal,alice@acme.com,+1-555-0100,+1-555-0100,,On call 24/7"
-              style={{ resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: 11, marginBottom: 'var(--space-3)' }}
+              style={{ resize: 'vertical', fontFamily: 'var(--font-mono)', marginBottom: 'var(--space-3)' }}
             />
 
             {preview === null ? (

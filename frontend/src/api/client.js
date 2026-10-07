@@ -42,11 +42,15 @@ function safeJson(s) {
   try { return JSON.parse(s) } catch { return s }
 }
 
+// Every API error is flat {detail, code}; a 422 validation_error also has errors [{loc, msg, type}] (L4).
+// The list-shaped detail is still read for a server from before L4.
 function extractMessage(data, status) {
   if (data && typeof data === 'object') {
     if (typeof data.detail === 'string') return data.detail
     if (Array.isArray(data.detail) && data.detail[0]?.msg) return data.detail[0].msg
   }
+  // The edge proxy's 413 has no JSON body (L4, R50).
+  if (status === 413) return 'The request is too large for the server (size limit reached). Nothing was saved.'
   if (status === 429) return 'Too many attempts. Try again later.'
   if (status === 401) return 'Authentication failed.'
   if (status === 403) return 'Forbidden.'
@@ -100,7 +104,7 @@ function cancelled() {
 // FE-L16 — cancelled or cut off while the server was completing the upload: it may have stored it.
 function resultUnknown() {
   const err = new Error('Result unknown — the connection was cancelled or lost while the server was storing the '
-    + 'upload, and it may have finished. Check Evidence › Items (and this page’s list) before uploading again.')
+    + 'upload, and it may have finished. Check Evidence › Exhibits (and this page’s list) before uploading again.')
   err.code = 'upload_result_unknown'
   return err
 }
@@ -172,8 +176,9 @@ export async function uploadInChunks(incidentId, file, {
   // G-fix L12: the complete body goes along as `metadata`, so the server checks its fields (enums, types)
   // before a byte is sent. A server without that field refuses it (422 extra_forbidden): open without.
   let created = await open({ ...opening, metadata: completeBody })
-  if (created.res.status === 422 && Array.isArray(created.data?.detail)
-      && created.data.detail.some(d => d?.loc?.[1] === 'metadata' && d?.type === 'extra_forbidden')) {
+  const fieldErrors = created.data?.errors ?? created.data?.detail     // L4: errors[]; list detail before L4
+  if (created.res.status === 422 && Array.isArray(fieldErrors)
+      && fieldErrors.some(d => d?.loc?.[1] === 'metadata' && d?.type === 'extra_forbidden')) {
     created = await open(opening)
   }
   if (!created.res.ok) {
@@ -293,7 +298,7 @@ function mainStoredButFailed(e, done, filename, what) {
   const ident = done.evidence?.identifier || 'an exhibit'
   const stored = done.exhibit_link === 'sha256_match' ? `matched the existing exhibit ${ident}` : `was registered as ${ident}`
   const why = e.code === 'upload_cancelled' ? 'was cancelled'
-    : e.code === 'upload_result_unknown' ? 'has an unknown result (check Evidence › Items)'
+    : e.code === 'upload_result_unknown' ? 'has an unknown result (check Evidence › Exhibits)'
     : `failed: ${e.message || 'unknown error'}`
   const err = new Error(`${filename} ${stored}; the ${what} upload ${why}. Nothing was parsed. Parse ${ident} under `
     + '“From a registered exhibit” (with the form history once it is registered).')
@@ -428,6 +433,7 @@ export const api = {
   },
   getIncident:         (id)       => request('GET',   `/api/incidents/${id}`),
   getIncidentSnapshot: (id)       => request('GET',   `/api/incidents/${id}/snapshot`),
+  getIncidentPhaseHistory: (id)   => request('GET',   `/api/incidents/${id}/phase-history`),
   createIncident:      (payload)  => request('POST',  '/api/incidents', payload),
   updateIncident:      (id, body) => request('PATCH', `/api/incidents/${id}`, body),
   getIncidentGates:    (id)       => request('GET',   `/api/incidents/${id}/gates`),
@@ -1264,7 +1270,7 @@ export const api = {
   },
   lolbinsCheckText: (text)               => request('GET',  `/api/lolbins/check-text?text=${encodeURIComponent(text)}`),
 
-  // Custody exports (Phase 2 legal handoff)
+  // Custody exports (Phase 2 legal handoff) — deprecated (K1); read-only history on the Disclosure page.
   listExports:  (incidentId, params = {}) => {
     const qs = new URLSearchParams()
     for (const [k, v] of Object.entries(params)) {
@@ -1273,21 +1279,21 @@ export const api = {
     const s = qs.toString()
     return request('GET', `/api/incidents/${incidentId}/evidence/exports${s ? '?' + s : ''}`)
   },
-  createExport: (incidentId, payload) =>
-    request('POST', `/api/incidents/${incidentId}/evidence/exports`, payload),
-  getExport:    (incidentId, exportId) =>
-    request('GET',  `/api/incidents/${incidentId}/evidence/exports/${exportId}`),
-
-  // LE package (P1 #4) — admin only.
-  // `payload` now carries the full Wizard-C set including EIO/MLA references,
-  // recipient details, sender_declaration, and enable_acknowledgment.
-  prepareLePackage: (incidentId, payload) =>
-    request('POST', `/api/incidents/${incidentId}/le-package`, payload),
-  listLePackages: (incidentId) =>
-    request('GET',  `/api/incidents/${incidentId}/le-packages`),
-  getLePackage:   (incidentId, lpId) =>
-    request('GET',  `/api/incidents/${incidentId}/le-packages/${lpId}`),
-  // Admin-attested ack for external recipients who can't reach the URL.
+  // K1 (R36): Disclosure packages (internal | law_enforcement | regulator) replace Evidence › Export and the
+  // LE package (their routes are deprecated). Incident lead or admin.
+  createDisclosure: (incidentId, payload) =>
+    request('POST', `/api/incidents/${incidentId}/disclosures`, payload),
+  listDisclosures: (incidentId, params = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    }
+    const s = qs.toString()
+    return request('GET', `/api/incidents/${incidentId}/disclosures${s ? '?' + s : ''}`)
+  },
+  getDisclosure: (incidentId, id) =>
+    request('GET',  `/api/incidents/${incidentId}/disclosures/${id}`),
+  // Lead-attested ack for external recipients who can't reach the URL (any disclosure id).
   manualAckLePackage: (incidentId, lpId, payload) =>
     request('POST', `/api/incidents/${incidentId}/le-packages/${lpId}/manual-ack`, payload),
 

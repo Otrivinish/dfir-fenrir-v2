@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client.js'
 import { formatLocal, formatLocalShort } from '../lib/datetime.js'
-import { SEVERITY, STATUS, byValue, labelOf, pillOf } from '../lib/incidentVocab.js'
+import { PHASE, SEVERITY, STATUS, byValue, labelOf, pillOf } from '../lib/incidentVocab.js'
 import IncidentCreateModal from '../components/IncidentCreateModal.jsx'
 import TagChip from '../components/TagChip.jsx'
 
@@ -14,6 +14,7 @@ export default function Incidents() {
   const [filters, setFilters]   = useState({
     status:   searchParams.get('status')   || '',
     severity: searchParams.get('severity') || '',
+    phase:    searchParams.get('phase')    || '',
     tag:      (searchParams.get('tag') || '').toLowerCase(),
   })
   const [items, setItems]       = useState([])
@@ -29,6 +30,7 @@ export default function Incidents() {
       const params = {}
       if (filters.status)   params.status   = filters.status
       if (filters.severity) params.severity = filters.severity
+      if (filters.phase)    params.phase    = filters.phase
       if (filters.tag)      params.tag      = filters.tag
       if (resetCursor)      params.cursor   = resetCursor
       const r = await api.listIncidents(params)
@@ -44,9 +46,9 @@ export default function Incidents() {
     } finally {
       setLoading(false)
     }
-  }, [filters.status, filters.severity, filters.tag])
+  }, [filters.status, filters.severity, filters.phase, filters.tag])
 
-  useEffect(() => { load(null) /* eslint-disable-next-line */ }, [filters.status, filters.severity, filters.tag])
+  useEffect(() => { load(null) /* eslint-disable-next-line */ }, [filters.status, filters.severity, filters.phase, filters.tag])
 
   // Reflect filters back into the URL so the page is bookmarkable and the
   // browser back button restores the same view.
@@ -54,9 +56,10 @@ export default function Incidents() {
     const next = new URLSearchParams()
     if (filters.status)   next.set('status', filters.status)
     if (filters.severity) next.set('severity', filters.severity)
+    if (filters.phase)    next.set('phase', filters.phase)
     if (filters.tag)      next.set('tag', filters.tag)
     setSearchParams(next, { replace: true })
-  }, [filters.status, filters.severity, filters.tag, setSearchParams])
+  }, [filters.status, filters.severity, filters.phase, filters.tag, setSearchParams])
 
   const toggleFilter = (key, value) => {
     setFilters(f => ({ ...f, [key]: f[key] === value ? '' : value }))
@@ -95,6 +98,16 @@ export default function Incidents() {
                   className={`chip ${filters.severity === s.value ? 'on' : ''}`}
                   onClick={() => toggleFilter('severity', s.value)}
                   type="button">{s.label}</button>
+        ))}
+        <span className="chip-sep" aria-hidden="true" />
+        {/* L3 (R48): phase filter (GET /api/incidents?phase=) */}
+        <span className="chip" style={{ cursor: 'default', borderColor: 'transparent', background: 'transparent' }}>PHASE</span>
+        {PHASE.filter(p => p.value !== 'preparation').map(p => (
+          <button key={p.value}
+                  className={`chip ${filters.phase === p.value ? 'on' : ''}`}
+                  onClick={() => toggleFilter('phase', p.value)}
+                  title={p.label}
+                  type="button"><span className="phase-glyph" aria-hidden="true" style={{ color: p.color }}>{p.glyph}</span>{p.short || p.label}</button>
         ))}
         <span className="chip-sep" aria-hidden="true" />
         <span className="chip" style={{ cursor: 'default', borderColor: 'transparent', background: 'transparent' }}>TAG</span>
@@ -137,13 +150,14 @@ export default function Incidents() {
               <th>TLP</th>
               <th>Status</th>
               <th>Tags</th>
+              <th title="Incident Commander">Owner (IC)</th>
               <th>Reporter</th>
               <th>Created</th>
             </tr>
           </thead>
           <tbody>
             {!loading && items.length === 0 && (
-              <tr><td colSpan={9} className="tbl-empty">No incidents yet. Click <strong>New incident</strong> to create one.</td></tr>
+              <tr><td colSpan={10} className="tbl-empty">No incidents yet. Click <strong>New incident</strong> to create one.</td></tr>
             )}
             {items.map(inc => (
               <tr key={inc.id} onClick={() => navigate(`/incidents/${inc.id}`)}>
@@ -170,12 +184,13 @@ export default function Incidents() {
                     )}
                   </div>
                 </td>
+                <td className="num">{inc.incident_commander || '—'}</td>
                 <td className="num">{inc.reporter || '—'}</td>
                 <td className="ts" title={formatLocal(inc.created_at)}>{formatLocalShort(inc.created_at)}</td>
               </tr>
             ))}
             {loading && items.length === 0 && (
-              <tr><td colSpan={9} className="tbl-empty">Loading…</td></tr>
+              <tr><td colSpan={10} className="tbl-empty">Loading…</td></tr>
             )}
           </tbody>
         </table>

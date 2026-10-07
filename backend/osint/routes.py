@@ -11,7 +11,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
-from auth.deps import current_user
+from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.errors import ApiErrorBody
 from core.outbound_policy import OPEN_TLP, require_outbound_confirmation
@@ -61,15 +61,18 @@ async def _policy_incident(db: AsyncSession, req: EnrichRequest, user: User):
 @router.post("/enrich", response_model=EnrichResponse,
              summary="Enrich an indicator (OSINT)",
              responses={404: {"model": ApiErrorBody, "description": "incident_id not found or not accessible"},
+                        403: {"model": ApiErrorBody, "description": "insufficient_role (a viewer: outbound OSINT "
+                              "needs the analyst role, L4 R137)"},
                         409: {"model": ApiErrorBody, "description": "outbound_confirmation_required (Dark "
                               "Operation or TLP:RED incident; body has `reason`)"}})
 async def enrich_indicator(
     req: EnrichRequest,
     request: Request,
-    user: User = Depends(current_user),
+    user: User = Depends(require_analyst),
     db: AsyncSession = Depends(get_db),
 ) -> EnrichResponse:
     """Enrich a single indicator with one or more selected sources in parallel.
+    Requires the analyst role: the lookup leaves the platform (viewers 403 insufficient_role).
 
     Records one audit entry per call covering every source requested (not one per
     source) -- the indicator value/type/sources are logged, since an indicator is not

@@ -8,6 +8,19 @@ import { formatLocal } from '../../lib/datetime.js'
 // Who may assign or remove them is the API's `assign_lead_roles` capability, not a rule here.
 const LEAD_ROLE_KEYS = ['incident_commander', 'deputy_commander']
 
+// L3 (R48): the picker shows on-call, availability and skills (GET /api/roster, /api/on-call/current).
+const AVAILABILITY_LABEL = { available: 'Available', on_call: 'On-call', unavailable: 'Unavailable',
+                             out_of_office: 'Out of office' }
+
+function pickerLabel(u, profile, onCallId) {
+  const bits = [u.username]
+  if (u.id === onCallId) bits.push('ON CALL')
+  if (profile?.availability) bits.push(AVAILABILITY_LABEL[profile.availability] || profile.availability)
+  const skills = profile?.skills ?? []
+  if (skills.length) bits.push(skills.slice(0, 3).join(', ') + (skills.length > 3 ? ` +${skills.length - 3}` : ''))
+  return bits.join(' · ')
+}
+
 // ─── Role Coverage section ────────────────────────────────────────────────────
 
 function RoleCoverage({ incidentId, refreshKey }) {
@@ -87,6 +100,8 @@ function RoleCoverage({ incidentId, refreshKey }) {
 
 function AssignModal({ incidentId, canAssignLead, onClose, onCreated }) {
   const [users, setUsers]   = useState([])
+  const [profiles, setProfiles] = useState({})        // user_id → roster entry (skills, availability)
+  const [onCallId, setOnCallId] = useState(null)      // today's on-call responder
   const [roles, setRoles]   = useState([])
   const [userId, setUserId] = useState('')
   const [roleId, setRoleId] = useState('')
@@ -105,6 +120,9 @@ function AssignModal({ incidentId, canAssignLead, onClose, onCreated }) {
       setRoles(active)
       setRoleId(active.length ? active[0].id : '')
     }).catch(() => {})
+    // Extra context only: the picker still works if the roster or rota can't be read.
+    api.listRoster().then(r => setProfiles(Object.fromEntries((r.items ?? []).map(e => [e.user_id, e])))).catch(() => {})
+    api.getCurrentOnCall().then(c => setOnCallId(c?.user_id ?? null)).catch(() => {})
   }, [canAssignLead])
 
   const handleSubmit = useCallback(async e => {
@@ -147,9 +165,12 @@ function AssignModal({ incidentId, canAssignLead, onClose, onCreated }) {
               >
                 <option value="">— select user —</option>
                 {users.map(u => (
-                  <option key={u.id} value={u.id}>{u.username}</option>
+                  <option key={u.id} value={u.id}>{pickerLabel(u, profiles[u.id], onCallId)}</option>
                 ))}
               </select>
+              {userId && (profiles[userId]?.skills ?? []).length > 3 && (
+                <span className="field-hint">Skills: {profiles[userId].skills.join(', ')}</span>
+              )}
             </label>
 
             <label className="field-label">

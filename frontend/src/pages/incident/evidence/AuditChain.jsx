@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
+import { CUSTODY_ACTION_LABEL, custodySubject } from '../../../lib/custodyLabels.js'
 
 export default function AuditChain() {
   const { inc } = useOutletContext()
@@ -40,7 +41,7 @@ export default function AuditChain() {
   return (
     <section className="panel">
       <div className="panel-toolbar">
-        <h2 className="panel-h">Audit chain — evidence events</h2>
+        <h2 className="panel-h">Integrity — evidence audit chain</h2>
         <button
           type="button"
           className="btn primary"
@@ -79,7 +80,7 @@ export default function AuditChain() {
             {!result.ok && result.broken_reason && (
               <>
                 {' '}<span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                  ({result.broken_reason}, first bad id {result.broken_at_id?.slice(0, 8)}…)
+                  ({result.broken_reason}; exhibit {(() => { const b = events.find(e => e.id === result.broken_at_id); return b ? custodySubject(b) : '—' })()})
                 </span>
               </>
             )}
@@ -102,7 +103,7 @@ export default function AuditChain() {
               <th style={{ width: 160 }}>Timestamp</th>
               <th>Action</th>
               <th>Actor</th>
-              <th>Resource</th>
+              <th>Exhibit</th>
               <th>prev_hash</th>
               <th>row_hash</th>
               <th style={{ width: 60 }}></th>
@@ -139,10 +140,11 @@ function ChainRow({ idx, ev, broken, priorRowHash }) {
       <td title={ev.created_at} style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
         {formatLocal(ev.created_at)}
       </td>
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{ev.event_type}</td>
+      <td style={{ fontSize: 12 }} title={ev.event_type}>{CUSTODY_ACTION_LABEL[ev.event_type] || ev.event_type}</td>
       <td style={{ fontFamily: 'var(--font-mono)' }}>{ev.username || '—'}</td>
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}>
-        {ev.resource_type}/{ev.resource_id ? ev.resource_id.slice(0, 8) + '…' : '—'}
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)' }}
+          data-testid="chain-subject" title={`${ev.resource_type} ${ev.resource_id || ''}`}>
+        {custodySubject(ev)}
       </td>
       <td
         title={ev.prev_hash || '—'}

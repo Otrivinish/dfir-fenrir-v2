@@ -592,13 +592,13 @@ export default function EvidenceSOP() {
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <div className="panel-toolbar">
         <h2 className="panel-h">Chain of Custody — Standard Operating Procedure</h2>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 12, color: 'var(--muted)' }}>
+        <label style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-2)', fontSize: 12, color: 'var(--muted)', maxWidth: '100%' }}>
           Authority
           <select
             className="select"
             value={standard}
             onChange={e => setStandard(e.target.value)}
-            style={{ minWidth: 200 }}
+            style={{ minWidth: 200, maxWidth: '100%' }}
           >
             {STANDARDS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
           </select>
@@ -613,7 +613,7 @@ export default function EvidenceSOP() {
         padding: 'var(--space-3)',
         marginBottom: 'var(--space-5)',
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-3)' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-3)' }}>
           <div style={{ fontWeight: 600, fontSize: 13 }}>
             Incident compliance — {items.length} evidence item{items.length !== 1 ? 's' : ''}
           </div>
@@ -628,7 +628,7 @@ export default function EvidenceSOP() {
           )}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--space-2)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 150px), 1fr))', gap: 'var(--space-2)' }}>
           {complianceResults.map(({ phase, compliance }) => (
             <button
               key={phase.id}

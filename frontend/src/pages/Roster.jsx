@@ -82,11 +82,11 @@ function EditProfileModal({ entry, onClose, onSaved }) {
       <div className="modal" style={{ maxWidth: 500 }}>
         <div className="modal-header">
           <span className="modal-title">Edit profile — {entry.username}</span>
-          <button className="btn-icon" onClick={onClose}>✕</button>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">✕</button>
         </div>
         <form onSubmit={handleSubmit}>
           <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-            {error && <div className="banner banner-err">{error}</div>}
+            {error && <div className="alert error">{error}</div>}
 
             <label className="field-label">
               Availability
@@ -122,8 +122,8 @@ function EditProfileModal({ entry, onClose, onSaved }) {
               </div>
               <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
                 <input
-                  className="input"
-                  style={{ flex: 1, fontSize: 12 }}
+                  className="input compact"
+                  style={{ flex: 1 }}
                   placeholder="Type a skill and press Enter or Add"
                   value={skillInput}
                   onChange={e => setSkillInput(e.target.value)}
@@ -132,7 +132,6 @@ function EditProfileModal({ entry, onClose, onSaved }) {
                 <button
                   type="button"
                   className="btn"
-                  style={{ fontSize: 12 }}
                   onClick={() => addSkill(skillInput)}
                 >Add</button>
               </div>
@@ -179,19 +178,18 @@ function EditProfileModal({ entry, onClose, onSaved }) {
                 </div>
               ))}
               {oob.length < 10 && (
-                <button type="button" className="btn" style={{ fontSize: 12 }} onClick={addOob}>+ Add out-of-band contact</button>
+                <button type="button" className="btn" onClick={addOob}>+ Add out-of-band contact</button>
               )}
             </fieldset>
 
             <label className="field-label">
               Notes <span className="muted">(optional)</span>
               <textarea
-                className="input"
+                className="input compact"
                 rows={2}
                 value={notes}
                 onChange={e => setNotes(e.target.value)}
                 maxLength={512}
-                style={{ fontSize: 12 }}
               />
             </label>
           </div>
@@ -335,8 +333,7 @@ export default function Roster() {
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
           <select
-            className="input"
-            style={{ fontSize: 12, padding: '4px 8px' }}
+            className="input compact"
             value={avFilter}
             onChange={e => setAvFilter(e.target.value)}
           >
@@ -346,8 +343,8 @@ export default function Roster() {
             ))}
           </select>
           <input
-            className="input"
-            style={{ fontSize: 12, padding: '4px 8px', width: 160 }}
+            className="input compact"
+            style={{ width: 160 }}
             placeholder="Search name…"
             value={textFilter}
             onChange={e => setTextFilter(e.target.value)}

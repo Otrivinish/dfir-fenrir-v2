@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
@@ -39,6 +40,8 @@ const TYPE_VAR = {
 
 const labelOfType = (v) => ENTITY_TYPES.find(t => t.value === v)?.label || v
 const typeColor   = (v) => `var(${TYPE_VAR[v] || '--muted'})`
+const ACTION_STATUS = { open: 'Open', in_progress: 'In progress', done: 'Done', deferred: 'Deferred', reverted: 'Reverted' }
+const RELATED_LIMIT = 50
 
 export default function EntityDetailDrawer({
   entity,          // EntityOut object
@@ -78,6 +81,27 @@ export default function EntityDetailDrawer({
   }, [incidentId, entity.id])
 
   useEffect(() => { loadLog() }, [loadLog])
+
+  // K4 (R40): the incident's records about this entity — its timeline events (K3 ?entity_id=),
+  // the IOCs linked to it and its containment actions (C1). The asset log below stays.
+  const [related, setRelated]           = useState(null)   // null = loading
+  const [relatedError, setRelatedError] = useState(null)
+  useEffect(() => {
+    let live = true
+    setRelated(null); setRelatedError(null)
+    Promise.all([
+      api.listTimelineEvents(incidentId, { entity_id: entity.id, limit: RELATED_LIMIT }),
+      api.listIocs(incidentId, { entity_id: entity.id, limit: RELATED_LIMIT }),
+      api.listRespondActions(incidentId, { entity_id: entity.id, category: 'containment', limit: RELATED_LIMIT }),
+    ]).then(([tl, iocs, acts]) => { if (live) setRelated({ tl, iocs, acts }) })
+      .catch(e => { if (live) setRelatedError(e.message || 'Could not load the linked records') })
+    return () => { live = false }
+  }, [incidentId, entity.id])
+  const count = (page) => page ? ` (${page.items.length}${page.next_cursor ? '+' : ''})` : ''
+  const relatedBody = (page, empty, render) =>
+    !page ? <div className="entity-drawer-empty">{relatedError || 'Loading…'}</div>
+    : page.items.length === 0 ? <div className="entity-drawer-empty">{empty}</div>
+    : <ul className="entity-drawer-list">{page.items.map(render)}</ul>
 
   // Collected files state
   const [files,        setFiles]        = useState([])
@@ -301,12 +325,11 @@ export default function EntityDetailDrawer({
             <div className="entity-drawer-section-label">Status</div>
             <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
               <select
-                className="select"
+                className="select compact"
                 value={entity.criticality}
                 onChange={(e) => setCriticality(e.target.value)}
                 disabled={isClosed || busy}
                 aria-label="Criticality"
-                style={{ fontSize: 12 }}
               >
                 {CRITICALITY.map(c => (
                   <option key={c.value} value={c.value}>{c.label}</option>
@@ -383,7 +406,6 @@ export default function EntityDetailDrawer({
                       <button
                         type="button"
                         className="btn ghost"
-                        style={{ padding: '2px 6px', fontSize: 11 }}
                         onClick={() => onDisconnect(rel)}
                         disabled={busy}
                         title="Remove this relationship"
@@ -398,7 +420,7 @@ export default function EntityDetailDrawer({
               <button
                 type="button"
                 className="btn ghost"
-                style={{ marginTop: 'var(--space-1)', fontSize: 12 }}
+                style={{ marginTop: 'var(--space-1)' }}
                 onClick={() => onAddConnection(entity)}
               >
                 + Add connection
@@ -473,7 +495,7 @@ export default function EntityDetailDrawer({
                       <button
                         type="button"
                         className="btn ghost"
-                        style={{ padding: '1px 5px', fontSize: 11, flexShrink: 0 }}
+                        style={{ flexShrink: 0 }}
                         onClick={() => setRegisteringFile(ef)}
                         title="Register as exhibit (draft, chain of custody)"
                       >⛁</button>
@@ -488,7 +510,7 @@ export default function EntityDetailDrawer({
                       <button
                         type="button"
                         className="btn ghost"
-                        style={{ padding: '1px 5px', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}
+                        style={{ color: 'var(--dim)', flexShrink: 0 }}
                         onClick={() => setDeletingFile(ef)}
                         title="Delete file"
                       >✕</button>
@@ -507,6 +529,42 @@ export default function EntityDetailDrawer({
             <RegisterExhibitModal file={registeringFile} onClose={() => setRegisteringFile(null)}
                                   onConfirm={() => confirmRegisterFile(registeringFile)} />
           )}
+
+          {/* Incident timeline events on this entity */}
+          <div className="entity-drawer-section" data-testid="drawer-timeline">
+            <div className="entity-drawer-section-label">Timeline events{count(related?.tl)}</div>
+            {relatedBody(related?.tl, 'No timeline events on this entity.', ev => (
+              <li key={ev.id}>
+                <span className="entity-drawer-when">{formatLocal(ev.event_time)}</span>
+                <span>{ev.description}</span>
+              </li>
+            ))}
+            <Link className="entity-drawer-more" to={`/incidents/${incidentId}/timeline?entity_id=${entity.id}`}>Open in Timeline →</Link>
+          </div>
+
+          {/* IOCs linked to this entity */}
+          <div className="entity-drawer-section" data-testid="drawer-iocs">
+            <div className="entity-drawer-section-label">Linked IOCs{count(related?.iocs)}</div>
+            {relatedBody(related?.iocs, 'No IOCs linked to this entity.', i => (
+              <li key={i.id}>
+                <span className="entity-drawer-when">{i.type}</span>
+                <span className="entity-drawer-mono">{i.value}</span>
+              </li>
+            ))}
+            <Link className="entity-drawer-more" to={`/incidents/${incidentId}/iocs`}>Open IOCs →</Link>
+          </div>
+
+          {/* Containment actions linked to this entity */}
+          <div className="entity-drawer-section" data-testid="drawer-containment">
+            <div className="entity-drawer-section-label">Containment actions{count(related?.acts)}</div>
+            {relatedBody(related?.acts, 'No containment actions linked to this entity.', a => (
+              <li key={a.id}>
+                <span className="entity-drawer-when">{ACTION_STATUS[a.status] || a.status}{a.completed_at ? ` · ${formatLocal(a.completed_at)}` : ''}</span>
+                <span>{a.title}</span>
+              </li>
+            ))}
+            <Link className="entity-drawer-more" to={`/incidents/${incidentId}/containment`}>Open Containment →</Link>
+          </div>
 
           {/* Asset Log */}
           <div className="entity-drawer-section">
@@ -558,7 +616,7 @@ export default function EntityDetailDrawer({
               <button
                 type="button"
                 className="btn ghost"
-                style={{ marginTop: 'var(--space-2)', fontSize: 12 }}
+                style={{ marginTop: 'var(--space-2)' }}
                 onClick={() => setShowAddNote(true)}
               >+ Add note</button>
             )}
@@ -566,21 +624,20 @@ export default function EntityDetailDrawer({
             {showAddNote && (
               <form className="add-note-form" onSubmit={submitNote}>
                 <input
-                  className="input"
+                  className="input compact"
                   type="text"
                   placeholder="Note title (required)"
                   value={noteTitle}
                   onChange={(e) => setNoteTitle(e.target.value)}
                   required
-                  style={{ fontSize: 12 }}
                 />
                 <textarea
-                  className="input"
+                  className="input compact"
                   placeholder="Details (optional)"
                   value={noteBody}
                   onChange={(e) => setNoteBody(e.target.value)}
                   rows={3}
-                  style={{ fontSize: 12, resize: 'vertical' }}
+                  style={{ resize: 'vertical' }}
                 />
                 <div className="add-note-occurred-wrap">
                   <span>When:</span>
@@ -596,13 +653,11 @@ export default function EntityDetailDrawer({
                   <button
                     type="submit"
                     className="btn primary"
-                    style={{ fontSize: 12 }}
                     disabled={noteBusy || !noteTitle.trim()}
                   >{noteBusy ? 'Saving…' : 'Save note'}</button>
                   <button
                     type="button"
                     className="btn ghost"
-                    style={{ fontSize: 12 }}
                     onClick={() => { setShowAddNote(false); setNoteTitle(''); setNoteBody(''); setNoteOccurredAt('') }}
                   >Cancel</button>
                 </div>

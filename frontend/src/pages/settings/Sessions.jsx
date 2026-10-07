@@ -135,7 +135,7 @@ export default function Sessions() {
                       <button
                         type="button"
                         className="btn ghost"
-                        style={{ padding: '4px 8px', fontFamily: 'var(--font-body)', fontWeight: 500 }}
+                        style={{ fontFamily: 'var(--font-body)', fontWeight: 500 }}
                         onClick={() => startEdit(s)}
                         title="Click to rename"
                       >

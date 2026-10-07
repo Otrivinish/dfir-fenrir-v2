@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import { useAuth } from '../../../hooks/useAuth.jsx'
 import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
@@ -102,6 +102,7 @@ function PendingTransferBadge({ item, usernameOf }) {
 export default function Items() {
   const { inc, bumpRail, access } = useOutletContext()
   const { user } = useAuth()
+  const navigate = useNavigate()
   const isClosed = inc?.status === 'closed'
   const isAdmin  = user?.role === 'admin'
   const canWrite = !!user && user.role !== 'viewer'   // FE-L12: viewers see the register read-only
@@ -215,7 +216,7 @@ export default function Items() {
   return (
     <section className="panel">
       <div className="panel-toolbar">
-        <h2 className="panel-h">Evidence items</h2>
+        <h2 className="panel-h">Exhibits</h2>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
           <select className="select" value={kindFilter} onChange={(e) => setKindFilter(e.target.value)} aria-label="Filter by kind">
             <option value="">All kinds</option>
@@ -227,26 +228,15 @@ export default function Items() {
             {Object.entries(STATUS_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
           </select>
           {canWrite && (
-            <>
-              <button
-                type="button"
-                className="btn ghost"
-                onClick={() => setModal({ mode: 'add' })}
-                disabled={isClosed}
-                title={isClosed ? 'Closed incidents are read-only' : 'Quick add (no wizard)'}
-              >
-                + Quick add
-              </button>
-              <button
-                type="button"
-                className="btn primary"
-                onClick={() => setModal({ mode: 'wizard' })}
-                disabled={isClosed}
-                title={isClosed ? 'Closed incidents are read-only' : 'Court-grade acquisition wizard (ISO 27037 + GDPR)'}
-              >
-                🛡 Wizard add
-              </button>
-            </>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => navigate('../register')}
+              disabled={isClosed}
+              title={isClosed ? 'Closed incidents are read-only' : 'Evidence › Register: the acquisition wizard, or a quick add as an unsealed draft'}
+            >
+              + Register exhibit
+            </button>
           )}
         </div>
       </div>
@@ -262,8 +252,8 @@ export default function Items() {
       ) : items.length === 0 ? (
         <div className="panel-empty">
           <div className="panel-empty-mark" aria-hidden="true">⊞</div>
-          <div>No evidence yet.</div>
-          {!isClosed && canWrite && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Use “Quick add” or “Wizard add” to register a file or physical item.</div>}
+          <div>No exhibits yet.</div>
+          {!isClosed && canWrite && <div style={{ color: 'var(--dim)', fontSize: 12 }}>Click “+ Register exhibit” to register a file or physical item.</div>}
         </div>
       ) : (
         <>
@@ -337,7 +327,7 @@ export default function Items() {
                           className="btn ghost"
                           onClick={() => { navigator.clipboard?.writeText(ev.sha256) }}
                           title={`Click to copy:\n${ev.sha256}`}
-                          style={{ padding: '2px 6px', fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 400 }}
+                          style={{ fontFamily: 'var(--font-mono)', fontWeight: 400 }}
                         >
                           {ev.sha256.slice(0, 12)}…
                         </button>
@@ -380,23 +370,6 @@ export default function Items() {
         </>
       )}
 
-      {modal?.mode === 'add' && (
-        <AddEvidenceModal
-          incidentId={inc.id}
-          entities={entities}
-          onClose={() => setModal(null)}
-          onSaved={() => { setModal(null); reload() }}
-        />
-      )}
-      {modal?.mode === 'wizard' && (
-        <AcquisitionWizard
-          incidentId={inc.id}
-          entities={entities}
-          users={users}
-          onClose={() => setModal(null)}
-          onSaved={() => { setModal(null); reload() }}
-        />
-      )}
       {modal?.mode === 'complete' && (
         <AcquisitionWizard
           incidentId={inc.id}
@@ -429,7 +402,8 @@ export default function Items() {
 
 // ── Add modal ─────────────────────────────────────────────────────────────
 
-function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
+// K1: the Register tab's "Quick add": registers an unsealed draft (complete & seal it later on Exhibits).
+export function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
   const [kind, setKind]               = useState('digital_file')
   const [name, setName]               = useState('')
   const [identifier, setIdentifier]   = useState('')
@@ -505,7 +479,7 @@ function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
       setError((err.code === 'identifier_exists'
         ? `The identifier “${identifier.trim()}” is already used on this incident: change it.`
         : (err.message || 'Could not add evidence.'))
-        + (err.retained ? ' The file stays uploaded on the server: Add evidence again to finish without re-sending it.' : ''))
+        + (err.retained ? ' The file stays uploaded on the server: Add draft again to finish without re-sending it.' : ''))
     } finally {
       up.done()
       setBusy(false)
@@ -519,7 +493,7 @@ function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
     >
       <div className="modal" role="dialog" aria-labelledby="ev-add-title">
         <div className="modal-head">
-          <h2 id="ev-add-title">Add evidence</h2>
+          <h2 id="ev-add-title">Quick add (unsealed draft)</h2>
           <button type="button" className="modal-close" onClick={onClose} disabled={busy} aria-label="Close">×</button>
         </div>
         <form onSubmit={onSubmit}>
@@ -640,7 +614,7 @@ function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
           <div className="modal-foot">
             <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
             <button type="submit" className="btn primary" disabled={busy}>
-              {busy ? 'Uploading…' : 'Add evidence'}
+              {busy ? 'Uploading…' : 'Add draft'}
             </button>
           </div>
         </form>
@@ -1458,7 +1432,7 @@ function DeviceClock({ incidentId, item, editable, onSaved }) {
         )}
       </div>
       {editable && !editing && (
-        <button type="button" className="btn ghost" style={{ fontSize: 11, marginTop: 4 }}
+        <button type="button" className="btn ghost" style={{ marginTop: 4 }}
                 onClick={() => { setValue(has ? String(current) : ''); setErr(null); setEditing(true) }}>
           {has ? 'Change offset' : 'Set offset'}
         </button>
@@ -1739,15 +1713,14 @@ function TransferModal({ incidentId, item, users, me, isAdmin, onClose, onSaved 
                 }}>
                   <button type="button"
                     className={`btn ${mode === 'internal' ? 'primary' : 'ghost'}`}
-                    style={{ borderRadius: 0, fontSize: 12, padding: '4px 12px' }}
+                    style={{ borderRadius: 0 }}
                     onClick={() => setMode('internal')}>
                     {isExternalNow ? 'You (take it back)' : 'Internal user (Fenrir account)'}
                   </button>
                   {canExternal && (
                     <button type="button"
                       className={`btn ${mode === 'external' ? 'primary' : 'ghost'}`}
-                      style={{ borderRadius: 0, borderLeft: '1px solid var(--border)',
-                               fontSize: 12, padding: '4px 12px' }}
+                      style={{ borderRadius: 0, borderLeft: '1px solid var(--border)' }}
                       onClick={() => setMode('external')}>
                       External party (courier / counsel / LE)
                     </button>
@@ -1819,10 +1792,10 @@ function TransferModal({ incidentId, item, users, me, isAdmin, onClose, onSaved 
                   </div>
                   <div className="field">
                     <label className="field-label" htmlFor="ev-ext-contact">Contact (email / phone / badge #)</label>
-                    <input id="ev-ext-contact" className="input" value={extContact}
+                    <input id="ev-ext-contact" className="input compact" value={extContact}
                            onChange={(e) => setExtContact(e.target.value)} maxLength={256}
                            placeholder="e.g. p.hansen@polisen.se · +46 8 401 00 00 · badge B-44219"
-                           style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} />
+                           style={{ fontFamily: 'var(--font-mono)' }} />
                   </div>
                 </>
               )}
@@ -1847,15 +1820,15 @@ function TransferModal({ incidentId, item, users, me, isAdmin, onClose, onSaved 
                 </div>
                 <div className="field">
                   <label className="field-label" htmlFor="ev-seal">Seal ID</label>
-                  <input id="ev-seal" className="input" value={sealId}
+                  <input id="ev-seal" className="input compact" value={sealId}
                          onChange={(e) => setSealId(e.target.value)} maxLength={128}
-                         placeholder="e.g. bag #4471" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} />
+                         placeholder="e.g. bag #4471" style={{ fontFamily: 'var(--font-mono)' }} />
                 </div>
                 <div className="field">
                   <label className="field-label" htmlFor="ev-cref">Courier / tracking ref</label>
-                  <input id="ev-cref" className="input" value={courierRef}
+                  <input id="ev-cref" className="input compact" value={courierRef}
                          onChange={(e) => setCourierRef(e.target.value)} maxLength={128}
-                         placeholder="e.g. DHL 7741-2293" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} />
+                         placeholder="e.g. DHL 7741-2293" style={{ fontFamily: 'var(--font-mono)' }} />
                 </div>
               </div>
 
@@ -2068,7 +2041,7 @@ function PhotosPanel({ incidentId, item, isClosed, onReplaceItem, onChanged }) {
                   {p.caption && <figcaption style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{p.caption}</figcaption>}
                   {p.taken_at && <div style={{ fontSize: 10, color: 'var(--dim)', fontFamily: 'var(--font-mono)' }}>{formatLocal(p.taken_at)}</div>}
                   {canEditCaptions && (
-                    <button type="button" className="btn ghost" style={{ fontSize: 11, marginTop: 2 }} disabled={busy}
+                    <button type="button" className="btn ghost" style={{ marginTop: 2 }} disabled={busy}
                             data-testid="ev-photo-edit" onClick={() => { setEditIdx(i); setEditText(p.caption || ''); setError(null) }}>
                       Edit caption
                     </button>

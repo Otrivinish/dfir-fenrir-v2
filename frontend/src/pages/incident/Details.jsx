@@ -61,7 +61,7 @@ function TeamsSection({ inc, onUpdated }) {
         <span>Teams</span>
         {!editing && (
           <button type="button" className="btn ghost"
-            style={{ fontSize: 11, padding: '1px 6px', marginTop: -1 }}
+            style={{ marginTop: -1 }}
             onClick={openEdit}>Manage</button>
         )}
       </dt>
@@ -83,19 +83,23 @@ function TeamsSection({ inc, onUpdated }) {
             )}
             {error && <div className="team-picker-error" role="alert"><span className="team-picker-error-mark" aria-hidden="true">!</span><span>{error}</span></div>}
             <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-              <button type="button" className="btn ghost" style={{ fontSize: 12 }}
+              <button type="button" className="btn ghost"
                 onClick={() => setEditing(false)} disabled={busy}>Cancel</button>
-              <button type="button" className="btn primary" style={{ fontSize: 12 }}
+              <button type="button" className="btn primary"
                 onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
             </div>
           </div>
         ) : (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            {currentTeams.length === 0
-              ? <span style={{ fontSize: 12, color: 'var(--muted)' }}>Unrestricted</span>
-              : currentTeams.map(t => <TeamChip key={t.id} team={t} />)
-            }
-          </div>
+          <>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+              {currentTeams.length === 0
+                ? <span style={{ fontSize: 12, color: 'var(--muted)' }}>Unrestricted</span>
+                : currentTeams.map(t => <TeamChip key={t.id} team={t} />)
+              }
+            </div>
+            {/* L3 (R48): a failed team list load (Manage) was set but never shown outside the editor. */}
+            {error && <div className="team-picker-error" role="alert"><span className="team-picker-error-mark" aria-hidden="true">!</span><span>{error}</span></div>}
+          </>
         )}
       </dd>
     </>
@@ -135,7 +139,7 @@ function TagsSection({ inc, readOnly, onUpdated }) {
         <span>Tags</span>
         {!editing && !readOnly && (
           <button type="button" className="btn ghost"
-            style={{ fontSize: 11, padding: '1px 6px', marginTop: -1 }}
+            style={{ marginTop: -1 }}
             onClick={openEdit}>Manage</button>
         )}
       </dt>
@@ -145,9 +149,9 @@ function TagsSection({ inc, readOnly, onUpdated }) {
             <TagInput value={draft} onChange={setDraft} scope="incident" />
             {error && <span style={{ fontSize: 12, color: 'var(--crit)' }}>{error}</span>}
             <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-              <button type="button" className="btn ghost" style={{ fontSize: 12 }}
+              <button type="button" className="btn ghost"
                 onClick={() => setEditing(false)} disabled={busy}>Cancel</button>
-              <button type="button" className="btn primary" style={{ fontSize: 12 }}
+              <button type="button" className="btn primary"
                 onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
             </div>
           </div>
@@ -242,11 +246,11 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
           <div style={{ color: 'var(--muted)', fontSize: 12 }}>Entities marked compromised</div>
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
-          <Link to={`/incidents/${incidentId}/entities`} className="btn ghost" style={{ fontSize: 12, textDecoration: 'none' }}>
+          <Link to={`/incidents/${incidentId}/entities`} className="btn ghost" style={{ textDecoration: 'none' }}>
             Manage in Entities →
           </Link>
           {!readOnly && (
-            <button type="button" className="btn ghost" style={{ fontSize: 12 }} onClick={openAdd}>
+            <button type="button" className="btn ghost" onClick={openAdd}>
               + Add system
             </button>
           )}
@@ -287,7 +291,7 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
                 <td style={{ color: s.description ? 'inherit' : 'var(--muted)', fontSize: 12 }}>{s.description || '—'}</td>
                 {!readOnly && (
                   <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                    <button type="button" className="btn ghost" style={{ fontSize: 11, padding: '1px 6px' }}
+                    <button type="button" className="btn ghost"
                       title="Clear the compromised flag; the entity stays in Entities"
                       onClick={() => handleClear(s)}>Clear</button>
                   </td>
@@ -562,11 +566,9 @@ export default function Details() {
             <div className="det-add-tabs" style={{ marginBottom: 0 }}>
               <button type="button"
                 className={`btn ghost ${!preview ? 'active' : ''}`}
-                style={{ fontSize: 12, padding: '2px 10px' }}
                 onClick={() => setPreview(false)}>Write</button>
               <button type="button"
                 className={`btn ghost ${preview ? 'active' : ''}`}
-                style={{ fontSize: 12, padding: '2px 10px' }}
                 onClick={() => setPreview(true)}>Preview</button>
             </div>
           )}

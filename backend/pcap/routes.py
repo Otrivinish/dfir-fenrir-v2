@@ -551,7 +551,7 @@ async def import_pcap_iocs(
 ):
     """Import selected indicators (ip, domain, url only) from a saved PCAP
     analysis into the incident's IOC list, deduplicating against existing
-    values and tagging them (`pcap` by default, or `tags_override`). IOCs from an
+    (type, value) pairs and tagging them (`pcap` by default, or `tags_override`). IOCs from an
     analysis with a run record (G3) record its exhibit (`evidence_id`). Requires
     the analyst role and an open incident (409 incident_closed otherwise). Returns
     `{imported, skipped_duplicates}`."""
@@ -571,11 +571,12 @@ async def import_pcap_iocs(
     if not body.iocs:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No IOCs to import")
 
-    # Pre-load existing values for fast dedup
+    # Pre-load existing (type, value) pairs for fast dedup — the IOC key (K5/R49: was value only,
+    # so an ip and a domain with the same text collided)
     existing = set(
-        row[0]
+        (row[0], row[1])
         for row in (
-            await db.execute(select(IOC.value).where(IOC.incident_id == incident_id))
+            await db.execute(select(IOC.type, IOC.value).where(IOC.incident_id == incident_id))
         ).fetchall()
     )
 
@@ -589,7 +590,7 @@ async def import_pcap_iocs(
         value    = (item.value or "").strip()
         notes    = (item.notes or "").strip() or None
 
-        if not value or ioc_type not in _ALLOWED_IOC_TYPES or value in existing:
+        if not value or ioc_type not in _ALLOWED_IOC_TYPES or (ioc_type, value) in existing:
             skipped += 1
             continue
 
@@ -611,7 +612,7 @@ async def import_pcap_iocs(
             ))
             await db.flush()
             await sp.commit()
-            existing.add(value)
+            existing.add((ioc_type, value))
             imported += 1
         except IntegrityError:
             await sp.rollback()

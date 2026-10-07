@@ -661,7 +661,7 @@ function ContextStrip({ oncall, staleCount, overdueTotal }) {
   // On-call display — initials avatar + name. Stable hue from username so the
   // same person always gets the same colour.
   if (oncall) {
-    const name = oncall.full_name || oncall.username || '—'
+    const name = oncall.display_name || oncall.username || '—'   // L3 (R48): the API sends display_name, not full_name
     const initial = (name || '?')[0].toUpperCase()
     const hue = (oncall.username || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0) % 360
     items.push(

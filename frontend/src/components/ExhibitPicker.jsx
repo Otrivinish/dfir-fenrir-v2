@@ -20,7 +20,7 @@ export function DraftBadge({ title }) {
   const p = SEV_PALETTE.medium
   return (
     <span className="pill" data-testid="draft-badge"
-          title={title || 'Unsealed draft exhibit: complete its acquisition record and seal it in Evidence › Items'}
+          title={title || 'Unsealed draft exhibit: complete its acquisition record and seal it in Evidence › Exhibits'}
           style={{ fontSize: 10, whiteSpace: 'nowrap', background: p.bg, color: p.text, borderColor: p.border }}>
       Draft · unsealed
     </span>

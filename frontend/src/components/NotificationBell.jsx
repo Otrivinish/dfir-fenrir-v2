@@ -19,6 +19,9 @@ const TYPE_LABEL = {
   legal_deadline:   'Legal Clock',
   assignment:       'Assignment',
   le_package:       'LE Package',
+  disclosure:       'Disclosure',
+  stakeholder_notification: 'Stakeholders',
+  stored_file_unreadable:   'Storage',
 }
 
 export default function NotificationBell() {

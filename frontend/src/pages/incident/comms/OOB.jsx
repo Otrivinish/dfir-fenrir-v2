@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { relative, formatLocal } from '../../../lib/datetime.js'
+import { useAuth } from '../../../hooks/useAuth.jsx'
 
 const CHANNEL_LABELS = {
   personal_mobile: 'Personal Mobile',
@@ -27,6 +28,10 @@ const EMPTY_FORM = {
 
 export default function OOB() {
   const { inc, isClosed, refresh } = useOutletContext()
+  // L2 (R43): a viewer gets no write controls (the API refuses them); ro = closed or viewer.
+  const { user } = useAuth()
+  const viewer = user?.role === 'viewer'
+  const ro = isClosed || viewer
 
   const [darkOp,      setDarkOp]      = useState(inc.dark_operation)
   const [passphrase,  setPassphrase]  = useState(null)
@@ -146,12 +151,12 @@ export default function OOB() {
       {/* ── Dark Operation ─────────────────────────────────────────────── */}
       <section>
         <div className="panel-h">Dark Operation</div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', cursor: isClosed ? 'default' : 'pointer', width: 'fit-content' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', cursor: ro ? 'default' : 'pointer', width: 'fit-content' }}>
           <input
             type="checkbox"
             checked={darkOp}
-            onChange={isClosed ? undefined : () => toggleDarkOp()}
-            disabled={isClosed || toggling}
+            onChange={ro ? undefined : () => toggleDarkOp()}
+            disabled={ro || toggling}
             style={{ accentColor: 'var(--crit)', width: 16, height: 16 }}
           />
           <span style={{ fontWeight: 600, color: darkOp ? 'var(--crit)' : 'var(--text)', fontSize: 14 }}>
@@ -173,7 +178,7 @@ export default function OOB() {
           {inc.dark_operation_decided_at
             ? <>Decision recorded {formatLocal(inc.dark_operation_decided_at)}.</>
             : <>No decision recorded yet (a start check when email compromise is suspected).</>}
-          {!inc.dark_operation_decided_at && !darkOp && !isClosed && (
+          {!inc.dark_operation_decided_at && !darkOp && !ro && (
             <> <button type="button" className="btn" onClick={() => toggleDarkOp(true)} disabled={toggling}>
               Record decision: stay off
             </button></>
@@ -210,7 +215,7 @@ export default function OOB() {
           <button className="btn" type="button" onClick={copyPassphrase} disabled={!passphrase}>
             {copied ? 'Copied!' : 'Copy'}
           </button>
-          {!isClosed && (
+          {!ro && (
             <button className="btn" type="button" onClick={regenerate} disabled={regenning}>
               {regenning ? 'Regenerating…' : 'Regenerate'}
             </button>
@@ -224,9 +229,11 @@ export default function OOB() {
           <div className="panel-h" style={{ margin: 0 }}>OOB Communications Log</div>
           {/* Also on a closed incident: the API records post-closure communications (e.g. a
               regulator follow-up); deleting an entry is refused there (409 incident_closed). */}
-          <button className="btn" type="button" onClick={() => setFormOpen(o => !o)} data-oob-log-add>
-            {formOpen ? 'Cancel' : '+ Log communication'}
-          </button>
+          {!viewer && (
+            <button className="btn" type="button" onClick={() => setFormOpen(o => !o)} data-oob-log-add>
+              {formOpen ? 'Cancel' : '+ Log communication'}
+            </button>
+          )}
         </div>
 
         {formOpen && (
@@ -335,7 +342,7 @@ export default function OOB() {
                   {l.created_by_username && (
                     <span className="oob-log-meta">by {l.created_by_username}</span>
                   )}
-                  {!isClosed && (
+                  {!ro && (
                     <button
                       className="btn-link danger"
                       type="button"

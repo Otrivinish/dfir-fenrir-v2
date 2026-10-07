@@ -547,6 +547,47 @@ Built from the IR-expert workflow audit of 2026-10-01: 21 approved pieces (A1–
 - **Promote** War Room messages and comments to a timeline event or a decision (`POST /api/incidents/{id}/promote`). (J4)
 - **Respond actions link** to an approving decision and a playbook task, with chips shown both ways. Entity and IOC rows get **Isolate / Disable / Block** buttons that open the Respond form prefilled. (J5)
 
+### Backlog wave K (2026-10-06)
+
+- **Evidence sub-tabs follow the lifecycle:** Register, Exhibits, Custody log, Integrity, Disclosure package, SOP, Supporting documents. Old links redirect. Custody log and Integrity name exhibits by identifier. New device types: email export, vendor report and network capture export. (K1)
+- **Disclosure package** (internal, law enforcement or regulator): Ed25519-signed, custody-logged per exhibit, audited, and the other admins are notified. `POST /api/incidents/{id}/disclosures`; MCP `disclosure_create`. (K1)
+- ⚠ `POST …/evidence/exports`, `POST …/le-package` and `GET …/le-packages` are deprecated. Exports are open to the incident lead (they were admin-only), and `GET …/le-packages` lists only law-enforcement packages. The LE package UI moved from Post-Incident › Reports to Evidence › Disclosure package. (K1)
+- **Audit log records the client user agent** next to the real client IP on every entry. The UA is sanitised and at most 512 characters. Both audit pages show "METHOD IP · client", with the full UA on hover and when expanded, and "system" for background entries. The audit API, MCP `fenrir_incident_audit`, signed export (JSONL/PDF) and LE package carry it. (AUD-1)
+- ⚠ **Audit hash v3:** new rows include the user agent in the row hash; v1/v2 rows are unchanged and still verify. Offline verifiers must pick the payload by `hash_version` (fields are listed in the bundle README). Syslog audit frames gain the SD-PARAM `ua`, and the LE `Audit_Trail.csv` gains a `user_agent` column. Signed exports now write v1 rows' real payload. (AUD-1)
+- ⚠ **Respond is three rail pages:** Containment, Eradication & Recovery, and Decisions. `/respond` redirects to Containment. Entities is now **Scope** (`/entities` redirects). (K2)
+- **Time in phase** on the phase stepper and the Situation board. New `GET /api/incidents/{id}/phase-history`. The snapshot adds `phase_history`, `respond_containment`, `respond_eradication_recovery` and `decisions`. (K2)
+- **Timeline:** server-side filters (entity, IOC, IR phase, origin, key, text) in a toolbar; an Import button; IOC chips with link and unlink; a key-event flag (`is_key`) and `key_event` marker; and a "Key timeline" on the Situation board. MCP `fenrir_timeline_list` takes the filters and `sort`. (K3)
+- ⚠ **The server now decides what counts as a key event.** Manual annotations no longer count in "Insert key timeline events". (K3)
+- **Scope:** "Compromised only" filter. **IOCs:** First / last seen column from the linked timeline events, and `?entity_id=`. The **entity drawer** shows the entity's timeline events, linked IOCs and containment actions. (K4)
+- **ATT&CK:** Reconnaissance (TA0043) and Resource Development (TA0042) added, for 14 tactics. The attack chain moved to ATT&CK → Coverage, and `post-incident/attack-chain` redirects. (K4)
+- ⚠ **Legal anchors in the future are rejected** (422 `anchor_in_future`). **Cost currencies must be ISO 4217** (422 `invalid_currency`). Legal regulation colours are theme tokens. (K5)
+- **Data fixes:**
+  - One bad row no longer fails a timeline batch.
+  - Email `urls[].promoted_ioc_id` is set.
+  - PCAP dedup uses type and value.
+  - Evidence GET carries the derived transfer flags.
+  - The demo seed no longer splits "Domain Controllers". (K5)
+- **Admin script `python -m legal.fix_legacy_rows`** (dry run by default; `--apply --operator`). It is idempotent and audited, and covers three cases: duplicate legal rows from before B4, open NIS2 final-report rows on the old 720 h window, and the seed's split DC entities. (K5)
+
+### Backlog wave L (2026-10-07)
+
+- **Narrow screens:** no page scrolls sideways at 400 px, and the incident rail stays in view while you scroll. Every button, dropdown and input follows the shared size standard, and Examine page headings match their tabs. Esc in a date picker no longer closes the dialog around it. (L1)
+- **Contrast:** every measured text colour reaches 4.5:1 in all three themes. Nordic Calm colours are darker, and its severity badges get darker text so they are readable. (L2)
+- **Viewers** no longer see buttons that only end in "forbidden". LOLBins sync is shown to admins only. (L2)
+- ⚠ **API errors:** 422 validation errors are `{detail: "<summary>", code: "validation_error", errors: [{loc, msg, type}]}`, and `detail` is no longer a list. Every error now carries a `code`. A missing `X-Fenrir-Key` is 403 `invalid_key` (was 422). A web-history re-mint is 409 `already_minted` (was 400). (L4)
+- ⚠ **IOC Enrich and OSINT enrich need the Analyst role** (viewers get 403 `insufficient_role`). (L4)
+- Audit API timestamps end in `Z`. The MCP identifies itself as `fenrir-mcp/<version>` in the audit log. (L4)
+- **Teams/Slack:**
+  - A phase and severity change in one update sends both cards.
+  - The close card reads "Incident Closed".
+  - Notifications carry the ref, never the title.
+  - Custody requesters are told the outcome. (L3)
+- The Incidents list gains an **Owner (IC)** column and a phase filter. The assignee picker shows on-call, availability and skills. The War Room drawer follows the topbar height. (L3)
+- ⚠ **CSV exports are formula-safe:** the LE package, Defender IOC CSV, and Timeline and OSINT downloads put a `'` before cells that start with `=`, `+`, `-`, `@`, TAB or CR; plain numbers are unchanged. The LE package adds `10_Case_Notes/Case_Notes.json`, and its README says to recompute hashes from the JSON files. (SEC-1)
+- ⚠ **`X-Request-Id`** is kept only when it is a canonical UUID (stored and echoed lower-case). Any other value is replaced by a server-minted UUID; an over-long value used to fail the request with 500. (SEC-1)
+- **Help rewritten** to match the current app: roles, tabs, reports, disclosure packages and tokens. New topics include an end-to-end "Running an Incident from Intake to Closure" workflow. Help renders `[[topic]]` links, `code` and *italics*, and a link check before every build fails on a dangling link. (L5)
+- **Docs:** `reports.md`, `audit-integrity.md` §4, the CoC procedure and the Help style guide now cover Ed25519-signed disclosure packages and spreadsheet-safe CSV. (L5)
+
 ### Upgrade notes
 
 - **Wave G:**

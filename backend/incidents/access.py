@@ -18,7 +18,7 @@ privilege). Viewers are never leads, even when assigned.
 import uuid
 from typing import NamedTuple, Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, status
 from sqlalchemy import exists, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,11 +69,11 @@ async def get_accessible_incident(
         stmt = stmt.with_for_update(of=Incident).execution_options(populate_existing=True)
     inc = (await db.execute(stmt)).scalar_one_or_none()
     if not inc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Incident not found")
+        raise ApiError(status.HTTP_404_NOT_FOUND, "incident_not_found", "Incident not found")
     if user.role == "admin":
         return inc
     if not await _team_visible(db, incident_id, user.id):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Incident not found")
+        raise ApiError(status.HTTP_404_NOT_FOUND, "incident_not_found", "Incident not found")
     return inc
 
 
@@ -267,6 +267,7 @@ async def require_incident_lead(
 CAPABILITIES = {
     "read_audit_log":        "Read the incident audit log (lead)",
     "manage_le_package":     "Build, list and acknowledge law-enforcement packages (lead)",
+    "manage_disclosures":    "Build, list and acknowledge disclosure packages (lead; K1)",
     "set_teams":             "Set the incident's teams (lead; only an admin can clear a restricted list)",
     "override_gate":         "Send override_gate=true on a phase change or close (lead)",
     "remove_any_assignment": "Remove anyone's assignment (lead)",
@@ -284,7 +285,7 @@ async def incident_capabilities(db: AsyncSession, user: User, incident: Incident
     lead = await is_incident_lead(db, user, incident)
     caps: list[str] = []
     if lead:
-        caps += ["read_audit_log", "manage_le_package", "set_teams", "override_gate", "remove_any_assignment",
+        caps += ["read_audit_log", "manage_le_package", "manage_disclosures", "set_teams", "override_gate", "remove_any_assignment",
                  "replace_playbook", "sign_off_ic"]
     if await is_incident_dpo(db, user, incident):
         caps.append("sign_off_dpo")
