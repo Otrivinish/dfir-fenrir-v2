@@ -61,8 +61,8 @@ function extractMessage(data, status) {
 // A multipart upload is spooled by the server before the route sees it. An upload session instead
 // sends the file as raw 8 MiB chunks that the server hashes and encrypts as they arrive; nothing is
 // stored until `complete` succeeds (the server checks the hash then).
-//   onProgress(sentBytes, totalBytes, phase) after each accepted chunk; phase 'completing' while the
-//     server checks and stores the file (no Cancel then: the result would be unknown)
+//   onProgress(sentBytes, totalBytes, phase) while each chunk is sent and after it is accepted; phase
+//     'completing' while the server checks and stores the file (no Cancel then: the result would be unknown)
 //   signal: an AbortSignal — aborting cancels the session (DELETE: its staged file is deleted). A cancel
 //     that lands while the server completes it throws err.code 'upload_result_unknown'.
 //   a failed chunk is retried with backoff after re-reading the session (resume from next_index),
@@ -114,6 +114,33 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
   const t = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve() }, ms)
   signal?.addEventListener('abort', onAbort, { once: true })
 })
+
+// One chunk PUT over XHR, because fetch can't report upload progress: onSent(bytes of this chunk sent so
+// far). Resolves to { res: { ok, status, headers.get }, text }; rejects like fetch would (AbortError when
+// the signal aborts, TypeError on a network failure).
+function putChunk(url, blob, signal, onSent) {
+  return new Promise((resolve, reject) => {
+    const aborted = () => Object.assign(new Error('Aborted'), { name: 'AbortError' })
+    if (signal?.aborted) { reject(aborted()); return }
+    const xhr = new XMLHttpRequest()
+    const onAbort = () => xhr.abort()
+    const done = () => signal?.removeEventListener('abort', onAbort)
+    xhr.open('PUT', url)
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+    xhr.setRequestHeader('Accept', 'application/json')
+    xhr.upload.onprogress = (e) => onSent(e.loaded)
+    xhr.onload = () => {
+      done()
+      resolve({ res: { ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status,
+                       headers: { get: (name) => xhr.getResponseHeader(name) } },
+                text: xhr.responseText })
+    }
+    xhr.onerror = () => { done(); reject(new TypeError('Network request failed')) }
+    xhr.onabort = () => { done(); reject(aborted()) }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    xhr.send(blob)
+  })
+}
 
 async function sendJson(method, path, body, signal) {
   const init = { method, credentials: 'same-origin', signal, headers: { Accept: 'application/json' } }
@@ -202,15 +229,16 @@ export async function uploadInChunks(incidentId, file, {
   try {
     let failures = 0
     while (next < session.chunk_count) {
-      const blob = file.slice(next * session.chunk_size, Math.min(file.size, (next + 1) * session.chunk_size))
+      const sentBefore = next * session.chunk_size
+      const blob = file.slice(sentBefore, Math.min(file.size, sentBefore + session.chunk_size))
       let res = null, data = null
       try {
-        res = await fetch(`${url}/chunks/${next}`, {
-          method: 'PUT', credentials: 'same-origin', signal, body: blob,
-          headers: { 'Content-Type': 'application/octet-stream', Accept: 'application/json' },
-        })
-        const text = await res.text()
-        data = text ? safeJson(text) : null
+        // Progress within the chunk; its completion is reported from the server's answer below, so the
+        // bar never reaches 100% (the 'completing' look, no Cancel) before the last chunk is accepted.
+        const sent = await putChunk(`${url}/chunks/${next}`, blob, signal,
+                                    (n) => { if (n < blob.size) onProgress?.(sentBefore + n, file.size) })
+        res = sent.res
+        data = sent.text ? safeJson(sent.text) : null
       } catch (e) {
         if (signal?.aborted || e.name === 'AbortError') throw cancelled()
         res = null                               // network failure: retry below

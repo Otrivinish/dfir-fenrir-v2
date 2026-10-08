@@ -450,6 +450,9 @@ async def put_upload_chunk(
         if s.lock.locked():
             raise _busy(s)
     except ApiError:
+        # End the transaction first: auth's last_seen_at UPDATE holds the user's session row, and a slow
+        # body would stall every other request on that session until it has drained.
+        await db.rollback()
         await _drain(request)
         raise
     async with s.lock:
