@@ -32,6 +32,10 @@ class IncidentRef(BaseModel):
     title: str
     severity: Optional[str] = None
     phase: Optional[str] = None
+    # Set by the lookup (P1): the incident's reference, status and triage state (confirmed / false_positive / …).
+    ref: Optional[str] = None
+    status: Optional[str] = None
+    triage_state: Optional[str] = None
     model_config = {"from_attributes": True}
 
 
@@ -246,6 +250,28 @@ async def global_ioc_correlations(
 
 # ─── Global: correlate arbitrary (type, value) pairs ─────────────────────────
 
+async def lookup_pairs(db: AsyncSession, user: User, pairs: set[tuple[str, str]], *,
+                       exclude_incident_id: Optional[uuid.UUID] = None) -> dict[tuple[str, str], list]:
+    """(type, value) -> the rows of the IOCs that hold it in incidents the user can access (the IOC's id,
+    malicious flag and added_at, and its incident's id, ref, title, severity, phase, status and
+    triage_state). Pairs with no match are absent. Shared by POST /correlations/lookup and the email
+    analyser's seen-before (docs/phishing-fast-path-slices.md P1)."""
+    if not pairs:
+        return {}
+    q = (select(IOC.type, IOC.value, IOC.id.label("ioc_id"), IOC.malicious.label("ioc_malicious"),
+                IOC.added_at, Incident.id.label("incident_id"), Incident.ref, Incident.title, Incident.severity,
+                Incident.phase, Incident.status, Incident.triage_state)
+         .join(Incident, Incident.id == IOC.incident_id)
+         .where(tuple_(IOC.type, IOC.value).in_(list(pairs)),
+                Incident.id.in_(select(Incident.id).where(accessible_filter(user)))))
+    if exclude_incident_id is not None:
+        q = q.where(Incident.id != exclude_incident_id)
+    found: dict[tuple[str, str], list] = {}
+    for row in (await db.execute(q)).all():
+        found.setdefault((row.type, row.value), []).append(row)
+    return found
+
+
 @router.post("/lookup", response_model=LookupResponse,
              summary="Correlate arbitrary indicator values against tracked IOCs")
 async def correlate_lookup(
@@ -260,20 +286,11 @@ async def correlate_lookup(
     """
     if not req.items:
         return LookupResponse(items=[])
-    acc_ids = select(Incident.id).where(accessible_filter(user))
-    pairs = [(i.type, i.value) for i in req.items]
-
-    rows = (await db.execute(
-        select(IOC.type, IOC.value, Incident.id, Incident.title, Incident.severity, Incident.phase)
-        .join(Incident, Incident.id == IOC.incident_id)
-        .where(tuple_(IOC.type, IOC.value).in_(pairs), Incident.id.in_(acc_ids))
-    )).all()
-
-    matches: dict[tuple[str, str], list[IncidentRef]] = {}
-    for typ, val, inc_id, title, severity, phase in rows:
-        matches.setdefault((typ, val), []).append(
-            IncidentRef(id=inc_id, title=title, severity=severity, phase=phase)
-        )
+    found = await lookup_pairs(db, user, {(i.type, i.value) for i in req.items})
+    matches: dict[tuple[str, str], list[IncidentRef]] = {
+        k: [IncidentRef(id=h.incident_id, ref=h.ref, title=h.title, severity=h.severity, phase=h.phase,
+                        status=h.status, triage_state=h.triage_state) for h in hits]
+        for k, hits in found.items()}
 
     return LookupResponse(items=[
         LookupHit(type=i.type, value=i.value, matched_incidents=matches.get((i.type, i.value), []))

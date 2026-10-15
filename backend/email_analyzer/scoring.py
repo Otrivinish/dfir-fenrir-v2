@@ -122,55 +122,72 @@ def score(parsed: dict, auth_verified: dict | None = None) -> dict:
             break
 
     # ── URLs ──
-    # Evaluate the real destination, not the wrapper: a Safelink-rewritten URL
-    # legitimately has a safelinks.protection.outlook.com host, so shortener/
-    # raw-IP/punycode/mismatch checks run against `safelink_target` when present.
     for u in parsed.get("urls") or []:
-        host = (u.get("host") or "").lower()
-        real_host = (u.get("safelink_host") or host)
-        dh = u.get("display_host")
-        if dh and real_host and _reg(dh) != _reg(real_host):
-            add("url_display_mismatch", "high", "Link text hides its true destination",
-                f"The link shows {dh} but points to {real_host}.", "url", 25)
-        if _reg(real_host) in SHORTENERS:
-            add("url_shortener", "low", "URL shortener",
-                f"{real_host} hides the final destination.", "url", 10)
-        if re.fullmatch(r'\d{1,3}(\.\d{1,3}){3}', real_host or ""):
-            add("url_raw_ip", "medium", "Raw-IP URL",
-                f"{u.get('safelink_target') or u.get('url')} uses a bare IP address instead of a hostname.", "url", 15)
-        authority = (u.get("safelink_target") or u.get("url", "")).split("//", 1)[-1].split("/", 1)[0]
-        if "@" in authority:
-            add("url_userinfo", "medium", "Userinfo trick in URL",
-                "The URL authority contains '@' — the visible host may be fake.", "url", 15)
-        if "xn--" in real_host:
-            add("url_punycode", "medium", "Punycode URL host",
-                f"{real_host} uses punycode — possible homoglyph.", "url", 15)
+        for code, sev, title, detail, pts in url_signals(u):
+            add(code, sev, title, detail, "url", pts)
 
     # ── attachments ──
     for a in parsed.get("attachments") or []:
-        name = (a.get("filename") or "").lower()
-        dfam = _famtype(a.get("declared_type"))
-        tfam = _famtype(a.get("true_type"))
-        if dfam != tfam and tfam in ("executable", "archive") and dfam not in ("executable", "archive", "unknown", ""):
-            add("att_type_mismatch", "high", "Attachment type mismatch",
-                f"{a['filename']} claims {a.get('declared_type')} but is actually {a.get('true_type')}.", "attachment", 30)
-        if name.endswith(DANGER_EXT):
-            add("att_executable", "high", "Executable / script attachment",
-                f"{a['filename']} is an executable or script type.", "attachment", 25)
-        if name.count(".") >= 2 and name.endswith(DANGER_EXT):
-            add("att_double_ext", "high", "Double extension",
-                f"{a['filename']} hides its real extension behind a benign-looking one.", "attachment", 20)
-        if name.endswith(MACRO_EXT):
-            add("att_macro", "medium", "Macro-enabled Office attachment",
-                f"{a['filename']} can carry macros.", "attachment", 20)
-        if "‮" in (a.get("filename") or ""):
-            add("att_rtlo", "high", "Right-to-left override in filename",
-                "The filename uses U+202E to disguise its true extension.", "attachment", 20)
-        if name.endswith(ARCHIVE_EXT):
-            add("att_archive", "low", "Archive attachment",
-                f"{a['filename']} is a container — contents aren't visible until extracted in the sandbox.", "attachment", 8)
+        for code, sev, title, detail, pts in attachment_signals(a):
+            add(code, sev, title, detail, "attachment", pts)
 
     pts = sum(x["points"] for x in findings)
     score_val = min(100, pts)
     verdict = "red" if (force_red or score_val >= 50) else ("amber" if score_val >= 20 else "green")
     return {"score": score_val, "verdict": verdict, "findings": findings}
+
+
+def url_signals(u: dict) -> list[tuple]:
+    """The URL-layer signals one urls[] row fires, as (code, severity, title, detail, points). score() adds
+    them as findings; the containment plan (docs/phishing-fast-path-slices.md P3) reads them per row.
+    Evaluate the real destination, not the wrapper: a Safelink-rewritten URL legitimately has a
+    safelinks.protection.outlook.com host, so shortener/raw-IP/punycode/mismatch checks run against
+    `safelink_target` when present."""
+    out = []
+    host = (u.get("host") or "").lower()
+    real_host = (u.get("safelink_host") or host)
+    dh = u.get("display_host")
+    if dh and real_host and _reg(dh) != _reg(real_host):
+        out.append(("url_display_mismatch", "high", "Link text hides its true destination",
+                    f"The link shows {dh} but points to {real_host}.", 25))
+    if _reg(real_host) in SHORTENERS:
+        out.append(("url_shortener", "low", "URL shortener",
+                    f"{real_host} hides the final destination.", 10))
+    if re.fullmatch(r'\d{1,3}(\.\d{1,3}){3}', real_host or ""):
+        out.append(("url_raw_ip", "medium", "Raw-IP URL",
+                    f"{u.get('safelink_target') or u.get('url')} uses a bare IP address instead of a hostname.", 15))
+    authority = (u.get("safelink_target") or u.get("url", "")).split("//", 1)[-1].split("/", 1)[0]
+    if "@" in authority:
+        out.append(("url_userinfo", "medium", "Userinfo trick in URL",
+                    "The URL authority contains '@' — the visible host may be fake.", 15))
+    if "xn--" in real_host:
+        out.append(("url_punycode", "medium", "Punycode URL host",
+                    f"{real_host} uses punycode — possible homoglyph.", 15))
+    return out
+
+
+def attachment_signals(a: dict) -> list[tuple]:
+    """The attachment-layer signals one attachments[] row fires, as (code, severity, title, detail, points)."""
+    out = []
+    name = (a.get("filename") or "").lower()
+    dfam = _famtype(a.get("declared_type"))
+    tfam = _famtype(a.get("true_type"))
+    if dfam != tfam and tfam in ("executable", "archive") and dfam not in ("executable", "archive", "unknown", ""):
+        out.append(("att_type_mismatch", "high", "Attachment type mismatch",
+                    f"{a['filename']} claims {a.get('declared_type')} but is actually {a.get('true_type')}.", 30))
+    if name.endswith(DANGER_EXT):
+        out.append(("att_executable", "high", "Executable / script attachment",
+                    f"{a['filename']} is an executable or script type.", 25))
+    if name.count(".") >= 2 and name.endswith(DANGER_EXT):
+        out.append(("att_double_ext", "high", "Double extension",
+                    f"{a['filename']} hides its real extension behind a benign-looking one.", 20))
+    if name.endswith(MACRO_EXT):
+        out.append(("att_macro", "medium", "Macro-enabled Office attachment",
+                    f"{a['filename']} can carry macros.", 20))
+    if "\u202e" in (a.get("filename") or ""):
+        out.append(("att_rtlo", "high", "Right-to-left override in filename",
+                    "The filename uses U+202E to disguise its true extension.", 20))
+    if name.endswith(ARCHIVE_EXT):
+        out.append(("att_archive", "low", "Archive attachment",
+                    f"{a['filename']} is a container — contents aren't visible until extracted in the sandbox.", 8))
+    return out

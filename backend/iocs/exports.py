@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 from xml.etree import ElementTree as ET
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +24,10 @@ from audit.service import write_audit
 from auth.deps import current_user
 from core.csv_safe import csv_safe
 from core.database import get_db
-from models import IOC, Incident, User
+from core.errors import ApiError
+from core.url_indicator import classify_url_indicator
+from incidents.access import get_accessible_incident
+from models import IOC, User
 
 router = APIRouter()
 
@@ -74,12 +77,9 @@ _CORTEX_TYPE = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _load_iocs(db: AsyncSession, incident_id: uuid.UUID) -> list[IOC]:
-    inc = (await db.execute(
-        select(Incident).where(Incident.id == incident_id)
-    )).scalar_one_or_none()
-    if not inc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Incident not found")
+async def _load_iocs(db: AsyncSession, incident_id: uuid.UUID, user: User) -> list[IOC]:
+    # The same team-based access as the IOC list (404 incident_not_found), not just existence.
+    await get_accessible_incident(db, incident_id, user)
     rows = (await db.execute(
         select(IOC)
         .where(IOC.incident_id == incident_id)
@@ -108,30 +108,44 @@ async def export_iocs(
     request: Request,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
-    action:           str  = Query(default="Audit"),
+    action:           str  = Query(default="Block"),
     severity:         str  = Query(default="Medium"),
     expiry_days:      int  = Query(default=90, ge=0, le=365),
     mitre_techniques: str  = Query(default=""),
     generate_alert:   bool = Query(default=True),
     prefix:      str = Query(default=""),
+    ioc_id:      list[uuid.UUID] = Query(default=[], description="Export only these IOCs of the incident "
+                                         "(repeatable, at most 500 -- Defender's import batch); default all"),
 ) -> Response:
     """Export all of an incident's IOCs as a downloadable file formatted for a
     security platform. The `fmt` path param selects the target: mde-csv,
     mde-json, crowdstrike, sentinelone, cortex-xdr, fortigate, or panos. Query
-    params `action`, `severity`, and `expiry_days` apply to the MDE formats;
-    `prefix` names objects in the FortiGate and PAN-OS outputs. Returns 404 if
-    the incident does not exist, writes an audit record, and requires an
-    authenticated user. Returns a file Response (CSV, JSON, FortiGate CLI script,
+    params `action` (default `Block`, the portal's "Block execution"), `severity`, and
+    `expiry_days` apply to the MDE formats; `prefix` names objects in the FortiGate and
+    PAN-OS outputs. In the MDE formats a URL or domain IOC is sorted by its value: a bare
+    host becomes a `DomainName` (or `IpAddress`), anything with a path or query a full `Url`.
+    `ioc_id` (repeatable) exports only those IOCs: 422 `too_many_iocs` above 500, 422
+    `ioc_other_incident` when one isn't an IOC of this incident. Returns 404 if
+    the incident does not exist or the user can't access it (team-based, like the
+    IOC list), writes an audit record, and requires an authenticated user. Returns a file Response (CSV, JSON, FortiGate CLI script,
     or a PAN-OS XML + EDL ZIP) with an attachment Content-Disposition.
     """
-    iocs = await _load_iocs(db, incident_id)
+    iocs = await _load_iocs(db, incident_id, user)
     short = str(incident_id)[:8]
+    if ioc_id:
+        if len(ioc_id) > 500:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_ENTITY, "too_many_iocs", "At most 500 ioc_id per export")
+        wanted = set(ioc_id)
+        if wanted - {i.id for i in iocs}:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_ENTITY, "ioc_other_incident",
+                           "An ioc_id is not an IOC of this incident")
+        iocs = [i for i in iocs if i.id in wanted]
 
     await write_audit(
         db, "ioc_export",
         user_id=user.id, username=user.username,
         resource_type="incident", resource_id=str(incident_id),
-        details={"format": fmt, "count": len(iocs)},
+        details={"format": fmt, "count": len(iocs), **({"filtered": True} if ioc_id else {})},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -206,6 +220,43 @@ def _export_defanged(iocs: list, short: str) -> Response:
     )
 
 
+# ── MDE (Microsoft Defender for Endpoint) ─────────────────────────────────────
+# Syntax per learn.microsoft.com/defender-endpoint/indicator-manage (CSV import),
+# api/import-ti-indicators (JSON import) and indicators-overview (value forms):
+#  - a domain is the bare name (`contoso.com`); a URL the full path with its scheme
+#    (`https://contoso.com/block`) — so a URL/domain IOC is sorted by its value;
+#  - "Block execution" in the portal is `Block`; network indicators don't take
+#    `BlockAndRemediate` ("it won't import"), so they get `Block` instead;
+#  - `Audit` needs GenerateAlert true; the CSV import takes no FileMd5 (the API does).
+
+_MDE_NET_TYPE = {"ip": "IpAddress", "domain": "DomainName", "url": "Url"}
+
+
+def _mde_rows(iocs: list, csv_import: bool):
+    """(ioc, indicatorType, indicatorValue) for each IOC Defender can take, once per indicator
+    (a URL IOC `https://x.com/` and a domain IOC `x.com` are the same DomainName)."""
+    seen: set[tuple[str, str]] = set()
+    for ioc in iocs:
+        if ioc.type in ("url", "domain"):
+            sorted_ = classify_url_indicator(ioc.value)
+            if not sorted_:
+                continue
+            itype, value = _MDE_NET_TYPE[sorted_[0]], sorted_[1]
+        elif ioc.type in _MDE_TYPE and not (csv_import and ioc.type == "hash_md5"):
+            itype, value = _MDE_TYPE[ioc.type], ioc.value
+        else:
+            continue
+        if (itype, value) not in seen:
+            seen.add((itype, value))
+            yield ioc, itype, value
+
+
+def _mde_action(itype: str, action: str) -> str:
+    if action == "BlockAndRemediate" and itype in _MDE_NET_TYPE.values():
+        return "Block"
+    return action
+
+
 # ── MDE CSV ───────────────────────────────────────────────────────────────────
 
 _MDE_CATEGORY = {
@@ -219,7 +270,7 @@ _MDE_CATEGORY = {
 
 
 def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_days: int, mitre_techniques: str = "", generate_alert: bool = True) -> Response:
-    expiry = _utc_expiry(expiry_days)
+    expiry = _utc_expiry(expiry_days).replace("Z", ".0Z")    # the import's YYYY-MM-DDTHH:MM:SS.0Z
     # Normalise MITRE input: strip spaces, uppercase, deduplicate
     mitre = ",".join(dict.fromkeys(
         t.strip().upper() for t in mitre_techniques.split(",") if t.strip()
@@ -232,10 +283,7 @@ def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_d
         "MitreTechniques", "GenerateAlert",
     ])
     w.writeheader()
-    for ioc in iocs:
-        itype = _MDE_TYPE.get(ioc.type)
-        if not itype:
-            continue
+    for ioc, itype, value in _mde_rows(iocs, csv_import=True):
         # Merge analyst-supplied MITRE with any T\d{4} tags on the IOC
         ioc_mitre_tags = ",".join(
             t.upper() for t in (ioc.tags or []) if re.match(r"^t\d{4}(\.\d{3})?$", t, re.I)
@@ -243,9 +291,9 @@ def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_d
         row_mitre = ",".join(filter(None, [mitre, ioc_mitre_tags]))
         w.writerow({k: csv_safe(v) for k, v in {   # R129: formula-escape every cell
             "IndicatorType":      itype,
-            "IndicatorValue":     ioc.value,
+            "IndicatorValue":     value,
             "ExpirationTime":     expiry,
-            "Action":             action,
+            "Action":             _mde_action(itype, action),
             "Severity":           severity,
             "Title":              f"DFIR-FENRIR incident {short}",
             "Description":        (ioc.notes or f"Exported from incident {short}")[:500],
@@ -253,7 +301,7 @@ def _export_mde_csv(iocs: list, short: str, action: str, severity: str, expiry_d
             "RbacGroups":         "",
             "Category":           _MDE_CATEGORY.get(ioc.type, ""),
             "MitreTechniques":    row_mitre,
-            "GenerateAlert":      "true" if generate_alert else "false",
+            "GenerateAlert":      "True" if generate_alert or action == "Audit" else "False",
         }.items()})
     # utf-8-sig BOM for Excel compatibility
     content = buf.getvalue().encode("utf-8-sig")
@@ -275,22 +323,19 @@ def _export_mde_json(iocs: list, short: str, action: str, severity: str, expiry_
         t.strip().upper() for t in mitre_techniques.split(",") if t.strip()
     ))
     items = []
-    for ioc in iocs:
-        itype = _MDE_TYPE.get(ioc.type)
-        if not itype:
-            continue
+    for ioc, itype, value in _mde_rows(iocs, csv_import=False):
         ioc_mitre_tags = [t.upper() for t in (ioc.tags or []) if re.match(r"^t\d{4}(\.\d{3})?$", t, re.I)]
         row_mitre = list(dict.fromkeys(mitre_list + ioc_mitre_tags))
         item = {
             "indicatorType":      itype,
-            "indicatorValue":     ioc.value,
-            "action":             action,
+            "indicatorValue":     value,
+            "action":             _mde_action(itype, action),
             "severity":           severity,
             "title":              f"DFIR-FENRIR incident {short}",
             "description":        (ioc.notes or f"Exported from incident {short}")[:500],
             "recommendedActions": "Investigate and isolate if confirmed.",
             "rbacGroupNames":     [],
-            "generateAlert":      generate_alert,
+            "generateAlert":      generate_alert or action == "Audit",
             "tags":               list(ioc.tags or []),
         }
         if expiry:
@@ -298,7 +343,8 @@ def _export_mde_json(iocs: list, short: str, action: str, severity: str, expiry_
         if row_mitre:
             item["mitreTechniques"] = row_mitre
         items.append(item)
-    content = json.dumps({"value": items}, indent=2).encode()
+    # The body of POST https://api.security.microsoft.com/api/indicators/import
+    content = json.dumps({"Indicators": items}, indent=2).encode()
     return Response(
         content=content,
         media_type="application/json",

@@ -235,44 +235,11 @@ async def list_respond_actions(
 
 # ─── Actions — create ────────────────────────────────────────────────────────
 
-@router.post("/{incident_id}/respond/actions",
-             response_model=RespondActionOut,
-             status_code=status.HTTP_201_CREATED,
-             summary="Create a response action",
-             responses=_PERSON_ERRORS)
-async def create_respond_action(
-    incident_id: uuid.UUID,
-    req: RespondActionCreate,
-    request: Request,
-    user: User = Depends(require_analyst),
-    db: AsyncSession = Depends(get_db),
-) -> RespondActionOut:
-    """Create a response action under an incident's Respond section.
-
-    Requires the analyst role. The incident must not be closed (409 otherwise).
-    The action is categorised (containment/eradication/recovery), audited, and
-    the created action is returned. Creating it as `done` stamps completion and
-    emits a system timeline event, as marking it done later does.
-
-    `entity_id` / `ioc_id` link the action to its target on this incident
-    (404 `entity_not_found` / `ioc_not_found`; 422 `entity_other_incident` /
-    `ioc_other_incident`); an empty `details.target` is then filled from the
-    entity's or IOC's value. A containment `template_id` (e.g. `isolate_host`,
-    `block_ip`) sets the linked entity's / IOC's containment state, and only
-    links of a matching type are accepted (422 `target_type_mismatch`, e.g.
-    `isolate_host` on a hash IOC); a free-text target is not checked.
-
-    `assignee_id` must be an active user who can see the incident (404
-    `user_not_found`, 422 `assignee_no_access`).
-
-    J5: `decision_id` links the decision that approved the action and `task_id` the
-    playbook task it carries out (same incident: 404 `decision_not_found` /
-    `task_not_found`, 422 `decision_other_incident` / `task_other_incident` /
-    `task_archived`). Links only: completing a task never completes an action.
-    """
-    inc = await _get_incident(db, incident_id, user)
-    if inc.status == "closed":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+async def create_action(db: AsyncSession, incident_id: uuid.UUID, req: RespondActionCreate, user: User,
+                        ip_address: Optional[str]) -> RespondAction:
+    """Create one response action on an open incident the caller may write -- the checks, links, audit and
+    done-timeline event of POST …/respond/actions, without the commit. Shared with the email analyser's
+    containment (docs/phishing-fast-path-slices.md P3) so both create actions by the same rules."""
     if req.assignee_id is not None:
         await require_incident_person(db, incident_id, req.assignee_id)
 
@@ -320,10 +287,52 @@ async def create_respond_action(
         user_id=user.id, username=user.username,
         resource_type="respond_action", resource_id=str(action.id),
         details=audit_details,
-        ip_address=request.client.host if request.client else None,
+        ip_address=ip_address,
     )
     if action.status == "done":
         _add_done_timeline_event(db, action, incident_id, user)
+    return action
+
+
+@router.post("/{incident_id}/respond/actions",
+             response_model=RespondActionOut,
+             status_code=status.HTTP_201_CREATED,
+             summary="Create a response action",
+             responses=_PERSON_ERRORS)
+async def create_respond_action(
+    incident_id: uuid.UUID,
+    req: RespondActionCreate,
+    request: Request,
+    user: User = Depends(require_analyst),
+    db: AsyncSession = Depends(get_db),
+) -> RespondActionOut:
+    """Create a response action under an incident's Respond section.
+
+    Requires the analyst role. The incident must not be closed (409 otherwise).
+    The action is categorised (containment/eradication/recovery), audited, and
+    the created action is returned. Creating it as `done` stamps completion and
+    emits a system timeline event, as marking it done later does.
+
+    `entity_id` / `ioc_id` link the action to its target on this incident
+    (404 `entity_not_found` / `ioc_not_found`; 422 `entity_other_incident` /
+    `ioc_other_incident`); an empty `details.target` is then filled from the
+    entity's or IOC's value. A containment `template_id` (e.g. `isolate_host`,
+    `block_ip`) sets the linked entity's / IOC's containment state, and only
+    links of a matching type are accepted (422 `target_type_mismatch`, e.g.
+    `isolate_host` on a hash IOC); a free-text target is not checked.
+
+    `assignee_id` must be an active user who can see the incident (404
+    `user_not_found`, 422 `assignee_no_access`).
+
+    J5: `decision_id` links the decision that approved the action and `task_id` the
+    playbook task it carries out (same incident: 404 `decision_not_found` /
+    `task_not_found`, 422 `decision_other_incident` / `task_other_incident` /
+    `task_archived`). Links only: completing a task never completes an action.
+    """
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
+    action = await create_action(db, incident_id, req, user, request.client.host if request.client else None)
     await db.commit()
     return RespondActionOut.model_validate(action)
 

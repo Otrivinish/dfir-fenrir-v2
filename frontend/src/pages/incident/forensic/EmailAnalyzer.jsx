@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useOutletContext } from 'react-router-dom'
 import { api } from '../../../api/client.js'
+import { SEV_PALETTE } from '../../../components/SevBadge.jsx'
+import { labelOf } from '../../../lib/incidentVocab.js'
+import { useDialogFocus } from '../../../hooks/useDialogFocus.js'
 import { formatLocal } from '../../../lib/datetime.js'
 import ExhibitPicker, { DraftBadge } from '../../../components/ExhibitPicker.jsx'
 import RunRecord from '../../../components/RunRecord.jsx'
@@ -20,6 +23,7 @@ import { useOutboundConfirm } from '../../../components/OutboundConfirm.jsx'
 
 const VERDICT_COLOR = { red: 'var(--crit)', amber: 'var(--med)', green: 'var(--ok)' }
 const SEV_COLOR     = { high: 'var(--crit)', medium: 'var(--med)', low: 'var(--muted)' }
+const PROMOTE_AS    = { url: 'URL', domain: 'Domain', ip: 'IP' }   // a link's ioc_type, sorted by the API
 // "Exhibit" is not used on the Evidence tab yet, so the button says what it means.
 const EXHIBIT_HINT  = 'Exhibit = an evidence item. Adds this message to Evidence, re-hashed, with a custody log.'
 const MAX_EMAIL_BYTES = 25 * 1024 * 1024
@@ -45,6 +49,7 @@ export default function EmailAnalyzer() {
   const [pickedUrls, setPickedUrls] = useState({})   // url -> bool
   const [note, setNote]       = useState(null)
   const [showHtmlPreview, setShowHtmlPreview] = useState(false)
+  const [containOpen, setContainOpen] = useState(false)   // P3 dialog
 
   const [batchResult, setBatchResult] = useState(null)
   const [batchFilter, setBatchFilter] = useState(null)
@@ -56,6 +61,19 @@ export default function EmailAnalyzer() {
 
   const loadHistory = () => api.listEmailAnalyses(incidentId).then(r => setHistory(r.items || [])).catch(() => {})
   useEffect(() => { loadHistory() }, [incidentId])
+
+  // P1 — earlier incidents that hold this email's indicators. Loaded after the analysis; never blocks it.
+  const [seen, setSeen] = useState(null)   // null | {loading} | {failed} | {data}
+  useEffect(() => {
+    if (!analysis?.id) { setSeen(null); return }
+    let live = true
+    setSeen({ loading: true })
+    api.getEmailSeenBefore(incidentId, analysis.id)
+      .then(r => { if (live) setSeen({ data: r }) })
+      .catch(() => { if (live) setSeen({ failed: true }) })
+    return () => { live = false }
+  }, [incidentId, analysis?.id])
+  const seenByRow = rowHits(seen?.data)
 
   // Multiple files, or a single .zip, go through the batch endpoint; a lone
   // .eml/.msg (or pasted text) goes through the single endpoint -- one input
@@ -118,11 +136,10 @@ export default function EmailAnalyzer() {
   function urlIocPayload() {
     const out = []
     for (const u of analysis.urls || []) {
-      if (!pickedUrls[u.url]) continue
-      // Promote the real destination when it's a Safelink wrapper -- the
-      // safelinks.protection.outlook.com host itself isn't a useful indicator.
-      out.push({ type: 'url', value: u.safelink_target || u.url })
-      if (u.safelink_host || u.host) out.push({ type: 'domain', value: u.safelink_host || u.host })
+      if (!pickedUrls[u.url] || !u.ioc_type) continue
+      // The API sorts each link (its Safelink target when wrapped): the full request
+      // URL when it has a path or query, else the bare domain (or IP).
+      out.push({ type: u.ioc_type, value: u.ioc_value })
     }
     const oip = analysis.headers?.origin_ip
     if (oip && pickedUrls.__origin__) out.push({ type: 'ip', value: oip })
@@ -324,6 +341,20 @@ export default function EmailAnalyzer() {
             </details>
           )}
 
+          <SeenBefore seen={seen} />
+          {!isClosed && (a.verdict === 'red' || a.verdict === 'amber') && (
+            <div style={{ marginTop: 'var(--space-3)' }}>
+              <button type="button" className="btn primary" disabled={busy} onClick={() => setContainOpen(true)}>Contain…</button>
+              <span style={{ marginLeft: 'var(--space-2)', fontSize: 12, color: 'var(--muted)' }}>
+                Promote the indicators and create the containment actions in one step.
+              </span>
+            </div>
+          )}
+          {containOpen && (
+            <ContainDialog incidentId={incidentId} analysis={a} onClose={() => setContainOpen(false)}
+                           onDone={(updated) => { setAnalysis(updated); loadHistory() }} />
+          )}
+
           {/* Findings */}
           <h4 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>Findings ({(a.findings || []).length})</h4>
           {(a.findings || []).length === 0
@@ -409,7 +440,7 @@ export default function EmailAnalyzer() {
           {(a.urls || []).length > 0 && (
             <>
               <table className="table" style={{ fontSize: 12 }}>
-                <thead><tr><th></th><th>Defanged URL</th><th>Host</th><th>Link text</th></tr></thead>
+                <thead><tr><th></th><th>Defanged URL</th><th>Host</th><th>Promote as</th><th>Link text</th></tr></thead>
                 <tbody>
                   {a.urls.map((u, i) => {
                     const realHost = u.safelink_host || u.host
@@ -419,6 +450,7 @@ export default function EmailAnalyzer() {
                                    onChange={e => setPickedUrls(p => ({ ...p, [u.url]: e.target.checked }))} /></td>
                         <td style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>
                           {u.defanged}
+                          <SeenBadge hits={seenByRow.url[i]} />
                           {u.safelink_target && (
                             <div style={{ color: 'var(--med)', marginTop: 2 }}>
                               Safelink → <span style={{ color: 'inherit' }}>{u.safelink_target.replace(/^http/i, 'hxxp').replace(/\./g, '[.]')}</span>
@@ -426,6 +458,7 @@ export default function EmailAnalyzer() {
                           )}
                         </td>
                         <td>{realHost || '—'}{u.display_host && u.display_host !== realHost ? <span style={{ color: 'var(--crit)' }}> ≠ {u.display_host}</span> : ''}</td>
+                        <td>{PROMOTE_AS[u.ioc_type] || '—'}</td>
                         <td style={{ color: 'var(--muted)' }}>{u.display_text || ''}</td>
                       </tr>
                     )
@@ -454,7 +487,7 @@ export default function EmailAnalyzer() {
                   const mismatch = at.declared_type && at.true_type && at.declared_type !== at.true_type
                   return (
                     <tr key={i}>
-                      <td>{at.filename}</td>
+                      <td>{at.filename}<SeenBadge hits={seenByRow.attachment[i]} /></td>
                       <td>{at.declared_type}</td>
                       <td style={{ color: mismatch ? 'var(--crit)' : 'inherit' }}>{at.true_type}</td>
                       <td>{at.size}</td>
@@ -469,6 +502,8 @@ export default function EmailAnalyzer() {
               </tbody>
             </table>
           )}
+
+          <HuntingQueries key={a.id} incidentId={incidentId} analysisId={a.id} />
         </div>
       )}
 
@@ -516,6 +551,306 @@ export default function EmailAnalyzer() {
 // the frontend also renders it inside an `iframe sandbox=""` (blocks script
 // execution, forms, popups, top navigation entirely) -- three layers, not one,
 // because email HTML is the most hostile input this app ever displays.
+
+// ─── P1 — Seen before ─────────────────────────────────────────────────────────
+// docs/phishing-fast-path-slices.md. The API picks, matches and orders the hits; this only shows them.
+
+const SEEN_SOURCE = {
+  sender: 'Sender', reply_to: 'Reply-To', return_path: 'Return-Path', origin_ip: 'Origin IP',
+  x_originating_ip: 'X-Originating-IP', attachment: 'Attachment', url: 'Link', url_host: 'Link host',
+}
+const strongHit = (h) => h.ioc_malicious || h.triage_state === 'confirmed'
+const shown = (type, v) => (['url', 'domain', 'ip', 'email'].includes(type)
+  ? v.replace(/^http/i, 'hxxp').replace(/\./g, '[.]') : v)
+
+// The hits for each urls[] / attachments[] row, by index.
+function rowHits(data) {
+  const out = { url: {}, attachment: {} }
+  for (const it of data?.items || []) {
+    for (const w of it.sources) {
+      const kind = w.source === 'attachment' ? 'attachment' : (w.source === 'url' || w.source === 'url_host') ? 'url' : null
+      if (kind && w.ref != null) out[kind][w.ref] = [...(out[kind][w.ref] || []), ...it.hits]
+    }
+  }
+  return out
+}
+
+function HitRef({ h }) {
+  return (
+    <span style={{ whiteSpace: 'nowrap' }}>
+      <Link to={`/incidents/${h.incident_id}/iocs`}>{h.ref}</Link>
+      {' '}({labelOf('triage_state', h.triage_state)}{h.ioc_malicious ? ' · IOC malicious' : ''})
+    </span>
+  )
+}
+
+function SeenBefore({ seen }) {
+  if (!seen) return null
+  if (seen.loading) return <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 'var(--space-3)' }}>Checking earlier incidents…</div>
+  if (seen.failed)  return <div style={{ color: 'var(--dim)', fontSize: 12, marginTop: 'var(--space-3)' }}>Couldn’t check earlier incidents.</div>
+  const { items = [], summary } = seen.data || {}
+  if (!items.length) return null
+  const strong = summary.confirmed > 0 || summary.malicious_iocs > 0
+  const tone = strong ? SEV_PALETTE.critical : null
+  return (
+    <div role="status" style={{
+      marginTop: 'var(--space-3)', padding: 'var(--space-2) var(--space-3)', borderRadius: 'var(--radius)', fontSize: 13,
+      background: tone ? tone.bg : 'var(--surface-2)', border: `1px solid ${tone ? tone.border : 'var(--border)'}`,
+    }}>
+      <div style={{ fontWeight: 700, color: tone ? tone.text : 'var(--text)', marginBottom: 4 }}>
+        ⋈ Seen before in {summary.incidents} earlier incident{summary.incidents === 1 ? '' : 's'}
+        {summary.confirmed > 0 && ` · ${summary.confirmed} confirmed`}
+        {summary.false_positive > 0 && ` · ${summary.false_positive} false or benign positive`}
+      </div>
+      {items.map((it) => (
+        <div key={`${it.type}:${it.value}`} style={{ padding: '2px 0', wordBreak: 'break-all' }}>
+          <span style={{ color: 'var(--muted)' }}>
+            {[...new Set(it.sources.map(w => `${SEEN_SOURCE[w.source] || w.source}${w.ref != null ? ` ${w.ref + 1}` : ''}`))].join(', ')}
+          </span>
+          {' '}<span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{shown(it.type, it.value)}</span>
+          {' — '}
+          {it.hits.slice(0, 3).map((h, j) => <span key={h.ioc_id}>{j > 0 && ', '}<HitRef h={h} /></span>)}
+          {it.hits.length > 3 && <span style={{ color: 'var(--muted)' }}> +{it.hits.length - 3} more</span>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function SeenBadge({ hits }) {
+  if (!hits?.length) return null
+  const refs = [...new Set(hits.map(h => h.ref))]
+  const strong = hits.some(strongHit)
+  return (
+    <span title={`Seen in ${refs.join(', ')}`} style={{
+      marginLeft: 6, fontSize: 11, fontFamily: 'var(--font-body)', whiteSpace: 'nowrap',
+      color: strong ? SEV_PALETTE.critical.text : 'var(--muted)',
+    }}>⋈ {refs.length}</span>
+  )
+}
+
+// ─── P2 — Scope in Defender ───────────────────────────────────────────────────
+// The API builds (and escapes) every query; this shows them. Fetched only when opened: each fetch is audited.
+
+function HuntingQueries({ incidentId, analysisId }) {
+  const [open, setOpen]     = useState(false)
+  const [days, setDays]     = useState(30)
+  const [state, setState]   = useState(null)   // null | {loading} | {error} | {data}
+  const [copied, setCopied] = useState(null)   // query id, or 'failed:<id>'
+
+  useEffect(() => {
+    if (!open) return
+    let live = true
+    setState({ loading: true })
+    api.getEmailHuntingQueries(incidentId, analysisId, days)
+      .then(r => { if (live) setState({ data: r }) })
+      .catch(e => { if (live) setState({ error: e.message || 'Could not build the queries' }) })
+    return () => { live = false }
+  }, [open, days, incidentId, analysisId])
+
+  async function copy(q) {
+    try { await navigator.clipboard.writeText(q.kql); setCopied(q.id) }
+    catch { setCopied(`failed:${q.id}`) }
+  }
+
+  const d = state?.data
+  return (
+    <details style={{ marginTop: 'var(--space-4)' }} onToggle={e => setOpen(e.currentTarget.open)}>
+      <summary className="panel-h" style={{ cursor: 'pointer' }}>
+        Scope in Defender <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· Advanced Hunting queries</span>
+      </summary>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', margin: 'var(--space-2) 0', fontSize: 12, flexWrap: 'wrap' }}>
+        <label htmlFor="hunt-days" style={{ color: 'var(--muted)' }}>Look back</label>
+        <select id="hunt-days" className="select compact" value={days} onChange={e => setDays(Number(e.target.value))}>
+          {[7, 14, 30].map(n => <option key={n} value={n}>{n} days</option>)}
+        </select>
+        <span style={{ color: 'var(--muted)' }}>
+          Run in Defender XDR → Hunting → Advanced hunting. FENRIR runs nothing. The email tables are empty without Defender for Office 365.
+        </span>
+      </div>
+      {state?.loading && <div style={{ color: 'var(--muted)', fontSize: 12 }}>Building queries…</div>}
+      {state?.error && <div className="alert error" role="alert"><span className="alert-icon">!</span><span>{state.error}</span></div>}
+      {d && d.queries.map(q => (
+        <div key={q.id} style={{ marginBottom: 'var(--space-3)' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+            <strong style={{ fontSize: 13 }}>{q.title}</strong>
+            <span className="pill pill-gray">{q.requires}</span>
+            <button type="button" className="btn ghost" style={{ marginLeft: 'auto' }} onClick={() => copy(q)}
+                    aria-label={`Copy query: ${q.title}`}>
+              {copied === q.id ? 'Copied ✓' : 'Copy'}
+            </button>
+            {copied === `failed:${q.id}` && (
+              <span role="alert" style={{ fontSize: 12, color: 'var(--crit)' }}>Couldn’t copy — select the query and copy it by hand.</span>
+            )}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--muted)', margin: '2px 0 4px' }}>{q.purpose}</div>
+          <pre style={{ fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'pre', overflow: 'auto', maxHeight: 260,
+                        background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)',
+                        padding: 'var(--space-2)', margin: 0 }}>{q.kql}</pre>
+        </div>
+      ))}
+      {d && d.skipped.length > 0 && (
+        <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+          Not built: {d.skipped.map(sk => `${sk.id} (${sk.reason})`).join(' · ')}
+        </div>
+      )}
+      {d && d.omitted_values > 0 && (
+        <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+          {d.omitted_values} value{d.omitted_values === 1 ? '' : 's'} left out (too long, or past 50 per list).
+        </div>
+      )}
+    </details>
+  )
+}
+
+// ─── P3 — Contain from the analysis ───────────────────────────────────────────
+// The API works out the plan (what to suggest and why) and creates everything; this only lets the
+// analyst tick items and shows the result.
+
+const CONTAIN_GROUPS = [
+  ['Message', ['message']], ['Sender', ['sender', 'sender_domain', 'reply_to']],
+  ['Links', ['url']], ['Attachments', ['attachment']], ['Origin', ['origin_ip']],
+]
+const itemKey = (i) => `${i.kind}:${i.ref ?? ''}`
+
+function ContainDialog({ incidentId, analysis, onClose, onDone }) {
+  const [items, setItems]   = useState(null)
+  const [picked, setPicked] = useState({})
+  const [busy, setBusy]     = useState(false)
+  const [error, setError]   = useState(null)
+  const [result, setResult] = useState(null)
+  const [dlError, setDlError] = useState(null)
+  const [users, setUsers]   = useState([])
+  const [assigneeId, setAssigneeId] = useState('')
+  const dialogRef = useRef(null)
+  useDialogFocus(dialogRef, () => { if (!busy) onClose() })
+
+  useEffect(() => {
+    let live = true
+    api.getEmailContainmentPlan(incidentId, analysis.id)
+      .then(r => {
+        if (!live) return
+        setItems(r.items)
+        setPicked(Object.fromEntries(r.items.map(i => [itemKey(i), i.suggested && !i.existing_action_id])))
+      })
+      .catch(e => { if (live) setError(e.message || 'Could not load the plan') })
+    return () => { live = false }
+  }, [incidentId, analysis.id])
+
+  // Users who can see this incident (the API checks the assignee again).
+  useEffect(() => {
+    let live = true
+    api.listAssignableUsers(incidentId).then(u => { if (live) setUsers(u || []) }).catch(() => {})
+    return () => { live = false }
+  }, [incidentId])
+
+  const chosen = (items || []).filter(i => picked[itemKey(i)] && !i.existing_action_id)
+
+  async function confirm() {
+    setBusy(true); setError(null)
+    try {
+      const r = await api.containEmail(incidentId, analysis.id, chosen.map(i => ({ kind: i.kind, ref: i.ref })),
+                                       assigneeId || null)
+      setResult(r)
+      onDone(r.analysis)
+    } catch (e) { setError(e.message || 'Containment failed') } finally { setBusy(false) }
+  }
+
+  async function download(fmt) {
+    setDlError(null)
+    try { await api.exportIocs(incidentId, fmt, { ioc_id: result.ioc_ids }) }
+    catch (e) { setDlError(e.message || 'Download failed') }
+  }
+
+  const created = result ? result.actions.filter(x => x.status === 'created').length : 0
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="contain-title" style={{ maxWidth: 720 }}>
+        <div className="modal-head">
+          <h2 id="contain-title">Contain this email</h2>
+          <button type="button" className="modal-close" onClick={onClose} disabled={busy} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">
+          {!result && (
+            <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>
+              Each ticked item becomes an IOC and an open containment action on <strong>Respond</strong>. FENRIR only records
+              them: carry them out in Defender or Exchange, then mark them done. Links are pre-ticked only when an earlier
+              incident confirmed them — check a link isn’t a legitimate site (yours, Microsoft’s, a vendor’s) before ticking it.
+            </p>
+          )}
+          {items && !result && (
+            <div className="field" style={{ marginBottom: 'var(--space-3)', maxWidth: 320 }}>
+              <label className="field-label" htmlFor="contain-assignee">Assign the actions to</label>
+              <select id="contain-assignee" className="select compact" value={assigneeId} disabled={busy}
+                      onChange={e => setAssigneeId(e.target.value)}>
+                <option value="">Nobody yet</option>
+                {users.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
+              </select>
+            </div>
+          )}
+          {!items && !error && <div style={{ color: 'var(--muted)', fontSize: 13 }}>Loading the plan…</div>}
+          {items && !result && CONTAIN_GROUPS.map(([label, kinds]) => {
+            const rows = items.filter(i => kinds.includes(i.kind))
+            if (!rows.length) return null
+            return (
+              <fieldset key={label} style={{ border: 0, padding: 0, margin: '0 0 var(--space-3)' }}>
+                <legend className="panel-h" style={{ fontSize: 13 }}>{label}</legend>
+                {rows.map(i => {
+                  const k = itemKey(i)
+                  const done = !!i.existing_action_id
+                  return (
+                    <label key={`${k}:${i.template_id}`} style={{ display: 'flex', gap: 'var(--space-2)', padding: '3px 0', fontSize: 13, alignItems: 'baseline' }}>
+                      <input type="checkbox" checked={done || !!picked[k]} disabled={done || busy}
+                             onChange={e => setPicked(p => ({ ...p, [k]: e.target.checked }))} />
+                      <span style={{ minWidth: 0 }}>
+                        <strong>{i.title}</strong>{' '}
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, wordBreak: 'break-all' }}>
+                          {i.value ? shown(i.ioc_type, i.value) : 'this message, for every recipient'}
+                        </span>
+                        <div style={{ fontSize: 12, color: done ? 'var(--ok)' : 'var(--muted)' }}>
+                          {done ? 'Already has this action on Respond.' : i.reason}
+                        </div>
+                      </span>
+                    </label>
+                  )
+                })}
+              </fieldset>
+            )
+          })}
+          {result && (
+            <div role="status" style={{ fontSize: 13 }}>
+              <p style={{ marginTop: 0 }}>
+                <strong>{result.iocs_created + result.iocs_existing} IOC{result.iocs_created + result.iocs_existing === 1 ? '' : 's'}</strong>
+                {' '}({result.iocs_created} new) · <strong>{created} action{created === 1 ? '' : 's'} created</strong>
+                {result.actions.length > created && ` · ${result.actions.length - created} already there`}
+                {' · '}<Link to={`/incidents/${incidentId}/containment`}>Open Respond</Link>
+              </p>
+              {result.ioc_ids.length > 0 && (
+                <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ color: 'var(--muted)', fontSize: 12 }}>These IOCs for Defender (action Block execution):</span>
+                  <button type="button" className="btn ghost" onClick={() => download('mde-csv')}>Download CSV</button>
+                  <button type="button" className="btn ghost" onClick={() => download('mde-json')}>Download JSON</button>
+                </div>
+              )}
+              {dlError && <div className="alert error" role="alert"><span className="alert-icon">!</span><span>{dlError}</span></div>}
+            </div>
+          )}
+          {error && <div className="alert error" role="alert"><span className="alert-icon">!</span><span>{error}</span></div>}
+        </div>
+        <div className="modal-foot">
+          {result
+            ? <button type="button" className="btn primary" onClick={onClose}>Done</button>
+            : <>
+                <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+                <button type="button" className="btn primary" onClick={confirm} disabled={busy || !chosen.length}>
+                  {busy ? 'Creating…' : `Create ${chosen.length} action${chosen.length === 1 ? '' : 's'}`}
+                </button>
+              </>}
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function buildPreviewDoc(html) {
   return `<!doctype html><html><head><meta charset="utf-8">` +

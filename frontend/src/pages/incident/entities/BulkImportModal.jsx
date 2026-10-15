@@ -15,32 +15,60 @@ ip,10.0.0.5,,medium
 domain,evil.example.com,,high
 email,phish@attacker.com,,medium`
 
-// Parse a CSV string into rows. Returns { headers, rows } or throws.
-function parseCSV(text) {
-  const lines = text.trim().split(/\r?\n/).filter(Boolean)
-  if (lines.length < 2) throw new Error('CSV must have a header row and at least one data row')
-
-  // Simple CSV split that handles quoted fields
-  const splitLine = (line) => {
-    const cols = []; let cur = ''; let inQ = false
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i]
-      if (c === '"') { inQ = !inQ }
-      else if (c === ',' && !inQ) { cols.push(cur.trim()); cur = '' }
-      else { cur += c }
-    }
-    cols.push(cur.trim())
-    return cols
+// Split one line on `delim`, honouring double-quoted fields.
+function splitLine(line, delim) {
+  const cols = []; let cur = ''; let inQ = false
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (c === '"') { inQ = !inQ }
+    else if (c === delim && !inQ) { cols.push(cur.trim()); cur = '' }
+    else { cur += c }
   }
+  cols.push(cur.trim())
+  return cols
+}
 
-  const headers = splitLine(lines[0]).map(h => h.toLowerCase().replace(/\s+/g, '_'))
-  const rows = lines.slice(1).map((line, i) => {
-    const vals = splitLine(line)
-    const row = {}
-    headers.forEach((h, j) => { row[h] = vals[j] ?? '' })
-    return { _line: i + 2, ...row }
+// A plain-list line's type when "Auto-detect" is picked. Only shapes that can't be
+// anything else; host and user names are left as "other" (pick a type for those).
+function detectType(v) {
+  if (/^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(v) || /^[0-9a-f]*:[0-9a-f:]*\/\d{1,3}$/i.test(v)) return 'network_range'
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(v) || /^[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,7}$/i.test(v)) return 'ip'
+  if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) return 'email'
+  if (/^[^\\\s]+\\[^\\\s]+$/.test(v)) return 'user'
+  if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(v)) return 'domain'
+  return 'other'
+}
+
+// Parse the input into rows, or throw. A header row with `type` and `value` columns means
+// CSV, separated by commas, semicolons (Excel in many locales) or tabs (cells pasted from a
+// spreadsheet). One column and no such header means a plain list: one value per line,
+// typed by `plainType` ('auto' = detectType).
+function parseInput(text, plainType) {
+  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/)
+    .map((raw, i) => ({ raw, _line: i + 1 }))
+    .filter(l => l.raw.trim())
+  if (lines.length === 0) throw new Error('Nothing to import')
+
+  const head = lines[0].raw
+  const delim = [',', ';', '\t'].reduce((best, d) => (head.split(d).length > head.split(best).length ? d : best))
+  const headers = splitLine(head, delim).map(h => h.toLowerCase().replace(/\s+/g, '_'))
+
+  if (headers.includes('type') && headers.includes('value')) {
+    if (lines.length < 2) throw new Error('The CSV has a header row but no data rows')
+    return lines.slice(1).map(({ raw, _line }) => {
+      const vals = splitLine(raw, delim)
+      const row = {}
+      headers.forEach((h, j) => { row[h] = vals[j] ?? '' })
+      return { _line, ...row }
+    })
+  }
+  if (headers.length > 1) {
+    throw new Error(`The header row needs "type" and "value" columns (found: ${headers.join(', ')}). For a plain list, put one value per line.`)
+  }
+  return lines.map(({ raw, _line }) => {
+    const value = raw.trim()
+    return { _line, type: plainType === 'auto' ? detectType(value) : plainType, value }
   })
-  return { headers, rows }
 }
 
 // Validate a parsed row and return a display row with status
@@ -71,6 +99,7 @@ const STAGES = { INPUT: 'input', PREVIEW: 'preview', IMPORTING: 'importing', DON
 export default function BulkImportModal({ incidentId, onClose, onImported }) {
   const [stage, setStage]         = useState(STAGES.INPUT)
   const [csvText, setCsvText]     = useState('')
+  const [plainType, setPlainType] = useState('auto')      // type for a plain list
   const [parseError, setParseError] = useState(null)
   const [rows, setRows]           = useState([])          // validated rows
   const [results, setResults]     = useState(null)        // { ok, skipped, failed }
@@ -93,10 +122,7 @@ export default function BulkImportModal({ incidentId, onClose, onImported }) {
   const onPreview = () => {
     setParseError(null)
     try {
-      const { rows: parsed } = parseCSV(csvText)
-      const validated = parsed.map(validateRow)
-      if (validated.length === 0) { setParseError('No rows found in CSV'); return }
-      setRows(validated)
+      setRows(parseInput(csvText, plainType).map(validateRow))
       setStage(STAGES.PREVIEW)
     } catch (e) {
       setParseError(e.message)
@@ -167,6 +193,7 @@ export default function BulkImportModal({ incidentId, onClose, onImported }) {
                   </div>
                   <div className="field-hint">
                     Required columns: <code>type</code>, <code>value</code>. Optional: <code>name</code>, <code>criticality</code> (low/medium/high/critical, defaults to medium).
+                    Separated by commas, semicolons or tabs. Or a plain list: one value per line, no header.
                     Existing entities are skipped (dedup on type + value).
                   </div>
                 </div>
@@ -184,7 +211,7 @@ export default function BulkImportModal({ incidentId, onClose, onImported }) {
                 </div>
 
                 <div className="field">
-                  <label className="field-label" htmlFor="bulk-paste">Or paste CSV directly</label>
+                  <label className="field-label" htmlFor="bulk-paste">Or paste CSV or a plain list</label>
                   <textarea
                     id="bulk-paste"
                     className="input compact"
@@ -194,6 +221,17 @@ export default function BulkImportModal({ incidentId, onClose, onImported }) {
                     placeholder={EXAMPLE_CSV}
                     style={{ fontFamily: 'var(--font-mono)' }}
                   />
+                </div>
+
+                <div className="field">
+                  <label className="field-label" htmlFor="bulk-plain-type">Type for a plain list</label>
+                  <select id="bulk-plain-type" className="select" value={plainType} onChange={(e) => setPlainType(e.target.value)}>
+                    <option value="auto">Auto-detect (IP, range, email, DOMAIN\user, domain)</option>
+                    {ENTITY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                  <div className="field-hint">
+                    Ignored for CSV. Auto-detect can't tell host or user names apart, and imports them as <code>other</code>; pick a type for those lists.
+                  </div>
                 </div>
 
                 {parseError && (

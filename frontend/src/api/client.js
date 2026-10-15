@@ -486,7 +486,8 @@ export const api = {
   exportIocs: async (incidentId, fmt, params = {}) => {
     const qs = new URLSearchParams()
     for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+      if (Array.isArray(v)) v.forEach(x => qs.append(k, x))        // e.g. ioc_id (repeatable)
+      else if (v !== undefined && v !== null && v !== '') qs.set(k, v)
     }
     const s = qs.toString()
     const url = `/api/incidents/${incidentId}/iocs/export/${fmt}${s ? '?' + s : ''}`
@@ -785,6 +786,10 @@ export const api = {
   },
   listEmailAnalyses:   (incidentId)        => request('GET',  `/api/incidents/${incidentId}/email`),
   getEmailAnalysis:    (incidentId, aid)   => request('GET',  `/api/incidents/${incidentId}/email/${aid}`),
+  getEmailSeenBefore:  (incidentId, aid)   => request('GET',  `/api/incidents/${incidentId}/email/${aid}/seen-before`),
+  getEmailHuntingQueries: (incidentId, aid, lookbackDays) => request('GET', `/api/incidents/${incidentId}/email/${aid}/hunting-queries?lookback_days=${lookbackDays}`),
+  getEmailContainmentPlan: (incidentId, aid) => request('GET', `/api/incidents/${incidentId}/email/${aid}/containment-plan`),
+  containEmail:        (incidentId, aid, items, assigneeId = null) => request('POST', `/api/incidents/${incidentId}/email/${aid}/containment`, { items, assignee_id: assigneeId }),
   promoteEmailIocs:    (incidentId, aid, iocs) => request('POST', `/api/incidents/${incidentId}/email/${aid}/promote-iocs`, { iocs }),
   extractEmailAttachment: (incidentId, aid, idx) => request('POST', `/api/incidents/${incidentId}/email/${aid}/attachments/${idx}/extract`),
   importEmailHops:     (incidentId, aid)   => request('POST', `/api/incidents/${incidentId}/email/${aid}/import-hops`),

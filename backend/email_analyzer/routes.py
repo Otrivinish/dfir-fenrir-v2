@@ -28,7 +28,7 @@ import httpx
 import magic
 from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query, Request,
                      UploadFile, status)
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
@@ -37,6 +37,11 @@ from core.config import settings
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
 from core.outbound_policy import outbound_allowed, require_outbound_confirmation, siem_redaction
+from core.url_indicator import classify_url_indicator
+from correlations.routes import lookup_pairs
+from email_analyzer.containment import plan as containment_plan
+from email_analyzer.hunting import hunting_queries
+from email_analyzer.indicators import candidates
 from email_analyzer.domain_check import check_dkim, check_spf_dmarc, evaluate_source_ip, fetch_domain_auth
 from email_analyzer.parser import (PARSER_NAME, PARSER_VERSION, attachment_bytes, is_msg, msg_to_eml_bytes,
                                    parse_email, repair_wrapped_export)
@@ -49,10 +54,16 @@ from evidence.register import (EXAMINED_MASTER, EXAMINED_MATCH, EXAMINED_UPLOAD,
                                examine_audit, exhibit_brief, link_error_extra, read_exhibit_for_analysis,
                                recheck_exhibit, register_or_link_upload, upload_link_for)
 from evidence.routes import _check_acquired_at
-from incidents.access import get_accessible_incident
-from models import Artifact, EmailAnalysis, Evidence, IOC, User, utcnow
+from incidents.access import get_accessible_incident, require_incident_person
+from models import Artifact, EmailAnalysis, Evidence, IOC, RespondAction, User, utcnow
+from respond.routes import create_action
 from schemas import (DomainCheckOut, EmailAnalysisList, EmailAnalysisOut, EmailBulkAnalyzeOut,
-                     HopImportStatus, PromoteIocsRequest)
+                     EmailContainmentOut, EmailContainmentPlanItem,
+                     EmailContainmentPlanOut, EmailContainmentRequest, EmailContainmentResult,
+                     RespondActionCreate,
+                     EmailHuntingQueriesOut, EmailIndicatorSource, EmailSeenBeforeHit, EmailSeenBeforeItem,
+                     EmailSeenBeforeOut,
+                     EmailSeenBeforeSummary, HopImportStatus, PromoteIocsRequest)
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -808,6 +819,114 @@ async def get_email_analysis(
     return await _analysis_out(db, await _get_analysis(db, incident_id, aid))
 
 
+# P1 (docs/phishing-fast-path-slices.md): strongest hits first -- confirmed or a malicious IOC, then
+# suspected, then false / benign positive.
+_HIT_RANK = {"confirmed": 0, "suspected": 1, "false_positive": 2, "benign_positive": 2}
+
+
+def _hit_rank(h) -> tuple:
+    return (0 if h.ioc_malicious else 1, _HIT_RANK.get(h.triage_state, 1), -h.added_at.timestamp())
+
+
+@router.get("/{incident_id}/email/{aid}/seen-before", response_model=EmailSeenBeforeOut,
+            summary="Earlier incidents that hold this email's indicators as IOCs")
+async def seen_before(
+    incident_id: uuid.UUID, aid: uuid.UUID,
+    user: User = Depends(current_user), db: AsyncSession = Depends(get_db),
+) -> EmailSeenBeforeOut:
+    """Which other incidents already hold this analysis's indicators as IOCs: the sender (address and
+    domain), Reply-To / Return-Path, the public origin IPs, attachment hashes, and each link (as it is
+    promoted, plus its host and parent domains). Exact (type, value) matches, only in incidents the user
+    can access (the correlation lookup's rule), never this incident. Each hit carries the incident's ref,
+    status and triage state and the IOC's malicious flag. Read-only: works on a closed incident.
+    Requires access to the incident; 404 when the analysis isn't this incident's."""
+    await _incident(db, incident_id, user, writable=False)
+    analysis = await _get_analysis(db, incident_id, aid)
+    sources: dict[tuple[str, str], list[EmailIndicatorSource]] = {}
+    for c in candidates(analysis):
+        sources.setdefault((c.type, c.value), []).append(EmailIndicatorSource(source=c.source, ref=c.ref))
+    found = await lookup_pairs(db, user, set(sources), exclude_incident_id=incident_id)
+    items, incidents, malicious = [], {}, 0
+    for (type_, value), where in sources.items():
+        rows = sorted(found.get((type_, value), []), key=_hit_rank)
+        if not rows:
+            continue
+        for h in rows:
+            incidents[h.incident_id] = h.triage_state
+            malicious += bool(h.ioc_malicious)
+        items.append(EmailSeenBeforeItem(type=type_, value=value, sources=where, hits=[
+            EmailSeenBeforeHit(incident_id=h.incident_id, ref=h.ref, title=h.title, status=h.status,
+                               triage_state=h.triage_state, severity=h.severity, ioc_id=h.ioc_id,
+                               ioc_malicious=h.ioc_malicious, added_at=h.added_at) for h in rows]))
+    items.sort(key=lambda i: _hit_rank(i.hits[0]))
+    return EmailSeenBeforeOut(items=items, summary=EmailSeenBeforeSummary(
+        incidents=len(incidents),
+        confirmed=sum(t == "confirmed" for t in incidents.values()),
+        false_positive=sum(t in ("false_positive", "benign_positive") for t in incidents.values()),
+        malicious_iocs=malicious))
+
+
+@router.get("/{incident_id}/email/{aid}/hunting-queries", response_model=EmailHuntingQueriesOut,
+            summary="Defender Advanced Hunting queries that scope this email")
+async def email_hunting_queries(
+    incident_id: uuid.UUID, aid: uuid.UUID, request: Request,
+    lookback_days: int = Query(default=30, ge=1, le=30, description="Advanced Hunting keeps 30 days"),
+    user: User = Depends(current_user), db: AsyncSession = Depends(get_db),
+) -> EmailHuntingQueriesOut:
+    """Ready-to-run Defender XDR Advanced Hunting (KQL) queries built from this analysis: who received
+    it and where it is now, the same campaign (Microsoft's similarity cluster, same sender), every mail
+    carrying its links, who clicked them, who received its attachment, and the devices the file reached.
+    FENRIR runs and sends nothing: paste a query into Defender XDR -> Hunting -> Advanced hunting. Every
+    value from the message is an escaped KQL string literal. Queries the email has nothing for are in
+    `skipped`. Read-only for the incident (works when closed); audited as `email_hunting_queries` (the
+    query ids, no values), like an IOC export. Requires access to the incident."""
+    inc = await _incident(db, incident_id, user, writable=False)
+    analysis = await _get_analysis(db, incident_id, aid)
+    out = hunting_queries(analysis, incident_ref=inc.ref, lookback_days=lookback_days)
+    await write_audit(db, "email_hunting_queries", user_id=user.id, username=user.username,
+                      resource_type="email_analysis", resource_id=str(aid), outcome="success",
+                      details={"incident_id": str(incident_id), "lookback_days": lookback_days,
+                               "queries": [q["id"] for q in out["queries"]]},
+                      ip_address=request.client.host if request.client else None)
+    await db.commit()
+    return EmailHuntingQueriesOut(lookback_days=lookback_days, **out)
+
+
+async def _promote(db, incident_id, analysis, user, items) -> tuple[dict, int]:
+    """Make each (type, value, notes) an IOC of the incident unless it already is one. Returns
+    {(type, value): its IOC (new or existing)} and how many were created. IOCs from an analysis with a run
+    record (G3) record its exhibit. Shared by promote-iocs and containment (P3)."""
+    promoted: dict[tuple[str, str], IOC] = {}
+    created = 0
+    for type_, value, notes in items:
+        if (type_, value) in promoted:
+            continue
+        ioc = (await db.execute(select(IOC).where(
+            IOC.incident_id == incident_id, IOC.type == type_, IOC.value == value,
+        ))).scalar_one_or_none()
+        if ioc is None:
+            ioc = IOC(id=uuid.uuid4(), incident_id=incident_id, type=type_, value=value,
+                      notes=notes or f"From email analysis {analysis.id}", source="email-analysis",
+                      tags=["email"], added_by_id=user.id,
+                      # G3 — found in the exhibit this run analysed (none for a pre-G3 analysis)
+                      evidence_id=analysis.evidence_id if analysis.input_sha256 else None)
+            db.add(ioc)
+            created += 1
+        promoted[(type_, value)] = ioc
+    return promoted, created
+
+
+def _mark_promoted(analysis, promoted: dict) -> None:
+    """K5 (R49): a URL row is promoted when what it promotes as (its ioc_type/ioc_value: the full URL or
+    the bare domain of its Safelink target or URL) is an IOC of this incident. A new list, so the JSON
+    column is written."""
+    if promoted:
+        analysis.urls = [({**u, "promoted_ioc_id": str(promoted[k].id)}
+                          if (k := classify_url_indicator(u.get("safelink_target") or u.get("url") or "")) in promoted
+                          else u)
+                         for u in (analysis.urls or [])]
+
+
 @router.post("/{incident_id}/email/{aid}/promote-iocs", response_model=EmailAnalysisOut,
              summary="Promote email indicators to IOCs", responses=_CLOSED_409)
 async def promote_iocs(
@@ -818,47 +937,142 @@ async def promote_iocs(
 
     Takes a list of typed indicators (ip, domain, url, hash_*, email, registry_key,
     file_path, other); unknown types and existing duplicates are skipped. IOCs from an analysis with a
-    run record (G3) record its exhibit (`evidence_id`). Each `urls[]` row whose URL (its Safelink
-    target when it has one) is now a URL IOC of the incident, new or existing, gets
-    `promoted_ioc_id`. Requires the analyst role and an open incident. Returns the email analysis.
+    run record (G3) record its exhibit (`evidence_id`). To promote a link, send its `urls[]` row's
+    `ioc_type` and `ioc_value` (the full request URL, or the bare domain or IP when it has no path or
+    query). Each row whose `ioc_type`/`ioc_value` is now an IOC of the incident, new or existing,
+    gets `promoted_ioc_id`. Requires the analyst role and an open incident. Returns the email analysis.
     """
     await _incident(db, incident_id, user)
     analysis = await _get_analysis(db, incident_id, aid)
     valid = {"ip", "domain", "url", "hash_md5", "hash_sha1", "hash_sha256",
              "email", "registry_key", "file_path", "other"}
-    created = 0
-    url_iocs: dict[str, str] = {}      # K5 (R49): URL value -> its IOC id, for urls[].promoted_ioc_id
-    for item in req.iocs:
-        if item.type not in valid:
-            continue
-        exists = (await db.execute(select(IOC).where(
-            IOC.incident_id == incident_id, IOC.type == item.type, IOC.value == item.value,
-        ))).scalar_one_or_none()
-        if exists:
-            if item.type == "url":
-                url_iocs[item.value] = str(exists.id)
-            continue
-        ioc = IOC(id=uuid.uuid4(), incident_id=incident_id, type=item.type, value=item.value,
-                  notes=item.notes or f"From email analysis {aid}", source="email-analysis",
-                  tags=["email"], added_by_id=user.id,
-                  # G3 — found in the exhibit this run analysed (none for a pre-G3 analysis)
-                  evidence_id=analysis.evidence_id if analysis.input_sha256 else None)
-        db.add(ioc)
-        if item.type == "url":
-            url_iocs[item.value] = str(ioc.id)
-        created += 1
-    # A URL row is promoted when its value (the Safelink target when there is one, as the UI
-    # sends) is a URL IOC of this incident. A new list, so the JSON column is written.
-    if url_iocs:
-        analysis.urls = [({**u, "promoted_ioc_id": url_iocs[k]}
-                          if (k := (u.get("safelink_target") or u.get("url"))) in url_iocs else u)
-                         for u in (analysis.urls or [])]
+    promoted, created = await _promote(db, incident_id, analysis, user,
+                                       [(i.type, i.value, i.notes) for i in req.iocs if i.type in valid])
+    _mark_promoted(analysis, promoted)
     await write_audit(db, "email_promote_iocs", user_id=user.id, username=user.username,
                       resource_type="email_analysis", resource_id=str(aid), outcome="success",
                       details={"incident_id": str(incident_id), "created": created},
                       ip_address=request.client.host if request.client else None)
     await db.commit()
     return await _analysis_out(db, analysis)
+
+
+# ─── P3 — containment from the analysis (docs/phishing-fast-path-slices.md) ──
+
+async def _plan_with_state(db, user, incident_id, analysis) -> list[dict]:
+    """The containment plan, plus what this incident already has: the IOC (existing_ioc_id) and a not
+    reverted action with the same template for it (existing_action_id; for the message, a quarantine
+    action made from this analysis). Seen-before hits that an earlier incident confirmed, or that sit on a
+    malicious IOC, make a link or attachment suggested."""
+    pairs = {(c.type, c.value) for c in candidates(analysis)}
+    found = await lookup_pairs(db, user, pairs, exclude_incident_id=incident_id)
+    strong = frozenset(k for k, rows in found.items()
+                       if any(h.ioc_malicious or h.triage_state == "confirmed" for h in rows))
+    items = containment_plan(analysis, strong)
+    wanted = {(i["ioc_type"], i["value"]) for i in items if i["ioc_type"]}
+    iocs = {}
+    if wanted:
+        iocs = {(t, v): i for t, v, i in (await db.execute(
+            select(IOC.type, IOC.value, IOC.id).where(IOC.incident_id == incident_id,
+                                                      tuple_(IOC.type, IOC.value).in_(list(wanted))))).all()}
+    actions = (await db.execute(select(RespondAction).where(
+        RespondAction.incident_id == incident_id, RespondAction.status != "reverted",
+        RespondAction.template_id.in_({i["template_id"] for i in items})))).scalars().all()
+    by_link = {(a.template_id, a.ioc_id): a.id for a in actions if a.ioc_id}
+    quarantine = next((a.id for a in actions if a.template_id == "quarantine_email"
+                       and (a.details or {}).get("email_analysis_id") == str(analysis.id)), None)
+    for i in items:
+        ioc_id = iocs.get((i["ioc_type"], i["value"])) if i["ioc_type"] else None
+        i["existing_ioc_id"] = ioc_id
+        i["existing_action_id"] = (by_link.get((i["template_id"], ioc_id)) if ioc_id
+                                   else quarantine if i["kind"] == "message" else None)
+    return items
+
+
+@router.get("/{incident_id}/email/{aid}/containment-plan", response_model=EmailContainmentPlanOut,
+            summary="Suggested containment for this email")
+async def email_containment_plan(
+    incident_id: uuid.UUID, aid: uuid.UUID,
+    user: User = Depends(current_user), db: AsyncSession = Depends(get_db),
+) -> EmailContainmentPlanOut:
+    """What to contain for this email, worked out on the server so every client gets the same plan: quarantine
+    the message, block the sender, sender domain or Reply-To, each link (as it is promoted: URL, domain or IP),
+    each attachment (SHA-256) and the origin IP. Each item has the Respond template it creates, whether it is
+    `suggested` and why, and what this incident already has. A forged sender (DMARC failed) is never
+    suggested, nor one whose DMARC pass the live DNS check didn't confirm; links only when an earlier
+    incident confirmed them (a risk signal can point at a legitimate site); attachments when a medium or
+    high risk signal fired, or an earlier incident confirmed them. Values over 2048 characters are left
+    out (they can't be IOCs). Read-only: works on a closed incident. Requires access to the incident."""
+    await _incident(db, incident_id, user, writable=False)
+    analysis = await _get_analysis(db, incident_id, aid)
+    return EmailContainmentPlanOut(items=[EmailContainmentPlanItem(**i)
+                                          for i in await _plan_with_state(db, user, incident_id, analysis)])
+
+
+@router.post("/{incident_id}/email/{aid}/containment", response_model=EmailContainmentOut,
+             summary="Promote and create containment actions for this email",
+             responses={**_CLOSED_409,
+                        403: {"description": "Viewers can't contain"},
+                        404: {"model": ApiErrorBody, "description": "user_not_found (assignee)"},
+                        422: {"model": ApiErrorBody, "description": "containment_item_unknown (not in this "
+                              "analysis's plan), assignee_no_access"}})
+async def email_containment(
+    incident_id: uuid.UUID, aid: uuid.UUID, req: EmailContainmentRequest, request: Request,
+    user: User = Depends(require_analyst), db: AsyncSession = Depends(get_db),
+) -> EmailContainmentOut:
+    """Contain the chosen plan items in one step: each becomes an IOC of the incident (as promote-iocs does)
+    and an open Respond action with its template, linked to that IOC -- through the same rules as
+    POST …/respond/actions (containment state, target types, assignee, audit). Items are named by (kind,
+    ref) from GET …/containment-plan; the server resolves the values, so a client can't inject one (422
+    `containment_item_unknown`). Idempotent: an item that already has a not reverted action with its
+    template is reported `existing`, nothing new is made. FENRIR records the containment; carry it out in
+    Defender / Exchange and mark the actions done. All or nothing. Requires the analyst role and an open
+    incident. Returns the IOC ids (for …/iocs/export/{fmt}?ioc_id=…) and the updated analysis."""
+    await _incident(db, incident_id, user)
+    if req.assignee_id is not None:          # before anything is written
+        await require_incident_person(db, incident_id, req.assignee_id)
+    analysis = await _get_analysis(db, incident_id, aid, for_update=True)
+    plan = {(i["kind"], i["ref"]): i for i in await _plan_with_state(db, user, incident_id, analysis)}
+    chosen: list[dict] = []
+    for ref in req.items:
+        item = plan.get((ref.kind, ref.ref))
+        if item is None:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_ENTITY, "containment_item_unknown",
+                           f"No {ref.kind} {'' if ref.ref is None else ref.ref} in this analysis's containment plan")
+        if item not in chosen:
+            chosen.append(item)
+    promoted, created = await _promote(db, incident_id, analysis, user,
+                                       [(i["ioc_type"], i["value"], None) for i in chosen if i["ioc_type"]])
+    await db.flush()
+    ip = request.client.host if request.client else None
+    results = []
+    for i in chosen:
+        ioc = promoted.get((i["ioc_type"], i["value"])) if i["ioc_type"] else None
+        if i["existing_action_id"]:
+            results.append(EmailContainmentResult(kind=i["kind"], ref=i["ref"], template_id=i["template_id"],
+                                                  ioc_id=ioc.id if ioc else None,
+                                                  action_id=i["existing_action_id"], status="existing"))
+            continue
+        details = {"email_analysis_id": str(analysis.id)}
+        if i["kind"] == "message":
+            details["target"] = (f"Message-ID {analysis.message_id}" if analysis.message_id
+                                 else f"From {analysis.from_addr or '?'}: {analysis.subject or ''}")[:512]
+        action = await create_action(db, incident_id, RespondActionCreate(
+            category="containment", title=i["title"], template_id=i["template_id"],
+            ioc_id=ioc.id if ioc else None, assignee_id=req.assignee_id, details=details), user, ip)
+        results.append(EmailContainmentResult(kind=i["kind"], ref=i["ref"], template_id=i["template_id"],
+                                              ioc_id=ioc.id if ioc else None, action_id=action.id, status="created"))
+    _mark_promoted(analysis, promoted)
+    await write_audit(db, "email_containment", user_id=user.id, username=user.username,
+                      resource_type="email_analysis", resource_id=str(aid), outcome="success",
+                      details={"incident_id": str(incident_id), "iocs_created": created,
+                               "actions_created": sum(r.status == "created" for r in results),
+                               "actions_existing": sum(r.status == "existing" for r in results),
+                               "items": [f"{i['kind']}{'' if i['ref'] is None else i['ref']}" for i in chosen]},
+                      ip_address=ip)
+    await db.commit()
+    return EmailContainmentOut(iocs_created=created, iocs_existing=len(promoted) - created, actions=results,
+                               ioc_ids=[x.id for x in promoted.values()], analysis=await _analysis_out(db, analysis))
 
 
 @router.post("/{incident_id}/email/{aid}/attachments/{idx}/extract", response_model=EmailAnalysisOut,

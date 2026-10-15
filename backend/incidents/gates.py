@@ -60,7 +60,7 @@ _NON_DATA_ACTIONS = ("report_generate", "report_download", "incident_audit_view"
                      "audit_export_download", "audit_export_download_denied", "evidence_export_download",
                      "evidence_export_download_denied", "collection_package_download",
                      "collection_package_download_denied", "ioc_export", "outbound_notification_suppressed",
-                     "outbound_lookup_suppressed")
+                     "outbound_lookup_suppressed", "email_hunting_queries")
 SIGN_OFF_KEYS = {"ic": "ic_sign_off_missing", "dpo": "dpo_sign_off_missing"}
 _ROLE_LABEL = {"ic": "Incident Commander", "dpo": "Data Protection Officer"}
 
