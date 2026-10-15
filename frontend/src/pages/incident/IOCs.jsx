@@ -39,7 +39,7 @@ const labelOf = (v) => IOC_TYPES.find(t => t.value === v)?.label || v
 
 // Types each platform can receive — used for per-platform IOC count
 const PLATFORM_TYPES = {
-  'mde-csv':     new Set(['ip', 'domain', 'url', 'hash_md5', 'hash_sha1', 'hash_sha256']),
+  'mde-csv':     new Set(['ip', 'domain', 'url', 'hash_sha1', 'hash_sha256']),   // Defender's CSV import takes no MD5
   'mde-json':    new Set(['ip', 'domain', 'url', 'hash_md5', 'hash_sha1', 'hash_sha256']),
   'crowdstrike': new Set(['ip', 'domain', 'url', 'hash_md5', 'hash_sha256']),
   'sentinelone': new Set(['ip', 'domain', 'url', 'hash_md5', 'hash_sha1', 'hash_sha256']),
@@ -49,8 +49,8 @@ const PLATFORM_TYPES = {
 }
 
 const PLATFORMS = [
-  { id: 'mde-csv',     label: 'Microsoft Defender',   sub: 'CSV — bulk import',       types: 'IP · Domain · URL · MD5/SHA1/SHA256' },
-  { id: 'mde-json',    label: 'Microsoft Defender',   sub: 'JSON — Graph API',         types: 'IP · Domain · URL · MD5/SHA1/SHA256' },
+  { id: 'mde-csv',     label: 'Microsoft Defender',   sub: 'CSV — portal import',      types: 'IP · Domain · URL · SHA1/SHA256' },
+  { id: 'mde-json',    label: 'Microsoft Defender',   sub: 'JSON — Indicators import API', types: 'IP · Domain · URL · MD5/SHA1/SHA256' },
   { id: 'crowdstrike', label: 'CrowdStrike',           sub: 'JSON — Custom IOC API',    types: 'IP · Domain · URL · MD5/SHA256' },
   { id: 'sentinelone', label: 'SentinelOne',           sub: 'JSON — IOC API',           types: 'IP · Domain · URL · MD5/SHA1/SHA256' },
   { id: 'cortex-xdr',  label: 'Cortex XDR',            sub: 'JSON — Indicators API',    types: 'IP · Domain · Hashes' },
@@ -1491,7 +1491,15 @@ function EditIocModal({ incidentId, ioc, onClose, onSaved }) {
   )
 }
 
-const MDE_ACTIONS   = ['Audit', 'Block', 'BlockAndRemediate', 'Warn', 'Allowed']
+// Defender's action values, labelled as in its portal. Network indicators don't take
+// BlockAndRemediate; the export gives them Block.
+const MDE_ACTIONS   = [
+  { value: 'Block',             label: 'Block execution' },
+  { value: 'BlockAndRemediate', label: 'Block and remediate (hashes)' },
+  { value: 'Audit',             label: 'Audit' },
+  { value: 'Warn',              label: 'Warn' },
+  { value: 'Allowed',           label: 'Allow' },
+]
 const MDE_SEVERITIES = ['Informational', 'Low', 'Medium', 'High']
 const MDE_PLATFORMS  = new Set(['mde-csv', 'mde-json'])
 
@@ -1499,7 +1507,7 @@ function ExportModal({ incidentId, allIocs, onClose }) {
   const [downloading, setDownloading] = useState({})
   const [errors, setErrors]           = useState({})
   const [mdeConfig, setMdeConfig]     = useState({
-    action:           'Audit',
+    action:           'Block',
     severity:         'Medium',
     expiry_days:      90,
     mitre_techniques: '',
@@ -1555,7 +1563,7 @@ function ExportModal({ incidentId, allIocs, onClose }) {
               <label style={{ fontSize: 12 }}>
                 <div style={{ marginBottom: 2, color: 'var(--muted)' }}>Action</div>
                 <select className="input compact" value={mdeConfig.action} onChange={e => setMde('action', e.target.value)} style={{ width: '100%' }}>
-                  {MDE_ACTIONS.map(a => <option key={a}>{a}</option>)}
+                  {MDE_ACTIONS.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
                 </select>
               </label>
               <label style={{ fontSize: 12 }}>

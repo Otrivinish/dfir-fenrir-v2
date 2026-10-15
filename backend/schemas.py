@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, fie
 
 from core.config import settings
 from core.outbound_policy import outbound_block_reasons
+from core.url_indicator import classify_url_indicator
 
 
 def _as_utc(v: datetime) -> datetime:
@@ -1830,7 +1831,10 @@ class EmailAnalysisOut(BaseModel):
     auth_verified: Optional[dict] = None
     body_text:    Optional[str] = None
     body_html:    Optional[str] = None
-    urls:         list = []
+    urls:         list = Field(default_factory=list, description=(
+        "Links found in the message. Each row's ioc_type (url, domain or ip) and ioc_value are what "
+        "Promote → IOC sends for it: the full request URL when it has a path or query, else the bare "
+        "domain (or IP) -- of its Safelink target when it is wrapped."))
     attachments:  list = []
     created_by:   Optional[str] = None
     created_at:   datetime
@@ -1846,12 +1850,130 @@ class EmailAnalysisOut(BaseModel):
     evidence_identifier: Optional[str] = None
     evidence_sealed:    Optional[bool] = None
 
+    @field_validator("urls")
+    @classmethod
+    def _url_ioc(cls, v: list) -> list:
+        out = []
+        for u in v:
+            kind = classify_url_indicator(u.get("safelink_target") or u.get("url") or "") if isinstance(u, dict) else None
+            out.append({**u, "ioc_type": kind[0], "ioc_value": kind[1]} if kind else u)
+        return out
+
     class Config:
         from_attributes = True
 
 
 class EmailAnalysisList(BaseModel):
     items: list[EmailAnalysisOut]
+
+
+class EmailSeenBeforeHit(BaseModel):
+    incident_id:   UUID
+    ref:           str
+    title:         str
+    status:        str
+    triage_state:  str = Field(description="suspected | confirmed | false_positive | benign_positive")
+    severity:      Optional[str] = None
+    ioc_id:        UUID
+    ioc_malicious: Optional[bool] = Field(default=None, description="The IOC's own verdict: true / false / null (unknown)")
+    added_at:      datetime
+
+
+class EmailIndicatorSource(BaseModel):
+    source: str = Field(description="sender | reply_to | return_path | origin_ip | x_originating_ip | attachment | url | url_host")
+    ref:    Optional[int] = Field(default=None, description="The urls[] / attachments[] index (url, url_host, attachment)")
+
+
+class EmailSeenBeforeItem(BaseModel):
+    type:    str
+    value:   str
+    sources: list[EmailIndicatorSource] = Field(description="Where in the email the value occurs (a link's host can also be the sender's domain)")
+    hits:    list[EmailSeenBeforeHit]
+
+
+class EmailSeenBeforeSummary(BaseModel):
+    incidents:      int = Field(description="Distinct other incidents with a hit")
+    confirmed:      int = Field(description="… of which triaged confirmed")
+    false_positive: int = Field(description="… of which triaged false or benign positive")
+    malicious_iocs: int = Field(description="Hits on IOCs marked malicious")
+
+
+class EmailHuntingQuery(BaseModel):
+    id:       str = Field(description="delivery | similar | url_recipients | clicks | attachments_mail | attachments_endpoint")
+    title:    str
+    purpose:  str
+    requires: str = Field(description="The Defender product whose data the query reads")
+    tables:   list[str]
+    kql:      str = Field(description="Standalone query; every value from the message is an escaped KQL literal")
+
+
+class EmailHuntingSkipped(BaseModel):
+    id:     str
+    reason: str
+
+
+class EmailHuntingQueriesOut(BaseModel):
+    platform:       Literal["defender_xdr"] = "defender_xdr"
+    lookback_days:  int
+    queries:        list[EmailHuntingQuery]
+    skipped:        list[EmailHuntingSkipped] = Field(description="Queries left out because the email has nothing for them")
+    omitted_values: int = Field(description="Values left out: over 2048 characters, an invisible character outside "
+                                            "the BMP, or past 50 per list")
+
+
+EmailContainmentKind = Literal["message", "sender", "sender_domain", "reply_to", "url", "attachment", "origin_ip"]
+
+
+class EmailContainmentPlanItem(BaseModel):
+    kind:        EmailContainmentKind
+    ref:         Optional[int] = Field(default=None, description="The urls[] / attachments[] index (url, attachment)")
+    ioc_type:    Optional[str] = Field(default=None, description="The IOC it becomes; null for the message itself")
+    value:       Optional[str] = None
+    template_id: str = Field(description="The Respond action template: quarantine_email, block_sender, block_url, "
+                                         "block_domain, block_ip or block_hash")
+    title:       str
+    suggested:   bool
+    reason:      str
+    existing_ioc_id:    Optional[UUID] = Field(default=None, description="Already an IOC of this incident")
+    existing_action_id: Optional[UUID] = Field(default=None, description="Already a (not reverted) action with "
+                                                                         "this template for it")
+
+
+class EmailContainmentPlanOut(BaseModel):
+    items: list[EmailContainmentPlanItem]
+
+
+class EmailContainmentItemRef(BaseModel):
+    kind: EmailContainmentKind
+    ref:  Optional[int] = None
+
+
+class EmailContainmentRequest(BaseModel):
+    items:       list[EmailContainmentItemRef] = Field(min_length=1, max_length=200,
+                                                       description="Plan items by (kind, ref) -- never values")
+    assignee_id: Optional[UUID] = None
+
+
+class EmailContainmentResult(BaseModel):
+    kind:        EmailContainmentKind
+    ref:         Optional[int] = None
+    template_id: str
+    ioc_id:      Optional[UUID] = None
+    action_id:   UUID
+    status:      Literal["created", "existing"]
+
+
+class EmailContainmentOut(BaseModel):
+    iocs_created:  int
+    iocs_existing: int
+    actions:       list[EmailContainmentResult]
+    ioc_ids:       list[UUID] = Field(description="The IOCs involved -- pass them as ioc_id to …/iocs/export/{fmt}")
+    analysis:      EmailAnalysisOut
+
+
+class EmailSeenBeforeOut(BaseModel):
+    summary: EmailSeenBeforeSummary
+    items:   list[EmailSeenBeforeItem] = Field(description="Only the indicators with hits; strongest hits first")
 
 
 class EmailBulkAnalyzeOut(BaseModel):

@@ -1358,7 +1358,7 @@ const CATEGORIES = [
           { type: 'section', title: 'Toolbar', items: [
             '**Filter by Type / Criticality**, and **Compromised only** (the affected systems; filtered on the server).',
             '**+ Add entity** — single-entity modal (Type · Value · Name · Criticality · Compromised · Tags).',
-            '**Bulk import** — CSV upload with preview.',
+            '**Bulk import** — upload or paste a CSV with a `type,value` header (optional `name`, `criticality`), separated by commas, semicolons or tabs — or a plain list, one value per line, with a **Type for a plain list** (**Auto-detect** recognises IPs, ranges, emails, `DOMAIN\\user` and domain names; host and user names need a type). Preview before import.',
             '**Connect** — draw a relationship between two existing entities.',
           ] },
           { type: 'section', title: 'Entity detail drawer', items: [
@@ -1397,6 +1397,7 @@ const CATEGORIES = [
             '**Block** (IP, domain, URL and hash IOCs) — opens the **Containment** action form with the matching block template and this IOC already linked. Not shown to viewers or on a closed incident.',
           ] },
           { type: 'note', text: 'The Defender CSV is spreadsheet-safe: a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `\'` ([[tl-export]]).' },
+          { type: 'note', text: 'Defender export: **Action** defaults to **Block execution**. A URL or domain IOC goes in by its value — a bare name as a domain (`contoso.com`, which also covers its subdomains), anything with a path or query as a full URL (`https://contoso.com/page`; `https://` is added when the scheme is missing). IPs, domains and URLs get **Block execution** when **Block and remediate** is picked, because Defender won\'t import that for them. MD5 hashes are only in the JSON: Defender\'s CSV import doesn\'t take them.' },
         ],
       },
       {
@@ -1650,7 +1651,8 @@ const CATEGORIES = [
       {
         id: 'fo-email',
         title: 'Email Analysis',
-        tags: ['email', 'phishing', 'eml', 'msg', 'headers', 'spf', 'dkim', 'dmarc', 'exhibit', 'run record', 'attachments', 'hops'],
+        tags: ['email', 'phishing', 'eml', 'msg', 'headers', 'spf', 'dkim', 'dmarc', 'exhibit', 'run record', 'attachments', 'hops',
+               'seen before', 'advanced hunting', 'kql', 'defender', 'contain', 'containment'],
         body: [
           { type: 'p', text: 'Offline phishing triage of a message: headers, relay hops, SPF / DKIM / DMARC, URLs and attachments, with a verdict and score. The message analysed is always an exhibit.' },
           { type: 'steps', items: [
@@ -1664,9 +1666,23 @@ const CATEGORIES = [
             'Every analysis is in the exhibit\u2019s custody log as **Examined**. No plaintext quarantine copy of the message is kept.',
             'A message that can\u2019t be parsed stays registered; the error names the exhibit.',
           ] },
+          { type: 'section', title: 'Seen before', items: [
+            'A banner above the findings lists earlier incidents that already hold the sender, a link (or its host), an attachment hash or the origin IP as an IOC, strongest first: **Confirmed** or **IOC malicious** before suspected, false and benign positives last.',
+            'A **⋈ N** badge marks each link and attachment with a match; hover it for the incidents. Each incident ref opens its IOCs.',
+            'Only incidents you can open are searched, never this one. Exact values only: a URL with another path, or a different scheme, doesn\u2019t match.',
+          ] },
+          { type: 'section', title: 'Scope in Defender', items: [
+            'Open **Scope in Defender** (under the attachments) for ready-to-run Advanced Hunting queries: who received the message and where it is now, the same campaign, every mail with the same links, who clicked, who received the attachment, and the devices the file reached.',
+            'Pick **Look back** (7, 14 or 30 days), **Copy** a query and run it in Defender XDR → **Hunting → Advanced hunting**. FENRIR runs nothing. The email tables are empty without Defender for Office 365; the device query needs Defender for Endpoint.',
+            'Remove any legitimate host (a real vendor\u2019s or Microsoft\u2019s own link) from `hosts` before running the link queries.',
+            'Opening the section is audited (which queries, no values). Values from the message are escaped, so a crafted subject or file name can\u2019t change a query.',
+          ] },
           { type: 'section', title: 'Actions', items: [
+            '**Contain…** (red or amber verdict) — tick what to contain: quarantine the message, block the sender, sender domain or Reply-To, each link, each attachment, the origin IP. FENRIR pre-ticks its suggestions and says why for each. **Create N actions** adds each as an IOC and an open action on **Respond → Containment**, then offers a Defender CSV / JSON of just those IOCs (action **Block execution**). Running it again adds nothing already there. Carry the actions out in Defender or Exchange, then mark them done.',
+            'A sender that failed DMARC is never pre-ticked: its address is forged, and blocking it would block the real owner. The sender is pre-ticked only when DMARC passed and the live DNS check confirmed it, on a red verdict or when an earlier incident confirmed the address; the sender domain only for a punycode lookalike.',
+            'Links are pre-ticked only when an earlier incident confirmed them: a risk signal alone can be pointed at a legitimate site (link text showing the attacker\u2019s site over a real Microsoft sign-in link). The signal is shown as the reason; check the link before ticking it. **Assign the actions to** sets one assignee for all of them.',
             '**Import hops → Timeline** — relay hops with a time. They record the exhibit and are locked as imported. No clock offset applies: the mail servers wrote those times.',
-            '**Promote selected → IOC** — the IOCs record the exhibit.',
+            '**Promote selected → IOC** — each link goes in as its **Promote as** type: the full **URL** when it has a path or query, otherwise its **Domain** (or **IP**). A Safelink goes in as its real target. The IOCs record the exhibit.',
             '**Extract → Artifact** — the message is re-read from the exhibit (re-hashed first) and the attachment goes to **Malware quarantine**.',
             '**Register as exhibit** — only on analyses made before uploads were registered first.',
           ] },

@@ -2,6 +2,70 @@
 
 All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
+## [Unreleased] — Phishing fast path, Defender IOC export, email URL promotion, entity bulk import (2026-10-15)
+
+### Added — phishing fast path ([design + as built](docs/phishing-fast-path-slices.md))
+
+- **Seen before (P1).** An email analysis now shows earlier incidents that already hold its indicators as IOCs, strongest first, with each incident's triage state and whether the IOC is marked malicious. The indicators checked are the sender, Reply-To / Return-Path, each link and its host, attachment hashes and the public origin IP.
+  - A ⋈ badge marks each matching link and attachment.
+  - Only incidents you can open are searched, never the current one.
+  - Surfaces: `GET /api/incidents/{id}/email/{aid}/seen-before`; MCP `fenrir_forensic_list(view="email_seen_before")`.
+  - `POST /api/correlations/lookup` hits now also carry `ref`, `status` and `triage_state` (additive).
+- **Scope in Defender (P2).** Ready-to-run Defender XDR Advanced Hunting queries built from the analysis:
+  - who received it and where it is now;
+  - the same campaign (Microsoft's similarity cluster, same sender);
+  - every mail with the same links;
+  - who clicked;
+  - who received the attachment;
+  - the devices the file reached.
+
+  FENRIR runs nothing. Every value from the message is an escaped KQL literal and never appears in a comment. The call is audited as `email_hunting_queries` (query ids only) and doesn't mark reports stale. Surfaces: `GET …/email/{aid}/hunting-queries?lookback_days=1-30`; MCP view `email_hunting_queries`.
+- **Contain from the analysis (P3).** **Contain…** shows a plan worked out on the server: quarantine the message, block the sender, sender domain or Reply-To, each link (URL, domain or IP as it is promoted), each attachment, the origin IP. Each item comes with a suggestion and its reason.
+  - Confirming adds the IOCs and open Respond actions with the matching templates, through the same rules as the Respond form.
+  - It is idempotent and all or nothing.
+  - It then offers a Defender CSV / JSON of exactly those IOCs.
+  - A sender that failed DMARC is never suggested: the address is forged. Neither is one whose DMARC pass the live DNS check didn't confirm, since a header pass can be forged.
+  - Links are suggested only when an earlier incident confirmed them, because a risk signal can point at a legitimate site; the signal is shown as the reason. MCP refuses an empty `ioc_ids` instead of exporting everything.
+  - Surfaces: `GET …/email/{aid}/containment-plan`, `POST …/email/{aid}/containment` (items by `{kind, ref}` only); MCP view `email_containment_plan`, `fenrir_email_analyze(action="containment")`.
+- **IOC export filter:** `GET …/iocs/export/{fmt}?ioc_id=…` (repeatable, at most 500) exports only those IOCs (422 `ioc_other_incident` / `too_many_iocs`). MCP: `fenrir_ioc_export(ioc_ids=…)`.
+
+### Fixed
+
+- **Security: the IOC export ignored team access.** `GET /api/incidents/{id}/iocs/export/{fmt}` only checked that the incident existed, so anyone signed in could export the IOCs of a team-restricted incident by its UUID. It now uses the same access check as the IOC list (404 `incident_not_found`). The gap predates this release; the independent review found it.
+- **Entity bulk import rejected every row** (`Unknown type "", Value is required` from line 2) unless the input was a comma CSV with a `type,value` header. Fixed cases:
+  - A semicolon CSV (Excel in many locales) or tab-separated cells pasted from a spreadsheet now parse.
+  - A plain list (one value per line, no header) imports with a chosen **Type for a plain list**. **Auto-detect** recognises IPs, ranges, emails, `DOMAIN\user` and domain names.
+  - A header row without `type` and `value` columns now gives one clear error that names the columns found.
+- **Defender export defaults to Block execution** (`action=Block`), not Audit, in the GUI and in the API (`GET …/iocs/export/mde-csv|mde-json`). The Action list uses the portal's names.
+- **Defender URL and domain indicators use Microsoft's value forms** ([indicators overview](https://learn.microsoft.com/defender-endpoint/indicators-overview)). A URL or domain IOC is sorted by its value. A bare host becomes a `DomainName` (`contoso.com`), or an `IpAddress` if the host is an IP. A value with a path or query becomes a full `Url` (`https://contoso.com/page`); `https://` is added when the scheme is missing. Defanged values are refanged. Each indicator appears once per file.
+- **Defender CSV follows the [import format](https://learn.microsoft.com/defender-endpoint/indicator-manage):**
+  - `ExpirationTime` is `YYYY-MM-DDTHH:MM:SS.0Z`.
+  - `GenerateAlert` is `True`/`False`.
+  - MD5 rows are left out, because the CSV import doesn't take `FileMd5`.
+- **Defender JSON is the [import API](https://learn.microsoft.com/defender-endpoint/api/import-ti-indicators) body** (`{"Indicators": […]}`, previously `{"value": […]}`).
+- **Defender actions per indicator type (both formats):**
+  - IPs, domains and URLs get `Block` when `BlockAndRemediate` is chosen, because Defender won't import that action for network indicators.
+  - `Audit` always sets generate-alert to true, as the API requires.
+- **Email analyser: Promote → IOC adds one IOC per link, typed by what the link is.** A link with a path or query becomes a URL IOC with the full request URL. A bare-domain link becomes a domain IOC (or an IP IOC). Previously every link added both its URL and its host's domain. Each `urls[]` row in the API now carries `ioc_type`/`ioc_value`, and the URL table shows them in a **Promote as** column.
+
+### Upgrade notes
+
+- Rebuild the backend and frontend images.
+- **API clients:** the `mde-json` body key changed from `value` to `Indicators`. The default `action` is now `Block`.
+
+### Verification
+
+- `backend/tests/test_ioc_url_indicator.py`: 12 tests pass. 8 of them fail against the previous `exports.py`/`schemas.py` (negative control).
+- The frontend builds. The entity import parser was checked in node against plain, semicolon, tab, BOM, quoted, bad-header and header-only inputs; the first three reproduced the error before the fix.
+- Phishing fast path:
+  - Rolled-back DB tests through the real routes, after the review fixes: P1 26/0, P2 15/0, P3 32/0 (including export access).
+  - `backend/tests/test_phish_fast_path.py`: 21 tests, including KQL literal round-trip and fuzz tests with hostile values.
+  - One independent review. Fixed: export access, link pre-ticks, unconfirmed DMARC pass, duplicate-row merge, values over 2048 characters (a 500 before), MCP empty `ioc_ids`, dialog accessibility, the assignee picker. The noted, not-changed items are in the design doc's As-built section.
+  - The `scoring.py` refactor scores 5000 random messages and all 53 stored analyses identically.
+  - Earlier waves' DB scripts: K4/K5 70/0, J4/J5 63/0, SEC1 18/0. Older scripts that predate required incident fields (e.g. C1) were not run.
+  - MCP suite: 532 passed.
+- Not yet run against the live stack, not yet imported into a Defender tenant, and the KQL not yet run in Defender.
+
 ## [Released] — `feature/ux-002` (merged, #28) and branch `fix/ebm` (2026-10-01)
 
 ### Changed
