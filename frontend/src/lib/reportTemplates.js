@@ -85,9 +85,10 @@ function markdownToHtml(s) {
 
 // ─── Report sections (single source) ─────────────────────────────────────────
 // Order, title, executive-report rule and NIST CSF 2.0 subcategory IDs (`csf`,
-// printed under the heading) for every numbered section. Used by
-// generateProReport(), the "Show structure" preview and the Reports page's
-// "Include sections" checkboxes — add or rename a section here, nowhere else.
+// printed under the heading) for every numbered section. `ifPresent`: printed
+// only when there is data for it. Used by generateProReport(), the "Show
+// structure" preview and the Reports page's "Sections" checkboxes — add or
+// rename a section here, nowhere else.
 // The section → CSF table is documented in docs/reports.md §2.
 export const REPORT_SECTIONS = [
   { key: 'exec_summary',  title: 'Executive Summary',                   csf: ['RS.CO-03', 'RS.AN-03'] },
@@ -102,11 +103,11 @@ export const REPORT_SECTIONS = [
   { key: 'legal',         title: 'Legal & Regulatory Deadlines',        csf: ['GV.OC-03', 'RS.CO-02'] },
   { key: 'comms_log',     title: 'Communications & Notification Log', fullOnly: true, csf: ['RS.CO-02', 'RS.CO-03'] },
   { key: 'root_cause',    title: 'Root Cause Analysis',                 csf: ['RS.AN-03'] },
-  { key: 'attack_chain',  title: 'Attack Chain',                        csf: ['RS.AN-03', 'DE.AE-02'] },
+  { key: 'attack_chain',  title: 'Attack Chain', ifPresent: true,       csf: ['RS.AN-03', 'DE.AE-02'] },
   { key: 'attribution',   title: 'Threat Actor Attribution',            csf: ['ID.RA-03', 'DE.AE-07'] },
   { key: 'entities',      title: 'Entities & Attack Path',              csf: ['RS.AN-08', 'ID.AM-05'] },
   { key: 'evidence',      title: 'Evidence & Artifacts', fullOnly: true, csf: ['RS.AN-07'] },
-  { key: 'attachments',   title: 'Figures',                             csf: ['RS.AN-06'] },
+  { key: 'attachments',   title: 'Figures', ifPresent: true,            csf: ['RS.AN-06'] },
   { key: 'playbook',      title: 'Playbook', fullOnly: true,            csf: ['RS.MA-01'] },
   { key: 'closure',       title: 'Closure Checklist Completion',        csf: ['RC.RP-06'] },
   { key: 'lessons',       title: 'Lessons Learned & Recommendations',   csf: ['ID.IM-03', 'ID.IM-04'] },
@@ -588,7 +589,7 @@ function generateProReport(data, opts = {}) {
     sections: sectionToggles = {},
     figures: preparedFigures = null,
   } = opts
-  // Every section is included unless its "Include sections" checkbox is off.
+  // Every section and appendix is included unless its checkbox under "Sections" is off.
   const include = (key) => sectionToggles[key] !== false
 
   const inc = (data && data.incident) || {}
@@ -609,7 +610,8 @@ function generateProReport(data, opts = {}) {
   const decs        = data.decisions        || []
   const ll          = data.lessons_learned
   const ev          = data.evidence_summary || {}
-  const bia         = data.business_impact
+  const evidenceItems = data.evidence_items || []
+  const bia        = data.business_impact
   const costs       = data.costs   || []
   const cl          = data.closure_checklist || []
   const assignments = data.assignments || []
@@ -652,6 +654,18 @@ function generateProReport(data, opts = {}) {
     <td><span style="color:${sevHex(e.criticality)};text-transform:capitalize">${esc(e.criticality || '')}</span></td>
     <td>${e.compromised ? '<span class="status-bad">COMPROMISED</span>' : '<span class="status-ok">Not compromised</span>'}</td>
     <td class="small">${esc(e.description || '—')}</td>
+  </tr>`).join('')
+
+  // Exhibit rows (§ Evidence & Artifacts): a failed hash verification is flagged next to its hash.
+  const evidenceRows = evidenceItems.map(e => `<tr>
+    <td class="mono">${esc(e.identifier || '')}</td>
+    <td>${esc(e.name || '')}</td>
+    <td>${e.kind === 'physical_item' ? 'Physical' : 'Digital'}</td>
+    <td>${e.status === 'verify_failed'
+      ? '<span class="status-bad">Verify failed</span>'
+      : `<span style="text-transform:capitalize">${esc((e.status || '').replace(/_/g, ' '))}</span>`}</td>
+    <td class="mono tiny" style="word-break:break-all">${e.sha256 ? esc(e.sha256)
+      : e.kind === 'physical_item' ? '— (physical item, no hash)' : '—'}</td>
   </tr>`).join('')
 
   // Closure checklist items
@@ -1034,7 +1048,12 @@ function generateProReport(data, opts = {}) {
          <div class="info-card"><div class="label">Active</div><div class="value">${ev.active || 0}</div></div>
          <div class="info-card"><div class="label">Digital Files</div><div class="value">${ev.digital || 0}</div></div>
          <div class="info-card"><div class="label">Physical Items</div><div class="value">${ev.physical || 0}</div></div>
-       </div>`
+       </div>
+       ${evidenceItems.length ? `<h3>Exhibits</h3>
+       <div class="table-wrap"><table>
+         <thead><tr><th>Identifier</th><th>Name</th><th>Type</th><th>Status</th><th>SHA-256</th></tr></thead>
+         <tbody>${evidenceRows}</tbody>
+       </table></div>` : ''}`
     : '<div class="placeholder-box"><strong>[ NO EVIDENCE ITEMS COLLECTED ]</strong></div>' },
 
     { key: 'attachments', body: figuresHtml },
@@ -1105,15 +1124,14 @@ function generateProReport(data, opts = {}) {
   ${s.body}
 </div>`).join('\n')
 
-  // Appendices: always-present first, optional last, so letters never change
-  // and never leave a gap — A = Affected Systems, B = Timeline (optional).
+  // Appendices: each is optional; letters follow print order with no gap (A, B, C …).
   const appendices = [
-    { title: 'Affected Systems', body: affectedHtml },
+    include('appendix_affected') && { title: 'Affected Systems', body: affectedHtml },
     includeTimelineAppendix && { title: 'Incident Timeline', body: `
   <p style="font-size:12px;color:var(--text-muted);margin-bottom:24px">${evs.length} event${evs.length !== 1 ? 's' : ''} · chronological · all phases</p>
   ${_proTimelineAppendix(evs)}` },
     // H2: the append-only case notes, full report only, after the existing appendices.
-    !isExec && { title: 'Case Notes', body: _proCaseNotesAppendix(caseNotes) },
+    !isExec && include('appendix_case_notes') && { title: 'Case Notes', body: _proCaseNotesAppendix(caseNotes) },
   ].filter(Boolean)
 
   const appendicesHtml = appendices.map((a, i) => {
@@ -1459,6 +1477,7 @@ function _skeletonSections() {
     ]},
     { key: 'evidence', items: [
       `Counts: ${ph('evidence_summary (total, active, digital, physical)', 'auto')} ${where('Evidence tab')}`,
+      `Exhibits table, in collection order: ${ph('evidence_items[*] (identifier, name, type, status, SHA-256)', 'auto')} ${where('Evidence tab')} <span class="static">— physical items have no hash; "Verify failed" is flagged</span>`,
     ]},
     { key: 'attachments', conditional: 'Only when at least one file is ticked "Include in report" in Supporting documents — otherwise omitted and the sections below move up one number.', items: [
       `Numbered figures (Figure 1, 2 …), oldest first: image + ${ph('report_files[*].caption (or file name)', 'auto')} ${where('Supporting documents → Include in report')}`,
@@ -1501,21 +1520,26 @@ function _skeletonSections() {
 }
 
 // Mirrors the `appendices` array in generateProReport() — see KEEP IN SYNC above.
-// Fixed letters: always-present appendices first, optional ones last.
+// Letters follow print order with no gap; an unticked appendix has none.
 function _skeletonAppendices(opts) {
-  return [
-    { letter: 'A', title: 'Affected Systems', included: true, items: [
+  const include = (key) => (opts.sections || {})[key] !== false
+  const isExec = (opts.mode || 'full') === 'executive'
+  const list = [
+    { title: 'Affected Systems', included: include('appendix_affected'),
+      hint: 'Untick "Affected Systems" under Sections → Appendices to leave it out.', items: [
       `Table: ${ph('affected_systems[*] (name, type, notes, added by, added at)', 'auto')} ${where('Details → Affected systems')}`,
     ]},
-    { letter: 'B', title: 'Incident Timeline', included: !!opts.includeTimelineAppendix,
-      hint: 'Optional — tick "Appendix B — Timeline" under Advanced options → Appendix.', items: [
+    { title: 'Incident Timeline', included: !!opts.includeTimelineAppendix,
+      hint: 'Optional — tick "Incident Timeline" under Sections → Appendices.', items: [
       `Zig-zag timeline of every event: ${ph('timeline_events[*]', 'auto')} ${where('Timeline tab')}`,
     ]},
-    { letter: opts.includeTimelineAppendix ? 'C' : 'B', title: 'Case Notes', included: (opts.mode || 'full') !== 'executive',
-      hint: 'Full Technical Report only. Lettered after the Timeline appendix when that is included.', items: [
+    { title: 'Case Notes', included: !isExec && include('appendix_case_notes'),
+      hint: 'Full Technical Report only.', items: [
       `Table: ${ph('case_notes[*] (each note\'s current revision: time first written, signature, text, links, SHA-256)', 'auto')} ${where('Case notes')}`,
     ]},
   ]
+  let n = 0
+  return list.map(a => ({ ...a, letter: a.included ? String.fromCharCode(65 + n++) : '' }))
 }
 
 export function generateSkeleton(opts = {}) {
@@ -1540,7 +1564,7 @@ export function generateSkeleton(opts = {}) {
       ${classification ? ` · ${esc(classification)}` : ''}
       ${audience ? ` · for ${esc(audience)}` : ''}
       ${isExec ? `<div style="margin-top:6px">Left out of the executive report: ${omitted.map(esc).join(' · ')}.</div>` : ''}
-      ${unticked.length ? `<div style="margin-top:6px">Unticked under "Include sections": ${unticked.map(esc).join(' · ')}.</div>` : ''}
+      ${unticked.length ? `<div style="margin-top:6px">Unticked under "Sections": ${unticked.map(esc).join(' · ')}.</div>` : ''}
       ${isExec && !includeInternalEvents ? '<div style="margin-top:6px">⚠ Timeline-based parts only use events flagged <code>external_safe</code> (tick "Include internal-only events" to override).</div>' : ''}
     </div>
     <div class="legend">
@@ -1575,13 +1599,13 @@ export function generateSkeleton(opts = {}) {
       <div class="sk-section excluded">
         <span class="excluded-badge">Not included</span>
         <h3>${esc(s.title)}</h3>
-        <p class="sk-cond">Unticked under Advanced options → Include sections.</p>
+        <p class="sk-cond">Unticked under Sections.</p>
       </div>`).join('')
 
   const apps = _skeletonAppendices(opts).map(a => `
       <div class="sk-section${a.included ? '' : ' excluded'}">
         ${a.included ? '' : '<span class="excluded-badge">Not included</span>'}
-        <h3><span class="sk-num">${a.letter}</span>Appendix ${a.letter} — ${esc(a.title)}</h3>
+        <h3>${a.included ? `<span class="sk-num">${a.letter}</span>Appendix ${a.letter} — ` : 'Appendix — '}${esc(a.title)}</h3>
         <p class="sk-csf">NIST CSF 2.0: ${APPENDIX_CSF[a.title].map(esc).join(' · ')}</p>
         ${a.hint ? `<p class="sk-cond">${esc(a.hint)}</p>` : ''}
         <ul>${a.items.map(item => `<li>${item}</li>`).join('')}</ul>

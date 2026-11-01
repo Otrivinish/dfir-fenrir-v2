@@ -2,7 +2,7 @@
 
 All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
-## [0.4.0] — 2026-11-01 — Phishing fast path, Defender IOC export, email URL promotion, entity bulk import (2026-10-15); editable, signed case notes, timeline events pick up registered entities, unsaved edits survive a session timeout, timeline export layouts (2026-10-31); evidence source location, seal binding, photo record, screenshot capture record, container exhibits with manifests, automatic exhibit identifiers, deferring a failing readiness check (2026-11-01) — **breaking for API clients, sealing scripts and package verifiers** (see ⚠ Upgrading below)
+## [0.4.0] — 2026-11-01 — Phishing fast path, Defender IOC export, email URL promotion, entity bulk import (2026-10-15); editable, signed case notes, timeline events pick up registered entities, unsaved edits survive a session timeout, timeline export layouts (2026-10-31); evidence source location, seal binding, photo record, screenshot capture record, container exhibits with manifests, automatic exhibit identifiers, deferring a failing readiness check, report section picker and exhibit list (2026-11-01) — **breaking for API clients, sealing scripts and package verifiers** (see ⚠ Upgrading below)
 
 Everything since `v0.3.9`: the commits after that tag and all work not yet committed.
 
@@ -85,6 +85,14 @@ declared a 1 GiB pax header was OOM-killed under 512 MiB before the fix; such a 
 
 **Rollback:** reverse-apply `ignore/revert/evidence-owner-decisions-2026-11-01/`, then the slice kits S6 → S1 (each
 REVERT.md says how). The schema stays: it is additive and unused by the old code.
+
+### Added — reports: pick sections and appendices, exhibit list with SHA-256
+
+- **Sections panel on Post-Incident › Reports,** always visible (it was **Include sections**, folded inside Advanced options). One checkbox per section and per appendix, all ticked except the **Incident Timeline** appendix; **Select all** / **Clear all**. Each box shows the § number or appendix letter it will print as, and numbers close up as you untick. **Attack Chain** and **Figures** are marked *(if present)*: they print only when there is data, so the page can number one or two ahead of the report.
+- **Appendices Affected Systems and Case Notes are now optional too.** Letters follow print order with no gap (they were fixed: A = Affected Systems), so with Affected Systems unticked the Timeline becomes Appendix A. Show structure mirrors it.
+- **§ Evidence & Artifacts lists every exhibit** (full report): identifier, name, type, status and the full SHA-256; a physical item shows "no hash", a failed hash verification is flagged **Verify failed**.
+- **API (additive):** `GET /api/incidents/{id}/reports/data` gains `evidence_items[]` {identifier, name, kind, status, sha256 (null for a physical item)}, in collection order; no storage path, crypto or custody fields. **MCP:** `fenrir_report_data(view="data")` passes it through (docstring updated).
+- **Report options (renderer):** `sections.appendix_affected` / `sections.appendix_case_notes` (`false` leaves the appendix out; default included). No migration. Test: `backend/tests/test_report_evidence_items.py`.
 
 ### Added — readiness: defer a failing check for good (RD, [design + as built](docs/readiness-defer-slice.md))
 

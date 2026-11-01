@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../../../api/client.js'
 import { useAuth } from '../../../hooks/useAuth.jsx'
-import { REPORT_SECTION_OPTIONS, TEMPLATE_META, generateReport, generateSkeleton, injectReportSha256 } from '../../../lib/reportTemplates.js'
+import { REPORT_SECTIONS, REPORT_SECTION_OPTIONS, TEMPLATE_META, generateReport, generateSkeleton, injectReportSha256 } from '../../../lib/reportTemplates.js'
 
 // ── Lessons & Remediation (report narratives) ───────────────────────────────
 // Six plain-text fields that feed §09 Lessons Learned and §10 Remediation Plan, on the
@@ -218,9 +218,22 @@ function closeWindow(w) {
   if (w && !w.closed) w.close()
 }
 
-// "Include sections": one checkbox per report section (+ the cover stats strip),
-// from the same list the report uses. Everything is included by default.
-const DEFAULT_SECTIONS = Object.fromEntries(REPORT_SECTION_OPTIONS.map(o => [o.key, true]))
+// "Sections": one checkbox per report section (+ the cover stats strip) and per appendix,
+// from the same list the report uses. Everything is included by default except the
+// Timeline appendix, which is opt-in. Appendix letters follow print order (A, B, C …).
+const APPENDIX_OPTIONS = [
+  { key: 'appendix_affected',   title: 'Affected Systems' },
+  { key: 'appendix_timeline',   title: 'Incident Timeline', desc: 'Visual zig-zag spine of every event, for C-tier readers.' },
+  { key: 'appendix_case_notes', title: 'Case Notes', fullOnly: true },
+]
+const DEFAULT_SECTIONS = {
+  ...Object.fromEntries([...REPORT_SECTION_OPTIONS, ...APPENDIX_OPTIONS].map(o => [o.key, true])),
+  appendix_timeline: false,
+}
+const LINK_BTN = {
+  background: 'transparent', border: 'none', padding: 0,
+  fontSize: 11, color: 'var(--accent)', cursor: 'pointer',
+}
 
 const TLP_OPTIONS = ['TLP:CLEAR', 'TLP:GREEN', 'TLP:AMBER', 'TLP:AMBER+STRICT', 'TLP:RED']
 
@@ -239,9 +252,17 @@ export default function Reports({ inc }) {
   const [classification,        setClassification]        = useState('')   // '' = inherit incident TLP
   const [audience,              setAudience]              = useState('')
   const [includeInternalEvents,  setIncludeInternalEvents]  = useState(false)
-  const [includeTimelineAppendix, setIncludeTimelineAppendix] = useState(false)
   const [sections,               setSections]               = useState(DEFAULT_SECTIONS)
   const toggleSection = (key) => setSections(s => ({ ...s, [key]: !s[key] }))
+  const setAllSections = (on) => setSections(Object.fromEntries(Object.keys(DEFAULT_SECTIONS).map(k => [k, on])))
+  const includeTimelineAppendix = !!sections.appendix_timeline
+  // The § number / appendix letter each ticked box will print as (no gaps, like the report).
+  const isExec = mode === 'executive'
+  const printed = (o) => !!sections[o.key] && !(isExec && o.fullOnly)
+  const sectionNum = Object.fromEntries(REPORT_SECTIONS.filter(printed)
+    .map((o, i) => [o.key, `§ ${String(i + 1).padStart(2, '0')}`]))
+  const appendixLetter = Object.fromEntries(APPENDIX_OPTIONS.filter(printed)
+    .map((o, i) => [o.key, String.fromCharCode(65 + i)]))
   const fileRef = useRef(null)
   // E4: figures over the 7 MiB embed cap — the prepared report waits here for Continue / Cancel.
   const [capWarning, setCapWarning] = useState(null)   // { action, overCap, count }
@@ -600,7 +621,80 @@ export default function Reports({ inc }) {
         </div>
       </div>
 
-      {/* Advanced options — classification, audience, visibility filter, section toggles */}
+      {/* Sections — one box per numbered section, the cover stats strip and each appendix */}
+      <div style={{ marginBottom: 'var(--space-4)' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-3)', flexWrap: 'wrap', marginBottom: 'var(--space-2)' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--muted)' }}>
+            Sections
+          </div>
+          <button type="button" style={LINK_BTN} onClick={() => setAllSections(true)}>Select all</button>
+          <button type="button" style={LINK_BTN} onClick={() => setAllSections(false)}>Clear all</button>
+        </div>
+        <div style={{
+          background: 'var(--surface-2)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius)',
+          padding: 'var(--space-3)',
+        }}>
+          <div style={{ columnWidth: 260, columnGap: 'var(--space-4)' }}>
+            {REPORT_SECTION_OPTIONS.map(o => {
+              const execOnlyFull = isExec && o.fullOnly
+              return (
+                <label key={o.key}
+                       title={execOnlyFull ? 'Not part of the executive report'
+                         : o.ifPresent ? 'Printed only when there is data for it; the sections after it then move up one number.' : undefined}
+                       style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '2px 0', breakInside: 'avoid',
+                                cursor: execOnlyFull ? 'default' : 'pointer', opacity: execOnlyFull ? 0.5 : 1 }}>
+                  <input
+                    type="checkbox"
+                    checked={!!sections[o.key] && !execOnlyFull}
+                    disabled={execOnlyFull}
+                    onChange={() => toggleSection(o.key)}
+                  />
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', minWidth: 40, flexShrink: 0 }}>
+                    {o.key === 'kpis' ? 'cover' : (sectionNum[o.key] || '—')}
+                  </span>
+                  <span>
+                    {o.title}
+                    {execOnlyFull && ' (full report only)'}
+                    {o.ifPresent && !execOnlyFull && <span style={{ color: 'var(--dim)' }}> (if present)</span>}
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+
+          <div style={{ marginTop: 'var(--space-3)', paddingTop: 'var(--space-2)', borderTop: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>
+              Appendices
+            </div>
+            <div style={{ columnWidth: 260, columnGap: 'var(--space-4)' }}>
+              {APPENDIX_OPTIONS.map(o => {
+                const execOnlyFull = isExec && o.fullOnly
+                return (
+                  <label key={o.key}
+                         title={execOnlyFull ? 'Not part of the executive report' : o.desc}
+                         style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '2px 0', breakInside: 'avoid',
+                                  cursor: execOnlyFull ? 'default' : 'pointer', opacity: execOnlyFull ? 0.5 : 1 }}>
+                    <input
+                      type="checkbox"
+                      checked={!!sections[o.key] && !execOnlyFull}
+                      disabled={execOnlyFull}
+                      onChange={() => toggleSection(o.key)}
+                    />
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', minWidth: 40, flexShrink: 0 }}>
+                      {appendixLetter[o.key] || '—'}
+                    </span>
+                    <span>{o.title}{execOnlyFull && ' (full report only)'}</span>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Advanced options — classification, audience, visibility filter */}
       <div style={{ marginBottom: 'var(--space-4)' }}>
         <button
           type="button"
@@ -674,67 +768,6 @@ export default function Reports({ inc }) {
                   </span>
                 </label>
               )}
-            </div>
-
-            {/* Right: section toggles */}
-            <div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 'var(--space-2)' }}>
-                Include sections
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px' }}>
-                {REPORT_SECTION_OPTIONS.map(o => {
-                  const execOnlyFull = mode === 'executive' && o.fullOnly
-                  return (
-                    <label key={o.key}
-                           title={execOnlyFull ? 'Not part of the executive report' : undefined}
-                           style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12,
-                                    cursor: execOnlyFull ? 'default' : 'pointer', opacity: execOnlyFull ? 0.5 : 1 }}>
-                      <input
-                        type="checkbox"
-                        checked={!!sections[o.key] && !execOnlyFull}
-                        disabled={execOnlyFull}
-                        onChange={() => toggleSection(o.key)}
-                      />
-                      <span>{o.title}{execOnlyFull ? ' (full report only)' : ''}</span>
-                    </label>
-                  )
-                })}
-              </div>
-              <button
-                type="button"
-                onClick={() => setSections(DEFAULT_SECTIONS)}
-                style={{
-                  marginTop: 'var(--space-2)',
-                  background: 'transparent', border: 'none', padding: 0,
-                  fontSize: 11, color: 'var(--accent)', cursor: 'pointer',
-                }}
-              >
-                Reset to defaults
-              </button>
-
-              <div style={{
-                marginTop: 'var(--space-3)',
-                paddingTop: 'var(--space-2)',
-                borderTop: '1px solid var(--border)',
-              }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>
-                  Appendix
-                </div>
-                <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6, fontSize: 12, cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={includeTimelineAppendix}
-                    onChange={e => setIncludeTimelineAppendix(e.target.checked)}
-                    style={{ marginTop: 2, flexShrink: 0 }}
-                  />
-                  <span>
-                    <div>Appendix B — Timeline</div>
-                    <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 2 }}>
-                      Visual zig-zag spine appended after Appendix A (Affected Systems), for C-tier readers.
-                    </div>
-                  </span>
-                </label>
-              </div>
             </div>
           </div>
         )}

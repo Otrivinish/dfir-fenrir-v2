@@ -2187,7 +2187,7 @@ const CATEGORIES = [
             '**Template** — the look: **Executive** (light, serif), **Tactical** (the original dark FENRIR style), **Forensic** (court-ready, for regulators and law enforcement) or **Print** (black and white).',
             '**Company logo** and **Footer text** — kept in this browser only.',
             '**Classification** (default: the incident\'s TLP) and **Audience**.',
-            '**Include sections** — one box per section; full-report-only sections don\'t apply to the executive report. **Appendix B — Timeline** adds the full timeline.',
+            '**Sections** — one box per section and per appendix, all ticked except the **Incident Timeline** appendix; **Select all** / **Clear all**. Each box shows the number (§ 01 …) or appendix letter it will print as, and the numbers close up when you untick one. Sections marked *(if present)* print only when there is data for them. Full-report-only sections don\'t apply to the executive report.',
           ] },
           { type: 'steps', items: [
             'Click **Preview in new tab** (allow pop-ups for FENRIR) or **Download HTML**. **Show structure** shows the skeleton with placeholders.',
