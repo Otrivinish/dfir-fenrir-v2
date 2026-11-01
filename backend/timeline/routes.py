@@ -237,10 +237,13 @@ async def _username_map(db: AsyncSession, user_ids) -> dict[uuid.UUID, str]:
     return {uid: uname for uid, uname in rows}
 
 
-def _filtered(stmt, *, include_system, entity_id, ioc_id, ir_phase, origin, key, q):
-    """The list's filters, combined with AND — shared by GET …/timeline and GET …/timeline/export."""
+def _filtered(stmt, *, include_system, entity_id, ioc_id, ir_phase, origin, key, q, external_safe_only=False):
+    """The list's filters, combined with AND — shared by GET …/timeline and GET …/timeline/export
+    (external_safe_only: the export only)."""
     if not include_system:
         stmt = stmt.where(TimelineEvent.is_system == False)  # noqa: E712
+    if external_safe_only:
+        stmt = stmt.where(TimelineEvent.external_safe == True)  # noqa: E712
     if entity_id is not None:
         stmt = stmt.where(TimelineEvent.entity_id == entity_id)
     if ioc_id is not None:
@@ -368,9 +371,11 @@ def _zone(name: str):
 
 
 async def _filter_labels(db: AsyncSession, incident_id: uuid.UUID, *, include_system, entity_id, ioc_id, ir_phase,
-                         origin, key, q) -> list[str]:
+                         origin, key, q, external_safe_only=False) -> list[str]:
     """The filters in words, for the export's header."""
     out = []
+    if external_safe_only:
+        out.append("External-safe events only")
     if key is not None:
         out.append("Key events only" if key else "Non-key events only")
     if not include_system:
@@ -420,7 +425,7 @@ async def export_timeline(
             "(the original alternating layout). Ignored for format=csv.")),
     fmt:              Literal["html", "csv"] = Query(
         default="html", alias="format",
-        description="html = one standalone page in `layout` (no script, prints light); csv = the flat 18-column "
+        description="html = one standalone page in `layout` (no script, prints light); csv = the flat 29-column "
                     "file, UTC ISO 8601, formula-escaped."),
     tz:               str = Query(default="UTC", min_length=1, max_length=64, description=(
         "IANA time zone for the times an HTML layout shows (e.g. Europe/Stockholm); each day header shows its "
@@ -429,6 +434,10 @@ async def export_timeline(
         "Print the raw log lines (rail, ledger, zigzag; the CSV's raw_log column, which is empty otherwise). "
         "Off by default: raw lines can hold secrets.")),
     include_system:   bool = Query(default=True, description="false = leave out system events."),
+    external_safe_only: Optional[bool] = Query(default=None, description=(
+        "true = only events flagged external_safe: leaves out the internal-only ones (system records, response "
+        "actions, legal records, SIEM webhook events, PCAP and browser-history events). false = every event. "
+        "Omitted: true for layout=brief (the executive one-pager), false for the other layouts and the CSV.")),
     entity_id:        Optional[uuid.UUID] = Query(default=None, description="Only events linked to this entity."),
     ioc_id:           Optional[uuid.UUID] = Query(default=None, description="Only events linked to this IOC."),
     ir_phase:         Optional[Literal["preparation", "detection_and_analysis", "containment_eradication_recovery",
@@ -441,7 +450,8 @@ async def export_timeline(
 ) -> Response:
     """Export an incident's timeline as a file: one of six standalone HTML layouts, or the flat CSV.
 
-    The events are the ones `GET …/timeline` returns with the same filters (AND, oldest first), not paged:
+    The events are the ones `GET …/timeline` returns with the same filters (AND, oldest first), narrowed to
+    external-safe ones by `external_safe_only` (the default for the Brief), not paged:
     more than 10 000 is 422 `export_too_large` (narrow with the filters or `key=true`). HTML pages carry the
     incident's TLP and severity, who exported and when, the time zone and the filters; every value is escaped
     and the page has no script. Raw logs are left out unless `include_raw_logs=true`. Any user who can read
@@ -450,8 +460,10 @@ async def export_timeline(
     """
     inc = await _get_incident(db, incident_id, user)
     zone = _zone(tz)
+    if external_safe_only is None:
+        external_safe_only = fmt == "html" and layout == "brief"
     filters = dict(include_system=include_system, entity_id=entity_id, ioc_id=ioc_id, ir_phase=ir_phase,
-                   origin=origin, key=key, q=q)
+                   origin=origin, key=key, q=q, external_safe_only=external_safe_only)
     stmt = (select(TimelineEvent).where(TimelineEvent.incident_id == incident_id)
             .order_by(TimelineEvent.event_time, TimelineEvent.created_at, TimelineEvent.id))
     rows = (await db.execute(_filtered(stmt, **filters).limit(EXPORT_MAX_EVENTS + 1))).scalars().all()
@@ -495,8 +507,10 @@ async def export_timeline(
         resource_type="incident", resource_id=str(incident_id), resource_label=inc.ref,
         details={"format": fmt, **({"layout": layout} if fmt == "html" else {}), "events": len(rows), "tz": tz,
                  "include_raw_logs": include_raw_logs,
-                 "filters": {k: str(v) for k, v in filters.items() if v is not None and k != "include_system"}
-                 | ({} if include_system else {"include_system": "false"})},
+                 "filters": {k: str(v) for k, v in filters.items()
+                             if v is not None and k not in ("include_system", "external_safe_only")}
+                 | ({} if include_system else {"include_system": "false"})
+                 | ({"external_safe_only": "true"} if external_safe_only else {})},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()

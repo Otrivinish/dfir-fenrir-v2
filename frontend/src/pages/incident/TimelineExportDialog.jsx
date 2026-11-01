@@ -46,6 +46,8 @@ export default function TimelineExportDialog({ inc, filters, showSystem, events,
   const [format, setFormat] = useState('html')
   const [keyOnly, setKeyOnly] = useState(filters.key === 'true')
   const [raw, setRaw] = useState(false)
+  // TXF: external-safe events only. Each layout sets its default (on for the Brief); the operator can change it.
+  const [safeOnly, setSafeOnly] = useState(false)
   const [tz, setTz] = useState(fenrirTz)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -54,7 +56,8 @@ export default function TimelineExportDialog({ inc, filters, showSystem, events,
 
   const current = LAYOUTS.find(l => l.id === layout)
   const rawApplies = format === 'csv' || current.raw
-  const count = keyOnly ? keyCount : total
+  const safeCount = events.filter(e => e.external_safe).length
+  const count = events.filter(e => (!keyOnly || e.key_event) && (!safeOnly || e.external_safe)).length
   const filtered = Object.keys(filters).some(k => k !== 'key') || !showSystem
 
   useEffect(() => { firstRef.current?.focus() }, [])
@@ -72,6 +75,7 @@ export default function TimelineExportDialog({ inc, filters, showSystem, events,
     if (!showSystem) p.include_system = 'false'
     if (keyOnly) p.key = 'true'
     else if (p.key === 'true') delete p.key
+    p.external_safe_only = safeOnly ? 'true' : 'false'
     if (format === 'html') { p.layout = layout; p.tz = tz }
     if (raw && rawApplies) p.include_raw_logs = 'true'
     return p
@@ -107,7 +111,8 @@ export default function TimelineExportDialog({ inc, filters, showSystem, events,
             <div className="tx-grid">
               {LAYOUTS.map((l, i) => (
                 <button key={l.id} ref={i === 0 ? firstRef : undefined} type="button" className="tx-card"
-                        aria-pressed={layout === l.id} onClick={() => setLayout(l.id)} data-layout={l.id}>
+                        aria-pressed={layout === l.id} onClick={() => { setLayout(l.id); setSafeOnly(l.id === 'brief') }}
+                        data-layout={l.id}>
                   <Thumb id={l.id} />
                   <span className="tx-name">{l.name}</span>
                   <span className="tx-kind">{l.kind}</span>
@@ -116,7 +121,7 @@ export default function TimelineExportDialog({ inc, filters, showSystem, events,
               ))}
             </div>
             {format === 'csv' && (
-              <p className="field-hint">The layout applies to HTML. CSV is always the flat 18-column file.</p>
+              <p className="field-hint">The layout applies to HTML. CSV is always the flat 29-column file.</p>
             )}
           </fieldset>
 
@@ -129,6 +134,15 @@ export default function TimelineExportDialog({ inc, filters, showSystem, events,
                 <span>Key events only</span>
                 <span className="tx-count">{keyCount} of {total}</span>
               </label>
+              <label className="tx-switch">
+                <input type="checkbox" role="switch" checked={safeOnly} onChange={e => setSafeOnly(e.target.checked)}
+                       data-testid="tx-safe" />
+                <span>External-safe events only</span>
+                <span className="tx-count">{safeCount} of {total}</span>
+              </label>
+              <p className="field-hint">
+                Leaves out internal-only events: system records, response actions, legal, PCAP and browser history.
+              </p>
               <label className="tx-switch">
                 <input type="checkbox" role="switch" checked={raw && rawApplies} disabled={!rawApplies}
                        onChange={e => setRaw(e.target.checked)} data-testid="tx-raw" />
@@ -179,7 +193,7 @@ export default function TimelineExportDialog({ inc, filters, showSystem, events,
           )}
           <button type="button" className="btn primary" onClick={() => run(false)} disabled={busy || count === 0}
                   data-testid="tx-export">
-            {busy ? 'Exporting…' : count === 0 ? 'No key events' : `Export ${format.toUpperCase()}`}
+            {busy ? 'Exporting…' : count === 0 ? 'Nothing to export' : `Export ${format.toUpperCase()}`}
           </button>
         </div>
       </div>

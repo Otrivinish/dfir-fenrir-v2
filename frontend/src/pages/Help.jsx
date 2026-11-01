@@ -570,6 +570,7 @@ const CATEGORIES = [
           ] },
           { type: 'section', title: 'Options', items: [
             '**Key events only** — flagged, ATT&CK-tagged or recorded by FENRIR.',
+            '**External-safe events only** — leaves out internal-only events: system records, response actions, legal records, SIEM webhook events, PCAP and browser history (personal data). On by default for **Brief**, off for the other layouts and the CSV. FENRIR sets the flag from where the event came from; you can\'t change it on an event.',
             '**Include raw logs** — off by default. Rail, Ledger, Zig-zag and the CSV only; the others never show them.',
             '**Time zone** — UTC or your Fenrir TZ. Every day header shows its UTC offset. The CSV is always UTC.',
             '**Preview** — shows the page inside the dialog before you save it.',
@@ -580,8 +581,9 @@ const CATEGORIES = [
             'Prints light, with raw logs in full.',
           ] },
           { type: 'section', title: 'CSV', items: [
-            'Flat row-per-event, 18 columns. Use for spreadsheet analysis, BI tools, or pipeline ingestion.',
-            'The last six columns are provenance: exhibit, parser name and version, time basis, the time the device recorded and the clock offset applied. They are empty for events entered by hand.',
+            'Flat row-per-event, 29 columns. Use for spreadsheet analysis, BI tools, or pipeline ingestion.',
+            'Columns 13–18 are provenance: exhibit, parser name and version, time basis, the time the device recorded and the clock offset applied. They are empty for events entered by hand.',
+            'Columns 19–29 hold what the Ledger shows and where the event came from: event id, key event, the linked entity (type, value, compromised), malicious IOCs, who entered it, when it was entered (`created_at`) and last changed (`updated_at`, which a key flag or link also moves), and its place in the import (`import_event_index`, `source_record_id`). The Ledger\'s CSV SHA-256 covers them.',
             'The `raw_log` column stays, empty, unless **Include raw logs** is on.',
             'Spreadsheet-safe: a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `\'`, so Excel or LibreOffice shows it as text instead of running it as a formula. Plain numbers are left as they are.',
           ] },
