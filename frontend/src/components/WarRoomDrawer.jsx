@@ -24,7 +24,7 @@ export default function WarRoomDrawer({ incidentId, incidentRef, isClosed = fals
   const [promoting, setPromoting] = useState(null)   // message being promoted | null
   const [promoted,  setPromoted]  = useState(null)   // { id, target } of the last promotion
   const storageKey = incidentId ? `fenrir.warroom.${incidentId}.open` : null
-  const { user: me } = useAuth()
+  const { user: me, sessionEpoch } = useAuth()   // sessionEpoch (SE): reconnect after signing in again
   const meUsername = me?.username?.toLowerCase() || ''
   const canPromote = locked && !isClosed && !!me && me.role !== 'viewer'
 
@@ -214,7 +214,7 @@ export default function WarRoomDrawer({ incidentId, incidentRef, isClosed = fals
       ws.close()
       wsRef.current = null
     }
-  }, [selectedId])
+  }, [selectedId, sessionEpoch])
 
   // Prepend the next older page (R68). Live WebSocket messages keep appending at the end.
   const loadOlder = useCallback(async () => {

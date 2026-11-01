@@ -1,5 +1,5 @@
-/* Readiness (E1): pages/Readiness.jsx, components/ReadinessBanner.jsx and the blockers callout in
-   IncidentCreateModal.jsx. Tokens only. State is a glyph + a word: the glyph and the left border
+/* Readiness (E1): pages/Readiness.jsx, components/ReadinessBanner.jsx, ReadinessDeferDialog.jsx (RD) and the
+   blockers callout in IncidentCreateModal.jsx. Tokens only. State is a glyph + a word: the glyph and the left border
    carry the colour, every text stays in --text / --muted (>= 4.5:1 on --surface in all themes;
    --muted is never placed on a tint). */
 
@@ -61,6 +61,16 @@
 .rd-fix a  { color: var(--text); text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
 .rd-fix-admin { color: var(--muted); }
 
+/* RD: a deferred check keeps its status colour on the glyph; a dashed left border marks the decision. */
+.rd-item.rd-is-deferred { border-left-style: dashed; }
+.rd-deferral {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2);
+  margin-top: var(--space-1); font-size: 12px; color: var(--text); overflow-wrap: anywhere;
+}
+.rd-deferral-mark { font-family: var(--font-mono); color: var(--muted); }
+.rd-defer-btn { margin-top: var(--space-1); }
+.rd-count-deferred .rd-glyph { color: var(--muted); }
+
 @container (max-width: 720px) {
   .rd-cols { display: none; }
   .rd-item { grid-template-columns: auto minmax(0, 1fr) auto; }
@@ -89,6 +99,12 @@
 .rd-banner-mark { font-family: var(--font-mono); font-weight: 700; color: var(--crit); }
 .rd-banner-text { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
 .rd-banner-link { color: var(--text); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
+.rd-banner .rd-banner-defer { color: var(--text); font-size: 13px; white-space: nowrap; }
+
+/* RD Defer dialog */
+.rd-defer-intro { margin: 0; font-size: 13px; color: var(--text); }
+.rd-defer-checks { border: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.rd-defer-check { display: flex; align-items: baseline; gap: var(--space-2); font-size: 13px; color: var(--text); cursor: pointer; }
 
 .rd-callout { padding: var(--space-2) var(--space-3); font-size: 13px; }
 .rd-callout-head { display: flex; align-items: baseline; gap: var(--space-2); font-weight: 700; }

@@ -90,7 +90,8 @@ class Manifest:
                                     "-rawin -in MANIFEST.json -sigfile MANIFEST.json.sig`.",
                 "trusted_timestamp": "MANIFEST.tst (when present) = RFC-3161 Time-Stamp Token over "
                                     "sha256(MANIFEST.json) from an external TSA. Verify independently of "
-                                    "this platform's clock: `openssl ts -verify -data MANIFEST.json -in MANIFEST.tst`.",
+                                    "this platform's clock: `openssl ts -verify -token_in -data MANIFEST.json "
+                                    "-in MANIFEST.tst -CAfile <TSA CA certificate>`.",
             },
         }
 

@@ -1,5 +1,7 @@
-import { useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
+import { api } from '../api/client.js'
 import { useDialogFocus } from '../hooks/useDialogFocus.js'
+import { formatLocal } from '../lib/datetime.js'
 import { DraftBadge } from './ExhibitPicker.jsx'
 
 // H4 — shared by Supporting documents (incident Files) and the entity drawer's attachments: the
@@ -45,6 +47,7 @@ const REF_LABELS = {
   generated_report: 'a saved report shows it',
   case_note: 'a case note cites it',
   exhibit: 'it is registered as an exhibit',
+  link: 'it is linked to an exhibit, timeline event or IOC (unlink it in Details first)',
   entity: 'it is attached to an entity (unlink it first)',
 }
 
@@ -129,6 +132,59 @@ export function FileReasonModal({ file, rename = false, onConfirm, onClose }) {
   )
 }
 
+// S5: what a new draft gets from the file's capture record (the server's mapping, GET …/exhibit-prefill).
+const PREFILL_ROWS = [
+  ['acquired_at', 'Acquired at', v => formatLocal(v)],
+  ['acquisition_tool', 'Acquisition tool'],
+  ['acquisition_tool_version', 'Tool version'],
+  ['source_system', 'Source system', null, true],
+  ['source_path', 'Source path', null, true],
+  ['source_path_style', 'Path style'],
+  ['screen_state', 'Screen state'],
+  ['acquisition_hash_target', 'Target hash (SHA-256)', null, true],
+  ['upload_hash_check', 'Upload hash check'],
+]
+
+function PrefillPreview({ file }) {
+  const [prefill, setPrefill] = useState(null)
+  useEffect(() => {
+    let cancelled = false
+    api.fileExhibitPrefill(file.incident_id, file.id)
+      .then(p => { if (!cancelled) setPrefill(p) })
+      .catch(() => { if (!cancelled) setPrefill(false) })
+    return () => { cancelled = true }
+  }, [file.incident_id, file.id])
+  if (prefill === null) return <div style={{ color: 'var(--muted)', fontSize: 13 }}>Reading the capture record…</div>
+  if (prefill === false) return null
+  const rows = PREFILL_ROWS.filter(([k]) => prefill[k] !== null && prefill[k] !== undefined)
+  return (
+    <div data-testid="file-register-prefill">
+      {rows.length === 0 ? (
+        <div style={{ color: 'var(--muted)', fontSize: 13 }}>No capture record: the draft’s acquisition record starts empty.</div>
+      ) : (
+        <>
+          <div style={{ fontSize: 13, color: 'var(--text)', marginBottom: 'var(--space-1)' }}>Pre-filled on the new draft from the capture record:</div>
+          <dl className="kv">
+            {rows.map(([k, label, fmt, mono]) => (
+              <Fragment key={k}>
+                <dt>{label}</dt>
+                <dd style={mono ? { fontFamily: 'var(--font-mono)', fontSize: 12, wordBreak: 'break-all' } : { whiteSpace: 'pre-wrap' }}>
+                  {fmt ? fmt(prefill[k]) : prefill[k]}
+                </dd>
+              </Fragment>
+            ))}
+          </dl>
+        </>
+      )}
+      {(prefill.left_empty || []).map(s => (
+        <div key={s.field} className="field-hint" role="note" style={{ color: 'var(--med)' }}>
+          {s.field.replace('_', ' ')} left empty: {s.detail}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // "Register as exhibit" confirmation: what it does, then the result (new draft / linked / already).
 export function RegisterExhibitModal({ file, onConfirm, onClose }) {
   const [busy, setBusy]     = useState(false)
@@ -167,9 +223,10 @@ export function RegisterExhibitModal({ file, onConfirm, onClose }) {
             <p style={{ margin: 0, color: 'var(--text)', fontSize: 14, lineHeight: 1.6, wordBreak: 'break-all' }}>
               <b>{file.original_name}</b> is copied into the evidence store as an unsealed draft exhibit, collected by you
               and in your custody, after its SHA-256 is checked against the one recorded at upload. If the incident
-              already holds an exhibit with the same SHA-256, that one is linked instead. The file stays here as a
-              supporting document.
+              already holds an exhibit with the same SHA-256, that one is linked instead (nothing is pre-filled). The
+              file stays here as a supporting document.
             </p>
+            {!result && <PrefillPreview file={file} />}
             {done && (
               <div className="alert info" role="status" data-testid="file-register-result">
                 <span className="alert-icon">✓</span><span style={{ color: 'var(--text)' }}>{done}</span>

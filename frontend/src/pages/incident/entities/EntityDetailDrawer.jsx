@@ -4,6 +4,7 @@ import { api } from '../../../api/client.js'
 import { formatLocal } from '../../../lib/datetime.js'
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 import LinkedCaseNotes from '../../../components/LinkedCaseNotes.jsx'
+import EntityLinkPrompt from '../../../components/EntityLinkPrompt.jsx'
 import { ExhibitPill, FileHash, FileReasonModal, RegisterExhibitModal, fileRefsMessage } from '../../../components/SupportingFile.jsx'
 
 const ENTITY_TYPES = [
@@ -86,6 +87,7 @@ export default function EntityDetailDrawer({
   // the IOCs linked to it and its containment actions (C1). The asset log below stays.
   const [related, setRelated]           = useState(null)   // null = loading
   const [relatedError, setRelatedError] = useState(null)
+  const [relatedSeq, setRelatedSeq]     = useState(0)      // TE: bumped after a bulk link, to re-read
   useEffect(() => {
     let live = true
     setRelated(null); setRelatedError(null)
@@ -96,7 +98,7 @@ export default function EntityDetailDrawer({
     ]).then(([tl, iocs, acts]) => { if (live) setRelated({ tl, iocs, acts }) })
       .catch(e => { if (live) setRelatedError(e.message || 'Could not load the linked records') })
     return () => { live = false }
-  }, [incidentId, entity.id])
+  }, [incidentId, entity.id, relatedSeq])
   const count = (page) => page ? ` (${page.items.length}${page.next_cursor ? '+' : ''})` : ''
   const relatedBody = (page, empty, render) =>
     !page ? <div className="entity-drawer-empty">{relatedError || 'Loading…'}</div>
@@ -539,6 +541,11 @@ export default function EntityDetailDrawer({
                 <span>{ev.description}</span>
               </li>
             ))}
+            {/* TE: events whose host names this entity but aren't linked yet — linked on a click only */}
+            {!isClosed && (
+              <EntityLinkPrompt key={entity.id} incidentId={incidentId} entity={entity}
+                                onLinked={() => setRelatedSeq(n => n + 1)} />
+            )}
             <Link className="entity-drawer-more" to={`/incidents/${incidentId}/timeline?entity_id=${entity.id}`}>Open in Timeline →</Link>
           </div>
 

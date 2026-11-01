@@ -140,6 +140,12 @@ class Settings(BaseSettings):
     # every reader streams with bounded memory (export, LE, downloads, verify). The deprecated
     # multipart routes are capped at 512 MiB (evidence/routes.py LEGACY_MULTIPART_MAX_BYTES; G-fix R80).
     evidence_max_upload_bytes: int = 10 * 1024 * 1024 * 1024   # 10 GiB
+    # S6 (EG-4) — the container-manifest builder's caps (evidence/manifest_index.py). Hitting one fails the
+    # manifest (status failed + the reason); the exhibit itself is never refused. Uncompressed bytes = every byte
+    # decompressed while hashing members and reading tool listings (the zip-bomb guard).
+    evidence_manifest_max_entries: int = 1_000_000
+    evidence_manifest_max_uncompressed_bytes: int = 64 * 1024 * 1024 * 1024   # 64 GiB
+    evidence_manifest_max_path_chars: int = 32_768
 
     # RFC 3161 trusted timestamping (GS-4) — optional + best-effort. When unset,
     # seals/manifests/exports fall back to the server clock (recorded as such) and

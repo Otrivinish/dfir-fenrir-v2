@@ -321,6 +321,8 @@ function TimelinePanel({ result, incidentId, isClosed, onPromoted }) {
   const cands = result.timeline_candidates
   const [picked, setPicked] = useState(new Set())
   const [busy, setBusy]     = useState(false)
+  // TE (D3): link the events to the entity their host (the source address) names — on by default.
+  const [linkEntities, setLinkEntities] = useState(true)
   const [msg, setMsg]       = useState(null)
   useEffect(() => { setPicked(new Set()); setMsg(null) }, [result.result_id])
   if (cands === null || cands === undefined) {
@@ -337,8 +339,9 @@ function TimelinePanel({ result, incidentId, isClosed, onPromoted }) {
   const promote = async () => {
     setBusy(true); setMsg(null)
     try {
-      const r = await api.promotePcap(incidentId, result.result_id, { indices: [...picked] })
+      const r = await api.promotePcap(incidentId, result.result_id, { indices: [...picked], link_entities: linkEntities })
       setMsg({ ok: true, text: `Added ${r.created} event${r.created === 1 ? '' : 's'} to the Timeline.`
+        + (r.entities_linked ? ` ${r.entities_linked} linked to registered entities by host.` : '')
         + (r.already_promoted.length ? ` ${r.already_promoted.length} already there.` : '')
         + (r.skipped_untimestamped.length ? ` ${r.skipped_untimestamped.length} without a time not added.` : '') })
       setPicked(new Set())
@@ -358,6 +361,11 @@ function TimelinePanel({ result, incidentId, isClosed, onPromoted }) {
                 title={isClosed ? 'Closed incidents are read-only' : 'FENRIR copies the chosen candidates onto the Timeline'}>
           {busy ? 'Adding…' : `Add ${picked.size} to Timeline`}
         </button>
+        <label className="tl-key-toggle" title="Each event whose host (the source address) names a registered entity is linked to it (an annotation; the imported host stays as recorded)">
+          <input type="checkbox" checked={linkEntities} onChange={(e) => setLinkEntities(e.target.checked)}
+                 disabled={busy || isClosed} data-testid="pcap-link-entities" />
+          Link to entities by host
+        </label>
       </div>
       {msg && (
         <div className={`alert ${msg.ok ? 'info' : 'error'}`} role="alert" data-testid="pcap-promote-result" style={{ marginBottom: 'var(--space-2)' }}>

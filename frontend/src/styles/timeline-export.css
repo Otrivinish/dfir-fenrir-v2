@@ -1,0 +1,122 @@
+/* TX — Timeline → Export dialog (pages/incident/TimelineExportDialog.jsx). Tokens only. */
+
+.tx-dialog { max-width: 1040px; }
+.tx-sub { margin-top: 2px; font-size: 12px; color: var(--muted); }
+
+.tx-fs { border: 0; padding: 0; margin: 0 0 var(--space-4); min-width: 0; }
+.tx-fs legend {
+  margin-bottom: var(--space-2);
+  font-family: var(--font-heading);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: var(--heading-letter-spacing);
+  text-transform: var(--heading-transform);
+  color: var(--muted);
+}
+
+.tx-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--space-3); }
+@media (max-width: 980px) { .tx-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .tx-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.tx-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--space-2);
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.tx-card:hover:not(:disabled) { border-color: var(--border-strong); }
+.tx-card[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.tx-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tx-card:disabled { opacity: 0.55; cursor: not-allowed; }
+.tx-name { margin-top: var(--space-2); font-size: 13px; font-weight: 700; }
+.tx-kind { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
+.tx-desc { font-size: 11px; line-height: 1.35; color: var(--muted); }
+
+.tx-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.4fr); gap: var(--space-4); }
+@media (max-width: 760px) { .tx-row { grid-template-columns: minmax(0, 1fr); } }
+.tx-switch,
+.tx-radio { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); font-size: 13px; cursor: pointer; }
+.tx-switch:has(input:disabled) { opacity: 0.55; cursor: not-allowed; }
+.tx-count { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+.tx-fs:disabled .tx-radio { opacity: 0.55; cursor: not-allowed; }
+
+.tx-preview { max-width: min(1500px, 96vw); height: 92vh; }
+.tx-frame { flex: 1; min-height: 0; width: 100%; border: 0; background: var(--bg); }
+
+/* Layout sketches: a few absolutely placed spans per layout. */
+.tx-thumb {
+  position: relative;
+  display: block;
+  height: 72px;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.tx-thumb span { position: absolute; display: block; border-radius: 1px; background: var(--border-strong); }
+.tx-rail span + span, .tx-horizon span + span, .tx-zigzag span + span,
+.tx-swimlanes span:nth-child(n+3) {
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-left: 2px solid var(--accent);
+}
+
+.tx-rail span:nth-child(1) { left: 16px; top: 6px; bottom: 6px; width: 2px; }
+.tx-rail span:nth-child(n+2) { left: 26px; right: 8px; height: 14px; }
+.tx-rail span:nth-child(2) { top: 8px; }
+.tx-rail span:nth-child(3) { top: 29px; border-left-color: var(--high); }
+.tx-rail span:nth-child(4) { top: 50px; border-left-color: var(--crit); }
+
+.tx-horizon span:nth-child(1) { left: 6px; right: 6px; top: 35px; height: 2px; }
+.tx-horizon span:nth-child(n+2) { width: 24%; height: 14px; }
+.tx-horizon span:nth-child(2) { left: 6%; top: 12px; }
+.tx-horizon span:nth-child(3) { left: 22%; top: 44px; border-left-color: var(--high); }
+.tx-horizon span:nth-child(4) { left: 40%; top: 12px; border-left-color: var(--crit); }
+.tx-horizon span:nth-child(5) { left: 56%; top: 44px; border-left-color: var(--med); }
+.tx-horizon span:nth-child(6) { left: 72%; top: 12px; }
+
+.tx-swimlanes span:nth-child(1),
+.tx-swimlanes span:nth-child(2) { left: 0; right: 0; height: 1px; }
+.tx-swimlanes span:nth-child(1) { top: 24px; }
+.tx-swimlanes span:nth-child(2) { top: 48px; }
+.tx-swimlanes span:nth-child(n+3) { width: 18%; height: 11px; }
+.tx-swimlanes span:nth-child(3) { left: 8%; top: 6px; border-left-color: var(--crit); }
+.tx-swimlanes span:nth-child(4) { left: 30%; top: 30px; }
+.tx-swimlanes span:nth-child(5) { left: 52%; top: 30px; border-left-color: var(--high); }
+.tx-swimlanes span:nth-child(6) { left: 70%; top: 54px; border-left-color: var(--med); }
+.tx-swimlanes span:nth-child(7) { left: 84%; top: 6px; }
+
+.tx-ledger span { left: 6px; right: 6px; height: 5px; }
+.tx-ledger span:nth-child(1) { top: 8px; background: var(--accent); }
+.tx-ledger span:nth-child(2) { top: 20px; }
+.tx-ledger span:nth-child(3) { top: 30px; }
+.tx-ledger span:nth-child(4) { top: 40px; }
+.tx-ledger span:nth-child(5) { top: 50px; }
+.tx-ledger span:nth-child(6) { top: 60px; }
+
+.tx-brief span:nth-child(1) { left: 6px; width: 50%; top: 6px; height: 6px; background: var(--text); }
+.tx-brief span:nth-child(2),
+.tx-brief span:nth-child(3),
+.tx-brief span:nth-child(4) { left: 6px; width: 48%; height: 4px; }
+.tx-brief span:nth-child(2) { top: 20px; }
+.tx-brief span:nth-child(3) { top: 30px; }
+.tx-brief span:nth-child(4) { top: 40px; }
+.tx-brief span:nth-child(5),
+.tx-brief span:nth-child(6) { top: 18px; width: 17%; height: 26px; background: var(--surface-2); border: 1px solid var(--border-strong); }
+.tx-brief span:nth-child(5) { left: 60%; }
+.tx-brief span:nth-child(6) { left: 80%; }
+.tx-brief span:nth-child(7) { left: 6px; right: 6px; top: 54px; height: 10px; background: var(--accent-soft); border: 1px solid var(--accent); }
+
+.tx-zigzag span:nth-child(1) { left: calc(50% - 1px); top: 6px; bottom: 6px; width: 2px; }
+.tx-zigzag span:nth-child(n+2) { width: 38%; height: 14px; }
+.tx-zigzag span:nth-child(2) { left: 8%; top: 8px; }
+.tx-zigzag span:nth-child(3) { right: 8%; top: 29px; border-left-color: var(--high); }
+.tx-zigzag span:nth-child(4) { left: 8%; top: 50px; border-left-color: var(--crit); }

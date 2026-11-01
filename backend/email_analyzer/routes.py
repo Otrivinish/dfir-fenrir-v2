@@ -50,10 +50,12 @@ from artifacts import store as artifact_store
 from evidence.crypto import EvidenceCryptoError, awrite_encrypted
 from evidence.hashing import ahashes_of, asha256_of
 from evidence.streaming import require_free_space
+from evidence import identifier as exhibit_ids
 from evidence.register import (EXAMINED_MASTER, EXAMINED_MATCH, EXAMINED_UPLOAD, UPLOAD_ID_DOC, ExhibitInput,
                                examine_audit, exhibit_brief, link_error_extra, read_exhibit_for_analysis,
                                recheck_exhibit, register_or_link_upload, upload_link_for)
 from evidence.routes import _check_acquired_at
+from entities.match import load_index, match
 from incidents.access import get_accessible_incident, require_incident_person
 from models import Artifact, EmailAnalysis, Evidence, IOC, RespondAction, User, utcnow
 from respond.routes import create_action
@@ -463,7 +465,7 @@ async def analyze_email(
     …/uploads purpose=email, PUT the chunks, POST …/complete), then POST
     …/email/from-evidence/{evidence_id}. Pasted source (`raw`) stays here.
 
-    - a new **unsealed draft exhibit** (identifier `EMAIL-…`, the caller as collector and custodian,
+    - a new **unsealed draft exhibit** (identifier from the naming convention, the caller as collector and custodian,
       `acquired_at` as supplied or unknown, lawful basis pending), hashed (SHA-256 / SHA-1 / MD5),
       encrypted at rest and audited `evidence_collect` (method email_upload / email_paste) — complete
       and seal it later in Evidence; or
@@ -499,8 +501,7 @@ async def analyze_email(
     x = await register_or_link_upload(
         db, incident_id=incident_id, user=user, data=data, filename=src_name,
         mime_type="application/vnd.ms-outlook" if is_msg(data) else "message/rfc822",
-        prefix="EMAIL", name=("Email message (pasted source)" if method == "email_paste"
-                              else f"Email message: {src_name}"),
+        name=("Email message (pasted source)" if method == "email_paste" else f"Email message: {src_name}"),
         method=method, analyser_label="Email analyser", acquired_at=acquired_at, ip=ip)
     await db.commit()                     # registered first: the exhibit stands even if the analysis fails
     return await _analysis_out(db, await _analyse_one(db, inc, x, src_name, user, request))
@@ -641,7 +642,7 @@ async def analyze_email_bulk(
         x = await register_or_link_upload(
             db, incident_id=incident_id, user=user, data=data, filename=src_name,
             mime_type="application/vnd.ms-outlook" if is_msg(data) else "message/rfc822",
-            prefix="EMAIL", name=f"Email message: {src_name}", method="email_upload",
+            name=f"Email message: {src_name}", method="email_upload",
             analyser_label="Email analyser (bulk)", acquired_at=acquired_at, ip=ip, extra=extra)
         await db.commit()
         registered.append((src_name, x))
@@ -1176,6 +1177,9 @@ async def extract_attachment(
 async def import_hops(
     incident_id: uuid.UUID, aid: uuid.UUID, request: Request,
     user: User = Depends(require_analyst), db: AsyncSession = Depends(get_db),
+    link_entities: bool = Query(default=True, description=(
+        "TE: link each hop event to the entity its relay host (`by`) names (the rule of "
+        "TimelineEventOut.entity_match).")),
 ) -> EmailAnalysisOut:
     """Import the email's Received (relay hop) chain as timeline events.
 
@@ -1186,7 +1190,8 @@ async def import_hops(
     run record (G3) each event records the exhibit, the analysis (`email_analysis_id`, its run) and a
     `time_basis` (explicit; assumed_tz for a zone-less date, read as UTC), so its facts are immutable;
     no clock offset is applied (relay
-    times come from the mail servers). Requires the analyst role and an open incident. Returns the
+    times come from the mail servers). With `link_entities` (the default) each event is linked to the
+    entity its relay host names. Requires the analyst role and an open incident. Returns the
     email analysis; its `hop_import` counts importable hops and those already on the Timeline.
     """
     from models import TimelineEvent
@@ -1199,8 +1204,10 @@ async def import_hops(
     hops = [dict(h) for h in headers.get("hops") or []]
     live = await _live_hop_events(db, incident_id, hops)
     run = bool(analysis.input_sha256 and analysis.evidence_id)
+    index = await load_index(db, incident_id, [h.get("by") for h in hops]) if link_entities else {}
     n = 0
     already = 0
+    linked = 0
     for h in hops:
         et = _hop_time(h)
         if et is None:
@@ -1223,21 +1230,23 @@ async def import_hops(
                     "time_basis": "explicit" if et.tzinfo is not None else "assumed_tz"}
             if et.tzinfo is None:
                 et = et.replace(tzinfo=timezone.utc)
+        ent = match(index, h.get("by"))
         db.add(TimelineEvent(
             id=ev_id, incident_id=incident_id, event_time=et, source="email",
-            event_type="Mail relay hop", hostname=h.get("by"),
+            event_type="Mail relay hop", hostname=h.get("by"), entity_id=ent.id if ent else None,
             description=desc, raw_log=str(raw)[:4000], ir_phase="detection_and_analysis",
             origin="forensic_import", external_safe=False, created_by_id=user.id, **prov,
         ))
         h["timeline_event_id"] = str(ev_id)
         n += 1
+        linked += ent is not None
     if n:
         # New list of new dicts, reassigned: the JSON column change is detected.
         analysis.headers = {**headers, "hops": hops}
     await write_audit(db, "email_import_hops", user_id=user.id, username=user.username,
                       resource_type="email_analysis", resource_id=str(aid), outcome="success",
                       details={"incident_id": str(incident_id), "events": n,
-                               "already_imported": already,
+                               "already_imported": already, "entities_linked": linked,
                                "evidence_id": str(analysis.evidence_id) if run else None},
                       ip_address=request.client.host if request.client else None)
     await db.commit()
@@ -1267,7 +1276,7 @@ async def mint_evidence(
     evidence to the analysis. Fails if already minted or the source message is unavailable.
     Requires the analyst role and an open incident. Returns the email analysis.
     """
-    await _incident(db, incident_id, user)
+    inc = await _incident(db, incident_id, user)
     analysis = await _get_analysis(db, incident_id, aid)
     if analysis.evidence_id:
         raise ApiError(status.HTTP_409_CONFLICT, "already_minted", "Already minted as evidence")
@@ -1296,15 +1305,16 @@ async def mint_evidence(
     ev_id = uuid.uuid4()
     rel = f"emails/{ev_id}.eml.enc"
     stored = await awrite_encrypted(raw, rel)
-    short = str(aid)[:8]
+    at = utcnow()                            # EI (D4): the identifier follows the naming convention
+    identifier, template = await exhibit_ids.assign(db, incident_id, inc.ref, at)
     ev = Evidence(
         id=ev_id, incident_id=incident_id, kind="digital_file", status="active",
         name=f"Email: {(analysis.subject or '(no subject)')[:200]}",
-        identifier=f"EMAIL-{short}",
+        identifier=identifier,
         original_filename="message.eml", storage_path=rel, nonce_hex=stored.nonce_hex,
         file_size_bytes=len(raw), mime_type="message/rfc822",
         sha256=sha256, sha1=sha1, md5=md5,
-        current_custodian_id=user.id, collected_by_id=user.id, collected_at=utcnow(),
+        current_custodian_id=user.id, collected_by_id=user.id, collected_at=at,
         acquired_at=src.uploaded_at, upload_hash_check="not_checked",
     )
     db.add(ev)
@@ -1314,7 +1324,8 @@ async def mint_evidence(
                       resource_type="evidence", resource_id=str(ev_id), outcome="success",
                       details={"incident_id": str(incident_id), "method": "email_mint",
                                "email_analysis_id": str(aid), "artifact_id": str(src.id),
-                               "kind": "digital_file", "identifier": ev.identifier, "name": ev.name,
+                               "kind": "digital_file", "identifier": ev.identifier,
+                               "identifier_assigned": "auto", "identifier_template": template, "name": ev.name,
                                "sha256": ev.sha256, "file_size_bytes": ev.file_size_bytes,
                                "acquired_at": ev.acquired_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
                                                if ev.acquired_at else None,

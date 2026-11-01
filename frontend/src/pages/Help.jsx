@@ -297,7 +297,7 @@ const CATEGORIES = [
       {
         id: 'gs-readiness',
         title: 'Readiness',
-        tags: ['readiness', 'preparation', 'prepare', 'blocker', 'csf', 'on-call', 'backup', 'totp'],
+        tags: ['readiness', 'preparation', 'prepare', 'blocker', 'csf', 'on-call', 'backup', 'totp', 'defer', 'deferred'],
         body: [
           { type: 'p', text: 'Readiness checks whether the organisation is prepared for the next incident. Open it from **Prepare → Readiness** (admins and analysts).' },
           { type: 'section', title: 'What it shows', items: [
@@ -307,9 +307,16 @@ const CATEGORIES = [
             '**Unknown** means Fenrir could not check it (for example, the backup directory is not mounted). It never counts as a pass.',
           ] },
           { type: 'section', title: 'Where else it appears', items: [
-            'The **Dashboard** shows a banner while any blocker fails.',
-            '**+ New incident** lists the failing blockers. It never stops you creating the incident.',
+            'The **Dashboard** shows a banner while any blocker fails that is not deferred.',
+            '**+ New incident** lists the failing blockers that are not deferred. It never stops you creating the incident.',
             'MCP: `fenrir_dashboard(view="readiness")` · API: `GET /api/readiness`.',
+          ] },
+          { type: 'section', title: 'Deferring a check (admins)', items: [
+            '**When:** the organisation has decided to live with a failing check, for example no on-call rota in a two-person team.',
+            '**How:** **Defer…** on the Dashboard banner (it lists the failing blockers, all ticked) or on the check here. A reason is optional.',
+            '**Effect:** for everyone, the check leaves the Dashboard banner and the **+ New incident** list until an admin undoes it. With every failing blocker deferred, the banner disappears. A different blocker that starts failing later still shows.',
+            '**It stays visible here:** the check keeps running and keeps its real status, marked **⏸ Deferred by … on …** with **Undo** for admins.',
+            'Each deferral and undo is audit-logged. MCP: `fenrir_api` `POST /api/readiness/deferrals` · `DELETE /api/readiness/deferrals/{check_id}`.',
           ] },
           { type: 'note', text: 'A pass means the record exists, not that it works. Readiness does not check restore tests, tabletop exercises or whether a test email arrives.' },
         ],
@@ -482,6 +489,14 @@ const CATEGORIES = [
             '**Linked IOCs** — pick IOCs of this incident to link; **×** unlinks. The links are saved with the event (each one audited) and also show on the IOC\'s row in **IOCs**.',
             '**★ Key event** — flag the moments that tell the story (initial access, first C2, lateral movement, detection, containment). An event is also *key* when it has an ATT&CK tactic or technique, or when FENRIR recorded it (milestones, triage, decisions, response actions, closure). Key events show on the Situation board\'s **Key timeline** and come first in **Insert key timeline events** ([[pi-lessons]]). API: `is_key` on the event, `?key=true` on the list.',
             '**Host / entity** — type or pick the host (or account, service…). When it matches an entity in **Scope** (case doesn\'t matter), click **Link** to link the event to it; a typed name never links on its own. **Unlink** removes the link and keeps the hostname. A host not in scope yet: tick **Add … to Entities as a host**; it is added once the event is saved. The hostname text is saved as well.',
+          ] },
+          { type: 'section', title: 'Linking events to entities', items: [
+            'An event belongs to an entity only when it is **linked**. The entity filter, the entity\'s **Timeline events** in **Scope** and reports use the link, not the host text.',
+            '**Host · DC01** chip — the event is linked to that entity (red with ⚠ when the entity is compromised).',
+            '**≈ Host DC01 · not linked** — the host names a registered entity, but the event isn\'t linked to it. Expand the event and click **Link this event**, or **Link them** to link every unlinked event that names it.',
+            'A host matches an entity when the values are equal, ignoring case and surrounding spaces. Any entity type matches (cloud logs put the account in the host field). When two entities tie, the exact-case value wins, then the host; a tie that remains matches nothing.',
+            'Linking never changes the host as recorded, and it works on imported events too (the link is an annotation). Every link is audit-logged.',
+            'After you add an entity (in **Scope**, from this form, or as an affected system on **Details**), FENRIR offers to link the events that already name it.',
             '**Source · Raw log** — supporting evidence.',
           ] },
           { type: 'section', title: 'Imported events', items: [
@@ -490,6 +505,7 @@ const CATEGORIES = [
             '**offset-corrected (+120 s)** — the exhibit records the device clock as 120 s ahead, so the time shown is the recorded time minus 120 s. Hover the badge, or expand the event, for the time the device recorded.',
             'Their facts — time, host, source, type, description, raw log — are locked as imported. **Edit** opens **Annotate imported event**: set the **IR phase**, **ATT&CK**, the **Entity link**, linked IOCs and the key-event flag.',
             'The same lock applies to events added from **Network capture**, **Browser history** and an email\u2019s **Import hops**, and to any event recorded from an exhibit or with a time basis (for example a YARA match). The expanded event says where it came from.',
+            '**Link to entities by host** — on by default beside **Add N to Timeline** (Logs & triage, Network capture), **Commit selected** (Vendor reports) and **Import hops**: each new event whose host names a registered entity is linked to it. Untick it to import without links. Browser history events carry no host.',
           ] },
           { type: 'note', text: 'Every edit is audit-logged with the value before and after.' },
         ],
@@ -535,20 +551,42 @@ const CATEGORIES = [
       {
         id: 'tl-export',
         title: 'Export Timeline',
-        tags: ['export', 'csv', 'html', 'report', 'zig-zag', 'spreadsheet', 'formula', 'excel', 'apostrophe'],
+        tags: ['export', 'csv', 'html', 'report', 'layout', 'rail', 'horizon', 'swimlanes', 'ledger', 'brief', 'zig-zag', 'print', 'spreadsheet', 'formula', 'excel', 'apostrophe', 'raw log'],
         body: [
-          { type: 'p', text: 'Two exports in the **Timeline** toolbar. Both hold the events the current filters show ([[iw-timeline]]).' },
+          { type: 'p', text: '**⇩ Export** in the **Timeline** toolbar saves the timeline as a standalone HTML page in one of six layouts, or as a CSV. The export holds the events the current filters show ([[iw-timeline]]).' },
+          { type: 'table', headers: ['Layout', 'Shows', 'For'], rows: [
+            ['**Rail**', 'Vertical spine: each event as a card with its flags and provenance; day and phase rows; quiet time over 10 min', 'The narrative'],
+            ['**Horizon**', 'Horizontal, time-scaled at 4 px per minute; events under 10 min apart share a card (×N)', 'How fast it moved'],
+            ['**Swimlanes**', 'One lane per linked entity; a malicious IOC is a target lane the linking events point at; a lane for events without an entity', 'Spread across hosts and accounts'],
+            ['**Ledger**', 'Table of every event: time since the previous row, provenance, device-recorded time, flags; the SHA-256 of the matching CSV', 'Legal and evidence work'],
+            ['**Brief**', 'One page: milestones (undetected, to contain, to recover), key moments, impact counts, ATT&CK stages', 'Leadership'],
+            ['**Zig-zag**', 'The original layout: cards alternate around a centre spine', 'As before'],
+          ] },
+          { type: 'section', title: 'Incidents over several days (Horizon)', items: [
+            'Events less than 6 h apart form an active period (A, B, …).',
+            'A longer quiet stretch folds into a fixed-width break labelled with its real length.',
+            'One scale for every period, so fast activity never looks slow; periods wrap onto new rows.',
+            'An overview at true scale (one column per day) sits on top: activity bars, milestones, the dwell / contain / recover brackets and the C2 channel.',
+          ] },
+          { type: 'section', title: 'Options', items: [
+            '**Key events only** — flagged, ATT&CK-tagged or recorded by FENRIR.',
+            '**Include raw logs** — off by default. Rail, Ledger, Zig-zag and the CSV only; the others never show them.',
+            '**Time zone** — UTC or your Fenrir TZ. Every day header shows its UTC offset. The CSV is always UTC.',
+            '**Preview** — shows the page inside the dialog before you save it.',
+          ] },
+          { type: 'section', title: 'The HTML page', items: [
+            'Standalone and script-free; its own content policy blocks scripts and outside loads.',
+            'Header: incident, severity, TLP, event count, who exported and when, the time zone and the filters.',
+            'Prints light, with raw logs in full.',
+          ] },
           { type: 'section', title: 'CSV', items: [
-            'Flat row-per-event. Use for spreadsheet analysis, BI tools, or pipeline ingestion.',
+            'Flat row-per-event, 18 columns. Use for spreadsheet analysis, BI tools, or pipeline ingestion.',
             'The last six columns are provenance: exhibit, parser name and version, time basis, the time the device recorded and the clock offset applied. They are empty for events entered by hand.',
+            'The `raw_log` column stays, empty, unless **Include raw logs** is on.',
             'Spreadsheet-safe: a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `\'`, so Excel or LibreOffice shows it as text instead of running it as a formula. Plain numbers are left as they are.',
           ] },
-          { type: 'section', title: 'HTML', items: [
-            'Standalone, JS-free, dark-themed page with a vertical spine and alternating left/right event cards.',
-            'Severity / TLP / count badges in the header.',
-            'Raw logs collapse with native `<details>` (no JS).',
-            'Print stylesheet included — light theme, raw logs auto-expanded.',
-          ] },
+          { type: 'note', text: 'Raw log lines can hold passwords, tokens and personal data. Check the file before you share it, and handle it per the incident\'s TLP.' },
+          { type: 'note', text: 'FENRIR builds every export on the server and audits it (`timeline_export`). The API is `GET /api/incidents/{id}/timeline/export`; the MCP tool is `fenrir_timeline_list` with `export`.' },
         ],
       },
     ],
@@ -688,16 +726,20 @@ const CATEGORIES = [
       {
         id: 'coc-collection',
         title: 'Collection Wizard',
-        tags: ['collection', 'device type', 'collect', 'acquire', 'lawful basis', '27037'],
+        tags: ['collection', 'device type', 'collect', 'acquire', 'lawful basis', '27037', 'source path', 'source device', 'serial', 'identifier', 'exhibit number'],
         body: [
           { type: 'p', text: 'Starts an evidence record the right way — device type, the collect-vs-acquire decision, and lawful basis — per `ISO/IEC 27037 §7`.' },
           { type: 'section', title: 'What you record', items: [
+            '**Identifier** — leave it empty and FENRIR assigns the next one from the naming convention ([[set-admin]]), e.g. `INC-2026-00009-20261101-001`; the field’s hint shows it. A typed identifier must be new in the incident. Either way it can’t be changed once registered.',
             '**Device type(s)** — §7 tags: computer / peripheral / storage / mobile / network / CCTV.',
             '**Collect vs acquire** plus the `§7.1.1.3` factors that drove the choice; live or mission-critical handling needs a justification.',
             '**Lawful basis** (`GDPR Art. 5.1(c)`) — IR / consent / warrant / court order / EIO / MLA / LIA.',
             'Device-specific handling: write-blocker · Faraday + IMEI + PIN · comms paths + isolation · CCTV overwrite window + time offset.',
             '**Acquisition time** (digital) or **Seizure time** (physical) — when the image was taken or the item seized, from the tool log or your notes. **Collected at** stays the time you registered the item in FENRIR.',
+            '**Source** (digital, `§5.4.2`, `§7.1.3.4`) — the source device (**Source system**, make, model, serial) and the **Source path** with its **Path style**, from the tool’s report or your notes, never the name of the file you upload. **More source details**: volume, OS, asset tag, MACB times (each needs its basis and the tool that read it), owner, stream, cloud provider, mail. Can’t state it? Give **Unknown source — reason**.',
+            '**Device** (physical, `§7.1.1.1`) — make, model, serial, device name and where it is stored.',
           ] },
+          { type: 'note', text: 'The source path is kept exactly as typed: spaces, case and accents included. FENRIR checks it fits its style and refuses it with the reason if not.' },
           { type: 'note', text: 'Physical items require an in-situ photograph (`§6.2.1`) — see **Evidence Photos**.' },
           { type: 'note', text: 'Uploads to **Email**, **Network capture** and **Browser history** are registered as **draft exhibits** before they are analysed — see [[coc-draft-exhibits]]. Older analyses can still use **Register as exhibit**: the quarantine copy is re-hashed against the hash taken at upload, the upload time becomes the acquisition time, and the item appears in the **Custody log** as **Collected**.' },
         ],
@@ -705,7 +747,7 @@ const CATEGORIES = [
       {
         id: 'coc-acquisition',
         title: 'Acquisition & Sealing (Wizard A)',
-        tags: ['acquisition', 'seal', 'hash', 'md5', 'sha-1', 'sha-256', 'e01', 'aff4', 'hash mismatch', 'acquisition time', 'write-blocker', '27037', '27041'],
+        tags: ['acquisition', 'seal', 'hash', 'md5', 'sha-1', 'sha-256', 'e01', 'aff4', 'hash mismatch', 'acquisition time', 'write-blocker', '27037', '27041', 'folder', 'container', 'zip', 'tar', 'manifest', 'kape', 'velociraptor'],
         body: [
           { type: 'p', text: 'Captures the reproducibility evidence for a digital acquisition, then **Seal** locks the minimum `ISO/IEC 27037 §6.1` fields.' },
           { type: 'steps', items: [
@@ -718,7 +760,25 @@ const CATEGORIES = [
             'Record write-blocker use, **system state** (powered-off / live / mission-critical), full-image vs **logical + rationale**, screen state, and changes made.',
             'Record the device clock (`§6.6`): the **System time offset** note as you observed it, and optionally the **Clock offset in seconds** — device clock minus true time, after its timezone (`+120` = the device was 2 minutes ahead).',
             'Confirm **27041** tool/method validation and the collector competence.',
-            'Click **Seal** — locks the acquisition record. A later change to a descriptive field (name, description, TLP, storage location, condition, clock offset) is logged **Amended after seal** with the value before and after. The photos already attached and the collector\u2019s role can\u2019t change; a new photo can still be added, logged **Photo added** ([[coc-photos]]).',
+            'Click **Seal** — locks the acquisition record. A later change to a descriptive field (name, description, TLP, storage location, condition, clock offset) or to the source record (API and MCP) is logged **Amended after seal** with the value before and after. The photos already attached and the collector\u2019s role can\u2019t change; a new photo can still be added, logged **Photo added** ([[coc-photos]]).',
+          ] },
+          { type: 'section', title: 'The source at seal (digital)', items: [
+            'A digital file needs its source device: an **Asset / entity**, the **Source system** or the **Source device serial**. Make and model alone don’t identify a device (`§7.1.1.1`).',
+            'And the path its handling needs: a full image, a device path (style **Device**); live data and exports (email, vendor report, network capture), none; anything else, the **Source path** and its style (`§7.1.3.4`).',
+            'Can’t state it? **Unknown source — reason** meets the whole requirement (`§5.3.5`). **Seal readiness** shows what is still missing.',
+            'Items sealed before this rule are not checked again.',
+          ] },
+          { type: 'section', title: 'What the seal binds', items: [
+            'The seal binds one record: the exhibit’s identity and hashes, the whole acquisition record, the source record and each photo’s SHA-256 (`§5.4.5`). Its SHA-256 and exact text go into the custody log; the trusted timestamp covers that SHA-256.',
+            'The item’s detail shows it under **What the seal binds**: the record’s SHA-256, what the timestamp covers, and whether the record has changed since the seal.',
+            '**Changed** follows an audited amendment (**Amended after seal**, **Photo added**). It reports the change; it is not by itself tampering.',
+          ] },
+          { type: 'section', title: 'Folders: container exhibits', items: [
+            'Acquire the folders with your tool into one container — ZIP, TAR, AD1, L01 or AFF4-L — and register that file as one exhibit (`§7.1.3.1.2`). Pick its **Logical container** format on the **Acquisition** step.',
+            '**ZIP** and **TAR** (also `.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`): FENRIR lists every member in the background — the path as stored, type, size, times with their source, and its own MD5, SHA-1 and SHA-256. Nothing is extracted.',
+            'A KAPE `*_CopyLog.csv` or a Velociraptor `uploads.json` inside a ZIP adds each file’s original path, times and the tool’s hash. A hash that differs is flagged.',
+            'The item’s **Contents** shows the list: search by path, **Download CSV**. While it is **Building**, the seal waits. Once built it never changes, and the seal binds its SHA-256.',
+            '**Failed** (a size limit, a damaged or unreadable container) leaves the exhibit as it is and shows why; **Rebuild** tries again. AD1, L01 and AFF4-L are kept but not listed.',
           ] },
           { type: 'note', text: 'The item\u2019s detail shows the whole record under **Acquisition record**: lawful basis, tool + version, source / target hashes, write-blocker, witness, device details, and who sealed it when. A viewer sees it read-only.' },
           { type: 'section', title: 'The upload check', items: [
@@ -836,8 +896,10 @@ const CATEGORIES = [
           { type: 'p', text: 'A per-item readiness score — **green / amber / red** plus a completeness percentage — that tells you whether an item is court-ready before handoff.' },
           { type: 'section', title: 'How it scores', items: [
             '**Mandatory** check failing → **red** (no collector, no lawful basis, no SHA-256, hash mismatch, broken chain).',
-            '**Advisory** check failing or pending → **amber** (tool validation, qualifications, working copy, 27042 findings/scope, DEFR/DES role, trusted timestamp).',
-            'Source and target hashes are compared only when they use the same algorithm. An MD5 source and a SHA-256 target is **amber** (confirm in the tool\'s report), never red, and never blocks **Seal**.',
+            '**Advisory** check failing or pending → **amber** (tool validation, qualifications, working copy, 27042 findings/scope, DEFR/DES role, trusted timestamp, source location, a physical item’s make / model / serial, a cloud provider’s MD5 / SHA-1 / SHA-256 against the stored file).',
+            '**Source location** applies the seal’s own source rule ([[coc-acquisition]]): the source device (an asset, the source system or the serial) and the path its handling needs. It is mandatory on an item sealed with its record, advisory otherwise. **Unknown source — reason** shows as pending, never as passed.',
+            '**Photo record** (advisory): every photo says who took it, when and with what camera.',
+            'Source and target hashes are compared only when they use the same algorithm. An MD5 source and a SHA-256 target is **amber** (confirm in the tool\'s report), never red, and never blocks **Seal**. So is a single hash: a target with no source (a registered screenshot has only its hash at capture) has nothing to compare it with.',
             'All applicable checks pass → **green**.',
           ] },
           { type: 'note', text: 'The server computes the same score the UI shows (API-first), so MCP clients and scripts get an identical verdict. Advisory checks never block sealing.' },
@@ -863,7 +925,7 @@ const CATEGORIES = [
         body: [
           { type: 'p', text: 'An optional **RFC 3161** time-stamp token binds an evidence hash to an independent trusted time, provable without trusting the platform clock.' },
           { type: 'section', title: 'Where it applies', items: [
-            'Best-effort at **seal**, on every **disclosure package** manifest and on the **signed audit export**.',
+            'Best-effort at **seal**, on every **disclosure package** manifest and on the **signed audit export**. At seal it covers the SHA-256 of the sealed record (items sealed before records were bound: the file’s SHA-256) — see [[coc-acquisition]].',
             'Only the hash is sent to the timestamp authority — never the evidence.',
             'Configure the authority with the `TSA_URL` env var; unset = server clock only (provenance shows a manual check).',
           ] },
@@ -937,7 +999,8 @@ const CATEGORIES = [
           { type: 'section', title: 'Where drafts come from', items: [
             'An upload to **Email**, **Network capture** or **Browser history** — the file is registered first, then analysed (`ISO/IEC 27037 §5.4.4`: identify and preserve before you examine).',
             'A **Quick add** in **Evidence › Register**.',
-            'A draft gets an automatic identifier (`EMAIL-…`, `PCAP-…`, `WEBHIST-…`), you as collector and custodian, and its SHA-256 / SHA-1 / MD5. The file is encrypted at rest.',
+            'A draft gets an identifier from the naming convention (see [[set-admin]]) — in **Quick add**, unless you type one.',
+            'You are its collector and custodian, and its SHA-256 / SHA-1 / MD5 are recorded. The file is encrypted at rest.',
             '**Acquired at** is unknown unless you entered it at upload. The lawful basis is pending.',
             'Its collection appears in the incident **Custody log** as **Collected**, and every analysis of it as **Examined**.',
           ] },
@@ -956,11 +1019,14 @@ const CATEGORIES = [
       {
         id: 'coc-photos',
         title: 'Evidence Photos',
-        tags: ['photo', 'image', '27037', '6.2.1', 'encrypted'],
+        tags: ['photo', 'image', '27037', '6.2.1', 'encrypted', 'photographer', 'camera', 'taken by'],
         body: [
           { type: 'p', text: 'Attach photographs to an item (`ISO/IEC 27037 §6.2.1`); images are stored **AES-256-GCM encrypted at rest** and served only through an auth-gated route.' },
           { type: 'section', title: 'Behaviour', items: [
             'Add a photo from the evidence detail, with an optional caption and **Taken at** — it starts at the acquisition time; clear it if unknown. Thumbnails render inline. At most 512 MiB per image.',
+            'Record who took it (**Taken by**: **Me**, or **Someone else** with their name), the **Camera** (make, model, serial or the phone’s IMEI) and **What it shows** (`§6.6`). FENRIR keeps the file’s name, its SHA-256 and its size; click the SHA-256 under a thumbnail to copy it.',
+            'A **Taken at** without a timezone is refused (**invalid taken at**). A time saved before this check that FENRIR can’t read shows as **Taken (as recorded)**.',
+            'Each photo goes into a disclosure package with its record, hash-checked like the exhibit’s file ([[coc-handoff]]). The provenance score flags a photo with no photographer, time or camera (advisory).',
             'Until the seal, **Edit caption** changes a photo\u2019s caption. An attached photo can\u2019t be removed; only destroying the item removes its photos.',
             'After the seal the photos and their captions can\u2019t change. A new photo can still be added; the custody log records it as **Photo added** (not **Amended after seal**).',
             '**Complete & seal** keeps the photos already stored. It adds a caption-only photo only to an item with no stored photo, dated by **Photo taken at**, else the seizure time, else unknown — never the time you save.',
@@ -1005,6 +1071,9 @@ const CATEGORIES = [
           { type: 'section', title: 'What it contains', items: [
             'Manifest with **SHA-256** file hashes, signed with the platform’s **Ed25519** key (`MANIFEST.json.sig`) and an **HMAC-SHA-256** (`INTEGRITY.sig`); with the chain-of-custody SOP, the TLP statement, tool provenance and the legal basis (EIO / MLA references when given).',
             'A one-time, time-limited download URL plus a recipient acknowledgment that closes the chain.',
+            'Each exhibit’s whole **acquisition record** and **source** (device, path as recorded), as extra columns of `Evidence_Inventory.csv` and as `acquisition` / `source` in each file’s `.meta.json`.',
+            'Each exhibit’s photos in `04_Evidence/Photos/<exhibit id>/`, hash-checked like its file, with `photos.json` (who took each, when, camera, what it shows, SHA-256). A photo that fails its check is left out and the item frozen, as for a file.',
+            'What each seal bound, in `04_Evidence/Seal/`: the exact record (its SHA-256 is `seal_record_sha256` in the `.meta.json`) and the seal’s RFC 3161 token, so the recipient can check them without FENRIR.',
             '`retention_until` recorded for lawful retention.',
             'Unsealed draft exhibits are left out unless you tick **Include unsealed drafts** — see [[pi-le-package]].',
           ] },
@@ -1177,31 +1246,38 @@ const CATEGORIES = [
       {
         id: 'iw-case-notes',
         title: 'Case Notes',
-        tags: ['case notes', 'notes', 'scratchpad', 'append-only', 'correction', 'contemporaneous', 'exhibit', 'sha-256'],
+        tags: ['case notes', 'notes', 'scratchpad', 'append-only', 'edit', 'revision', 'history', 'signature', 'signed', 'correction', 'contemporaneous', 'exhibit', 'sha-256'],
         body: [
           { type: 'p', text: 'Shared notes made at the time: what you did, saw or decided, and why. Everyone who can see the incident reads them; analysts and admins add them. Open **Detection & Analysis → Case notes**.' },
           { type: 'steps', items: [
             'Write the note under **New case note** (markdown).',
             'Optionally link it with **+ Link an item…** to exhibits, entities, IOCs or timeline events of this incident.',
             'Click **Post note**. The server sets the time; you can’t type one in.',
+            'Write as many notes as you need: each is its own card, in the order the notes were first written.',
           ] },
-          { type: 'section', title: 'Append-only', items: [
-            'A posted note can’t be edited or deleted by anyone, admins included. The database refuses it.',
-            'To fix a mistake, click **Correct** on the entry and post the correction. The original stays as written, struck through, with a link to the correction.',
-            'Only the entry’s author or an admin can correct it. An entry is corrected once; to change a correction, correct the correction.',
+          { type: 'section', title: 'Signed', items: [
+            'Every saved note carries a signature line: **Signed**, your full name (your username if you have none), your operational roles on this incident (your platform role if you hold none), the time and the start of its SHA-256.',
+            'The signature is recorded when you save and is part of the hash, so changing your name or roles later doesn’t change it.',
+            'Notes written before signed notes show the author’s username and **unsigned**.',
+          ] },
+          { type: 'section', title: 'Edit', items: [
+            'Click **Edit** on a note, change the text or its links, and click **Save revision**. Only the note’s author or an admin can edit it.',
+            'Editing never overwrites. Each save adds a new revision, signed by whoever saved it; the earlier text stays exactly as written. Nobody can delete a note or a revision, admins included: the database refuses it.',
+            'An edited note shows **edited · revision N** and keeps its place. Click **History** to see every revision with its signature; **Changes** shows what each revision changed.',
+            'If someone else saves the note while you are editing, saving tells you so. Copy your text, click **Reload** and edit the latest revision.',
           ] },
           { type: 'section', title: 'Where else they show', items: [
             '**Evidence** item detail, an expanded **Timeline** event or **IOC**, and the **Entities** drawer list the notes linked to that item. **+ Add note** there posts a note already linked to it.',
-            'Law-enforcement and internal **disclosure packages** have them in `10_Case_Notes/` (`Case_Notes.csv` and `Case_Notes.json`); the **Full Technical Report** has a **Case Notes** appendix. Both include each entry’s SHA-256.',
+            'Law-enforcement and internal **disclosure packages** have every revision in `10_Case_Notes/` (`Case_Notes.csv` and `Case_Notes.json`) with its signature and SHA-256. The **Full Technical Report** has a **Case Notes** appendix with each note’s current revision.',
           ] },
-          { type: 'note', text: 'Each entry shows `#` and the start of its SHA-256. The hash is written to the hash-chained audit log when the entry is posted, so a changed note would no longer match.' },
-          { type: 'note', text: 'On a closed incident case notes are read-only, like comments. Re-open the incident to add one.' },
+          { type: 'note', text: 'Each revision shows `#` and the start of its SHA-256. The hash is written to the hash-chained audit log when the revision is saved, so a changed revision would no longer match.' },
+          { type: 'note', text: 'On a closed incident case notes are read-only, like comments. Re-open the incident to add or edit one.' },
           { type: 'section', title: 'Your old scratchpad', items: [
             'Case notes replace the private scratchpad. Existing scratchpads are kept read-only under **Legacy scratchpads** and are never published for you.',
             'Click **Post as case note** to share yours: its current text becomes a new case note, dated now and marked **from scratchpad**.',
             'Scratchpads can no longer be edited or deleted.',
           ] },
-          { type: 'note', text: 'MCP: `fenrir_comms_list(view="case_notes")`, `fenrir_comms_write(action="case_note_add", data={body, evidence_ids?, entity_ids?, ioc_ids?, timeline_event_ids?, corrects_id?})` · API: `/api/incidents/{id}/case-notes`.' },
+          { type: 'note', text: 'MCP: `fenrir_comms_list(view="case_notes", filters={current: true})`, `view="case_note_revisions"`, `fenrir_comms_write(action="case_note_add", data={body, evidence_ids?, entity_ids?, ioc_ids?, timeline_event_ids?})`, `action="case_note_edit"` (`item_id` = the current revision) · API: `/api/incidents/{id}/case-notes` (`?current=true`), `…/case-notes/{note_id}/revisions`; an edit is a POST with `corrects_id`.' },
         ],
       },
       {
@@ -1265,13 +1341,13 @@ const CATEGORIES = [
       {
         id: 'iw-files',
         title: 'Supporting Documents',
-        tags: ['files', 'supporting documents', 'screenshot', 'upload', 'attachment', 'link entity', 'include in report', 'report figure', 'caption', 'sha-256', 'hash', 'rename', 'delete', 'reason', 'register as exhibit', 'exhibit'],
+        tags: ['files', 'supporting documents', 'screenshot', 'upload', 'attachment', 'link entity', 'include in report', 'report figure', 'caption', 'sha-256', 'hash', 'rename', 'delete', 'reason', 'register as exhibit', 'exhibit', 'capture record', 'capture details', 'corroborates', 'link to exhibit', 'link to timeline event', 'link to ioc'],
         body: [
           { type: 'p', text: 'A working store for non-malicious supporting material: screenshots, exported logs, notes. Encrypted at rest. Files attached to an entity (**Entities → Collected Files**) live in the same store.' },
           { type: 'section', title: 'On the page', items: [
-            '**+ Upload files** — add one or more files.',
-            'Per file: name · type · size · **SHA-256** (hover for SHA-1 and MD5) · added · added by · linked entity · report · exhibit.',
-            '**Download** · **Link** / **Re-link** to an entity · **Rename** · **Delete**.',
+            '**+ Upload files** — add one or more files; **Capture details** (optional) record how a screenshot was taken (below).',
+            'Per file: name (with the capture line: when, by whom, tool, method, links) · type · size · **SHA-256** (hover for SHA-1 and MD5) · added · added by · linked entity · report · exhibit.',
+            '**Download** · **Details** (capture record and links) · **Link** / **Re-link** to an entity · **Rename** · **Delete**.',
             '**Report → Include** (PNG, JPEG, GIF or WebP only) — makes the screenshot a numbered figure in generated reports, with an optional caption (**Caption** to change it) and its SHA-256. See [[pi-reports]].',
             '**Register as exhibit** — makes the file an exhibit with chain of custody (below). Once registered, the column shows the exhibit (**⛁ DOC-…**, **Draft · unsealed** until it is sealed).',
           ] },
@@ -1279,14 +1355,25 @@ const CATEGORIES = [
             'The server computes the SHA-256, SHA-1 and MD5 of every file as it encrypts the upload, and records them with the file and in the audit log. Files uploaded before this were hashed once afterwards by an admin tool, and the audit log says so.',
             'Renaming never changes the stored bytes or their hashes.',
           ] },
+          { type: 'section', title: 'Capture record', items: [
+            'How a screenshot (or a photo of a screen) was made, as ISO/IEC 27037 §7.1.1.1 asks: **Captured at**, **Captured by** (you, or a name; left empty it is not recorded — uploading it does not make you the capturer), **Capture tool** and version, **Method**, **Captured on** (host, device or display), **URL**, **What is visible** (window title, application, position, contents).',
+            '**SHA-256 at capture** (one file at a time) — the hash the capture tool or your notes recorded. The server compares it with the file before storing anything; a mismatch is refused, nothing is stored, and the attempt is audited. It can’t be changed afterwards.',
+            'Edit the rest in **Details › Edit capture record**. Each change is audited with its old and new value.',
+          ] },
+          { type: 'section', title: 'Link or register as exhibit?', items: [
+            '**Link** (in **Details › Link to…**) — the file corroborates an exhibit, a timeline event or an IOC of this incident, with an optional note. It stays a supporting document: no chain of custody, never in a disclosure package. The exhibit, event or IOC lists it under **Supporting documents**.',
+            '**Register as exhibit** — the file itself is primary evidence (for example the only record of a page since taken down). It gets chain of custody and can be disclosed.',
+            'A linked file can’t be deleted until it is unlinked. Deleting the timeline event or IOC removes its links.',
+          ] },
           { type: 'section', title: 'Rename and delete', items: [
             'Both ask for a **reason** (at least 10 characters). The audit log keeps the old and new name, or the deleted file\'s hashes, with your reason.',
-            'Delete is refused while something relies on the file, and the message says what: it is a report figure (untick **Include**), a saved report shows it, a case note cites it, it is registered as an exhibit, or it is attached to an entity (unlink it first; from the entity\'s own **Collected Files** you remove the attachment itself). Exhibits and case notes are permanent records, so a file they rely on stays.',
+            'Delete is refused while something relies on the file, and the message says what: it is a report figure (untick **Include**), a saved report shows it, a case note cites it, it is registered as an exhibit, it is linked to an exhibit, timeline event or IOC (unlink it in **Details**), or it is attached to an entity (unlink it first; from the entity\'s own **Collected Files** you remove the attachment itself). Exhibits and case notes are permanent records, so a file they rely on stays.',
           ] },
           { type: 'section', title: 'When to register as exhibit', items: [
             'When the file itself may be needed as evidence — shown to a court, a regulator or law enforcement, or relied on for a finding — rather than only illustrating the work.',
             'The file is decrypted, re-encrypted into the evidence store with a new key, and its SHA-256 checked against the one recorded at upload; if they differ nothing is registered and the attempt is audited.',
             'The result is an **unsealed draft exhibit** collected by you and in your custody (audited as a collection, with the file as its source). Complete its acquisition record and seal it in **Evidence › Exhibits** ([[iw-evidence]]).',
+            'The draft is pre-filled from the capture record, and the dialog shows what first: acquired at ← captured at, acquisition tool and version ← capture tool, source system ← captured on, source path ← URL (style **cloud URI** for `https`, else **other**), screen state ← what is visible, target hash ← the SHA-256 at capture (checked against the file at upload, so the upload hash check is **match**). Nothing else is filled in. A value the source check refuses is left empty and the audit log says why.',
             'If the incident already holds an exhibit with the same SHA-256, that exhibit is linked instead (no second copy). Registering again just shows the exhibit. The file stays here as a supporting document.',
           ] },
           { type: 'note', text: 'Screenshots can show personal data or TLP:RED material, and an included image goes into every report for the incident. Check it first; upload a cropped or redacted copy if needed.' },
@@ -1337,8 +1424,7 @@ const CATEGORIES = [
             '**+ Add event** — modal with a host picker over **Scope**, an IR-phase field, the MITRE selector, linked IOCs, the key-event flag and structured fields ([[tl-events]]).',
             '**⇪ Import** — opens **Examine → Logs & triage** to import events from an exhibit or a log file.',
             '**Filters** — IR phase (or *No phase set*), entity, IOC, source (Manual / Imported / System), **★ Key events only**, and a text search over description, host, source, type, raw log and ATT&CK. The server filters before paging, so every matching event is listed. Filters stay in the address, so a filtered view can be bookmarked or shared; **Clear filters** resets them. The exports hold the events shown.',
-            '**Export CSV** — flat rows for spreadsheets / pipelines.',
-            '**Export HTML** — standalone, JS-free, printable dark page ([[tl-export]]).',
+            '**⇩ Export** — six HTML layouts or a CSV, previewed before you save ([[tl-export]]).',
           ] },
         ],
       },
@@ -1365,6 +1451,7 @@ const CATEGORIES = [
             'Edit / Delete / Promote to IOC.',
             'Relationships to other entities, count of linked evidence files.',
             '**Timeline events** — the incident timeline events on this entity (first 50, oldest first); **Open in Timeline →** shows them all, filtered to the entity.',
+            '**N timeline events name … but aren\'t linked to it · Link them** — events whose host names this entity but that aren\'t linked yet. Nothing is linked until you click. See [[tl-events]].',
             '**Linked IOCs** — the IOCs whose entity is this one.',
             '**Containment actions** — the containment actions on **Containment** that target this entity, with their status.',
             '**Asset Log** — the entity\'s own notes and automatic entries (added, compromised flag changes), as before.',
@@ -2179,6 +2266,35 @@ const CATEGORIES = [
         ],
       },
       {
+        id: 'st-session-timeouts',
+        title: 'Session Timeouts',
+        tags: ['session', 'timeout', 'idle', 'inactivity', 'signed out', 'sign in again', 'expired', 'unsaved', '8 hours', 'stay signed in'],
+        body: [
+          { type: 'p', text: 'Your browser session ends after 30 minutes without activity, or 8 hours after you sign in, whichever comes first. Unsaved changes on the page are kept when it does.' },
+          { type: 'section', title: 'What counts as activity', items: [
+            'Typing, clicking, scrolling or touching in any FENRIR tab. FENRIR tells the server at most every 5 minutes.',
+            'Saving, or any other change you make.',
+            'Not by itself: opening pages, reading data, or a page refreshing on a timer. A tab left open with nobody at it is signed out.',
+            'An admin sets the idle limit (`INACTIVITY_TIMEOUT_MINUTES`, 30 by default). Nothing extends the 8-hour limit.',
+          ] },
+          { type: 'section', title: 'Before it ends', items: [
+            '**Still there?** appears 2 minutes before the idle limit, with a countdown. Click **Stay signed in**, or press any key.',
+            'A banner appears 2 minutes before the 8-hour limit, with the time it ends. Save your work, or click **Sign in again** to start a new 8-hour session without leaving the page.',
+          ] },
+          { type: 'section', title: 'When it ends', items: [
+            'The page is covered and its content hidden, so nobody can read the incident on an unattended screen. Your unsaved changes stay on the page underneath.',
+            'A save that ran into the timeout did not go through. The page says **Your session ended. Sign in again, then retry.**',
+          ] },
+          { type: 'steps', items: [
+            'Enter your password and click **Sign in**, then your authenticator code and **Verify**.',
+            'Check your changes and save again.',
+          ] },
+          { type: 'note', text: 'Only you can continue. **Sign in as someone else** reloads the page and drops your unsaved changes, so nobody can save them under their own name.' },
+          { type: 'note', text: 'Signed in again in another tab? Going back to this tab closes the cover by itself.' },
+          { type: 'note', text: 'Unsaved changes do not survive a reload, a closed tab or a browser crash. Save before you leave the page.' },
+        ],
+      },
+      {
         id: 'st-users',
         title: 'Users, Teams, Operational Roles',
         tags: ['user', 'team', 'role', 'operational', 'admin', 'password', 'disable', 'totp', 'visibility'],
@@ -2304,7 +2420,7 @@ const CATEGORIES = [
       {
         id: 'set-admin',
         title: 'Admin Console',
-        tags: ['admin', 'audit log', 'global audit', 'audit exports', 'sessions', 'revoke', 'storage', 'disk', 'volumes', 'backup', 'api docs', 'openapi', 'incident reference', 'prefix'],
+        tags: ['admin', 'audit log', 'global audit', 'audit exports', 'sessions', 'revoke', 'storage', 'disk', 'volumes', 'backup', 'api docs', 'openapi', 'incident reference', 'prefix', 'exhibit identifier', 'naming convention'],
         body: [
           { type: 'p', text: 'Platform-wide administration — sidebar **Admin → Admin**, for admins only.' },
           { type: 'table', headers: ['Page', 'What it does'], rows: [
@@ -2318,6 +2434,13 @@ const CATEGORIES = [
           { type: 'section', title: 'Incident Reference', items: [
             '**Settings → Incident Reference** sets the prefix for new references: `PREFIX-YYYY-NNNNN` (the UTC year of creation and a counter that never resets).',
             'A reference is given once, at creation, and never changes, so references in issued reports, disclosure packages and audit exports stay valid. Incidents created before this format keep their `INC-NNNN` reference.',
+          ] },
+          { type: 'section', title: 'Exhibit identifiers', items: [
+            'The **Exhibit identifiers** card on the same page sets the naming convention for identifiers FENRIR assigns: to an exhibit registered with the identifier left empty, and to every draft it registers itself (supporting documents, Email, Network capture and Browser history uploads).',
+            'Default `{incident}-{date}-{seq:3}`: `{incident}` = the incident reference as stored, `{date}` = the UTC day of registration (`YYYYMMDD`), `{seq}` = the exhibit’s number in the incident, zero-padded to 3 digits (`{seq:N}` pads to N, 1–6).',
+            'The number never resets and counts only assigned identifiers. One already typed by hand is skipped.',
+            '`{seq}` must appear once; other text may use letters, digits, `.`, `_` and `-`; at most 64 characters. FENRIR refuses anything else and says which rule failed.',
+            'A change applies to exhibits registered afterwards; existing identifiers never change. It is audit-logged with the old and new value.',
           ] },
         ],
       },

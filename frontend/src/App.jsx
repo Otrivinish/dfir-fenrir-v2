@@ -104,7 +104,8 @@ function RequireAuth({ children }) {
   const loc = useLocation()
   if (status === 'loading') return <Loading />
   if (needsSetup)           return <Navigate to="/setup" replace />
-  if (status !== 'user')    return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname)}`} replace />
+  // 'expired' keeps the page mounted under the sign-in dialog (SE), so unsaved work survives.
+  if (status !== 'user' && status !== 'expired') return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname)}`} replace />
   if (user?.force_totp_enrol && loc.pathname !== '/totp/enrol') {
     return <Navigate to="/totp/enrol" replace />
   }

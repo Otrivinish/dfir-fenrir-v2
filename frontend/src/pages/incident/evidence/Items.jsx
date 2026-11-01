@@ -6,6 +6,8 @@ import { formatLocal } from '../../../lib/datetime.js'
 import { TLP, labelOf, pillOf } from '../../../lib/incidentVocab.js'
 import AcquisitionWizard from './AcquisitionWizard.jsx'
 import ExaminationWizard, { ExamTarget, examTargetMissing } from './ExaminationWizard.jsx'
+import { PATH_STYLES, SourceRecord } from './SourceFields.jsx'
+import ContainerContents from './ContainerContents.jsx'
 import { scoreEvidence, severityColor, aggregateIntegrity, hashAlgorithm } from '../../../lib/evidenceProvenance.js'
 import { SEV_PALETTE } from '../../../components/SevBadge.jsx'
 import { fmtOffset, parseOffsetSeconds } from '../../../components/ClockOffset.jsx'
@@ -14,6 +16,7 @@ import UploadProgress, { useChunkedUpload, useRetainedUpload } from '../../../co
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 import { CUSTODY_ACTION_COLOR, CUSTODY_ACTION_LABEL } from '../../../lib/custodyLabels.js'
 import LinkedCaseNotes from '../../../components/LinkedCaseNotes.jsx'
+import LinkedSupportingFiles from '../../../components/LinkedSupportingFiles.jsx'
 
 const KIND_LABEL = { digital_file: 'Digital file', physical_item: 'Physical item' }
 const STATUS_LABEL = {
@@ -412,6 +415,10 @@ export function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
   const [collectedLocation, setCollectedLocation] = useState('')
   const [entityId, setEntityId]       = useState('')
   const [file, setFile]               = useState(null)
+  // S2 — optional source system + path (sent exactly as typed: never trimmed) + its style
+  const [sourceSystem, setSourceSystem] = useState('')
+  const [sourcePath, setSourcePath]     = useState('')
+  const [sourceStyle, setSourceStyle]   = useState('')
 
   // physical_item extras
   const [make, setMake]               = useState('')
@@ -424,42 +431,56 @@ export function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
   const [error, setError] = useState(null)
   const up = useChunkedUpload()   // G1 stage 3b: progress + cancel of the chunked upload
   const kept = useRetainedUpload() // G-fix FE-M2: an upload the server kept after a refused complete
+  // EI — the identifier FENRIR would assign to an empty field (an example), and the one it did assign.
+  const [nextIdentifier, setNextIdentifier] = useState(null)
+  const [assigned, setAssigned] = useState(null)
+  const close = assigned ? onSaved : onClose      // once registered, closing = Done
 
   useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
+    const onKey = (e) => { if (e.key === 'Escape' && !busy) close() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [busy, onClose])
+  }, [busy, close])
+
+  useEffect(() => {
+    let cancelled = false
+    api.nextEvidenceIdentifier(incidentId).then(r => { if (!cancelled) setNextIdentifier(r.example) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [incidentId])
 
   const onSubmit = async (e) => {
     e.preventDefault()
+    if (assigned) return
     setError(null)
-    if (!name.trim() || !identifier.trim()) {
-      setError('Name and identifier are required.'); return
+    if (!name.trim()) {
+      setError('Name is required.'); return
     }
     if (kind === 'digital_file' && !file) {
       setError('Please choose a file to upload.'); return
     }
     setBusy(true)
     try {
+      let created
       if (kind === 'digital_file') {
         const fields = {
           name: name.trim(),
-          identifier: identifier.trim(),
+          identifier: identifier.trim() || null,   // EI: empty = FENRIR assigns one
           description: description.trim() || null,
           tlp,
           collected_location: collectedLocation.trim() || null,
           entity_id: entityId || null,
           file,
+          wizard: { source_system: sourceSystem || null, source_path: sourcePath || null,
+                    source_path_style: sourcePath ? (sourceStyle || null) : null },
         }
         const opts = up.start(file.size)
-        if (kept.held) await kept.held.retry(api.digitalCompleteBody(fields), opts)   // no re-upload
-        else await api.collectDigital(incidentId, fields, { ...opts, retainOnError: true })
+        if (kept.held) created = (await kept.held.retry(api.digitalCompleteBody(fields), opts)).evidence   // no re-upload
+        else created = await api.collectDigital(incidentId, fields, { ...opts, retainOnError: true })
         kept.drop({ cancel: false })
       } else {
-        await api.collectPhysical(incidentId, {
+        created = await api.collectPhysical(incidentId, {
           name: name.trim(),
-          identifier: identifier.trim(),
+          identifier: identifier.trim() || null,   // EI: empty = FENRIR assigns one
           description: description.trim() || null,
           tlp,
           entity_id: entityId || null,
@@ -472,7 +493,9 @@ export function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
           photos: [],
         })
       }
-      onSaved()
+      // EI: an assigned identifier is shown before the dialog closes; a typed one closes it as before.
+      if (identifier.trim()) onSaved()
+      else setAssigned(created.identifier)
     } catch (err) {
       if (err.retained) kept.keep(err, file)
       else if (kept.held) kept.drop({ cancel: false })
@@ -494,7 +517,7 @@ export function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
       <div className="modal" role="dialog" aria-labelledby="ev-add-title">
         <div className="modal-head">
           <h2 id="ev-add-title">Quick add (unsealed draft)</h2>
-          <button type="button" className="modal-close" onClick={onClose} disabled={busy} aria-label="Close">×</button>
+          <button type="button" className="modal-close" onClick={() => close()} disabled={busy} aria-label="Close">×</button>
         </div>
         <form onSubmit={onSubmit}>
           <div className="modal-body">
@@ -524,7 +547,11 @@ export function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
               <div className="field">
                 <label className="field-label" htmlFor="ev-id">Identifier (case tag / item number)</label>
                 <input id="ev-id" className="input" value={identifier} onChange={(e) => setIdentifier(e.target.value)}
-                       required maxLength={128} placeholder="e.g. EV-2026-042-01" style={{ fontFamily: 'var(--font-mono)' }} />
+                       maxLength={128} placeholder={nextIdentifier || 'e.g. EV-2026-042-01'} style={{ fontFamily: 'var(--font-mono)' }}
+                       disabled={!!assigned} />
+                <div className="field-hint" data-testid="ev-id-hint">
+                  Leave empty to assign automatically{nextIdentifier ? <>, e.g. <code>{nextIdentifier}</code></> : ''}. It can&rsquo;t be changed later.
+                </div>
               </div>
 
               <div className="field">
@@ -572,6 +599,33 @@ export function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
                 </div>
               )}
 
+              {kind === 'digital_file' && (
+                <>
+                  <div className="form-row">
+                    <div className="field">
+                      <label className="field-label" htmlFor="ev-src-system">Source system (optional)</label>
+                      <input id="ev-src-system" className="input" value={sourceSystem} onChange={(e) => setSourceSystem(e.target.value)}
+                             maxLength={256} spellCheck={false} autoComplete="off" placeholder="e.g. WS-FIN-017"
+                             style={{ fontFamily: 'var(--font-mono)' }} />
+                    </div>
+                    <div className="field">
+                      <label className="field-label" htmlFor="ev-src-style">Path style{sourcePath ? ' *' : ''}</label>
+                      <select id="ev-src-style" className="select" value={sourceStyle} onChange={(e) => setSourceStyle(e.target.value)}>
+                        <option value="">— select —</option>
+                        {PATH_STYLES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label className="field-label" htmlFor="ev-src-path">Source path (optional)</label>
+                    <input id="ev-src-path" className="input" value={sourcePath} onChange={(e) => setSourcePath(e.target.value)}
+                           maxLength={32768} spellCheck={false} autoComplete="off" placeholder="e.g. C:\Users\jdoe\Desktop\Q3.xlsx"
+                           style={{ fontFamily: 'var(--font-mono)' }} />
+                    <div className="field-hint">Where the file was on the source, exactly as recorded. More source details: Complete &amp; seal.</div>
+                  </div>
+                </>
+              )}
+
               {kind === 'physical_item' && (
                 <>
                   <div className="form-row">
@@ -609,13 +663,25 @@ export function AddEvidenceModal({ incidentId, entities, onClose, onSaved }) {
                   <span className="alert-icon">!</span><span>{error}</span>
                 </div>
               )}
+              {assigned && (
+                <div className="alert info" role="status" data-testid="ev-add-assigned">
+                  <span className="alert-icon">✓</span>
+                  <span>Draft registered as <b style={{ fontFamily: 'var(--font-mono)' }}>{assigned}</b>.</span>
+                </div>
+              )}
             </div>
           </div>
           <div className="modal-foot">
-            <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
-            <button type="submit" className="btn primary" disabled={busy}>
-              {busy ? 'Uploading…' : 'Add draft'}
-            </button>
+            {assigned ? (
+              <button type="button" className="btn primary" onClick={() => close()}>Done</button>
+            ) : (
+              <>
+                <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+                <button type="submit" className="btn primary" disabled={busy}>
+                  {busy ? 'Uploading…' : 'Add draft'}
+                </button>
+              </>
+            )}
           </div>
         </form>
       </div>
@@ -1023,6 +1089,63 @@ function AcquisitionRecord({ item, usernameOf }) {
   )
 }
 
+// S3 (EG-11) — what the seal binds, from GET …/seal-record: the record's SHA-256, what the trusted timestamp covers,
+// and whether the record is still the one sealed (an audited amendment changes it; that is reported, not tampering).
+const TST_SUBJECT_LABEL = {
+  record_v1: 'the sealed record (its SHA-256)',
+  file_sha256: 'the file’s SHA-256 only (sealed before records were bound)',
+}
+
+function SealRecord({ incidentId, item }) {
+  const [rec, setRec] = useState(null)
+  const [error, setError] = useState(null)
+  useEffect(() => {
+    if (!item.coc_sealed) { setRec(null); return undefined }
+    let live = true
+    setError(null)
+    api.evidenceSealRecord(incidentId, item.id)
+      .then(r => { if (live) setRec(r) })
+      .catch(e => { if (live) setError(e.message || 'Could not load the sealed record') })
+    return () => { live = false }
+  }, [incidentId, item.id, item.coc_sealed, item.updated_at])
+  if (!item.coc_sealed) return null
+  const mono = { fontFamily: 'var(--font-mono)', fontSize: 11, wordBreak: 'break-all' }
+  return (
+    <section data-testid="ev-seal-record">
+      <h3 className="panel-h" style={{ marginTop: 'var(--space-4)' }}>
+        What the seal binds{' '}
+        <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· ISO 27037 §5.4.5</span>
+      </h3>
+      {error && <div style={{ color: 'var(--muted)', fontSize: 13 }}>{error}</div>}
+      {rec && (
+        <dl className="kv">
+          <dt>Record SHA-256</dt>
+          <dd>
+            {rec.seal_record_sha256 ? (
+              <button type="button" className="btn ghost" onClick={() => { navigator.clipboard?.writeText(rec.seal_record_sha256) }}
+                      title="Click to copy" style={{ ...mono, fontWeight: 400, textAlign: 'left' }}>
+                {rec.seal_record_sha256}
+              </button>
+            ) : <span style={{ color: 'var(--muted)' }}>None: sealed before records were bound (the seal covers the file only)</span>}
+          </dd>
+          <dt>Timestamp covers</dt>
+          <dd>{rec.seal_tst_subject ? TST_SUBJECT_LABEL[rec.seal_tst_subject] : <span style={{ color: 'var(--muted)' }}>No trusted timestamp (server clock only)</span>}</dd>
+          {rec.changed_since_seal !== null && (
+            <>
+              <dt>Since the seal</dt>
+              <dd data-changed={rec.changed_since_seal ? 'yes' : 'no'}>
+                {rec.changed_since_seal
+                  ? <span style={{ color: 'var(--med)' }}>Changed — an amendment after the seal (see <b>Amended after seal</b> or <b>Photo added</b> in the custody log). Recomputed now: <span style={mono}>{rec.recomputed_now_sha256}</span></span>
+                  : 'Unchanged: the record still hashes to the sealed SHA-256'}
+              </dd>
+            </>
+          )}
+        </dl>
+      )}
+    </section>
+  )
+}
+
 // G5 (R09) — what the custody log says about this item at a glance, and its examinations.
 function CustodySummary({ item, events, usernameOf }) {
   const transfers = events.filter(e => e.event_type === 'evidence_transfer').length
@@ -1232,13 +1355,20 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
             </div>
           )}
 
+          <SourceRecord item={item} />
+
           <AcquisitionRecord item={item} usernameOf={usernameOf} />
+
+          <SealRecord incidentId={incidentId} item={item} />
+
+          <ContainerContents incidentId={incidentId} item={item} canWrite={canWrite && !isClosed}
+            onReplaceItem={onReplaceItem} />
 
           <LegalHoldPanel incidentId={incidentId} item={item} events={events} usernameOf={usernameOf}
             canWrite={canWrite} isLead={isLead} onChanged={async () => { await reload(); await onChanged() }} />
 
           <PhotosPanel incidentId={incidentId} item={item} isClosed={isClosed || !canWrite}
-            onReplaceItem={onReplaceItem} onChanged={reload} />
+            onReplaceItem={onReplaceItem} onChanged={reload} me={me} usernameOf={usernameOf} />
 
           <CustodySummary item={item} events={events} usernameOf={usernameOf} />
 
@@ -1255,6 +1385,7 @@ function DetailModal({ incidentId, item, users, entities, me, isAdmin, isClosed,
             usernameOf={usernameOf} canWrite={canWrite} onChanged={reload} />
 
           <LinkedCaseNotes incidentId={incidentId} kind="evidence" targetId={item.id} isClosed={isClosed} />
+          <LinkedSupportingFiles incidentId={incidentId} kind="exhibit" targetId={item.id} />
         </div>
 
         <div className="modal-foot" style={{ flexWrap: 'wrap', gap: 'var(--space-2)' }}>
@@ -1943,9 +2074,38 @@ function ExamineModal({ incidentId, item, onClose, onSaved }) {
 // G-fix (R101): a PATCH of the photo list is merged by photo id — every photo is sent with its id and
 // only its caption / taken_at change; none can be removed (422 photo_remove_not_supported) and after the
 // seal the list can't change at all (409). Adding a photo (POST …/photos) works before and after the seal.
-function PhotosPanel({ incidentId, item, isClosed, onReplaceItem, onChanged }) {
+// S4 (EG-9) — a photo's record under its thumbnail: who took it, the camera, what it shows, the uploaded file and
+// its SHA-256 (click to copy). A time stored before the format was checked is shown as recorded.
+function PhotoRecordLines({ p, usernameOf }) {
+  const line = { fontSize: 10, color: 'var(--muted)', overflowWrap: 'anywhere' }
+  const by = p.taken_by_id ? usernameOf(p.taken_by_id) : p.taken_by_name
+  return (
+    <div data-testid="ev-photo-record">
+      {!p.taken_at && p.taken_at_unparsed && <div style={line}>Taken (as recorded): {p.taken_at_unparsed}</div>}
+      {by && <div style={line}>By {by}</div>}
+      {p.camera && <div style={line}>Camera: {p.camera}</div>}
+      {p.context && <div style={{ ...line, whiteSpace: 'pre-wrap' }}>{p.context}</div>}
+      {p.original_filename && <div style={line}>{p.original_filename}{p.size != null ? ` · ${fmtBytes(p.size)}` : ''}</div>}
+      {p.sha256 && (
+        <button type="button" className="btn ghost" onClick={() => { navigator.clipboard?.writeText(p.sha256) }}
+                title={`SHA-256 — click to copy:\n${p.sha256}`} aria-label="Copy the photo's SHA-256"
+                style={{ fontFamily: 'var(--font-mono)', fontWeight: 400, fontSize: 10 }}>
+          {p.sha256.slice(0, 12)}…
+        </button>
+      )}
+    </div>
+  )
+}
+
+// S4 (EG-9): each upload also records who took it (you, or a name), the camera and what it shows; the server
+// checks taken_at (422 invalid_taken_at) and keeps the file name, SHA-256 and size.
+function PhotosPanel({ incidentId, item, isClosed, onReplaceItem, onChanged, me, usernameOf }) {
   const [caption, setCaption] = useState('')
   const [takenAt, setTakenAt] = useState(item.acquired_at || '')   // FE-L9: the acquisition time, unless you change it
+  const [takenByOther, setTakenByOther] = useState(false)          // false = me (the API default)
+  const [takenByName, setTakenByName]   = useState('')
+  const [camera, setCamera]   = useState('')
+  const [context, setContext] = useState('')
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState(null)
   const [editIdx, setEditIdx] = useState(null)
@@ -1960,12 +2120,15 @@ function PhotosPanel({ incidentId, item, isClosed, onReplaceItem, onChanged }) {
     e.target.value = ''   // allow re-selecting the same file
     if (!file) return
     if (!file.type.startsWith('image/')) { setError('File must be an image.'); return }
+    if (takenByOther && !takenByName.trim()) { setError('Give the photographer’s name, or choose Me.'); return }
     setBusy(true); setError(null)
     try {
       const updated = await api.addEvidencePhoto(incidentId, item.id, {
         file, caption: caption.trim() || null, taken_at: takenAt || null,
+        taken_by_name: takenByOther ? takenByName.trim() : null,
+        camera: camera.trim() || null, context: context.trim() || null,
       })
-      setCaption('')
+      setCaption(''); setContext('')       // the photographer and camera usually stay the same for the next photo
       onReplaceItem?.(updated)
       await onChanged?.()
     } catch (e2) {
@@ -1977,14 +2140,17 @@ function PhotosPanel({ incidentId, item, isClosed, onReplaceItem, onChanged }) {
     }
   }
 
-  // Every photo is sent back with its id (stored photos keep their file and hashes server-side).
+  // Every photo is sent back with its id (stored photos keep their file and hashes server-side). S4: the server
+  // changes only the fields sent on an uploaded photo, so those go with their id alone and the edited one with its
+  // caption; a reference-only photo (no id) is replaced as sent, so it goes whole.
   async function saveCaption(i) {
     setBusy(true); setError(null)
     try {
-      const list = photos.map((p, j) => ({
-        ...(p.id ? { id: p.id } : {}), url: p.url || '',
-        caption: j === i ? (editText.trim() || null) : (p.caption ?? null), taken_at: p.taken_at ?? null,
-      }))
+      const list = photos.map((p, j) => p.id
+        ? { id: p.id, url: p.url || '', ...(j === i ? { caption: editText.trim() || null } : {}) }
+        : { url: p.url || '', caption: j === i ? (editText.trim() || null) : (p.caption ?? null), taken_at: p.taken_at ?? null,
+            taken_by_id: p.taken_by_id ?? null, taken_by_name: p.taken_by_name ?? null, camera: p.camera ?? null,
+            context: p.context ?? null })
       const updated = await api.updateEvidence(incidentId, item.id, { photos: list })
       setEditIdx(null)
       onReplaceItem?.(updated)
@@ -2040,6 +2206,7 @@ function PhotosPanel({ incidentId, item, isClosed, onReplaceItem, onChanged }) {
                 <>
                   {p.caption && <figcaption style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{p.caption}</figcaption>}
                   {p.taken_at && <div style={{ fontSize: 10, color: 'var(--dim)', fontFamily: 'var(--font-mono)' }}>{formatLocal(p.taken_at)}</div>}
+                  <PhotoRecordLines p={p} usernameOf={usernameOf} />
                   {canEditCaptions && (
                     <button type="button" className="btn ghost" style={{ marginTop: 2 }} disabled={busy}
                             data-testid="ev-photo-edit" onClick={() => { setEditIdx(i); setEditText(p.caption || ''); setError(null) }}>
@@ -2073,6 +2240,34 @@ function PhotosPanel({ incidentId, item, isClosed, onReplaceItem, onChanged }) {
               <LocalDateTimePicker id="ev-photo-at" value={takenAt} onChange={setTakenAt} clearable disabled={busy} />
               <div className="field-hint">When the photo was taken: starts at the acquisition time. Blank = unknown.</div>
             </div>
+          </div>
+          <div className="form-row">
+            <div className="field">
+              <label className="field-label" htmlFor="ev-photo-by">Taken by</label>
+              <select id="ev-photo-by" className="select" value={takenByOther ? 'other' : 'me'} disabled={busy}
+                      onChange={e => setTakenByOther(e.target.value === 'other')}>
+                <option value="me">Me{me?.username ? ` (${me.username})` : ''}</option>
+                <option value="other">Someone else (name)</option>
+              </select>
+            </div>
+            {takenByOther && (
+              <div className="field">
+                <label className="field-label" htmlFor="ev-photo-by-name">Photographer’s name</label>
+                <input id="ev-photo-by-name" className="input" value={takenByName} maxLength={128} disabled={busy}
+                       onChange={e => setTakenByName(e.target.value)} placeholder="e.g. PC 4471 Smith, Police Scotland" />
+              </div>
+            )}
+            <div className="field">
+              <label className="field-label" htmlFor="ev-photo-camera">Camera</label>
+              <input id="ev-photo-camera" className="input" value={camera} maxLength={256} disabled={busy}
+                     onChange={e => setCamera(e.target.value)} placeholder="Make / model / serial, or the phone’s IMEI" />
+            </div>
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="ev-photo-context">What it shows (optional)</label>
+            <textarea id="ev-photo-context" className="input" rows={2} value={context} maxLength={2000} disabled={busy}
+                      onChange={e => setContext(e.target.value)}
+                      placeholder="e.g. Laptop on the desk, lid open, screen showing the Outlook inbox" />
           </div>
           <label className="btn" style={{ alignSelf: 'flex-start', cursor: busy ? 'wait' : 'pointer' }}>
             {busy ? 'Uploading…' : 'Add photo'}

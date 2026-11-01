@@ -18,9 +18,12 @@ from auth.deps import require_admin
 from core.database import get_db
 from core.security import decrypt_secret, encrypt_secret
 from core.config import settings as env_settings
-from models import PlatformSetting, User
+from core.errors import ApiError, ApiErrorBody
+from models import Incident, PlatformSetting, User, utcnow
 from incidents import reference as incident_ref
+from evidence import identifier as exhibit_ids
 from schemas import (ApiKeyServiceOut, ApiKeySet, ApiKeysResponse, ENRICHMENT_SERVICES,
+                     EvidenceIdentifierSettings, EvidenceIdentifierSettingsUpdate, EvidenceIdentifierToken,
                      IncidentRefSettings, IncidentRefSettingsUpdate)
 
 router = APIRouter()
@@ -211,4 +214,60 @@ async def update_incident_ref_settings(
     )
     await db.commit()
     return IncidentRefSettings(prefix=req.prefix, next_ref_preview=await incident_ref.preview_next(db, req.prefix))
+
+
+# ─── Exhibit identifier convention (EI) ──────────────────────────────────────
+
+async def _evidence_identifier_settings(db: AsyncSession, template: str) -> EvidenceIdentifierSettings:
+    """The template, its tokens and an example for the most recent incident (or the next incident's reference)."""
+    inc = (await db.execute(select(Incident.id, Incident.ref)
+                            .order_by(Incident.created_at.desc(), Incident.id).limit(1))).first()
+    if inc is not None:
+        ref, example = inc.ref, await exhibit_ids.preview(db, inc.id, inc.ref, template)
+    else:
+        ref = await incident_ref.preview_next(db)
+        example = exhibit_ids.expand(template, ref, utcnow(), 1)
+    return EvidenceIdentifierSettings(
+        template=template, tokens=[EvidenceIdentifierToken(token=t, description=d) for t, d in exhibit_ids.TOKENS],
+        example=example, example_incident_ref=ref)
+
+
+@router.get("/evidence-identifier", response_model=EvidenceIdentifierSettings,
+            summary="Get the exhibit-identifier naming convention")
+async def get_evidence_identifier_settings(
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> EvidenceIdentifierSettings:
+    """The template FENRIR fills in when an exhibit is registered without an identifier (and for every draft it
+    registers itself: supporting documents, the Email, PCAP and Browser history uploads), its tokens, and an example
+    for the most recent incident. Default {incident}-{date}-{seq:3}. Admin only."""
+    return await _evidence_identifier_settings(db, await exhibit_ids.get_template(db))
+
+
+@router.patch("/evidence-identifier", response_model=EvidenceIdentifierSettings,
+              summary="Set the exhibit-identifier naming convention",
+              responses={422: {"model": ApiErrorBody,
+                               "description": "invalid_identifier_template (the detail names the rule it breaks)"}})
+async def update_evidence_identifier_settings(
+    req: EvidenceIdentifierSettingsUpdate,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> EvidenceIdentifierSettings:
+    """Change the template for identifiers assigned **from now on**; identifiers already assigned never change.
+    Rules (422 invalid_identifier_template, naming the rule): tokens {incident}, {date}, {seq} / {seq:N} only;
+    literal text A–Z a–z 0–9 . _ -; {seq} exactly once; at most 64 characters; the longest result (a 32-character
+    reference, a 9-digit number) at most 128. Audit-logged (old / new). Admin only."""
+    if (why := exhibit_ids.template_error(req.template)) is not None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_identifier_template", why)
+    old = await exhibit_ids.get_template(db)
+    await exhibit_ids.set_template(db, req.template, user.id)
+    await write_audit(
+        db, "evidence_identifier_template_changed",
+        outcome="success", resource_type="platform_setting",
+        resource_id=exhibit_ids.TEMPLATE_KEY, resource_label="Exhibit identifier convention",
+        details={"old": old, "new": req.template},
+    )
+    await db.commit()
+    return await _evidence_identifier_settings(db, req.template)
 

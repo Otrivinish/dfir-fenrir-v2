@@ -89,7 +89,7 @@ def render_readme(
         tst_verify = """
 6. Verify the trusted timestamp independently of this platform's clock:
 
-       openssl ts -verify -data MANIFEST.json -in MANIFEST.tst -CAfile <TSA CA certificate>
+       openssl ts -verify -token_in -data MANIFEST.json -in MANIFEST.tst -CAfile <TSA CA certificate>
 """
     else:
         tst_line = ("- **Trusted timestamp:**  none: no `MANIFEST.tst` (no time-stamping authority was configured, "
@@ -172,16 +172,26 @@ def render_readme(
     02_Timeline/                        Chronological event log (CSV + JSON)
     03_IOCs/                            Indicators of Compromise (CSV + JSON)
     04_Evidence/                        Evidence inventory, per-item custody logs, decrypted files
+                                        Photos/<exhibit id>/: each stored photo (hash-checked like the files) and
+                                        photos.json (who took it, when, camera, what it shows, SHA-256, package path).
+                                        Seal/: <exhibit id>__seal_record.json = the exact record the seal bound (its
+                                        SHA-256 is seal_record_sha256 in the .meta.json) and <exhibit id>__seal.tst =
+                                        the seal's RFC 3161 token (DER) over that SHA-256 when seal_tst_subject is
+                                        record_v1, over the file's SHA-256 when it is file_sha256: `openssl ts -verify
+                                        -token_in -in <id>__seal.tst -digest <SHA-256> -CAfile <TSA CA certificate>`.
     05_Artifacts/                       Quarantine + suspected malware (only present if opt-in was set)
     06_Forensic/                        PCAP analyses (JSON), YARA matches (CSV)
     07_Communications/                  Comments, OOB log, stakeholders
     08_Audit/                           This incident's audit-log rows (hash-chained) + per-row verifier output
     09_Legal/                           Chain-of-custody SOP + tool provenance + TLP handling
     10_Case_Notes/                      Append-only case notes (CSV + JSON), each with its content SHA-256 (present if any).
+                                        Every revision is listed: an edit is a new entry whose corrects_id names the
+                                        revision it replaces; root_id is the note (its revision 1), revision its number.
                                         Recompute from Case_Notes.json: SHA-256 of UTF-8 JSON, keys sorted, separators "," ":",
                                         {{v:1, id, incident_id, author_id, created_at (created_at_utc), body,
                                         corrects_id, source_scratchpad_id (null if empty), evidence_ids,
-                                        entity_ids, ioc_ids, timeline_event_ids (sorted lists)}}
+                                        entity_ids, ioc_ids, timeline_event_ids (sorted lists)}}. A signed entry
+                                        (hash_v 2) uses v:2 and adds signed_name and signed_as, the signature as saved.
     11_Recovery/                        Recovery tracker (CSV): per compromised system, the restore point, who restored
                                         and validated it and when, the validation method and the monitoring window
                                         (present if any).

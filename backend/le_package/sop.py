@@ -183,7 +183,7 @@ The recipient can verify integrity at three independent layers:
   • Trusted time-stamping (RFC 3161) is optional: only when the platform has a
     time-stamping authority configured (and it answered) does the package
     carry `MANIFEST.tst`; verify it with
-    `openssl ts -verify -data MANIFEST.json -in MANIFEST.tst -CAfile <TSA CA>`.
+    `openssl ts -verify -token_in -data MANIFEST.json -in MANIFEST.tst -CAfile <TSA CA>`.
     Otherwise the platform's UTC timestamps come from the container clock
     only, which is NTP-disciplined by the host.
 

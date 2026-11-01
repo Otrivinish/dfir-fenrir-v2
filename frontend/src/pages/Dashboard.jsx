@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api, notifyUnauthorized } from '../api/client.js'
+import { useAuth } from '../hooks/useAuth.jsx'
 import { labelOf, byValue } from '../lib/incidentVocab.js'
 import { relative, formatLocal } from '../lib/datetime.js'
 import SevBadge, { SEV_PALETTE } from '../components/SevBadge.jsx'
@@ -308,6 +309,7 @@ function IncidentRow({ inc, legal }) {
 
 export default function Dashboard() {
   const navigate = useNavigate()
+  const { sessionEpoch } = useAuth()    // SE: reconnect the socket after signing in again
   const [summary,   setSummary]   = useState(null)
   const [activity,  setActivity]  = useState(null)
   const [incidents, setIncidents] = useState(null)
@@ -404,7 +406,7 @@ export default function Dashboard() {
     ws.onerror = () => {}
     ws.onclose = (e) => { if (timer) clearTimeout(timer); if (e.code === 4001) notifyUnauthorized() }
     return () => { try { ws.close() } catch { /* ok */ } }
-  }, [load])
+  }, [load, sessionEpoch])
 
   // Open the new incident straight away (its Situation board shows the start checks), as from Incidents.
   const onCreatedIncident = useCallback((newInc) => {

@@ -211,7 +211,7 @@ function diff(draft, server) {
 
 export default function IncidentDetail() {
   const { id } = useParams()
-  const { user } = useAuth()
+  const { user, sessionEpoch } = useAuth()   // sessionEpoch (SE): reconnect presence after signing in again
   const navigate = useNavigate()
   const location = useLocation()
   const [inc, setInc]         = useState(null)
@@ -323,7 +323,7 @@ export default function IncidentDetail() {
       clearInterval(presencePingRef.current)
       ws.close()
     }
-  }, [id])
+  }, [id, sessionEpoch])
 
   const changes = useMemo(() => diff(draft, inc), [draft, inc])
   // Compare by instant (epoch ms), not display string — entry is canonical UTC ISO.

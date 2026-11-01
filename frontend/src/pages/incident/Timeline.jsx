@@ -5,12 +5,13 @@ import { formatLocal, formatLocalShort } from '../../lib/datetime.js'
 import { MITRE_TACTICS, MITRE_TECHNIQUES, tacticColor } from '../../lib/mitre.js'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
 import { labelOf } from '../../lib/incidentVocab.js'
-import { matchEntity } from '../../lib/entityMatch.js'
 import { OffsetMark, fmtOffset } from '../../components/ClockOffset.jsx'
 import LinkedCaseNotes from '../../components/LinkedCaseNotes.jsx'
+import LinkedSupportingFiles from '../../components/LinkedSupportingFiles.jsx'
+import EntityLinkPrompt from '../../components/EntityLinkPrompt.jsx'
 import { SEV_PALETTE } from '../../components/SevBadge.jsx'
-import { csvSafe } from '../../lib/csvSafe.js'
 import { useAuth } from '../../hooks/useAuth.jsx'
+import TimelineExportDialog from './TimelineExportDialog.jsx'
 
 // Maps 800-61 R3 phase keys to display labels.
 const IR_PHASE_LABELS = {
@@ -24,230 +25,6 @@ const IR_PHASE_LABELS = {
 const FILTER_KEYS = ['ir_phase', 'entity_id', 'ioc_id', 'origin', 'key', 'q']
 const ORIGIN_LABELS = { manual: 'Manual', forensic_import: 'Imported', system: 'System' }
 const MAL_CHIP = { background: SEV_PALETTE.critical.bg, color: SEV_PALETTE.critical.text, borderColor: SEV_PALETTE.critical.border }
-
-// ─── Export helpers ───────────────────────────────────────────────────────────
-
-function triggerDownload(blob, filename) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url; a.download = filename
-  document.body.appendChild(a); a.click()
-  document.body.removeChild(a); URL.revokeObjectURL(url)
-}
-
-function exportCsv(events, incRef) {
-  // G4: provenance + clock-offset columns appended after the original 12 (readers by position keep working).
-  const COLS = ['event_time', 'description', 'event_type', 'ir_phase',
-                'mitre_tactic_id', 'mitre_tactic_name', 'mitre_technique_id',
-                'mitre_technique_name', 'hostname', 'source', 'origin', 'raw_log',
-                'evidence_identifier', 'parser_name', 'parser_version', 'time_basis',
-                'recorded_event_time', 'clock_offset_seconds']
-  const esc = v => {
-    if (v == null) return ''
-    const s = csvSafe(v).replace(/"/g, '""')   // R129: formula-escaped
-    return /[,"\n\r]/.test(s) ? `"${s}"` : s
-  }
-  const rows = [COLS.join(','), ...events.map(ev => COLS.map(c => esc(ev[c])).join(','))]
-  triggerDownload(
-    new Blob([rows.join('\r\n')], { type: 'text/csv;charset=utf-8' }),
-    `timeline-${incRef || 'export'}.csv`,
-  )
-}
-
-const TACTIC_HEX = {
-  TA0043: '#10b981', TA0042: '#a78bfa',
-  TA0001: '#f43f5e', TA0002: '#f59e0b', TA0003: '#a78bfa',
-  TA0004: '#f59e0b', TA0005: '#22d3ee', TA0006: '#f43f5e',
-  TA0007: '#10b981', TA0008: '#f59e0b', TA0009: '#a78bfa',
-  TA0010: '#f59e0b', TA0011: '#22d3ee', TA0040: '#f43f5e',
-}
-
-const SEV_HEX = {
-  critical: '#dc2626', high: '#ea580c', medium: '#ca8a04',
-  low: '#2563eb', informational: '#6b7280',
-}
-
-function fmtDtHtml(iso) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  const off = -d.getTimezoneOffset()
-  const sign = off >= 0 ? '+' : '-'
-  const hh = String(Math.floor(Math.abs(off) / 60)).padStart(2, '0')
-  const mm = String(Math.abs(off) % 60).padStart(2, '0')
-  return d.toISOString().slice(0, 19).replace('T', ' ') + ` ${sign}${hh}:${mm}`
-}
-
-function exportHtml(events, inc) {
-  const slug = (inc.ref || 'timeline').replace(/[^a-z0-9]/gi, '-').toLowerCase()
-
-  const escHtml = s => s == null ? '' : String(s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-
-  const sevHex = SEV_HEX[(inc.severity || '').toLowerCase()] || '#6b7280'
-
-  // Build zig-zag rows. Alternation runs across all events regardless of
-  // date-divider position so the rhythm stays stable visually.
-  const rows = []
-  let prevDate = null
-  events.forEach((ev, i) => {
-    const d = new Date(ev.event_time)
-    const dateLabel = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-    const timeLabel = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
-
-    if (dateLabel !== prevDate) {
-      rows.push(`<div class="date-divider"><span>${escHtml(dateLabel)}</span></div>`)
-      prevDate = dateLabel
-    }
-
-    const side  = i % 2 === 0 ? 'left' : 'right'
-    const color = TACTIC_HEX[ev.mitre_tactic_id] || '#6b7280'
-    const phase = IR_PHASE_LABELS[ev.ir_phase] || ''
-
-    const headerBits = [`<span class="event-time">${escHtml(timeLabel)}</span>`]
-    if (ev.event_type) {
-      headerBits.push(`<span class="pill" style="background:${color}22;color:${color};border-color:${color}55">${escHtml(ev.event_type)}</span>`)
-    }
-    if (phase) {
-      headerBits.push(`<span class="pill pill-muted">${escHtml(phase)}</span>`)
-    }
-    if (ev.hostname) {
-      headerBits.push(`<span class="event-host">${escHtml(ev.hostname)}</span>`)
-    }
-
-    let mitreBadge = ''
-    const mitreLabel = [ev.mitre_technique_id, ev.mitre_technique_name].filter(Boolean).join(' ') || ev.mitre_tactic_name
-    if (mitreLabel) {
-      mitreBadge = `<div class="mitre-badge" style="color:${color};border-color:${color}66;background:${color}1a">${escHtml(mitreLabel)}</div>`
-    }
-
-    const metaBits = []
-    if (ev.source) metaBits.push(`source: ${escHtml(ev.source)}`)
-    if (ev.origin) metaBits.push(`origin: ${escHtml(ev.origin)}`)
-    const metaLine = metaBits.length ? `<div class="event-meta">${metaBits.join(' · ')}</div>` : ''
-
-    const rawSection = ev.raw_log
-      ? `<details class="event-raw-wrap"><summary>Raw log</summary><pre class="event-raw">${escHtml(ev.raw_log)}</pre></details>`
-      : ''
-
-    rows.push(`
-      <div class="event-item ${side}">
-        <div class="event-dot" style="background:${color};box-shadow:0 0 8px ${color}66"></div>
-        <div class="event-card" style="border-left:3px solid ${color}">
-          <div class="event-header">${headerBits.join('')}</div>
-          <div class="event-desc">${escHtml(ev.description)}</div>
-          ${mitreBadge}
-          ${metaLine}
-          ${rawSection}
-        </div>
-      </div>`)
-  })
-
-  const eventsHtml = rows.join('\n')
-  const generated = fmtDtHtml(new Date().toISOString())
-
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Timeline · ${escHtml(inc.ref || '')} ${escHtml(inc.title)}</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#07080b;color:#d9dde5;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;font-size:13px;line-height:1.6}
-.mono{font-family:'JetBrains Mono','Fira Mono',Consolas,monospace}
-
-.header{background:linear-gradient(135deg,#07070f,#140008);padding:32px 48px;border-bottom:3px solid ${sevHex}}
-.header-eyebrow{font-family:'JetBrains Mono','Fira Mono',Consolas,monospace;font-size:11px;color:#555570;letter-spacing:3px;margin-bottom:8px}
-.header-title{font-size:24px;font-weight:700;color:#fff;margin-bottom:6px}
-.header-badges{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
-.header-badge{padding:4px 12px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
-.badge-sev{background:${sevHex};color:#fff}
-.badge-tlp{border:2px solid #dc2626;color:#dc2626}
-.badge-count{background:#0e1015;border:1px solid #1f242d;color:#8888aa}
-.header-meta{margin-top:14px;font-family:'JetBrains Mono','Fira Mono',Consolas,monospace;font-size:11px;color:#555570}
-
-.timeline-container{max-width:1100px;margin:0 auto;padding:40px 24px;position:relative}
-.timeline-container::before{content:'';position:absolute;left:50%;top:0;bottom:0;width:2px;background:#1f242d;transform:translateX(-50%)}
-
-.date-divider{text-align:center;position:relative;margin:28px 0 16px;z-index:2}
-.date-divider span{display:inline-block;background:#07080b;border:1px solid #1f242d;padding:4px 14px;border-radius:20px;font-family:'JetBrains Mono','Fira Mono',Consolas,monospace;font-size:11px;color:#8888aa;letter-spacing:.08em}
-
-.event-item{display:flex;width:50%;position:relative;margin-bottom:18px}
-.event-item.left{padding-right:32px;justify-content:flex-end}
-.event-item.right{padding-left:32px;margin-left:50%}
-.event-dot{position:absolute;width:12px;height:12px;border-radius:50%;top:18px;z-index:3;border:2px solid #07080b}
-.event-item.left .event-dot{right:-7px}
-.event-item.right .event-dot{left:-7px}
-
-.event-card{background:#0e1015;border:1px solid #1f242d;border-radius:6px;padding:12px 14px;width:100%;max-width:460px}
-.event-header{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;margin-bottom:8px;row-gap:6px}
-.event-time{font-family:'JetBrains Mono','Fira Mono',Consolas,monospace;font-size:11px;font-weight:600;color:#a8b0c0;flex-shrink:0}
-.pill{font-size:10px;font-weight:700;padding:2px 8px;border-radius:3px;letter-spacing:.04em;white-space:nowrap;border:1px solid transparent}
-.pill-muted{background:#1f242d33;color:#8888aa;border-color:#1f242d}
-.event-host{font-family:'JetBrains Mono','Fira Mono',Consolas,monospace;font-size:10px;color:#555570;margin-left:auto;flex-shrink:0}
-.event-desc{font-size:13px;color:#d9dde5;line-height:1.5;margin-bottom:6px;word-break:break-word}
-.mitre-badge{display:inline-block;font-family:'JetBrains Mono','Fira Mono',Consolas,monospace;font-size:10px;font-weight:600;padding:2px 8px;border-radius:3px;border:1px solid;margin-top:4px}
-.event-meta{font-size:10px;color:#8888aa;margin-top:6px}
-.event-raw-wrap{margin-top:8px}
-.event-raw-wrap summary{cursor:pointer;font-family:'JetBrains Mono','Fira Mono',Consolas,monospace;font-size:11px;color:#555570;list-style:'▶ '}
-.event-raw-wrap[open] summary{list-style:'▼ ';color:#8888aa}
-.event-raw{font-family:'JetBrains Mono','Fira Mono',Consolas,monospace;font-size:10px;color:#8888aa;background:#050508;padding:8px;border-radius:4px;margin-top:4px;white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto;border:1px solid #1f242d}
-
-.footer{padding:20px 48px;border-top:1px solid #1f242d;font-family:'JetBrains Mono','Fira Mono',Consolas,monospace;font-size:10px;color:#555570;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
-
-@media (max-width:768px){
-  .timeline-container::before{left:20px}
-  .event-item,.event-item.right{width:100%;margin-left:0;padding-left:40px;padding-right:0;justify-content:flex-start}
-  .event-item.left .event-dot,.event-item.right .event-dot{left:13px;right:auto}
-  .event-card{max-width:100%}
-}
-@media print{
-  body{background:#fff;color:#111}
-  .header{background:#f5f5f5;color:#111}
-  .header-title{color:#000}
-  .timeline-container::before{background:#bbb}
-  .date-divider span{background:#fff;border-color:#ccc;color:#555}
-  .event-card{background:#fff;border-color:#ccc;color:#111}
-  .event-desc{color:#000}
-  .event-dot{border-color:#fff}
-  .event-raw-wrap[open] .event-raw{display:block !important}
-  .footer{background:#f5f5f5;color:#555;border-top-color:#ccc}
-}
-</style>
-</head>
-<body>
-
-<div class="header">
-  <div class="header-eyebrow">DFIR-FENRIR // INCIDENT TIMELINE</div>
-  <div class="header-title">${escHtml(inc.title || '')}</div>
-  <div class="header-badges">
-    ${inc.ref ? `<span class="header-badge badge-count">${escHtml(inc.ref)}</span>` : ''}
-    ${inc.severity ? `<span class="header-badge badge-sev">${escHtml(String(inc.severity).toUpperCase())}</span>` : ''}
-    ${inc.tlp ? `<span class="header-badge badge-tlp">TLP:${escHtml(String(inc.tlp).toUpperCase())}</span>` : ''}
-    <span class="header-badge badge-count">${events.length} event${events.length !== 1 ? 's' : ''}</span>
-  </div>
-  <div class="header-meta">Exported ${escHtml(generated)}</div>
-</div>
-
-<div class="timeline-container">
-  ${events.length ? eventsHtml : '<div style="text-align:center;color:#555570;padding:60px;font-family:\'JetBrains Mono\',monospace;font-size:12px">No timeline events recorded.</div>'}
-</div>
-
-<div class="footer">
-  <span>DFIR-FENRIR v2 — ${escHtml(inc.title || '')}</span>
-  ${inc.tlp ? `<span>TLP:${escHtml(String(inc.tlp).toUpperCase())} — Handle accordingly</span>` : ''}
-  <span>Generated ${escHtml(generated)}</span>
-</div>
-
-</body>
-</html>`
-
-  triggerDownload(
-    new Blob([html], { type: 'text/html;charset=utf-8' }),
-    `timeline-${slug}.html`,
-  )
-}
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
@@ -295,6 +72,9 @@ export default function Timeline() {
   const [modalOpen, setModalOpen] = useState(false)
   const [editEvent, setEditEvent] = useState(null)
   const [busy, setBusy]           = useState(false)
+  // TE: an entity just added from the event form — offer to link the other events that name it.
+  const [newEntity, setNewEntity] = useState(null)
+  const [exportOpen, setExportOpen] = useState(false)
 
   // LOLBin correlation state
   const [lolbinHits,   setLolbinHits]   = useState([])
@@ -370,6 +150,19 @@ export default function Timeline() {
 
   const toggle = (id) => setExpandedId(prev => prev === id ? null : id)
 
+  // TE: link one event to the entity its host names (entity_match) — the analyst's click, never automatic.
+  const onLinkEntity = async (ev) => {
+    setBusy(true)
+    try {
+      await api.updateTimelineEvent(inc.id, ev.id, { entity_id: ev.entity_match.id })
+      await reload()
+    } catch (e) {
+      setError(e.message || 'Could not link the event')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const onDelete = async (ev) => {
     if (!window.confirm(`Remove this timeline event?\n\n${ev.description}`)) return
     setBusy(true)
@@ -391,20 +184,12 @@ export default function Timeline() {
         <button
           type="button"
           className="btn"
-          onClick={() => exportCsv(events, inc.ref)}
+          onClick={() => setExportOpen(true)}
           disabled={events.length === 0}
-          title="Export timeline as CSV"
+          title="Export the timeline: six HTML layouts or CSV"
+          data-testid="tl-export"
         >
-          Export CSV
-        </button>
-        <button
-          type="button"
-          className="btn"
-          onClick={() => exportHtml(events, inc)}
-          disabled={events.length === 0}
-          title="Export timeline as standalone HTML"
-        >
-          Export HTML
+          ⇩ Export
         </button>
         <button
           type="button"
@@ -482,6 +267,10 @@ export default function Timeline() {
         </div>
       )}
 
+      {newEntity && !isClosed && !viewer && (
+        <EntityLinkPrompt key={newEntity.id} incidentId={inc.id} entity={newEntity} onLinked={() => reload()} />
+      )}
+
       {!showSystem && systemCount > 0 && (
         <div style={{
           fontSize: 12,
@@ -532,6 +321,9 @@ export default function Timeline() {
           onToggle={toggle}
           onEdit={setEditEvent}
           onDelete={onDelete}
+          onLinkEntity={onLinkEntity}
+          onEntitiesLinked={() => reload()}
+          onFilterEntity={(id) => setFilter('entity_id', id)}
           isClosed={isClosed || viewer}
           busy={busy}
           lolbinHitIds={lolbinHitIds}
@@ -543,7 +335,7 @@ export default function Timeline() {
         <EventModal
           incidentId={inc.id}
           onClose={() => setModalOpen(false)}
-          onCreated={(warning) => { setModalOpen(false); reload().then(() => { if (warning) setError(warning) }) }}
+          onCreated={(warning, added) => { setModalOpen(false); setNewEntity(added || null); reload().then(() => { if (warning) setError(warning) }) }}
         />
       )}
 
@@ -552,7 +344,17 @@ export default function Timeline() {
           incidentId={inc.id}
           event={editEvent}
           onClose={() => setEditEvent(null)}
-          onCreated={(warning) => { setEditEvent(null); reload().then(() => { if (warning) setError(warning) }) }}
+          onCreated={(warning, added) => { setEditEvent(null); setNewEntity(added || null); reload().then(() => { if (warning) setError(warning) }) }}
+        />
+      )}
+
+      {exportOpen && (
+        <TimelineExportDialog
+          inc={inc}
+          filters={filters}
+          showSystem={showSystem}
+          events={events}
+          onClose={() => setExportOpen(false)}
         />
       )}
 
@@ -578,7 +380,7 @@ export default function Timeline() {
 
 // ─── Vertical spine ───────────────────────────────────────────────────────────
 
-function TimelineSpine({ incidentId, events, expandedId, onToggle, onEdit, onDelete, isClosed, busy, lolbinHitIds, lolbinHitMap }) {
+function TimelineSpine({ incidentId, events, expandedId, onToggle, onEdit, onDelete, onLinkEntity, onEntitiesLinked, onFilterEntity, isClosed, busy, lolbinHitIds, lolbinHitMap }) {
   // Group events by date so we can insert date separators.
   const groups = []
   let currentDate = null
@@ -787,9 +589,24 @@ function TimelineSpine({ incidentId, events, expandedId, onToggle, onEdit, onDel
                 </div>
 
                 {/* meta row */}
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--muted)' }}>
-                  {ev.hostname && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--muted)', alignItems: 'center' }}>
+                  {ev.hostname && !sameName(ev.hostname, ev.entity?.value) && (
                     <span style={{ fontFamily: 'var(--font-mono)' }}>{ev.hostname}</span>
+                  )}
+                  {/* TE: the linked entity, or the one the host names (a suggestion: linked only on a click) */}
+                  {ev.entity ? (
+                    <span className="link-chip" data-chip="entity" data-testid="tl-entity-chip"
+                          data-compromised={ev.entity.compromised ? 'true' : undefined}
+                          style={ev.entity.compromised ? MAL_CHIP : undefined}
+                          title={`Linked to entity ${labelOf('entity_type', ev.entity.type)} ${ev.entity.value}${ev.entity.compromised ? ' (compromised)' : ''}`}>
+                      {labelOf('entity_type', ev.entity.type)} · {ev.entity.value}{ev.entity.compromised ? ' · ⚠ compromised' : ''}
+                    </span>
+                  ) : ev.entity_match && (
+                    <span data-testid="tl-entity-match" style={{ color: 'var(--dim)' }}
+                          title="The host names this entity, but the event isn't linked to it. Expand the event to link it.">
+                      ≈ {labelOf('entity_type', ev.entity_match.type)}{' '}
+                      <span style={{ fontFamily: 'var(--font-mono)' }}>{ev.entity_match.value}</span> · not linked
+                    </span>
                   )}
                   {ev.source && (
                     <span>{ev.source}</span>
@@ -885,6 +702,39 @@ function TimelineSpine({ incidentId, events, expandedId, onToggle, onEdit, onDel
                     {ev.created_by_username ? ` by ${ev.created_by_username}` : ''}
                   </div>
 
+                  {/* TE: the entity link */}
+                  {ev.entity ? (
+                    <div className="field-hint" data-testid="tl-entity-linked" style={{ marginBottom: 12 }}>
+                      Linked to entity {labelOf('entity_type', ev.entity.type)}{' '}
+                      <span style={{ fontFamily: 'var(--font-mono)' }}>{ev.entity.value}</span>
+                      {ev.entity.compromised && <span style={{ color: 'var(--crit)' }}> · ⚠ compromised</span>}
+                      {' · '}
+                      <button type="button" className="btn ghost" data-testid="tl-entity-filter"
+                              onClick={(e) => { e.stopPropagation(); onFilterEntity(ev.entity.id) }}>
+                        Show its events
+                      </button>
+                    </div>
+                  ) : ev.entity_match && (
+                    <div style={{ marginBottom: 12 }}>
+                      <div className="field-hint" data-testid="tl-entity-suggest" style={{ marginBottom: 6 }}>
+                        The host names entity {labelOf('entity_type', ev.entity_match.type)}{' '}
+                        <span style={{ fontFamily: 'var(--font-mono)' }}>{ev.entity_match.value}</span>
+                        {ev.entity_match.compromised && <span style={{ color: 'var(--crit)' }}> · ⚠ compromised</span>}
+                        {', but the event isn’t linked to it.'}
+                        {!isClosed && (
+                          <>
+                            {' '}
+                            <button type="button" className="btn ghost" data-testid="tl-entity-link"
+                                    onClick={(e) => { e.stopPropagation(); onLinkEntity(ev) }} disabled={busy}>
+                              Link this event
+                            </button>
+                          </>
+                        )}
+                      </div>
+                      {!isClosed && <EntityLinkPrompt incidentId={incidentId} entity={ev.entity_match} onLinked={onEntitiesLinked} />}
+                    </div>
+                  )}
+
                   {ev.server_generated ? (
                     // Recorded by the server (closure, gate override, milestone…): the API refuses
                     // edits and deletes (409 system_event_immutable), so none are offered.
@@ -912,6 +762,7 @@ function TimelineSpine({ incidentId, events, expandedId, onToggle, onEdit, onDel
                   </div>
                   )}
                   <LinkedCaseNotes incidentId={incidentId} kind="timeline_event" targetId={ev.id} isClosed={isClosed} />
+                  <LinkedSupportingFiles incidentId={incidentId} kind="timeline_event" targetId={ev.id} />
                 </div>
               )}
             </div>
@@ -921,6 +772,9 @@ function TimelineSpine({ incidentId, events, expandedId, onToggle, onEdit, onDel
     </div>
   )
 }
+
+// The host as recorded is shown beside the entity chip only when it spells something else.
+const sameName = (a, b) => !!b && a.trim().toLowerCase() === b.trim().toLowerCase()
 
 // C5 — how an imported event's time was worked out; explicit / legacy times get no badge.
 const TIME_BASIS_LABEL = { assumed_tz: 'TZ assumed', inferred_year: 'year inferred' }
@@ -1034,8 +888,21 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
 
   const hostText   = hostname.trim().slice(0, 256)
   const linked     = pinnedId ? entities.find(e => e.id === pinnedId) || null : null
-  // An entity the typed host matches (case-insensitive) — offered to link, never linked silently.
-  const suggestion = pinnedId ? null : matchEntity(entities, hostText)
+  // TE: the entity the typed host names, by the server's rule (GET …/entities?match=), debounced.
+  // Offered to link, never linked silently. Kept per text, so a lookup still running is no answer.
+  const [lookup, setLookup] = useState({ text: '', entity: null })
+  useEffect(() => {
+    if (!hostText) return
+    let live = true
+    const t = setTimeout(() => {
+      api.listEntities(incidentId, { match: hostText, limit: 1 })
+        .then(r => { if (live) setLookup({ text: hostText, entity: r.items[0] || null }) })
+        .catch(() => { if (live) setLookup({ text: hostText, entity: null }) })
+    }, 250)
+    return () => { live = false; clearTimeout(t) }
+  }, [incidentId, hostText])
+  const looked     = lookup.text === hostText
+  const suggestion = pinnedId || !looked ? null : lookup.entity
 
   const onTacticChange = (e) => {
     const id   = e.target.value
@@ -1118,16 +985,20 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
         })
       }
       let warning = await applyIocLinks(saved?.id ?? event.id)
+      let added = null
       if (addHost) {
         try {
-          const ent = await api.createEntity(incidentId, { type: 'host', value: hostText })
+          // Asked once more: a lookup that lagged the typing must not add a case variant of a known entity.
+          const known = (await api.listEntities(incidentId, { match: hostText, limit: 1 })).items[0]
+          const ent = known || await api.createEntity(incidentId, { type: 'host', value: hostText })
           await api.updateTimelineEvent(incidentId, saved?.id ?? event.id, { entity_id: ent.id })
+          added = known ? null : ent
         } catch (err2) {
           warning = `The event was saved, but “${hostText}” could not be added to Entities and linked: ${err2.message || 'request failed'}` +
                     (warning ? ` ${warning}` : '')
         }
       }
-      onCreated(warning)
+      onCreated(warning, added)
     } catch (err) {
       setError(err.message || (isEdit ? 'Could not save changes.' : 'Could not add event.'))
     } finally {
@@ -1289,7 +1160,7 @@ function EventModal({ incidentId, event, onClose, onCreated }) {
                             onClick={() => setPinnedId(suggestion.id)}
                             title="Link this event to the entity">Link</button>
                   </div>
-                ) : hostText ? (
+                ) : hostText && looked ? (
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: 'var(--muted)' }}>
                     <input type="checkbox" checked={addAsEntity} onChange={(e) => setAddAsEntity(e.target.checked)} />
                     Add “{hostText}” to Entities as a host

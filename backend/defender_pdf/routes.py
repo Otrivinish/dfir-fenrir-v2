@@ -44,6 +44,7 @@ from evidence.streaming import require_free_space
 from forensic.parser import apply_clock_offset
 from forensic.routes import (_exhibit_state_error, _lock_exhibit, _read_exhibit, clock_offset_fields,
                              exhibit_info, exhibit_too_large, upload_match)
+from entities.match import link_rows, load_index
 from incidents.access import get_accessible_incident
 from models import (IOC, Artifact, DefenderPdfImport, Entity, EntityEvent, Evidence, TimelineEvent,
                     User, utcnow)
@@ -658,6 +659,8 @@ async def promote_defender_pdf_import(
 
     n_iocs = await _insert_keyed(IOC, iocs)
     n_ents = await _insert_keyed(Entity, ents)
+    if req.link_entities and evs:       # TE: after the inserts, so this commit's own entities count
+        link_rows(await load_index(db, incident_id, [e["hostname"] for e in evs]), evs)
     made_ev: list[int] = []
     for start in range(0, len(evs), _PROMOTE_CHUNK):
         res = await db.execute(
@@ -669,6 +672,8 @@ async def promote_defender_pdf_import(
     # A concurrent promote of the same idx loses the ON CONFLICT race: count it as already there.
     again = sorted(set(again) | ({e["import_event_index"] for e in evs} - set(made_ev)))
     created_idx = sorted(created_idx + made_ev)
+    made = set(made_ev)
+    linked = sum(1 for e in evs if e.get("entity_id") and e["import_event_index"] in made)
 
     await write_audit(
         db, "defender_pdf_import_promote",
@@ -682,7 +687,7 @@ async def promote_defender_pdf_import(
             "requested": len(items),
             "created_iocs": n_iocs, "created_entities": n_ents, "created_events": len(made_ev),
             "skipped_untimestamped": len(untimed), "already_promoted": len(again),
-            "already_exists": len(exists), "ir_phase": req.ir_phase,
+            "already_exists": len(exists), "ir_phase": req.ir_phase, "entities_linked": linked,
         },
         ip_address=request.client.host if request.client else None,
     )
@@ -691,6 +696,7 @@ async def promote_defender_pdf_import(
         created=n_iocs + n_ents + len(made_ev), created_iocs=n_iocs, created_entities=n_ents,
         created_events=len(made_ev), created_indices=created_idx,
         skipped_untimestamped=sorted(untimed), already_promoted=again, already_exists=sorted(exists),
+        entities_linked=linked,
     )
 
 

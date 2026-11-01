@@ -68,6 +68,8 @@ export default function TimelineImport() {
   const [filterSuspicious, setFilterSuspicious] = useState(false)
   const [filterSource, setFilterSource] = useState('')
   const [promoting, setPromoting]       = useState(false)
+  // TE (D3): link promoted events to the entity their host names — on by default, visible here.
+  const [linkEntities, setLinkEntities] = useState(true)
   const [promoteMsg, setPromoteMsg]     = useState(null)
   const [iocTarget, setIocTarget]       = useState(null)   // ParsedEventOut | null
   const [iocBulkOpen, setIocBulkOpen]   = useState(false)  // bulk add-to-IOCs modal
@@ -363,17 +365,21 @@ export default function TimelineImport() {
     setPromoteMsg(null)
     try {
       let created = 0
+      let linked = 0
       const untimed = []
       const already = []
       for (let i = 0; i < picks.length; i += PROMOTE_CHUNK) {
         const res = await api.promoteForensicImport(inc.id, result.import_id, {
           indices: picks.slice(i, i + PROMOTE_CHUNK).map(e => e.idx),
+          link_entities: linkEntities,
         })
         created += res.created
+        linked += res.entities_linked || 0
         untimed.push(...res.skipped_untimestamped)
         already.push(...res.already_promoted)
       }
       const msg = `Added ${created} event${created !== 1 ? 's' : ''} to the timeline.` +
+        (linked ? ` ${linked} linked to registered entities by host.` : '') +
         (already.length ? ` ${already.length} already on the timeline (skipped).` : '') +
         (untimed.length ? ` ${untimed.length} without a timestamp skipped.` : '')
       setPromoteMsg({ kind: 'ok', text: msg })
@@ -870,6 +876,11 @@ export default function TimelineImport() {
               >
                 {promoting ? 'Adding…' : `Add ${selectedPromotable.length} to Timeline`}
               </button>
+              <label className="tl-key-toggle" title="Each event whose host names a registered entity is linked to it (an annotation; the imported host stays as recorded)">
+                <input type="checkbox" checked={linkEntities} onChange={(e) => setLinkEntities(e.target.checked)}
+                       disabled={promoting || ro} data-testid="ti-link-entities" />
+                Link to entities by host
+              </label>
               <button
                 type="button"
                 className="btn"

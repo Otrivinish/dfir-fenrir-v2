@@ -3,9 +3,11 @@ import { Link } from 'react-router-dom'
 import { api } from '../api/client.js'
 import { useAuth } from '../hooks/useAuth.jsx'
 import { formatLocal } from '../lib/datetime.js'
+import ReadinessDeferDialog from '../components/ReadinessDeferDialog.jsx'
 
 // Prepare → Readiness (E1). Shows GET /api/readiness as-is: the API decides every status and
 // level. State is a glyph plus a word; the text stays in text tokens (readiness.css).
+// RD: a deferred check stays listed with its real status, marked Deferred; admins defer and undo here.
 const STATUS = {
   pass:    { glyph: '✓', label: 'Pass' },
   fail:    { glyph: '✕', label: 'Fail' },
@@ -28,7 +30,7 @@ const NOT_CHECKED = [
 
 function plural(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}` }
 
-function CheckRow({ c, isAdmin }) {
+function CheckRow({ c, isAdmin, onDefer, onUndo, undoing }) {
   const st = STATUS[c.status] || STATUS.unknown
   const fixLabel = c.status === 'pass' ? 'View' : 'Fix'
   let fix = null
@@ -37,12 +39,27 @@ function CheckRow({ c, isAdmin }) {
       ? <span className="rd-fix-admin">Needs an admin</span>
       : <Link to={c.fix_route} aria-label={`${fixLabel}: ${c.title}`}>{fixLabel} →</Link>
   }
+  const d = c.deferral
   return (
-    <li className={`rd-item rd-${c.status} rd-lvl-${c.level}`} data-check-id={c.id}>
+    <li className={`rd-item rd-${c.status} rd-lvl-${c.level}${d ? ' rd-is-deferred' : ''}`} data-check-id={c.id}>
       <span className="rd-status"><span className="rd-glyph" aria-hidden="true">{st.glyph}</span>{st.label}</span>
       <div className="rd-main">
         <div className="rd-title">{c.title}</div>
         <div className="rd-detail">{c.detail}</div>
+        {d && (
+          <div className="rd-deferral">
+            <span className="rd-deferral-mark" aria-hidden="true">⏸</span>
+            <span>Deferred by {d.by_name} on {formatLocal(d.at)}{d.reason ? `: ${d.reason}` : ''}</span>
+            {isAdmin && (
+              <button type="button" className="btn-link" onClick={() => onUndo(c)} disabled={undoing}
+                      aria-label={`Undo deferral: ${c.title}`}>{undoing ? 'Undoing…' : 'Undo'}</button>
+            )}
+          </div>
+        )}
+        {!d && isAdmin && c.status !== 'pass' && (
+          <button type="button" className="btn-link rd-defer-btn" onClick={() => onDefer(c)}
+                  aria-label={`Defer: ${c.title}`}>Defer…</button>
+        )}
       </div>
       <span className="rd-level">{LEVEL[c.level] || c.level}</span>
       <span className="rd-csf">{c.csf.length ? c.csf.join(' · ') : '—'}</span>
@@ -58,6 +75,8 @@ export default function Readiness() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const seq = useRef(0)
+  const [deferTarget, setDeferTarget] = useState(null)   // RD: the check the Defer dialog is open for
+  const [undoing, setUndoing] = useState(null)
 
   const load = useCallback(async () => {
     const mine = ++seq.current
@@ -73,6 +92,21 @@ export default function Readiness() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // RD: both calls return the readiness response; show it as the latest check.
+  const deferred = (d) => { seq.current++; setData(d); setDeferTarget(null) }
+  const undo = async (c) => {
+    setUndoing(c.id); setError('')
+    try {
+      const d = await api.removeReadinessDeferral(c.id)
+      seq.current++
+      setData(d)
+    } catch (e) {
+      setError(e.message || 'Could not undo the deferral.')
+    } finally {
+      setUndoing(null)
+    }
+  }
 
   const s = data?.summary
   return (
@@ -105,6 +139,12 @@ export default function Readiness() {
               <span className="rd-glyph" aria-hidden="true">{s.warnings_failing ? '✕' : '✓'}</span>
               {plural(s.warnings_failing, 'warning')} failing
             </span>
+            {s.blockers_deferred + s.warnings_deferred > 0 && (
+              <span className="rd-count rd-count-deferred">
+                <span className="rd-glyph" aria-hidden="true">⏸</span>
+                {s.blockers_deferred + s.warnings_deferred} deferred
+              </span>
+            )}
             {s.unknown > 0 && (
               <span className="rd-count rd-count-unknown">
                 <span className="rd-glyph" aria-hidden="true">?</span>
@@ -119,7 +159,10 @@ export default function Readiness() {
               <span>Status</span><span>Check</span><span>Level</span><span>NIST CSF 2.0</span><span />
             </div>
             <ul className="rd-list" aria-label="Readiness checks">
-              {data.checks.map(c => <CheckRow key={c.id} c={c} isAdmin={isAdmin} />)}
+              {data.checks.map(c => (
+                <CheckRow key={c.id} c={c} isAdmin={isAdmin} onDefer={setDeferTarget} onUndo={undo}
+                          undoing={undoing === c.id} />
+              ))}
             </ul>
           </div>
 
@@ -129,6 +172,9 @@ export default function Readiness() {
             <p>A pass means the record exists, not that it works. Most fixes need an admin.</p>
           </div>
         </>
+      )}
+      {deferTarget && (
+        <ReadinessDeferDialog checks={[deferTarget]} onClose={() => setDeferTarget(null)} onDone={deferred} />
       )}
     </div>
   )

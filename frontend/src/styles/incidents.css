@@ -1204,11 +1204,6 @@ button.phase-step.clickable:focus-visible {
 .case-note-intro { color: var(--muted); font-size: 13px; margin: 0 0 var(--space-3); }
 .case-note-composer { margin-bottom: var(--space-4); }
 .case-note-composer textarea { width: 100%; resize: vertical; }
-.case-note-correcting {
-  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2);
-  padding: var(--space-2) var(--space-3); margin-bottom: var(--space-2); font-size: 13px;
-  background: var(--accent-soft); border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
-}
 .case-note {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: var(--space-3); margin-bottom: var(--space-3);
@@ -1227,7 +1222,17 @@ button.phase-step.clickable:focus-visible {
 a.case-note-flag { color: var(--accent); text-decoration: none; }
 .case-note-hash { margin-left: auto; color: var(--dim); font-size: 11px; }
 .case-note-body { overflow-wrap: anywhere; }
-.case-note-struck { text-decoration: line-through; color: var(--dim); }
+.case-note textarea { width: 100%; resize: vertical; }
+/* CN-2: the signature line of a revision, and the revisions in a note's history */
+.case-note-sig {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2);
+  font-size: 12px; color: var(--muted); margin-top: var(--space-2);
+  padding-top: var(--space-2); border-top: 1px dashed var(--border);
+}
+.case-note-rev { padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
+.case-note-rev:last-child { border-bottom: none; }
+.case-note-rev .case-note-meta { margin-bottom: var(--space-1); }
+.case-note-rev .case-note-sig { margin-top: 0; padding-top: 0; border-top: none; }
 .case-note-links { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); margin-top: var(--space-2); }
 .case-note-chip {
   display: inline-flex; align-items: center; gap: var(--space-1); max-width: 100%;

@@ -25,6 +25,7 @@ from stakeholder_notifications.service import (levels as sn_levels, levels_out a
                                                to_out as sn_to_out)
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
+from case_notes.chain import revision_meta
 from core.database import get_db
 from files.routes import report_file_present, report_image_digest
 from incidents.access import get_accessible_incident
@@ -130,9 +131,11 @@ async def get_report_data(
     - `gate_sign_offs[]` (I5): every recorded gate sign-off, oldest first: {id, gate,
       gate_label, role ic|dpo, role_label, username, signed_as, signed_at (UTC Z), statement,
       state_sha256, current (made since the last re-open: only those count)}.
-    - `case_notes[]` (H2): the append-only case notes, oldest first: {id, created_at (UTC Z),
-      author_username, body (current OOB passphrase shown as "[passphrase]"), corrects_id,
-      corrected_by_id, links (counts per kind), content_sha256}.
+    - `case_notes[]` (H2): the append-only case notes, every revision, oldest first: {id, root_id,
+      revision (CN-2: a note is the chain of its revisions; the current one has no corrected_by_id),
+      created_at (UTC Z), author_username, signed_name, signed_as (null before CN-2), body (current
+      OOB passphrase shown as "[passphrase]"), corrects_id, corrected_by_id, links (counts per kind),
+      content_sha256, hash_v}.
     - `recovery` (I1): {summary, items} as GET …/recovery returns them (every in-scope system,
       timestamps UTC Z): restore point, restored at/by, validation method and checklist,
       validated at/by, same_person_validation, monitoring window, notes.
@@ -417,17 +420,23 @@ async def get_report_data(
 
     # H2: append-only case notes, oldest first, with each entry's content hash (passphrase redacted).
     case_note_fixes = {n.corrects_id: str(n.id) for n in case_notes if n.corrects_id}
+    case_note_meta = await revision_meta(db, incident_id)
     case_notes_out = [
         {
             "id":              str(n.id),
+            "root_id":         str(case_note_meta[n.id][0]),
+            "revision":        case_note_meta[n.id][1],
             "created_at":      _utc_z(n.created_at),
             "author_username": username_map.get(str(n.author_id)),
+            "signed_name":     n.signed_name,
+            "signed_as":       n.signed_as,
             "body":            redact(n.body),
             "corrects_id":     str(n.corrects_id) if n.corrects_id else None,
             "corrected_by_id": case_note_fixes.get(n.id),
             "links":           {"evidence": len(n.evidence_ids), "entities": len(n.entity_ids),
                                 "iocs": len(n.ioc_ids), "timeline_events": len(n.timeline_event_ids)},
             "content_sha256":  n.content_sha256,
+            "hash_v":          n.hash_v,
         }
         for n in case_notes
     ]

@@ -5,7 +5,7 @@ import { formatLocal } from '../../lib/datetime.js'
 import { SEVERITY, TLP, TRIAGE_STATE, INCIDENT_TYPE, DETECTION_METHOD, ENTITY_TYPE, labelOf,
          FUNCTIONAL_IMPACT, INFORMATION_IMPACT, RECOVERABILITY } from '../../lib/incidentVocab.js'
 import { api } from '../../api/client.js'
-import { matchEntity } from '../../lib/entityMatch.js'
+import EntityLinkPrompt from '../../components/EntityLinkPrompt.jsx'
 import TagChip from '../../components/TagChip.jsx'
 import TagInput from '../../components/TagInput.jsx'
 import LocalDateTimePicker from '../../components/LocalDateTimePicker.jsx'
@@ -181,6 +181,7 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
   const [form, setForm]       = useState(BLANK_SYSTEM)
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState('')
+  const [saved, setSaved]     = useState(null)     // TE: the entity just added / flagged — offer its events
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -193,33 +194,58 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
   useEffect(() => { load() }, [load])
 
   const openAdd = async () => {
-    setForm(BLANK_SYSTEM); setError(''); setScope([]); setAdding(true)
+    setForm(BLANK_SYSTEM); setError(''); setScope([]); setSaved(null); setAdding(true)
     try { setScope(await api.listAllEntities(incidentId)) } catch { /* picker stays empty; typing still works */ }
   }
 
   const value    = form.value.trim()
-  // Case-insensitive (M6): "dc01" flags the existing "DC01" instead of adding a duplicate.
-  const existing = matchEntity(scope.filter(e => e.type === form.type), value)
+  // Case-insensitive (M6), by the server's rule (TE: GET …/entities?match=): "dc01" flags the existing
+  // "DC01" instead of adding a duplicate. Debounced; kept per (type, text) so a running lookup is no answer.
+  const [lookup, setLookup] = useState({ key: '', entity: null })
+  const key      = `${form.type}|${value}`
+  const looked   = lookup.key === key
+  const existing = looked ? lookup.entity : null
+  useEffect(() => {
+    if (!adding || !value) return
+    let live = true
+    const t = setTimeout(() => {
+      api.listEntities(incidentId, { match: value, type: form.type, limit: 1 })
+        .then(r => { if (live) setLookup({ key: `${form.type}|${value}`, entity: r.items[0] || null }) })
+        .catch(() => { if (live) setLookup({ key: `${form.type}|${value}`, entity: null }) })
+    }, 250)
+    return () => { live = false; clearTimeout(t) }
+  }, [incidentId, adding, value, form.type])
 
   // Picking a known value takes that entity's type, so it is flagged instead of duplicated.
-  const onValueChange = (v) => {
-    const match = matchEntity(scope, v.trim())
-    setForm(f => ({ ...f, value: v, ...(match ? { type: match.type } : {}) }))
-  }
+  useEffect(() => {
+    if (!adding || !value) return
+    let live = true
+    const t = setTimeout(() => {
+      api.listEntities(incidentId, { match: value, limit: 1 })
+        .then(r => { const m = r.items[0]; if (live && m) setForm(f => f.value.trim() === value ? { ...f, type: m.type } : f) })
+        .catch(() => {})
+    }, 250)
+    return () => { live = false; clearTimeout(t) }
+  }, [incidentId, adding, value])
+  const onValueChange = (v) => setForm(f => ({ ...f, value: v }))
 
   const handleSave = async () => {
     if (!value) { setError('Enter the host, account or service.'); return }
     setBusy(true); setError('')
     try {
-      if (existing) {
-        await api.updateEntity(incidentId, existing.id, { compromised: true })
-      } else {
-        await api.createEntity(incidentId, {
+      // Asked once more on save: a lookup that lagged the typing must not add a case variant.
+      const known = (await api.listEntities(incidentId, { match: value, type: form.type, limit: 1 })).items[0]
+      let ent = known
+      if (known && !known.compromised) {
+        ent = await api.updateEntity(incidentId, known.id, { compromised: true })
+      } else if (!known) {
+        ent = await api.createEntity(incidentId, {
           type: form.type, value, description: form.notes.trim() || null,
           criticality: 'high', compromised: true,
         })
       }
       setAdding(false)
+      setSaved(ent)
       await load()
     } catch (e) {
       setError(e.message || 'Save failed.')
@@ -256,6 +282,12 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
           )}
         </div>
       </div>
+
+      {saved && !readOnly && (
+        <div style={{ marginBottom: 'var(--space-3)' }}>
+          <EntityLinkPrompt key={saved.id} incidentId={incidentId} entity={saved} />
+        </div>
+      )}
 
       {loading && <div style={{ color: 'var(--muted)', fontSize: 13 }}>Loading…</div>}
 
@@ -338,7 +370,7 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
                     rows={3} placeholder="Optional context…" />
                 </div>
               )}
-              {value && (
+              {value && looked && (
                 <div role="status" style={{ color: 'var(--muted)', fontSize: 12 }}>
                   {existing?.compromised
                     ? 'Already marked compromised.'
@@ -355,7 +387,7 @@ function AffectedSystemsSection({ incidentId, readOnly }) {
             </div>
             <div className="modal-foot">
               <button type="button" className="btn ghost" onClick={() => setAdding(false)} disabled={busy}>Cancel</button>
-              <button type="button" className="btn primary" onClick={handleSave} disabled={busy || existing?.compromised}>
+              <button type="button" className="btn primary" onClick={handleSave} disabled={busy || !looked || existing?.compromised}>
                 {busy ? 'Saving…' : 'Add system'}
               </button>
             </div>

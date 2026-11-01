@@ -56,6 +56,8 @@ export default function DefenderPdfImport() {
   const [candidates, setCandidates] = useState([])
 
   const [committing, setCommitting] = useState(false)
+  // TE (D3): link the timeline events to the entity their host names — on by default, visible here.
+  const [linkEntities, setLinkEntities] = useState(true)
   const [commitResult, setCommitResult] = useState(null)
 
   // Saved imports — listed on mount; refreshed after each upload/dispose.
@@ -173,6 +175,7 @@ export default function DefenderPdfImport() {
     try {
       const r = await api.promoteDefenderPdfImport(incidentId, activeImportId, {
         items: selected.map(c => ({ idx: c.idx, destination: c.destination })),
+        link_entities: linkEntities,
       })
       setCommitResult({ ok: true, ...r })
     } catch (e) {
@@ -408,6 +411,11 @@ export default function DefenderPdfImport() {
                     title={legacy ? 'Imported before run records — import it again to commit' : undefined}>
               {committing ? 'Committing…' : `Commit ${selectedCount} selected`}
             </button>
+            <label className="tl-key-toggle" title="Each timeline event whose host names a registered entity is linked to it (an annotation; the imported host stays as recorded)">
+              <input type="checkbox" checked={linkEntities} onChange={(e) => setLinkEntities(e.target.checked)}
+                     disabled={committing || ro || legacy} data-testid="dfimp-link-entities" />
+              Link events to entities by host
+            </label>
             <span style={{ color: 'var(--muted)', fontSize: 12 }}>{candidates.length} candidates found</span>
           </div>
 
@@ -423,6 +431,7 @@ export default function DefenderPdfImport() {
                   {commitResult.skipped_untimestamped.length > 0 && ` ${commitResult.skipped_untimestamped.length} without a timestamp not placed on the timeline.`}
                   {commitResult.already_promoted.length > 0 && ` ${commitResult.already_promoted.length} already on the timeline from this import.`}
                   {commitResult.already_exists.length > 0 && ` ${commitResult.already_exists.length} already on the incident (left as they are).`}
+                  {commitResult.entities_linked > 0 && ` ${commitResult.entities_linked} timeline event${commitResult.entities_linked === 1 ? '' : 's'} linked to registered entities by host.`}
                 </span>
               ) : <span>{commitResult.error}</span>}
             </div>

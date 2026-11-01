@@ -3,6 +3,7 @@ import { Outlet } from 'react-router-dom'
 import Sidebar from '../components/Sidebar.jsx'
 import Topbar from '../components/Topbar.jsx'
 import ToastContainer from '../components/ToastContainer.jsx'
+import SessionGuard from '../components/SessionGuard.jsx'
 
 const KEY = 'fenrir.sidebar.collapsed'
 
@@ -27,6 +28,8 @@ export default function AppShell() {
       </div>
       {/* Global toast stack — bottom-left, clear of the War Room drawer on the right */}
       <ToastContainer />
+      {/* Session warnings and, once it has ended, the sign-in cover (SE) */}
+      <SessionGuard />
     </div>
   )
 }

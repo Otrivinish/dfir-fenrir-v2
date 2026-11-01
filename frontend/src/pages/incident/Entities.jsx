@@ -5,6 +5,7 @@ import { useAuth } from '../../hooks/useAuth.jsx'
 import { rowContainment } from './respond/actionTemplates.js'
 import { formatLocal } from '../../lib/datetime.js'
 import EntityDetailDrawer from './entities/EntityDetailDrawer.jsx'
+import EntityLinkPrompt from '../../components/EntityLinkPrompt.jsx'
 import EntityGraph from './entities/EntityGraph.jsx'
 import ConnectModal from './entities/ConnectModal.jsx'
 import BulkImportModal from './entities/BulkImportModal.jsx'
@@ -67,6 +68,8 @@ export default function Entities() {
 
   // Entity add/edit modal
   const [modal, setModal]           = useState(null)       // null | { mode, entity? }
+  // TE: the entity just added — offer to link the timeline events that name it.
+  const [justAdded, setJustAdded]   = useState(null)
 
   // Detail drawer
   const [selectedEntity, setSelectedEntity] = useState(null)
@@ -271,6 +274,8 @@ export default function Entities() {
         </div>
       )}
 
+      {justAdded && !ro && <EntityLinkPrompt key={justAdded.id} incidentId={inc.id} entity={justAdded} />}
+
       {loading ? (
         <div className="panel-empty"><div>Loading…</div></div>
       ) : view === 'graph' ? (
@@ -439,7 +444,7 @@ export default function Entities() {
           incidentId={inc.id}
           allEntities={items}
           onClose={() => setModal(null)}
-          onSaved={() => { setModal(null); reload() }}
+          onSaved={(added) => { setModal(null); setJustAdded(added || null); reload() }}
         />
       )}
 
@@ -550,6 +555,8 @@ function EntityModal({ mode, entity, incidentId, allEntities, onClose, onSaved }
             })
           }
         }
+        onSaved(created)
+        return
       }
       onSaved()
     } catch (err) {

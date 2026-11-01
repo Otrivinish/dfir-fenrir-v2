@@ -1,0 +1,51 @@
+/* SE: session expiry (components/SessionGuard.jsx, SessionExpiredDialog.jsx). Tokens only. */
+
+/* All three sit above every popup (date picker 1000, search dropdown 9999). */
+.session-cover,
+.session-modal,
+.session-banner { z-index: 10000; }
+
+/* Opaque on purpose (D3): an expired session must not leave incident content readable. The page
+   underneath stays mounted, so unsaved edits survive. */
+.session-cover {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  overflow-y: auto;
+}
+.session-card { width: 100%; max-width: 420px; }
+.session-card-foot {
+  margin-top: var(--space-3);
+  display: flex;
+  justify-content: center;
+}
+.session-card-foot .alert { width: 100%; }
+
+/* 8-hour limit: not blocking, top centre. */
+.session-banner {
+  position: fixed;
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100vw - 2 * var(--space-4));
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--med);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+.session-banner .btn { white-space: nowrap; }
+@media (max-width: 640px) {
+  .session-banner { flex-direction: column; align-items: stretch; width: auto; left: var(--space-4); right: var(--space-4); transform: none; }
+}

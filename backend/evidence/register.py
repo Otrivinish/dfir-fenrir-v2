@@ -45,7 +45,8 @@ from evidence import codec
 from evidence.hashing import ahashes_of
 from evidence.streaming import require_free_space
 from forensic.routes import _exhibit_state_error, _lock_exhibit, _read_exhibit, exhibit_too_large
-from models import AuditLog, Evidence, User, utcnow
+from evidence import identifier as exhibit_ids
+from models import AuditLog, Evidence, Incident, User, utcnow
 
 log = logging.getLogger("fenrir.evidence.register")
 
@@ -115,12 +116,12 @@ def draft_storage_path(incident_id: uuid.UUID, ev_id: uuid.UUID, filename: str) 
 
 async def register_or_link_upload(
     db: AsyncSession, *, incident_id: uuid.UUID, user: User, data: bytes, filename: str,
-    mime_type: Optional[str], prefix: str, name: str, method: str, analyser_label: str,
+    mime_type: Optional[str], name: str, method: str, analyser_label: str,
     acquired_at: Optional[datetime] = None, ip: Optional[str] = None, extra: Optional[dict] = None,
 ) -> ExhibitInput:
     """Register `data` as an unsealed draft exhibit (or link the one active exhibit with the same
-    SHA-256). Flushes and audits; the caller commits. `prefix` = identifier prefix (EMAIL / PCAP /
-    WEBHIST), `method` = the audit `method` (email_upload / pcap_upload / webhistory_upload)."""
+    SHA-256). Flushes and audits; the caller commits. `method` = the audit `method` (email_upload /
+    pcap_upload / webhistory_upload)."""
     sha256, sha1, md5 = await ahashes_of(data)
     await lock_upload_sha256(db, incident_id, sha256)          # M8: held until the caller commits
     match = await unique_sha256_match(db, incident_id, sha256, oldest=True)
@@ -133,7 +134,7 @@ async def register_or_link_upload(
     stored = await awrite_encrypted(data, rel)                # the shared evidence writer (encrypt at rest)
     try:
         ev = await register_draft(db, incident_id=incident_id, user=user, ev_id=ev_id, filename=filename,
-                                  stored=stored, mime_type=mime_type, prefix=prefix, name=name, method=method,
+                                  stored=stored, mime_type=mime_type, name=name, method=method,
                                   analyser_label=analyser_label, acquired_at=acquired_at, ip=ip, extra=extra)
     except BaseException:
         await adelete_encrypted(rel)                          # L23: no row, so no file left behind
@@ -143,20 +144,17 @@ async def register_or_link_upload(
 
 async def register_draft(
     db: AsyncSession, *, incident_id: uuid.UUID, user: User, ev_id: uuid.UUID, filename: str,
-    stored: StoredFile, mime_type: Optional[str], prefix: str, name: str, method: str, analyser_label: str,
+    stored: StoredFile, mime_type: Optional[str], name: str, method: str, analyser_label: str,
     acquired_at: Optional[datetime] = None, ip: Optional[str] = None, extra: Optional[dict] = None,
+    upload_hash_check: str = "not_checked",
 ) -> Evidence:
     """The unsealed draft exhibit row + its `evidence_collect` audit for a file already stored (as
     draft_storage_path(...)[1]) — shared by register_or_link_upload and the G1 stage 3b chunked upload
     (evidence/uploads.py). Flushes and audits; the caller commits."""
     sha256, sha1, md5 = stored.sha256, stored.sha1, stored.md5
-    identifier = f"{prefix}-{ev_id.hex[:10].upper()}"
-    for _ in range(3):                       # an identifier clash is practically impossible; never 500
-        taken = (await db.execute(select(Evidence.id).where(
-            Evidence.incident_id == incident_id, Evidence.identifier == identifier))).first()
-        if not taken:
-            break
-        identifier = f"{prefix}-{uuid.uuid4().hex[:10].upper()}"
+    at = utcnow()                            # EI (D4): the draft's identifier follows the naming convention
+    ref = (await db.execute(select(Incident.ref).where(Incident.id == incident_id))).scalar_one()
+    identifier, template = await exhibit_ids.assign(db, incident_id, ref, at)
     rel = stored.relative_path
     ev = Evidence(
         id=ev_id, incident_id=incident_id, kind="digital_file", status="active",
@@ -166,8 +164,8 @@ async def register_draft(
         tlp="amber", original_filename=filename, storage_path=rel, nonce_hex=stored.nonce_hex,
         file_size_bytes=stored.size, mime_type=mime_type,
         sha256=sha256, sha1=sha1, md5=md5,
-        current_custodian_id=user.id, collected_by_id=user.id, collected_at=utcnow(),
-        acquired_at=acquired_at, upload_hash_check="not_checked",
+        current_custodian_id=user.id, collected_by_id=user.id, collected_at=at,
+        acquired_at=acquired_at, upload_hash_check=upload_hash_check,
         collected_by_qualifications=user.qualifications,
     )
     db.add(ev)
@@ -178,10 +176,11 @@ async def register_draft(
         resource_type="evidence", resource_id=str(ev.id), outcome="success",
         details={
             "incident_id": str(incident_id), "kind": "digital_file",
-            "identifier": identifier, "name": ev.name, "sha256": sha256,
+            "identifier": identifier, "identifier_assigned": "auto", "identifier_template": template,
+            "name": ev.name, "sha256": sha256,
             "file_size_bytes": stored.size, "tlp": "amber",
             "original_filename": filename, "mime_type": mime_type,
-            "acquired_at": utc_z(acquired_at), "upload_hash_check": "not_checked",
+            "acquired_at": utc_z(acquired_at), "upload_hash_check": upload_hash_check,
             "method": method, "draft": True, "sealed": False, **(extra or {}),
         },
         ip_address=ip,

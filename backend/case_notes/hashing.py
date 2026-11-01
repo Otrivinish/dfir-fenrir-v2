@@ -15,7 +15,8 @@ def created_at_text(n) -> str:
 
 def content_sha256(n) -> str:
     """SHA-256 (hex) of the canonical entry: UTF-8 JSON, keys sorted, no spaces, link ids sorted,
-    created_at as YYYY-MM-DDTHH:MM:SS.ffffffZ, absent ids as null. Recomputable from an export row."""
+    created_at as YYYY-MM-DDTHH:MM:SS.ffffffZ, absent ids as null. Recomputable from an export row.
+    v2 (CN-2, `hash_v` 2) = the v1 document with "v": 2, `signed_name` and `signed_as` added."""
     doc = {
         "v": 1,
         "id": str(n.id),
@@ -27,5 +28,7 @@ def content_sha256(n) -> str:
         "source_scratchpad_id": str(n.source_scratchpad_id) if n.source_scratchpad_id else None,
         **{f: sorted(str(x) for x in (getattr(n, f) or [])) for f in LINK_FIELDS},
     }
+    if n.hash_v == 2:
+        doc.update({"v": 2, "signed_name": n.signed_name, "signed_as": n.signed_as})
     raw = json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

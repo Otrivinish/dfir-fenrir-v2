@@ -45,6 +45,8 @@ from evidence.exports import sweep_stale_pending as sweep_stale_pending_exports
 from evidence.read_alarms import install as install_read_alarms
 from audit.service import write_audit
 from evidence.routes import router as evidence_router
+from evidence.manifest_routes import router as evidence_manifest_router
+from evidence import manifest as container_manifest
 from evidence.uploads import router as uploads_router, start_reaper as start_upload_reaper, stop_reaper as stop_upload_reaper
 from incidents.routes import router as incidents_router
 from iocs.exports import router as iocs_exports_router
@@ -222,6 +224,8 @@ async def lifespan(app: FastAPI):
     mirror_receipts.start()
     # G1 stage 3b: idle chunked-upload sessions are aborted (their staged files deleted).
     start_upload_reaper()
+    # S6: the container-manifest builder (one at a time, in the background); manifests left pending are queued again.
+    await container_manifest.start()
     # Background syslog forwarder — idles when disabled, picks up config changes
     # via /api/integrations/syslog PUT calling forwarder.reload().
     from syslog_forwarder import start_forwarder, stop_forwarder
@@ -233,6 +237,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await mirror_receipts.stop()
+        await container_manifest.stop()
         await stop_upload_reaper()
         await stop_reminders()
         await stop_forwarder()
@@ -404,6 +409,7 @@ app.include_router(recovery_router,   prefix="/api/incidents",         tags=["Re
 app.include_router(stakeholder_notifications_router, prefix="/api/incidents", tags=["Stakeholder Notifications"])
 app.include_router(webhistory_router, prefix="/api/incidents",         tags=["Browser History"])
 app.include_router(evidence_router,  prefix="/api/incidents",          tags=["Evidence"])
+app.include_router(evidence_manifest_router, prefix="/api/incidents",  tags=["Evidence"])
 app.include_router(uploads_router,   prefix="/api/incidents",          tags=["Uploads"])
 app.include_router(playbook_tasks_router,     prefix="/api/incidents",          tags=["Playbook"])
 app.include_router(playbook_templates_router, prefix="/api/playbook-templates", tags=["Playbook templates"])
