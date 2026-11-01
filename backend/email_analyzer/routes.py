@@ -1132,7 +1132,7 @@ async def extract_attachment(
                               ip=ip, base=base)
 
     art_id = uuid.uuid4()
-    stored = artifact_store.stored_name(art_id, filename)
+    stored = artifact_store.stored_name(art_id)
     require_free_space(len(data), "this attachment", root=settings.quarantine_path)   # 507, nothing stored
     sf, tap = await artifact_store.awrite(data, incident_id, stored)    # H1: encrypted at rest
     md5, sha256, sha512 = sf.md5, sf.sha256, tap.sha512.hexdigest()

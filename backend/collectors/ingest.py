@@ -73,7 +73,7 @@ async def register_collection_output(
 
     original = upload.filename or "collection.zip"
     artifact_id = uuid.uuid4()
-    stored = artifact_store.stored_name(artifact_id, original)
+    stored = artifact_store.stored_name(artifact_id)
 
     # Decrypt the X.509 container → plaintext inner collection ZIP (or pass it through if it wasn't
     # encrypted), streamed into the encrypting staging writer; renamed into place only when complete.

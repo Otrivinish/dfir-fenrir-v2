@@ -20,11 +20,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-import re
 import tempfile
 import time
 import zipfile
-from pathlib import Path
 from typing import Iterator, Optional
 
 import pyzipper
@@ -48,16 +46,10 @@ def rel_path(incident_id, stored_filename: str) -> str:
     return f"{incident_id}/{stored_filename}"
 
 
-def safe_filename(name: str) -> str:
-    """Stored-name part from an uploaded name: special characters stripped, extension kept, ≤ 200 chars."""
-    stem, ext = Path(name).stem, Path(name).suffix
-    safe = re.sub(r"[^\w\-.]", "_", stem)[:200 - len(ext)]
-    return (safe or "artifact") + re.sub(r"[^\w\-.]", "_", ext)
-
-
-def stored_name(artifact_id, original_filename: str) -> str:
-    """`<id>_<safe name>.enc`: new stored names end in .enc, never in a reserved suffix (G-fix R3-1)."""
-    return f"{artifact_id}_{safe_filename(original_filename or 'artifact.bin')}.enc"
+def stored_name(artifact_id) -> str:
+    """`<id>.enc`: the server id only, never the uploaded name (CodeQL py/path-injection; the name is the row's
+    original_filename), and never a reserved suffix (G-fix R3-1). Rows stored before keep `<id>_<name>.enc`."""
+    return f"{artifact_id}.enc"
 
 
 def is_encrypted(a) -> bool:

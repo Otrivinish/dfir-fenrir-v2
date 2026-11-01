@@ -266,7 +266,7 @@ async def create_defender_pdf_import(
         # log: no second (quarantine) copy. Otherwise the raw PDF is quarantined, encrypted at rest.
         require_free_space(len(content), "this report", root=settings.quarantine_path)   # L2: 507, nothing stored
         art_id = uuid.uuid4()
-        stored = artifact_store.stored_name(art_id, filename)
+        stored = artifact_store.stored_name(art_id)
         sf, _tap = await artifact_store.awrite(content, incident_id, stored)
         db.add(Artifact(
             id=art_id, incident_id=incident_id,

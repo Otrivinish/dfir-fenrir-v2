@@ -215,9 +215,10 @@ def _safe_name(name: str) -> str:
     return safe + "_" if safe.lower().endswith(_RESERVED_SUFFIXES) else safe
 
 
-def _incident_file_path(incident_id: uuid.UUID, file_id: uuid.UUID, original_name: str) -> Path:
-    # New names end with a fixed ".enc" (R3-1); rows written before keep their path (readers use the row's).
-    return Path("files") / str(incident_id) / f"{file_id}_{_safe_name(original_name)}.enc"
+def _incident_file_path(incident_id: uuid.UUID, file_id: uuid.UUID) -> Path:
+    # Server ids only, never the uploaded name (CodeQL py/path-injection); the name lives in the row. New names end with
+    # a fixed ".enc" (R3-1); rows written before keep their `<id>_<name>.enc` path (readers use the row's).
+    return Path("files") / str(incident_id) / f"{file_id}.enc"
 
 
 async def _get_incident(db: AsyncSession, incident_id: uuid.UUID, user: User) -> Incident:
@@ -560,7 +561,7 @@ async def upload_incident_file(
 
     file_id       = uuid.uuid4()
     original_name = file.filename or "file"
-    rel_path      = _incident_file_path(incident_id, file_id, original_name)
+    rel_path      = _incident_file_path(inc.id, file_id)        # the row's id, not the URL's
 
     # Defense-in-depth: confine the write to the store root (path traversal guard).
     base_dir = Path(settings.logs_path).resolve()
