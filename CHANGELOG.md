@@ -2,7 +2,207 @@
 
 All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
-## [Unreleased] — Phishing fast path, Defender IOC export, email URL promotion, entity bulk import (2026-10-15)
+## [0.4.0] — 2026-11-01 — Phishing fast path, Defender IOC export, email URL promotion, entity bulk import (2026-10-15); editable, signed case notes, timeline events pick up registered entities, unsaved edits survive a session timeout, timeline export layouts (2026-10-31); evidence source location, seal binding, photo record, screenshot capture record, container exhibits with manifests, automatic exhibit identifiers, deferring a failing readiness check (2026-11-01) — **breaking for API clients, sealing scripts and package verifiers** (see ⚠ Upgrading below)
+
+Everything since `v0.3.9`: the commits after that tag and all work not yet committed.
+
+### ⚠ Upgrading — evidence S1–S6 (2026-11-01): breaking for API clients, sealing scripts and package verifiers
+
+Nothing changes for exhibits that are already sealed, and no data is rewritten. The migration only adds columns and
+two tables. What changes is what the API now refuses, and what a disclosure package contains.
+
+**What to do when you update FENRIR:**
+
+1. **Take a fresh database backup** first: the admin **Run backup now** button, or wait for the daily dump. The new
+   table `evidence_manifest_entries` is append-only (a trigger blocks DELETE), so it can't be emptied, only dropped.
+2. **Rebuild every image and start:** `make rebuild` (`docker compose up -d --build`). `migrate` runs first and the
+   backend waits for it. Don't rebuild the backend alone: audit-monitor would stay on the old image (posture
+   "image drift"). No new secrets or required settings. Optional: `EVIDENCE_MANIFEST_MAX_ENTRIES` (1,000,000),
+   `EVIDENCE_MANIFEST_MAX_UNCOMPRESSED_BYTES` (64 GiB), `EVIDENCE_MANIFEST_MAX_PATH_CHARS` (32,768).
+3. **Update the MCP server** (`dfir-fenrir-mcp`) and restart your MCP client so it lists the new fields and views.
+   An older MCP server still works, but it can't send the source fields or read manifests.
+4. **Check `make posture`** (0 failures). Pending container manifests are queued again when the backend starts.
+
+**API clients and scripts: what is refused now**
+
+- **Sealing a digital exhibit needs a source statement:** the device (a linked asset, `source_system` or `serial`;
+  make and model alone don't count) and the path its handling needs. A full image needs a path of style `device`;
+  live data and exports need no path; anything else needs `source_path` + `source_path_style`. Or give
+  `source_unknown_reason` (at least 10 characters). Otherwise 422 `seal_fields_missing`, naming `source_device`,
+  `source_path` or `source_path_style`.
+- **Sealing a ZIP or TAR exhibit waits for its manifest:** 409 `manifest_pending`. Retry once `manifest_status` is
+  `built` or `failed`.
+- **Photo `taken_at` must be ISO 8601 with a timezone** (422 `invalid_taken_at`; stored as UTC). A stored value that
+  isn't is returned as `taken_at: null` plus `taken_at_unparsed` (the text as stored).
+- **`source_path_norm` is derived by the server.** Sending it returns 422 `source_path_norm_read_only`.
+- **A linked supporting document can't be deleted** (409 `file_referenced`, naming the link) until it is unlinked.
+- **A duplicate typed identifier on `POST …/evidence/physical` returns 409 `identifier_exists`** (it was the generic `conflict`), the same code as the other create routes.
+- **The deprecated `POST …/evidence/digital` stores only the file's basename** as `original_filename`. A name with
+  control characters returns 422 `invalid_filename`.
+- **EI: identifiers FENRIR makes itself change format.** Drafts from supporting documents and from Email, PCAP and
+  Browser history uploads (and the older Register as exhibit of an email or browser-history analysis) were
+  `DOC-…`, `EMAIL-…`, `PCAP-…` and `WEBHIST-…`. They now follow the naming convention (default
+  `{incident}-{date}-{seq:3}`, e.g. `INC-2026-00009-20261101-001`), so a script, filter or report that matches those
+  prefixes must change; identifiers already assigned keep their form. The migration adds a third table,
+  `evidence_identifier_counters` (one row per incident, nothing backfilled).
+
+**Disclosure package recipients and verification scripts: what changed in a package**
+
+- **`MANIFEST.tst` is a bare RFC 3161 token:** verify with
+  `openssl ts -verify -token_in -data MANIFEST.json -in MANIFEST.tst -CAfile <TSA CA certificate>`. Packages built
+  before this release print the command without `-token_in`, which fails on every token
+  (`Field=status_info, Type=TS_RESP`). Add `-token_in` when you verify one of those.
+- **A new seal's token covers the sealed record, not the file.** `seal_tst_subject` is `record_v1`: the token is
+  over SHA-256 of `04_Evidence/Seal/<id>__seal_record.json` (= `seal_record_sha256`), and that record holds the
+  file's hashes. Verify with `openssl ts -verify -token_in -in <id>__seal.tst -digest <SHA-256> -CAfile …`. Seals made
+  before keep `file_sha256`, so check `seal_tst_subject` before choosing the digest.
+- **`MANIFEST.json` no longer names FENRIR's internal storage path.** An exhibit file's `source` is now
+  `evidence id=<id> (stored file)`.
+- **`Evidence_Inventory.csv` has new columns at the end:** the acquisition record, the source record, then the
+  container manifest. The existing columns keep their order, but a parser that checks the column count must accept
+  the new ones.
+- **New in the package:**
+  - `04_Evidence/Photos/<id>/` + `photos.json`;
+  - `04_Evidence/Seal/`;
+  - `…__manifest.jsonl` / `.csv` next to a container exhibit;
+  - in each `.meta.json`, `acquisition`, `source` and `container_manifest` blocks.
+
+  The custody export's photo list no longer carries `storage_path`, `nonce_hex` or the API URL.
+
+**Owner decisions applied (2026-11-01):**
+- **Register as exhibit** now copies a screenshot's hash at capture into the draft's target hash, with the upload
+  hash check `match`. That hash was compared with the bytes at upload.
+- **Changed provenance:** the check **Acquisition source/target hash match** (`iso_27037_9_2_5_hash_match`) scores
+  a single recorded hash (source or target alone) as advisory `manual` ("nothing to compare it with"). It used to be
+  a mandatory `fail` ("hashes differ"), a false alarm that exhibits with only a target hash already got. Two hashes
+  that differ are still a mandatory fail, and the seal's own source-vs-target refusal is unchanged.
+- **Unchanged:** the device rule above; a manifest can be rebuilt after the seal; the row hold at a million entries
+  is accepted; the seal does not bind `manifest_listing`.
+
+**Fixed at review:** TAR and KAPE CopyLog inputs can no longer exhaust the backend's memory. A 4.5 MB `.tar.gz` that
+declared a 1 GiB pax header was OOM-killed under 512 MiB before the fix; such a build now fails with
+`tar_header_too_large`, at no extra memory.
+
+**Rollback:** reverse-apply `ignore/revert/evidence-owner-decisions-2026-11-01/`, then the slice kits S6 → S1 (each
+REVERT.md says how). The schema stays: it is additive and unused by the old code.
+
+### Added — readiness: defer a failing check for good (RD, [design + as built](docs/readiness-defer-slice.md))
+
+- **An admin can defer a failing readiness check** the organisation has decided to live with, from **Defer…** on the Dashboard banner (the failing blockers, all ticked) or on the check in **Prepare › Readiness**. A reason is optional (up to 500 characters). It applies to everyone and holds until an admin presses **Undo** on the Readiness page.
+- **Effect:** a deferred check leaves the Dashboard banner and the **+ New incident** list; with every failing blocker deferred, the banner disappears. A different blocker that starts failing later still shows, and so does a check deferred as a warning that has become a blocker (`audit_anchor` verification failed, `backup_recent` missing); it can be deferred again. The check keeps running: the Readiness page lists it with its real status, marked **⏸ Deferred by … on …** (and the reason), plus a deferred count in the summary.
+- **Only a failing or unknown check can be deferred** (409 `check_not_failing`); a check already deferred is 409 `already_deferred`; all or none of a request is deferred.
+- **Audit:** `readiness_check_deferred` (check, level, status at the time, reason) and `readiness_deferral_removed` (who deferred it, when, why).
+- **API (additive):** `GET /api/readiness` gains `deferral {by_name, at, reason} | null` per check and `summary.blockers_deferred` / `warnings_deferred`; `summary.blockers_failing` / `warnings_failing` now leave deferred checks out (no change until an admin defers one). `POST /api/readiness/deferrals {check_ids, reason?}` and `DELETE /api/readiness/deferrals/{check_id}` (admin; both return the readiness response). For non-admins the reason on `admin_totp` / `audit_anchor` is null, like their details. **MCP:** `fenrir_dashboard(view="readiness")` passes `deferral` through; deferring and undoing go through `fenrir_api` (DELETE needs full mode).
+- **Migration:** the new table `readiness_deferrals` (from `create_all`; nothing altered, nothing backfilled). Revert: `ignore/revert/readiness-defer-rd-2026-11-01/`.
+
+### Added — evidence: automatic exhibit identifiers (EI, [design + as built](docs/evidence-auto-identifier-slice.md))
+
+- **Leave the identifier empty and FENRIR assigns one** from an admin naming convention, in the transaction that creates the exhibit: `{incident}-{date}-{seq:3}` by default, e.g. `INC-2026-00009-20261101-001`. `{incident}` is the incident reference as stored, `{date}` the UTC day of registration (the exhibit's `collected_at`), `{seq}` / `{seq:N}` the exhibit's number in the incident (padded to N, 1–6; grows past it). Blank = left out, null or whitespace only. A typed identifier works exactly as before, including 409 on a duplicate.
+- **The number:** per incident, never reset, from the new `evidence_identifier_counters` table (`INSERT … ON CONFLICT DO UPDATE … RETURNING`): concurrent registrations get different numbers, a rolled-back one gives its number back, and only assigned identifiers use numbers. One already typed by hand is skipped, so an assigned identifier never ends in 409.
+- **FENRIR's own drafts follow it too (D4):** supporting documents (Register as exhibit), Email, PCAP and Browser history uploads, and the email / browser-history Register as exhibit, instead of `DOC-` / `EMAIL-` / `PCAP-` / `WEBHIST-` + random hex.
+- **Settings › Incident Reference › Exhibit identifiers** (admin): the convention, its tokens and the next identifier of the most recent incident. Literal text `A–Z a–z 0–9 . _ -`; `{seq}` exactly once; at most 64 characters; the longest result fits 128. Anything else is 422 `invalid_identifier_template`, naming the rule. Changes are audited (`evidence_identifier_template_changed`, old / new) and apply to new exhibits only.
+- **Collection wizard and Quick add:** the identifier is optional, with the hint "Leave empty to assign automatically, e.g. …". The wizard's result and Quick add show the identifier that was assigned.
+- **Audit:** `evidence_collect` carries `identifier_assigned` (`auto` / `typed`) and, when assigned, `identifier_template`.
+- **API (additive):** `identifier` optional on `POST …/evidence/physical`, the upload-session complete (purpose evidence) and the deprecated multipart `POST …/evidence/digital`; `GET` / `PATCH /api/settings/evidence-identifier` (admin); `GET …/evidence/next-identifier` (`{template, example}`, reserves nothing). **MCP:** `fenrir_evidence_register` says the identifier is optional and where the convention is set (`fenrir_api`).
+- **Changed:** a duplicate typed identifier on `POST …/evidence/physical` returns 409 `identifier_exists`, not the generic `conflict` (owner decision 2026-11-01).
+- **Migration:** the new table `evidence_identifier_counters` (from `create_all`; nothing altered, nothing backfilled). Revert: `ignore/revert/evidence-ei-auto-identifier-2026-11-01/`.
+
+### Added — evidence: folders as container exhibits, with a per-file manifest (S6, [design + as built](docs/evidence-s6-container-manifest-slice.md))
+
+- **One exhibit per container (EG-4, ISO/IEC 27037 §7.1.3.1.2, §7.1.3.4):** acquire the folders with your tool into a ZIP, TAR, AD1, L01 or AFF4-L and register it as one exhibit. The Collection wizard's **Acquisition** step has a **Logical container** select when the scope is logical.
+- **Manifest:** for ZIP and TAR (also `.tar.gz` / `.tgz` / `.tar.bz2` / `.tar.xz`) FENRIR lists every member in the background, from the encrypted stored file and without extracting anything: the path as stored (with its raw bytes when it isn't UTF-8), type, sizes, times with their source (NTFS / Unix extra fields, DOS time marked "timezone unknown", TAR mtime and pax times) and FENRIR's own MD5, SHA-1 and SHA-256 of each member. Encrypted members are listed without hashes. AD1, L01 and AFF4-L are kept but not indexed.
+- **Tool listings:** a KAPE `*_CopyLog.csv` or a Velociraptor offline collector's `uploads.json` inside a ZIP adds each file's original path, the source times and the tool's hash, compared with FENRIR's. A listing FENRIR can't read is not merged and the reason is shown.
+- **Limits, never a refusal:** at most 1,000,000 entries, 64 GiB decompressed (the zip-bomb guard) and 32,768-character paths by default. A container over a limit, damaged, unreadable or tampered keeps its exhibit; the manifest is **Failed** with the reason (a tampered file is also frozen), and **Rebuild** tries again.
+- **Seal:** waits while a manifest is being built (409 `manifest_pending`); a built manifest's SHA-256 is part of the sealed record and the manifest never changes (append-only in the database).
+- **Exhibit detail › Contents:** status, entries, builder, manifest SHA-256, the tool-listing result, a searchable table (entry path, source path, type, size, times, SHA-256, tool hash) and **Download CSV**. An advisory provenance check, **Container contents listed** (fails when the tool's hashes differ).
+- **Disclosure packages** carry `…__manifest.jsonl` (its SHA-256 is the manifest SHA-256) and `…__manifest.csv` next to the exhibit, a `container_manifest` block in its `.meta.json`, and seven inventory columns at the end.
+- **API (additive):** `container_format` on the upload-session complete and `PATCH …/acquisition-record`; `GET …/evidence/{id}/manifest` (`limit`, `cursor`, `q`, `format=csv`); `POST …/evidence/{id}/manifest/rebuild`; `EvidenceOut` container / manifest fields. New codes `manifest_pending`, `manifest_not_built`, `manifest_built`, `manifest_not_indexed`, `container_format_not_applicable`. **MCP:** `fenrir_evidence_list(view="manifest")`, `fenrir_evidence_custody("manifest_rebuild")`, `container_format` documented.
+- **Migration:** seven nullable `evidence` columns, `ck_evidence_container_format_s6`, `ck_evidence_manifest_status_s6`, the new table `evidence_manifest_entries` and its append-only trigger. Settings: `EVIDENCE_MANIFEST_MAX_ENTRIES`, `EVIDENCE_MANIFEST_MAX_UNCOMPRESSED_BYTES`, `EVIDENCE_MANIFEST_MAX_PATH_CHARS`. Revert: `ignore/revert/evidence-s6-container-manifest-2026-10-31/`.
+
+### Added — evidence: the screenshot capture record, and links to what a supporting document corroborates (S5, [design + as built](docs/evidence-s5-screenshots-slice.md))
+
+- **Capture record (EG-6, ISO/IEC 27037 §7.1.1.1):** a supporting document records when it was captured, by whom (you or a name; never assumed to be the uploader), the tool and version, the method (whole screen, window, region, full page, scrolling, photo of a screen, other), the host or display, the URL and what is visible. **+ Upload files** opens a dialog with a collapsed **Capture details** section; **Details › Edit capture record** changes it later (audited from / to).
+- **Hash at capture:** a SHA-256 given at upload is compared with the file before anything is stored; a mismatch is refused (422 `capture_hash_mismatch`), audited, and nothing is stored. It can't be changed afterwards.
+- **Links (EG-7):** **Details › Link to…** records that a file corroborates an exhibit, a timeline event or an IOC of the incident, with a note; the exhibit, event and IOC list their **Supporting documents**. A linked file can't be deleted until unlinked; deleting the event or IOC removes its links. The file stays a supporting document (no chain of custody, never in a disclosure package).
+- **Register as exhibit** pre-fills the new draft from the capture record (acquired at, acquisition tool and version, source system, source path from the URL — `cloud_uri` for https, else `other` — and screen state), shows it first, and leaves out (and audits) anything the source check refuses.
+- **API (additive):** capture form fields on `POST …/files` and `POST …/entities/{id}/files`; capture fields on `PATCH …/files/{id}` (`capture_sha256` read-only); `POST` / `DELETE …/files/{id}/links[/{link_id}]`; `GET …/files?linked_type=&linked_id=`; `GET …/files/{id}/exhibit-prefill`; `EntityFileOut` capture fields + `links`; `prefill` on the register response; a `link` reference in 409 `file_referenced`.
+- **MCP:** `fenrir_file_upload` documents exactly the fields FENRIR accepts (FP-7); `fenrir_entity_write` `link_file` / `unlink_file` and the capture fields on `file_update`; `fenrir_entity_list view=incident_files` filters on `linked_type` + `linked_id`.
+- **Migration:** ten nullable `entity_files` columns, `ck_entity_files_capture_method_s5`, `ck_entity_files_capture_s5`, and the new table `supporting_file_links`. Revert: `ignore/revert/evidence-s5-screenshots-2026-10-31/`.
+
+### Added — evidence: the photo record and photos in packages; the seal binds the record and asks for the source (S4 + S3, [design + as built](docs/evidence-s3-s4-seal-photos-slice.md))
+
+- **Photo record (S4, ISO/IEC 27037 §6.6):** each exhibit photo records who took it (**Me** or a name), the **Camera**, **What it shows**, the uploaded file name, and a **Taken at** that must carry a timezone (422 `invalid_taken_at`; stored as UTC). The detail shows each photo's record, SHA-256 (click to copy) and size. An advisory provenance check, **Photo record complete**.
+- **Photos in disclosure packages (EG-8):** `04_Evidence/Photos/<exhibit id>/` holds each stored photo, hash-checked like the exhibit's file (a tampered one is left out and the item frozen; one that fails while written fails the build), plus `photos.json`.
+- **The seal binds the record (S3, EG-11, §5.4.5):** sealing hashes one canonical record (identity, hashes, the acquisition and source records, photo hashes), keeps its exact text in the hash-chained `evidence_seal` row and points the RFC 3161 token at it. The detail's **What the seal binds** shows the record's SHA-256, what the timestamp covers and whether an amendment has changed it since. Packages carry the record and the token in `04_Evidence/Seal/`.
+- **The source at seal (EG-12, owner Q1):** a digital exhibit needs its source device (asset, source system or serial) and the path its handling needs, or **Unknown source — reason**; **Seal readiness** shows it. Items sealed before are not re-checked. The **Source location** provenance check uses the same rule (mandatory once sealed with a record).
+- **Fixed:** the live-justification check now covers mission-critical live systems (FP-4); provenance labels cite the right ISO/IEC 27037:2012 clauses, codes unchanged (FP-8); a photo time that isn't ISO 8601 no longer breaks reading its exhibit (FP-2).
+- **API (additive):** `POST …/evidence/{id}/photos` form fields `taken_by_id`, `taken_by_name`, `camera`, `context`; `PATCH …/evidence/{id}` photo fields (only those sent change); `GET …/evidence/{id}/seal-record`; `EvidenceOut.seal_record_sha256` / `seal_tst_subject`; `seal_fields_missing` can name `source_device`, `source_path`, `source_path_style`; new codes `invalid_taken_at`, `taken_by_conflict`, `evidence_not_sealed`. **MCP:** `fenrir_evidence_list(view="seal_record")`, photo fields documented. **Migration:** `evidence.seal_record_sha256`, `evidence.seal_tst_subject` (backfilled `file_sha256` for old seals with a token) + `ck_evidence_seal_tst_subject_s3`. Revert: `ignore/revert/evidence-s3-s4-seal-photos-2026-10-31/`.
+
+### Added — evidence: the source location record, and disclosure carries the acquisition record (S1 + S2, [design + as built](docs/evidence-s1-s2-source-record-slice.md))
+
+- **Source location record (S2, ISO/IEC 27037 §5.4.2, §6.6, §7.1.3.4):** a digital exhibit records its source device (**Source system**, make, model, serial — the make / model / serial columns now also serve digital exhibits) and the **Source path** exactly as recorded with its **Path style** (windows, unc, posix, macos, android, ios, cloud_uri, mail_store, device, other). The path is never trimmed, case-folded or normalised; the server derives a search form (`source_path_norm`, norm_v1). Optional `source_details`: filename on source, volume, OS, asset tag, source MACB times (each with its basis and reader), owner, stream / link target, cloud provider ids and hash, mail ids. **Unknown source — reason** when it can't be stated.
+- **Where:** the Collection wizard's Identification step (a **Source** section; **Device** for physical items, which now really sends make / model / serial / storage location — FP-1), **Quick add** (source system, path, style), **Complete & seal**, and a read-only **Source** section in the exhibit detail.
+- **Provenance (advisory):** `iso_27037_source_location` (digital: device + path by handling mode; manual with an unknown-reason), `iso_27037_device_identifiers` (physical), `source_provider_hash_match` (a provider MD5 / SHA-1 / SHA-256, hex or base64, against the stored file; other algorithms n/a). Nothing new blocks the seal yet (S3).
+- **Disclosure + custody export (S1, EG-10):** `04_Evidence/Evidence_Inventory.csv` appends the rest of the acquisition record (tool, params, hashes, write-blocker, system state, justifications, witness, device types and details, handling, scope, clock offset, screen state, changes made, 27041 validation, qualifications, sealed by, TST present / time / TSA) and then the source record; the existing columns keep their order. Each file's `.meta.json` and the custody export's `coc/{id}.json` gain `acquisition` and `source` blocks. The custody export's photo list no longer exposes `storage_path`, `nonce_hex` or the API url (FP-5).
+- **API (additive):** the source fields on `POST …/uploads/{id}/complete` (evidence), the deprecated `POST …/evidence/digital` (form fields; `source_details` as JSON), `POST …/evidence/physical` (`source_system`, `source_details`), `PATCH …/acquisition-record` and `PATCH …/evidence/{id}` (an amendment on a sealed item; collector, custodian, lead or admin). New 422 codes: `invalid_source_path`, `invalid_source_text`, `source_path_style_required`, `source_path_style_mismatch`, `source_path_norm_read_only`, `source_unknown_reason_too_short`. Audited in `evidence_collect` / `evidence_acquisition_record` / `evidence_amend_after_seal`.
+- **Changed:** the deprecated multipart route stores the upload's basename as `original_filename`, like the upload sessions (FP-6; 422 `invalid_filename` for a name with control characters).
+- **MCP:** `fenrir_evidence_register` documents the fields (`data` passes them through). **Migration:** six nullable `evidence` columns + `ck_evidence_source_path_style_s2`. Revert: `ignore/revert/evidence-s1-s2-source-record-2026-10-31/`.
+
+### Added — timeline export: six layouts (TX, [design + as built](docs/timeline-export-layouts-slice.md))
+
+- **One Export button, six layouts:** **⇩ Export** in the Timeline toolbar replaces **Export CSV** and **Export HTML**. Pick **Rail** (vertical), **Horizon** (horizontal, time-scaled), **Swimlanes** (one lane per linked entity), **Ledger** (forensic table), **Brief** (executive one-pager) or **Zig-zag** (the original layout), or CSV. **Preview** shows the page before you save it.
+- **Incidents over several days (Horizon):** quiet stretches over 6 h fold into labelled breaks, with one scale (4 px per minute) for every period; periods wrap onto new rows; a true-scale overview with one column per day sits on top.
+- **Options:** key events only; raw logs (off by default — Rail, Ledger, Zig-zag and the CSV only); UTC or your Fenrir time zone, with the UTC offset in every page.
+- **Built on the server now:** the export holds the events the page's filters show. Every HTML page is script-free with its own CSP and carries the TLP. The Ledger states the SHA-256 of the matching CSV.
+- **API (additive):** `GET /api/incidents/{id}/timeline/export` (`layout`, `format`, `tz`, `include_raw_logs` + the list's filters); audited as `timeline_export`; 422 `invalid_timezone`, 422 `export_too_large` (over 10 000 events).
+- **MCP:** `fenrir_timeline_list(export=…, tz=, include_raw_logs=)` returns the file as text.
+- **Changed:** the Zig-zag and CSV leave raw logs out unless you include them (they always held them before); Zig-zag times follow the chosen time zone instead of the browser's.
+- **Help:** **Export Timeline** rewritten. **No migration.** Revert: `ignore/revert/tx/`.
+
+### Fixed — unsaved edits survive a session timeout (SE, [design + as built](docs/session-expiry-unsaved-work-slice.md))
+
+- **The problem:** when the session ended (30 min idle, 8 h cap, or revoked), the next request's 401 sent the app to the login page, unmounting the page and losing anything not yet saved. Reads never restarted the idle timer, and typing never reaches the server.
+- **Typing counts as activity:** the app reports real input (key, click, scroll, touch) with a heartbeat at most every 5 minutes. A tab nobody uses still signs out. Nothing extends the 8-hour cap.
+- **Warnings 2 minutes before:** **Still there?** with a countdown before the idle limit (**Stay signed in**); a banner with the end time before the 8-hour limit (**Sign in again** starts a new session without leaving the page).
+- **Expiry no longer leaves the page:** an opaque cover hides the content, and you sign in again on it (password, then TOTP) as the same user. Your unsaved changes stay on the page; save them again. Signing in as someone else reloads the page and drops them. A 401 now reads "Your session ended. Sign in again, then retry."
+- **API (additive):** `GET /api/sessions/current` (pure read: `CurrentSessionOut` with `idle_expires_at`, `idle_timeout_seconds`, `expires_at`, `server_time`) and `POST /api/sessions/current/heartbeats` (counts as activity; not audited). Both are for a cookie session only: a Bearer token gets 401.
+- **Help:** new topic **Session Timeouts**.
+- **No migration. No MCP change** (API tokens have no idle timeout). Revert: `ignore/revert/se/`.
+
+### Fixed — timeline events pick up registered entities (TE, [design + as built](docs/timeline-entity-link-slice.md))
+
+- **The problem:** an event belongs to an entity only through its `entity_id` link, and only a click in the event form set it. Imported events kept the host as text, so the entity filter, the entity's **Timeline events** and reports missed them, and registering an entity later linked nothing.
+- **One matching rule, on the server** (`entities/match.py`): the host equals the entity's value ignoring case and surrounding spaces; any entity type; ties go to the exact-case value, then the host; a tie that remains matches nothing. It replaces the browser-side `lib/entityMatch.js`.
+- **Suggest, then link on a click** (owner decision D1): nothing is linked silently.
+  - Each event shows its linked entity as a chip (red with ⚠ when compromised), or **≈ Host DC01 · not linked** when its host names one. Expanded: **Link this event**, and **Link them** for every unlinked event that names it.
+  - The entity drawer, adding an entity in **Scope**, adding an affected system on **Details** and **Add … to Entities** in the event form offer to link the events that already name it.
+- **Imports link by host** (D3, on by default, visible): a **Link to entities by host** checkbox on Logs & triage, Network capture, Vendor reports and an email's **Import hops**. The host as recorded never changes; the link is an annotation, so imported facts stay immutable.
+- **API (additive):**
+  - `TimelineEventOut` gains read-only `entity` and `entity_match`.
+  - New: `POST …/timeline/entity-links {entity_id, dry_run}` → `{entity_id, matched, linked}`; audited once as `timeline_entity_link` with the event ids; a repeat links 0; already-linked and server-recorded events are never touched.
+  - `GET …/entities?match=` returns the entity a typed name resolves to (with `type`, within that type).
+  - `link_entities` (default true) on the forensic, Defender and PCAP promotes, `…/timeline/batch` and `…/email/{id}/import-hops` (query); their results and audit rows carry `entities_linked`.
+- **MCP:** new `fenrir_timeline_write(action="link_entity", entity_id, dry_run)`, `match` on `fenrir_entity_list`, `link_entities` on batch and import tools.
+- **No migration.** Revert: `ignore/revert/te/`.
+
+### Changed — editable, signed case notes (CN-2, [design + as built](docs/case-notes-editable-slice.md))
+
+- **Edit a case note.** **Edit** on a note saves its next revision. Nothing stored is changed: the H2 append-only trigger is untouched, and every earlier revision stays in the note's **History**, with a diff of what each revision changed.
+  - Only the note's author or an admin can edit it. This fixes H2, where the author could no longer correct a note once an admin had.
+  - An edit that loses a race returns the existing 409 `already_corrected`. The UI says so and offers **Reload**.
+  - The Case notes page shows one card per note, kept in the order the notes were first written. The struck-through "correction" entries are gone.
+- **Signed.** From now on every entry carries a signature recorded when it is saved: `signed_name` (full name, else username) and `signed_as` (the operational role keys held on the incident, else the platform role).
+  - The signature is part of the entry's SHA-256 (`hash_v` 2).
+  - Entries written before CN-2 keep `hash_v` 1, show as **unsigned**, and still verify.
+- **API (additive):**
+  - `CaseNoteOut` gains `root_id`, `revision`, `root_author_id`, `root_author_username`, `signed_name`, `signed_as` and `hash_v`.
+  - `GET …/case-notes?current=true` lists each note's current revision.
+  - New: `GET …/case-notes/{id}/revisions`.
+  - An edit is the existing `POST …/case-notes` with `corrects_id` = the current revision.
+  - The default list is unchanged.
+- **Exports:** the LE package's `10_Case_Notes/` lists every revision. It gains the columns `root_id`, `revision`, `signed_name`, `signed_as` and `hash_v` (appended; existing columns keep their positions), and the README hash recipe documents v2. The full report's Case Notes appendix prints each note's current revision with its signature.
+- **MCP:** new action `fenrir_comms_write(action="case_note_edit", item_id=<current revision>)`, new view `case_note_revisions`, and a `current` filter on `case_notes`.
+- **Migration:** three additive columns on `case_notes` plus a CHECK. Metadata-only, with no backfill.
 
 ### Added — phishing fast path ([design + as built](docs/phishing-fast-path-slices.md))
 

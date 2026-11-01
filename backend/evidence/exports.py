@@ -43,6 +43,7 @@ from models import AuditLog, CustodyExport, Evidence, Incident, User
 
 from evidence.crypto import EvidenceIntegrityError, iter_decrypted
 from evidence.hashing import hash_algorithm
+from evidence.records import acquisition_record, photo_record, source_record
 from evidence.streaming import StagedOutput
 from le_package.builder import _safe_filename
 
@@ -245,10 +246,14 @@ def _build_coc_doc(inc: Incident, ev: Evidence, events: list[AuditLog]) -> dict:
                 "serial": ev.serial,
                 "physical_location": ev.physical_location,
                 "condition": ev.condition,
-                "photos": ev.photos or [],
+                "photos": [photo_record(p) for p in ev.photos or [] if isinstance(p, dict)],   # FP-5 / S4
             } if ev.kind == "physical_item" else None,
             "disposed_at": _z(ev.disposed_at),
             "final_hash_at_disposition": ev.final_hash_at_disposition,
+            # EG-10 (S1) / EG-1 (S2): the whole acquisition record and the source location record
+            # (evidence/records.py; the same blocks as a disclosure package's .meta.json).
+            "acquisition": acquisition_record(ev),
+            "source":      source_record(ev),
         },
         "custody_chain": [
             {

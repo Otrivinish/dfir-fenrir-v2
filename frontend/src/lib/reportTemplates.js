@@ -546,25 +546,32 @@ function _proTimelineAppendix(evs) {
 
 // H2 — case notes as written (plain text, never re-rendered as markdown): a corrected entry is struck
 // through and names its correction; each row carries the entry's SHA-256 (also in the audit log).
-function _proCaseNotesAppendix(notes) {
+function _proCaseNotesAppendix(entries) {
+  // CN-2: entries are every revision; print each note's current revision, in the order the notes were first written.
+  const first = Object.fromEntries(entries.filter(n => (n.revision || 1) === 1).map(n => [n.root_id || n.id, n]))
+  const notes = entries.filter(n => !n.corrected_by_id)
+    .sort((a, b) => String(first[a.root_id || a.id]?.created_at || a.created_at).localeCompare(String(first[b.root_id || b.id]?.created_at || b.created_at)))
   if (!notes.length) return '<div class="placeholder-box"><strong>[ NO CASE NOTES ]</strong></div>'
-  const pos = Object.fromEntries(notes.map((n, i) => [n.id, i + 1]))
   const linkText = l => [['evidence', 'exhibit'], ['entities', 'entity'], ['iocs', 'IOC'], ['timeline_events', 'event']]
     .filter(([k]) => l && l[k]).map(([k, w]) => `${l[k]} ${w}${l[k] !== 1 ? 's' : ''}`).join(', ') || '—'
-  return `<p class="small" style="color:var(--text-muted);margin-bottom:16px">${notes.length} entr${notes.length !== 1 ? 'ies' : 'y'} · chronological · append-only: entries are never edited; a correction is a new entry.</p>
+  const signer = n => n.hash_v >= 2
+    ? `${esc(n.signed_name || '—')}${n.author_username && n.author_username !== n.signed_name ? ` <span class="tiny">(${esc(n.author_username)})</span>` : ''}<div class="tiny mono">${esc((n.signed_as || '').split(',').join(', '))}</div>`
+    : `${esc(n.author_username || '—')}<div class="tiny">unsigned</div>`
+  return `<p class="small" style="color:var(--text-muted);margin-bottom:16px">${notes.length} note${notes.length !== 1 ? 's' : ''} · in the order first written · each shows its current revision, signed by whoever saved it. Saved revisions are never changed; every earlier revision is kept in the Case notes history and the LE package.</p>
   <div class="table-wrap"><table class="table-fixed">
-    <colgroup><col style="width:5%"><col style="width:17%"><col style="width:12%"><col style="width:40%"><col style="width:10%"><col style="width:16%"></colgroup>
-    <thead><tr><th>#</th><th>Time</th><th>Author</th><th>Note</th><th>Links</th><th>SHA-256</th></tr></thead>
-    <tbody>${notes.map((n, i) => `<tr>
+    <colgroup><col style="width:5%"><col style="width:17%"><col style="width:14%"><col style="width:38%"><col style="width:10%"><col style="width:16%"></colgroup>
+    <thead><tr><th>#</th><th>Time</th><th>Signed by</th><th>Note</th><th>Links</th><th>SHA-256</th></tr></thead>
+    <tbody>${notes.map((n, i) => {
+      const r1 = first[n.root_id || n.id] || n
+      return `<tr>
       <td class="mono small">${i + 1}</td>
-      <td class="mono small">${esc(fmtTs(n.created_at))}</td>
-      <td class="small">${esc(n.author_username || '—')}</td>
-      <td><div style="white-space:pre-wrap;${n.corrected_by_id ? 'text-decoration:line-through;opacity:.7' : ''}">${esc(n.body)}</div>
-        ${n.corrects_id ? `<div class="tiny" style="color:var(--text-muted)">Correction of entry #${pos[n.corrects_id] || '?'}</div>` : ''}
-        ${n.corrected_by_id ? `<div class="tiny" style="color:var(--text-muted)">Corrected by entry #${pos[n.corrected_by_id] || '?'}</div>` : ''}</td>
+      <td class="mono small">${esc(fmtTs(r1.created_at))}${(n.revision || 1) > 1 ? `<div class="tiny">revision ${n.revision} saved ${esc(fmtTs(n.created_at))}</div>` : ''}</td>
+      <td class="small">${signer(n)}${(n.revision || 1) > 1 && r1.author_username !== n.author_username ? `<div class="tiny">note by ${esc(r1.author_username || '—')}</div>` : ''}</td>
+      <td><div style="white-space:pre-wrap">${esc(n.body)}</div></td>
       <td class="small">${esc(linkText(n.links))}</td>
       <td class="mono tiny" style="word-break:break-all">${esc(n.content_sha256 || '')}</td>
-    </tr>`).join('')}</tbody>
+    </tr>`
+    }).join('')}</tbody>
   </table></div>`
 }
 
@@ -1506,7 +1513,7 @@ function _skeletonAppendices(opts) {
     ]},
     { letter: opts.includeTimelineAppendix ? 'C' : 'B', title: 'Case Notes', included: (opts.mode || 'full') !== 'executive',
       hint: 'Full Technical Report only. Lettered after the Timeline appendix when that is included.', items: [
-      `Table: ${ph('case_notes[*] (time, author, note as written — struck through when corrected, links, SHA-256)', 'auto')} ${where('Case notes')}`,
+      `Table: ${ph('case_notes[*] (each note\'s current revision: time first written, signature, text, links, SHA-256)', 'auto')} ${where('Case notes')}`,
     ]},
   ]
 }

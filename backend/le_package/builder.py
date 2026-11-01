@@ -27,6 +27,7 @@ import hashlib
 import io
 import itertools
 import json
+import mimetypes
 import secrets
 import time
 import uuid
@@ -47,11 +48,16 @@ from audit.service import verify_row_hash
 from audit_export.signing import public_key_pem, sign_bytes
 from artifacts import store as artifact_store
 from evidence.crypto import EvidenceCryptoError, EvidenceIntegrityError, iter_decrypted
+from evidence.records import (INVENTORY_ACQUISITION_COLUMNS, INVENTORY_MANIFEST_COLUMNS, INVENTORY_SOURCE_COLUMNS,
+                              acquisition_record, csv_value, manifest_record, photo_record, source_record)
+from evidence import manifest as container_manifest
+from evidence import manifest_index
 from evidence.streaming import StagedOutput
 from evidence.timestamping import timestamp_sha256
 from le_package.manifest import Manifest, hmac_manifest
 from le_package.readme import render_readme
 from le_package.sop import CHAIN_OF_CUSTODY_SOP
+from case_notes.chain import revision_meta
 from case_notes.hashing import LINK_FIELDS, content_sha256, created_at_text
 from core.csv_safe import csv_safe
 from recovery.service import scope_rows as recovery_scope_rows, to_out as recovery_to_out
@@ -149,7 +155,14 @@ class IntegrityFailed:
 
 def _stream_evidence_file(zf: zipfile.ZipFile, manifest: Manifest, ev: Evidence, path: str, mime: str,
                           source: str) -> dict | IntegrityFailed | None:
-    """Blocking (G2): decrypt an exhibit chunk by chunk into its own entry, hashing it on the way, and record
+    """Blocking (G2): an exhibit's stored file into its own entry (_stream_stored_file)."""
+    return _stream_stored_file(zf, manifest, ev.storage_path, ev.nonce_hex, ev.file_size_bytes, path, mime, source)
+
+
+def _stream_stored_file(zf: zipfile.ZipFile, manifest: Manifest, rel: str, nonce_hex: str, plain_size: int | None,
+                        path: str, mime: str, source: str) -> dict | IntegrityFailed | None:
+    """Blocking (G2): decrypt a stored file (an exhibit, or S4 an exhibit photo; v0 or v2, as its row says) chunk
+    by chunk into its own entry, hashing it on the way, and record
     it in the manifest. Two bounded-memory passes: the first decrypts the whole stored file and writes
     nothing, so a file that fails an integrity check (anywhere in it) returns IntegrityFailed (R3-2: the
     caller records integrity_failed:<reason> and the route freezes the exhibit) and one that is missing or
@@ -157,19 +170,19 @@ def _stream_evidence_file(zf: zipfile.ZipFile, manifest: Manifest, ev: Evidence,
     second pass writes the entry; a failure there means the file changed during the build, and it raises
     (F-12): the entry is half written, so the whole package is abandoned (build_le_package discards it)."""
     try:
-        for _part in iter_decrypted(ev.storage_path, ev.nonce_hex, ev.file_size_bytes):
+        for _part in iter_decrypted(rel, nonce_hex, plain_size):
             pass
     except EvidenceIntegrityError as e:
         return IntegrityFailed(e.reason)
     except Exception:
         return None
-    stream = iter_decrypted(ev.storage_path, ev.nonce_hex, ev.file_size_bytes)
+    stream = iter_decrypted(rel, nonce_hex, plain_size)
     first = next(stream)
     sha256, sha512, size = hashlib.sha256(), hashlib.sha512(), 0
     zinfo = getattr(zf, "zipinfo_cls", zipfile.ZipInfo)(path, date_time=time.localtime(time.time())[:6])
     zinfo.compress_type = zf.compression
     zinfo.external_attr = 0o600 << 16
-    zinfo.file_size = ev.file_size_bytes or len(first)      # sizes the ZIP64 decision
+    zinfo.file_size = plain_size or len(first)              # sizes the ZIP64 decision
     with contextlib.closing(stream), zf.open(zinfo, "w") as dest:
         for part in itertools.chain((first,), stream):
             with memoryview(part) as view:
@@ -278,17 +291,19 @@ async def estimate_package_bytes(db: AsyncSession, inc_id: uuid.UUID, *, legal_h
     """The stored bytes a package of this incident would embed: its exhibits' plaintext (with the
     legal-hold filter; M11: sealed ones only unless drafts are included) and, when included, its
     quarantined artifacts. For the free-space check and the ZIP64 decision; the records (timeline,
-    audit, ...) come on top."""
-    q = select(func.coalesce(func.sum(Evidence.file_size_bytes), 0)).where(
-        Evidence.incident_id == inc_id, Evidence.kind == "digital_file",
-        Evidence.storage_path.isnot(None), Evidence.nonce_hex.isnot(None))
+    audit, ...) come on top. S4: the exhibits' stored photos too."""
+    scope = [Evidence.incident_id == inc_id]
     if legal_hold_only:
-        q = q.where(Evidence.legal_hold.is_(True))
+        scope.append(Evidence.legal_hold.is_(True))
     if item_ids is not None:
-        q = q.where(Evidence.id.in_(item_ids))
+        scope.append(Evidence.id.in_(item_ids))
     if not include_unsealed_drafts:
-        q = q.where(Evidence.coc_sealed.is_(True))
+        scope.append(Evidence.coc_sealed.is_(True))
+    q = select(func.coalesce(func.sum(Evidence.file_size_bytes), 0)).where(
+        *scope, Evidence.kind == "digital_file", Evidence.storage_path.isnot(None), Evidence.nonce_hex.isnot(None))
     total = int((await db.execute(q)).scalar() or 0)
+    for (photos,) in (await db.execute(select(Evidence.photos).where(*scope))).all():
+        total += sum(int(p.get("size") or 0) for p in photos or [] if isinstance(p, dict) and p.get("storage_path"))
     if include_artifacts:
         total += int((await db.execute(select(func.coalesce(func.sum(Artifact.file_size), 0))
                                        .where(Artifact.incident_id == inc_id))).scalar() or 0)
@@ -515,7 +530,11 @@ async def _section_evidence(
               # imaging tool's target hash compared with the uploaded bytes.
               "acquired_at_utc", "upload_hash_check",
               # M11, appended: the sealed state, the lawful basis, and whether the item is in this package.
-              "coc_sealed", "coc_sealed_at_utc", "lawful_basis", "package_inclusion"]
+              "coc_sealed", "coc_sealed_at_utc", "lawful_basis", "package_inclusion",
+              # EG-10 (S1), appended: the rest of the acquisition record; then (S2) the source location record;
+              # then (S6) the container manifest's record. Lists and objects are compact JSON (evidence/records.py).
+              *INVENTORY_ACQUISITION_COLUMNS, *INVENTORY_SOURCE_COLUMNS, *INVENTORY_MANIFEST_COLUMNS]
+    records = {e.id: (acquisition_record(e), source_record(e), manifest_record(e)) for e in listed}
     rows = [[
         str(e.id), e.kind, e.identifier, e.name, e.description or "",
         e.tlp, e.status,
@@ -531,6 +550,9 @@ async def _section_evidence(
         _iso_z(e.acquired_at), e.upload_hash_check or "",
         bool(e.coc_sealed), _iso_z(e.coc_sealed_at), e.lawful_basis or "",
         EXCLUDED_DRAFT if e.id in excluded else "included",
+        *[csv_value(records[e.id][0][f]) for f in INVENTORY_ACQUISITION_COLUMNS],
+        *[csv_value(records[e.id][1][f]) for f in INVENTORY_SOURCE_COLUMNS],
+        *[csv_value(records[e.id][2][f]) for f in INVENTORY_MANIFEST_COLUMNS],
     ] for e in listed]
     data = _csv_bytes(header, rows)
     zf.writestr("04_Evidence/Evidence_Inventory.csv", data)
@@ -538,6 +560,7 @@ async def _section_evidence(
                  mime="text/csv", source="evidence table")
 
     # Per-item custody log (events from audit_logs scoped to resource_type='evidence').
+    sealed_texts: dict[uuid.UUID, str] = {}       # S3: the record each seal bound, as its evidence_seal row holds it
     for ev in items:
         events = (await db.execute(
             select(AuditLog)
@@ -545,6 +568,10 @@ async def _section_evidence(
                    AuditLog.resource_id   == str(ev.id))
             .order_by(AuditLog.timestamp.asc(), AuditLog.id.asc())
         )).scalars().all()
+        for a in events:
+            if (ev.seal_record_sha256 and a.action == "evidence_seal" and isinstance(a.details, dict)
+                    and a.details.get("seal_record_sha256") == ev.seal_record_sha256):
+                sealed_texts[ev.id] = a.details.get("sealed_record")
         if not events:
             continue
         e_header = ["timestamp_utc", "actor_user_id", "actor_username", "action", "outcome",
@@ -563,6 +590,21 @@ async def _section_evidence(
         manifest.add(path=path, data=cust_bytes, mime="text/csv",
                      source=f"audit_logs (resource_type=evidence, resource_id={ev.id})")
 
+    # S3 (EG-11): what each seal bound, so a recipient can hash it (= seal_record_sha256) and check the seal's
+    # RFC 3161 token against it: the canonical record v1 exactly as the evidence_seal row holds it, and the token.
+    seal_files: dict[uuid.UUID, tuple[str | None, str | None]] = {}
+    for ev in items:
+        rec_path = tst_path = None
+        if sealed_texts.get(ev.id):
+            rec_path = f"04_Evidence/Seal/{ev.id}__seal_record.json"
+            _add_file(zf, manifest, rec_path, sealed_texts[ev.id].encode("utf-8"), "application/json",
+                      "evidence_seal audit row (the record the seal bound)")
+        if ev.coc_sealed and ev.seal_tst:
+            tst_path = f"04_Evidence/Seal/{ev.id}__seal.tst"
+            _add_file(zf, manifest, tst_path, base64.b64decode(ev.seal_tst), "application/octet-stream",
+                      f"evidence.seal_tst (RFC 3161 token, DER; subject {ev.seal_tst_subject})")
+        seal_files[ev.id] = (rec_path, tst_path)
+
     # Embed decrypted file bytes for digital_file items, streamed (G2: bounded memory per exhibit).
     for ev in items:
         if ev.kind != "digital_file" or not ev.storage_path or not ev.nonce_hex:
@@ -572,7 +614,7 @@ async def _section_evidence(
 
         entry = await asyncio.to_thread(
             _stream_evidence_file, zf, manifest, ev, in_zip,
-            ev.mime_type or "application/octet-stream", f"evidence.storage_path={ev.storage_path}")
+            ev.mime_type or "application/octet-stream", f"evidence id={ev.id} (stored file)")
         if isinstance(entry, IntegrityFailed):
             # R3-2: the stored file failed an integrity check (tampered or corrupt) before a byte was
             # written: no file in the package, recorded below; the route freezes the exhibit.
@@ -592,6 +634,12 @@ async def _section_evidence(
             # written; not an integrity failure (not frozen; the read was audited and admins notified).
             sha256_now = None
             integrity_note = "source_file_missing_or_undecryptable"
+
+        # S6 (EG-4): a built container manifest, as its exact canonical JSONL (it hashes to manifest_sha256) + CSV.
+        container = manifest_record(ev)
+        if ev.manifest_status == "built":
+            container.update(await _stream_container_manifest(db, zf, manifest, ev,
+                                                              f"04_Evidence/Files/{ev.id}__{fname_safe}"))
 
         meta = {
             "evidence_id":           str(ev.id),
@@ -613,6 +661,16 @@ async def _section_evidence(
             "coc_sealed":            bool(ev.coc_sealed),
             "coc_sealed_at_utc":     _iso_z(ev.coc_sealed_at),
             "lawful_basis":          ev.lawful_basis,
+            # EG-10 (S1) / EG-1 (S2): the whole acquisition record and the source location record, raw values.
+            "acquisition":           records[ev.id][0],
+            "source":                records[ev.id][1],
+            # S3 (EG-11): what the seal bound and what its token covers; the files are in 04_Evidence/Seal/.
+            "seal_record_sha256":    ev.seal_record_sha256,
+            "seal_tst_subject":      ev.seal_tst_subject,
+            "seal_record_file":      seal_files[ev.id][0],
+            "seal_tst_file":         seal_files[ev.id][1],
+            # S6: the container's manifest record and, when built, its files and the SHA-256 they hash to now.
+            "container_manifest":    container,
         }
         meta_bytes = _json_bytes(meta)
         meta_path = f"04_Evidence/Files/{ev.id}__{fname_safe}.meta.json"
@@ -620,8 +678,94 @@ async def _section_evidence(
         manifest.add(path=meta_path, data=meta_bytes, mime="application/json",
                      source="evidence table + computed at export")
 
+    # S4 (EG-8): each exhibit's photos (any kind), streamed and hash-checked like its file, plus photos.json.
+    for ev in items:
+        photos = [p for p in ev.photos or [] if isinstance(p, dict)]
+        if not photos:
+            continue
+        entries = []
+        for p in photos:
+            out = {**photo_record(p), "package_path": None, "sha256_at_export": None}
+            pid = str(p.get("id") or "")
+            if not (pid and p.get("storage_path") and p.get("nonce_hex")):
+                entries.append({**out, "integrity": "no_stored_file"})      # a caption-only photo
+                continue
+            in_zip = f"04_Evidence/Photos/{ev.id}/{_safe_filename(pid)}{_photo_ext(p)}"
+            entry = await asyncio.to_thread(
+                _stream_stored_file, zf, manifest, p["storage_path"], p["nonce_hex"], p.get("size"), in_zip,
+                p.get("mime_type") or "application/octet-stream", f"evidence.photos id={pid} (stored file)")
+            if isinstance(entry, IntegrityFailed):
+                out["integrity"] = f"integrity_failed:{entry.reason}"
+                failures.append({"evidence_id": ev.id, "identifier": ev.identifier, "reason": entry.reason,
+                                 "integrity": f"photo:{pid}:{out['integrity']}", "sha256_recomputed": None})
+            elif entry is not None:
+                ok = entry["sha256"] == p.get("sha256")
+                out.update(package_path=in_zip, sha256_at_export=entry["sha256"],
+                           integrity="hash_at_export_matches_recorded" if ok else "HASH_MISMATCH_AT_EXPORT")
+                if not ok:
+                    failures.append({"evidence_id": ev.id, "identifier": ev.identifier, "reason": "hash_mismatch",
+                                     "integrity": f"photo:{pid}:HASH_MISMATCH_AT_EXPORT", "sha256_recomputed": None})
+            else:
+                out["integrity"] = "source_file_missing_or_undecryptable"
+            entries.append(out)
+        pj = _json_bytes({"evidence_id": str(ev.id), "identifier": ev.identifier, "photos": entries})
+        pj_path = f"04_Evidence/Photos/{ev.id}/photos.json"
+        zf.writestr(pj_path, pj)
+        manifest.add(path=pj_path, data=pj, mime="application/json", source="evidence.photos + computed at export")
+
     return (len(items), failures, sorted(e.identifier for e in listed if e.id in excluded),
             list(disclosed.values()))
+
+
+def _write_hashed(dest, data: bytes, *hashes) -> None:
+    for h in hashes:
+        h.update(data)
+    dest.write(data)
+
+
+async def _stream_container_manifest(db: AsyncSession, zf: zipfile.ZipFile, manifest: Manifest, ev: Evidence,
+                                     base: str) -> dict:
+    """S6: the exhibit's manifest entries into `{base}__manifest.jsonl` (the canonical JSONL, byte for byte: its
+    SHA-256 is manifest_sha256) and `{base}__manifest.csv`, read from the DB in batches and written in a worker
+    thread (bounded memory). A failure part way raises: the entry is half written, so the package is abandoned."""
+    out = {}
+    for ext, mime in ((".jsonl", "application/x-ndjson"), (".csv", "text/csv")):
+        path = f"{base}__manifest{ext}"
+        zinfo = getattr(zf, "zipinfo_cls", zipfile.ZipInfo)(path, date_time=time.localtime(time.time())[:6])
+        zinfo.compress_type = zf.compression
+        zinfo.external_attr = 0o600 << 16
+        sha256, sha512, size = hashlib.sha256(), hashlib.sha512(), 0
+        dest = await asyncio.to_thread(zf.open, zinfo, "w", force_zip64=True)
+        try:
+            if ext == ".csv":
+                head = manifest_index.csv_bytes([], header=True)
+                await asyncio.to_thread(_write_hashed, dest, head, sha256, sha512)
+                size += len(head)
+            async for batch in container_manifest.entry_batches(db, ev.id):
+                data = (b"".join(manifest_index.canonical_line(e) for e in batch) if ext == ".jsonl"
+                        else manifest_index.csv_bytes(batch, header=False))
+                await asyncio.to_thread(_write_hashed, dest, data, sha256, sha512)
+                size += len(data)
+        finally:
+            await asyncio.to_thread(dest.close)
+        manifest.add_hashed(path=path, size=size, sha256=sha256.hexdigest(), sha512=sha512.hexdigest(), mime=mime,
+                            source=f"evidence_manifest_entries (evidence_id={ev.id})")
+        if ext == ".jsonl":
+            out.update(manifest_file=path, manifest_sha256_at_export=sha256.hexdigest(),
+                       manifest_integrity=("matches_recorded" if sha256.hexdigest() == ev.manifest_sha256
+                                           else "MANIFEST_MISMATCH_AT_EXPORT"))
+        else:
+            out["manifest_csv_file"] = path
+    return out
+
+
+def _photo_ext(p: dict) -> str:
+    """A photo's file extension in the package: from its media type, else its original name, else .bin."""
+    for ext in (mimetypes.guess_extension((p.get("mime_type") or "").split(";")[0].strip().lower()),
+                Path(p.get("original_filename") or "").suffix.lower()):
+        if ext and 2 <= len(ext) <= 9 and ext[1:].isascii() and ext[1:].isalnum():
+            return ext
+    return ".bin"
 
 
 async def _section_artifacts(
@@ -742,8 +886,9 @@ async def _section_comms(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest
 
 
 async def _section_case_notes(db: AsyncSession, inc_id: uuid.UUID, manifest: Manifest, zf: zipfile.ZipFile) -> None:
-    """H2: the incident's append-only case notes, oldest first, each with its stored content hash and
-    whether it still matches the entry (recomputed now; recipe in case_notes/hashing.py and README)."""
+    """H2: the incident's append-only case notes -- every revision (CN-2) -- oldest first, each with its
+    note (root_id) and revision number, its signature, its stored content hash and whether it still
+    matches the entry (recomputed now with its hash_v; recipe in case_notes/hashing.py and README)."""
     notes = (await db.execute(
         select(CaseNote).where(CaseNote.incident_id == inc_id).order_by(CaseNote.created_at.asc(), CaseNote.id.asc())
     )).scalars().all()
@@ -753,13 +898,17 @@ async def _section_case_notes(db: AsyncSession, inc_id: uuid.UUID, manifest: Man
         select(User.id, User.username).where(User.id.in_({n.author_id for n in notes}))
     )).all())
     fixed_by = {n.corrects_id: n.id for n in notes if n.corrects_id}
+    meta = await revision_meta(db, inc_id)
     header = ["id", "incident_id", "created_at_utc", "author_id", "author_username", "body", "corrects_id", "corrected_by_id",
-              "source_scratchpad_id", *LINK_FIELDS, "content_sha256", "content_sha256_verified"]
+              "source_scratchpad_id", *LINK_FIELDS, "content_sha256", "content_sha256_verified",
+              "root_id", "revision", "signed_name", "signed_as", "hash_v"]
     rows = [[str(n.id), str(n.incident_id), created_at_text(n), str(n.author_id), names.get(n.author_id, ""), n.body,
              str(n.corrects_id) if n.corrects_id else "", str(fixed_by[n.id]) if n.id in fixed_by else "",
              str(n.source_scratchpad_id) if n.source_scratchpad_id else "",
              *[";".join(sorted(str(x) for x in getattr(n, f) or [])) for f in LINK_FIELDS],
-             n.content_sha256, "yes" if content_sha256(n) == n.content_sha256 else "NO"] for n in notes]
+             n.content_sha256, "yes" if content_sha256(n) == n.content_sha256 else "NO",
+             str(meta[n.id][0]), str(meta[n.id][1]), n.signed_name or "", n.signed_as or "", str(n.hash_v)]
+            for n in notes]
     _add_file(zf, manifest, "10_Case_Notes/Case_Notes.csv", _csv_bytes(header, rows), "text/csv", "case_notes table")
     # R129: the raw values for the content_sha256 recompute (the CSV cells are formula-escaped).
     json_rows = [{h: r[i] for i, h in enumerate(header)} for r in rows]
@@ -1119,7 +1268,7 @@ async def _build_into(entry, staged: StagedOutput, oz, *, db: AsyncSession, inc:
         zf.writestr("INTEGRITY.sha256", manifest.to_integrity_sha256().encode("utf-8"))
 
         # GS-4 — RFC 3161 trusted timestamp over sha256(MANIFEST.json), best-effort.
-        # Written as a raw DER token so a recipient can `openssl ts -verify
+        # Written as a raw DER token so a recipient can `openssl ts -verify -token_in
         # -data MANIFEST.json -in MANIFEST.tst` independently of FENRIR's clock.
         manifest_tst = await timestamp_sha256(manifest_sha256)
         if manifest_tst:

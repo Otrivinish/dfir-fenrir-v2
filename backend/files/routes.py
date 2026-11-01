@@ -15,6 +15,12 @@ audited (old/new name; the hashes); delete is refused while a record relies on t
 `file_references`). POST …/files/{id}/register-exhibit copies a file into the evidence store as an unsealed
 draft exhibit (G3 semantics); the file stays a supporting document and records the exhibit.
 
+S5 (EG-6, EG-7): an upload (here and on the entity attachment route) may carry a capture record (files/capture.py);
+a capture_sha256 is compared with the bytes before anything is stored. A file can be linked to an exhibit, timeline
+event or IOC it corroborates (supporting_file_links: POST / DELETE …/files/{id}/links; the list filters on
+?linked_type=&linked_id=); a link blocks delete. Register as exhibit pre-fills the new draft from the capture record
+(GET …/files/{id}/exhibit-prefill shows what it would fill).
+
 Mounted at prefix="/api/incidents".
 """
 import asyncio
@@ -26,7 +32,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,10 +47,14 @@ from evidence.crypto import (EvidenceCryptoError, EvidenceIntegrityError, Stored
                              asha256_decrypted, awrite_encrypted, read_decrypted, read_decrypted_stream, stored_size,
                              write_encrypted_stream)
 from evidence.streaming import SMALL_FILE_BYTES, decrypted_download, require_free_space
-from incidents.access import get_accessible_incident
-from models import CaseNote, Entity, EntityFile, Evidence, GeneratedReport, Incident, User
-from schemas import (EntityFileList, EntityFileOut, FileDelete, FileReference, FileRegisterExhibitOut,
-                     IncidentFileUpdate)
+from files import capture
+from incidents.access import get_accessible_incident, require_incident_person
+from models import (CaseNote, Entity, EntityFile, Evidence, GeneratedReport, IOC, Incident, SupportingFileLink,
+                    TimelineEvent, User)
+from schemas import (CAPTURE_BY_NAME_MAX, CAPTURE_CONTEXT_MAX, CAPTURE_DOC, CAPTURE_SOURCE_MAX, CAPTURE_TOOL_MAX,
+                     CAPTURE_TOOL_VERSION_MAX, CAPTURE_URL_MAX, CaptureMethod, EntityFileList, EntityFileOut,
+                     FileDelete, FileExhibitPrefillOut, FileReference, FileRegisterExhibitOut, IncidentFileUpdate,
+                     LinkTargetType, SupportingFileLinkCreate, SupportingFileLinkOut)
 
 router = APIRouter()
 
@@ -241,21 +251,137 @@ async def _exhibit_map(db: AsyncSession, evidence_ids) -> dict[uuid.UUID, tuple[
     return {r[0]: (r[1], bool(r[2])) for r in rows}
 
 
-def _decorate(out: EntityFileOut, umap: dict, emap: dict, xmap: Optional[dict] = None) -> EntityFileOut:
+def _decorate(out: EntityFileOut, umap: dict, emap: dict, xmap: Optional[dict] = None,
+              lmap: Optional[dict] = None) -> EntityFileOut:
     out.uploaded_by_username = umap.get(out.uploaded_by_id)
+    out.captured_by_username = umap.get(out.captured_by_id) if out.captured_by_id else None
     out.entity_name = emap.get(out.entity_id) if out.entity_id else None
     if out.evidence_id and xmap and out.evidence_id in xmap:
         out.evidence_identifier, out.evidence_sealed = xmap[out.evidence_id]
+    out.links = (lmap or {}).get(out.id, [])
     return out
 
 
 async def decorated_files(db: AsyncSession, rows) -> list[EntityFileOut]:
-    """Rows as EntityFileOut with the uploader's username, the entity's name and the exhibit's identifier and
-    seal state (H4) filled in. Shared with the entity drawer's list (entities/routes.py)."""
-    umap = await _username_map(db, [r.uploaded_by_id for r in rows])
+    """Rows as EntityFileOut with the uploader's and capturer's usernames, the entity's name, the exhibit's
+    identifier and seal state (H4) and the file's links (S5) filled in. Shared with the entity drawer's list
+    (entities/routes.py)."""
+    umap = await _username_map(db, [r.uploaded_by_id for r in rows] + [r.captured_by_id for r in rows])
     emap = await _entity_name_map(db, [r.entity_id for r in rows])
     xmap = await _exhibit_map(db, [r.evidence_id for r in rows])
-    return [_decorate(EntityFileOut.model_validate(r), umap, emap, xmap) for r in rows]
+    lmap: dict[uuid.UUID, list[SupportingFileLinkOut]] = {}
+    if rows:
+        links = (await db.execute(select(SupportingFileLink)
+                                  .where(SupportingFileLink.file_id.in_([r.id for r in rows]))
+                                  .order_by(SupportingFileLink.linked_at, SupportingFileLink.id))).scalars().all()
+        for out in await link_outs(db, links):
+            lmap.setdefault(out.file_id, []).append(out)
+    return [_decorate(EntityFileOut.model_validate(r), umap, emap, xmap, lmap) for r in rows]
+
+
+# ─── S5: capture record (EG-6) and links (EG-7) ───────────────────────────────
+
+def capture_form(
+    captured_at:          Optional[str] = Form(default=None, description=CAPTURE_DOC["captured_at"]),
+    captured_by_id:       Optional[uuid.UUID] = Form(default=None, description=CAPTURE_DOC["captured_by_id"]),
+    captured_by_name:     Optional[str] = Form(default=None, max_length=CAPTURE_BY_NAME_MAX,
+                                               description=CAPTURE_DOC["captured_by_name"]),
+    capture_tool:         Optional[str] = Form(default=None, max_length=CAPTURE_TOOL_MAX,
+                                               description=CAPTURE_DOC["capture_tool"]),
+    capture_tool_version: Optional[str] = Form(default=None, max_length=CAPTURE_TOOL_VERSION_MAX,
+                                               description=CAPTURE_DOC["capture_tool_version"]),
+    capture_method:       Optional[CaptureMethod] = Form(default=None, description=CAPTURE_DOC["capture_method"]),
+    capture_source:       Optional[str] = Form(default=None, max_length=CAPTURE_SOURCE_MAX,
+                                               description=CAPTURE_DOC["capture_source"]),
+    capture_url:          Optional[str] = Form(default=None, max_length=CAPTURE_URL_MAX,
+                                               description=CAPTURE_DOC["capture_url"]),
+    capture_context:      Optional[str] = Form(default=None, max_length=CAPTURE_CONTEXT_MAX,
+                                               description=CAPTURE_DOC["capture_context"]),
+    capture_sha256:       Optional[str] = Form(default=None, description=CAPTURE_DOC["capture_sha256"]),
+) -> dict:
+    """The capture-record form fields of a supporting-document upload (both upload routes), those sent."""
+    sent = dict(captured_at=captured_at, captured_by_id=captured_by_id, captured_by_name=captured_by_name,
+                capture_tool=capture_tool, capture_tool_version=capture_tool_version, capture_method=capture_method,
+                capture_source=capture_source, capture_url=capture_url, capture_context=capture_context,
+                capture_sha256=capture_sha256)
+    return {k: v for k, v in sent.items() if v is not None}
+
+
+async def capture_record(db: AsyncSession, incident_id: uuid.UUID, user: User, sent: dict) -> dict:
+    """The upload's capture columns, checked (capture.capture_columns), with a captured_by_id other than the caller
+    checked against the incident (404 user_not_found, 422 assignee_no_access). Before anything is read or stored."""
+    cols = capture.capture_columns(sent)
+    if cols.get("captured_by_id") and cols["captured_by_id"] != user.id:
+        await require_incident_person(db, incident_id, cols["captured_by_id"], "the capturer")
+    return cols
+
+
+async def check_capture_sha256(db: AsyncSession, request: Request, user: User, raw: bytes, cols: dict, *,
+                               action: str, resource_type: str, details: dict) -> None:
+    """C3-style intake check: the SHA-256 taken at capture vs the server's SHA-256 of the uploaded bytes, BEFORE the
+    encrypted write. A mismatch writes `<action>_rejected` (no file content), commits it and raises 422
+    capture_hash_mismatch: nothing is stored."""
+    expected = cols.get("capture_sha256")
+    if not expected:
+        return
+    computed = await asyncio.to_thread(lambda: hashlib.sha256(raw).hexdigest())
+    if computed == expected:
+        return
+    await write_audit(db, f"{action}_rejected", user_id=user.id, username=user.username,
+                      resource_type=resource_type, outcome="failure",
+                      details={**details, "size": len(raw), "reason": "capture_hash_mismatch",
+                               "capture_sha256": expected, "computed_sha256": computed},
+                      ip_address=request.client.host if request.client else None)
+    await db.commit()
+    raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "capture_hash_mismatch",
+                   f"The SHA-256 taken at capture ({expected}) does not match the uploaded file, whose SHA-256 is "
+                   f"{computed}. Nothing was stored; the attempt was audited.")
+
+
+_LINK_COLUMN = {"exhibit": "evidence_id", "timeline_event": "timeline_event_id", "ioc": "ioc_id"}
+
+
+def _link_target(link: SupportingFileLink) -> tuple[str, uuid.UUID]:
+    return next((t, getattr(link, c)) for t, c in _LINK_COLUMN.items() if getattr(link, c) is not None)
+
+
+async def link_outs(db: AsyncSession, links) -> list[SupportingFileLinkOut]:
+    """Links as SupportingFileLinkOut, with each target's label and the linker's username (one query per kind)."""
+    ids: dict[str, set] = {t: set() for t in _LINK_COLUMN}
+    for ln in links:
+        t, tid = _link_target(ln)
+        ids[t].add(tid)
+    labels: dict[uuid.UUID, str] = {}
+    if ids["exhibit"]:
+        labels.update((i, f"{ident} · {name}") for i, ident, name in (await db.execute(
+            select(Evidence.id, Evidence.identifier, Evidence.name).where(Evidence.id.in_(ids["exhibit"])))).all())
+    if ids["timeline_event"]:
+        labels.update((i, f"{_z(at)} · {(desc or '')[:80]}") for i, at, desc in (await db.execute(
+            select(TimelineEvent.id, TimelineEvent.event_time, TimelineEvent.description)
+            .where(TimelineEvent.id.in_(ids["timeline_event"])))).all())
+    if ids["ioc"]:
+        labels.update((i, f"{typ} {val[:120]}") for i, typ, val in (await db.execute(
+            select(IOC.id, IOC.type, IOC.value).where(IOC.id.in_(ids["ioc"])))).all())
+    umap = await _username_map(db, [ln.linked_by_id for ln in links])
+    outs = []
+    for ln in links:
+        t, tid = _link_target(ln)
+        outs.append(SupportingFileLinkOut(id=ln.id, file_id=ln.file_id, target_type=t, target_id=tid,
+                                          target_label=labels.get(tid), note=ln.note, linked_by_id=ln.linked_by_id,
+                                          linked_by_username=umap.get(ln.linked_by_id), linked_at=ln.linked_at))
+    return outs
+
+
+async def _require_link_target(db: AsyncSession, incident_id: uuid.UUID, target_type: str,
+                               target_id: uuid.UUID) -> None:
+    """404 evidence_not_found / timeline_event_not_found / ioc_not_found unless the target is of this incident."""
+    model, code, what = {"exhibit": (Evidence, "evidence_not_found", "Exhibit"),
+                         "timeline_event": (TimelineEvent, "timeline_event_not_found", "Timeline event"),
+                         "ioc": (IOC, "ioc_not_found", "IOC")}[target_type]
+    found = (await db.execute(select(model.id).where(model.id == target_id,
+                                                     model.incident_id == incident_id))).first()
+    if not found:
+        raise ApiError(status.HTTP_404_NOT_FOUND, code, f"{what} not found in this incident")
 
 
 # ─── H4: reason, references, hash for the audit ───────────────────────────────
@@ -280,6 +406,7 @@ async def file_references(db: AsyncSession, ef: EntityFile, *, via_entity: bool 
       generated_report  a saved report of the incident prints its SHA-256 (it was a figure when generated)
       case_note         a case note of the incident cites its id or SHA-256 (case notes are append-only)
       exhibit           it was registered as an exhibit (evidence_id)
+      link              S5: it corroborates an exhibit, timeline event or IOC (supporting_file_links; id = the link)
       entity            it is attached to an entity — not counted when deleting through that entity's own
                         attachment route (`via_entity`), which is the act of removing the attachment."""
     refs: list[dict] = []
@@ -305,6 +432,11 @@ async def file_references(db: AsyncSession, ef: EntityFile, *, via_entity: bool 
     if ef.evidence_id is not None:
         ident = (await db.execute(select(Evidence.identifier).where(Evidence.id == ef.evidence_id))).scalar()
         refs.append({"type": "exhibit", "id": str(ef.evidence_id), "label": f"registered as exhibit {ident}"})
+    links = (await db.execute(select(SupportingFileLink).where(SupportingFileLink.file_id == ef.id)
+                              .order_by(SupportingFileLink.linked_at, SupportingFileLink.id))).scalars().all()
+    for ln in await link_outs(db, links):
+        refs.append({"type": "link", "id": str(ln.id),
+                     "label": f"corroborates {ln.target_type.replace('_', ' ')} {ln.target_label or ln.target_id}"})
     if ef.entity_id is not None and not via_entity:
         name = (await _entity_name_map(db, [ef.entity_id])).get(ef.entity_id)
         refs.append({"type": "entity", "id": str(ef.entity_id), "label": f"attached to entity {name}"})
@@ -313,8 +445,8 @@ async def file_references(db: AsyncSession, ef: EntityFile, *, via_entity: bool 
 
 def referenced_error(refs: list[dict]) -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, "file_referenced",
-                    f"{len(refs)} record(s) rely on this file (report figure, saved report, case note, exhibit or "
-                    "entity); it can't be deleted while they do.",
+                    f"{len(refs)} record(s) rely on this file (report figure, saved report, case note, exhibit, "
+                    "link or entity); it can't be deleted while they do.",
                     extra={"references": [FileReference(**r).model_dump() for r in refs]})
 
 
@@ -339,23 +471,33 @@ async def locked_file(db: AsyncSession, file_id: uuid.UUID, **where) -> Optional
 # ─── List ──────────────────────────────────────────────────────────────────────
 
 @router.get("/{incident_id}/files", response_model=EntityFileList,
-            summary="List all files stored for an incident")
+            summary="List all files stored for an incident",
+            responses={422: {"model": ApiErrorBody, "description": "invalid_link_filter (linked_type without "
+                                                                   "linked_id, or the other way round)"}})
 async def list_incident_files(
     incident_id: uuid.UUID,
+    linked_type: Optional[LinkTargetType] = Query(default=None, description="S5: only files linked to this kind of "
+                                                                            "target (with linked_id)"),
+    linked_id:   Optional[uuid.UUID] = Query(default=None, description="S5: the exhibit, timeline event or IOC id"),
     user: User = Depends(current_user),
     db:   AsyncSession = Depends(get_db),
 ) -> EntityFileList:
     """List every file in the incident's store (entity-linked or not), newest first.
 
     Each item carries the uploader's username and the linked entity's name for
-    display. Requires an authenticated user with access to the incident.
+    display, its capture record and its links (S5). `linked_type` + `linked_id`
+    (both, else 422 invalid_link_filter) list only the files linked to that exhibit,
+    timeline event or IOC. Requires an authenticated user with access to the incident.
     """
     await _get_incident(db, incident_id, user)
-    rows = (await db.execute(
-        select(EntityFile)
-        .where(EntityFile.incident_id == incident_id)
-        .order_by(EntityFile.uploaded_at.desc())
-    )).scalars().all()
+    if (linked_type is None) != (linked_id is None):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_link_filter",
+                       "linked_type and linked_id go together: send both, or neither")
+    q = select(EntityFile).where(EntityFile.incident_id == incident_id)
+    if linked_type is not None:
+        target = getattr(SupportingFileLink, _LINK_COLUMN[linked_type])
+        q = q.where(EntityFile.id.in_(select(SupportingFileLink.file_id).where(target == linked_id)))
+    rows = (await db.execute(q.order_by(EntityFile.uploaded_at.desc()))).scalars().all()
     return EntityFileList(items=await decorated_files(db, rows))
 
 
@@ -364,12 +506,18 @@ async def list_incident_files(
 @router.post("/{incident_id}/files", response_model=EntityFileOut,
              status_code=status.HTTP_201_CREATED,
              summary="Upload a file to the incident store",
-             responses={507: {"model": ApiErrorBody, "description": "insufficient_storage (the file store, with its 1 GiB reserve, or the upload scratch space is full; nothing stored)"}})
+             responses={404: {"model": ApiErrorBody, "description": "the entity, or user_not_found (captured_by_id)"},
+                        422: {"model": ApiErrorBody, "description": "capture_hash_mismatch (audited), "
+                                                                    "invalid_captured_at, invalid_capture_text, "
+                                                                    "invalid_hash_format, captured_by_conflict or "
+                                                                    "assignee_no_access (the capturer); nothing stored"},
+                        507: {"model": ApiErrorBody, "description": "insufficient_storage (the file store, with its 1 GiB reserve, or the upload scratch space is full; nothing stored)"}})
 async def upload_incident_file(
     incident_id: uuid.UUID,
     request:     Request,
     file:        UploadFile = File(...),
     entity_id:   Optional[uuid.UUID] = Form(default=None),
+    capture_sent: dict = Depends(capture_form),
     user: User = Depends(require_analyst),
     db:   AsyncSession = Depends(get_db),
 ) -> EntityFileOut:
@@ -379,6 +527,12 @@ async def upload_incident_file(
     Optionally link it to an entity via `entity_id` (must belong to the incident).
     Returns 409 if the incident is closed, 404 if the entity is unknown, and 413
     over the 50 MB limit. Requires the analyst role and access to the incident.
+
+    S5: optional capture-record form fields (ISO/IEC 27037 §7.1.1.1): `captured_at`, `captured_by_id` or
+    `captured_by_name` (neither = not recorded; the uploader is never assumed), `capture_tool`,
+    `capture_tool_version`, `capture_method`, `capture_source`, `capture_url`, `capture_context`,
+    `capture_sha256`. A `capture_sha256` is compared with the server's SHA-256 of the bytes before
+    anything is stored: a mismatch is 422 capture_hash_mismatch, audited `file_upload_rejected`.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -390,6 +544,7 @@ async def upload_incident_file(
         )).scalar_one_or_none()
         if not ent:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Entity not found")
+    cap = await capture_record(db, incident_id, user, capture_sent)     # S5: checked before anything is read
 
     cl = request.headers.get("content-length")
     if cl and int(cl) > _FILE_MAX_BYTES:
@@ -398,6 +553,10 @@ async def upload_incident_file(
     raw = await file.read()
     if len(raw) > _FILE_MAX_BYTES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File exceeds 50 MB limit")
+    await check_capture_sha256(db, request, user, raw, cap, action="file_upload", resource_type="incident_file",
+                               details={"incident_id": str(incident_id),
+                                        "entity_id": str(entity_id) if entity_id else None,
+                                        "filename": file.filename or "file"})
 
     file_id       = uuid.uuid4()
     original_name = file.filename or "file"
@@ -424,6 +583,7 @@ async def upload_incident_file(
         nonce_hex=stored.nonce_hex,
         sha256=stored.sha256, sha1=stored.sha1, md5=stored.md5,
         uploaded_by_id=user.id,
+        **cap,
     )
     db.add(ef)
     await write_audit(
@@ -431,17 +591,12 @@ async def upload_incident_file(
         user_id=user.id, username=user.username,
         resource_type="incident_file", resource_id=str(file_id),
         details={"incident_id": str(incident_id), "entity_id": str(entity_id) if entity_id else None,
-                 "filename": original_name, "size": len(raw), "sha256": stored.sha256},
+                 "filename": original_name, "size": len(raw), "sha256": stored.sha256,
+                 **capture.audit_values(ef)},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
-
-    out = EntityFileOut.model_validate(ef)
-    out.uploaded_by_username = user.username
-    if entity_id:
-        emap = await _entity_name_map(db, [entity_id])
-        out.entity_name = emap.get(entity_id)
-    return out
+    return (await decorated_files(db, [ef]))[0]
 
 
 # ─── Download ──────────────────────────────────────────────────────────────────
@@ -507,15 +662,19 @@ async def download_incident_file(
                                "description": "unsupported_report_image (include_in_report on a file "
                                              "that is not a PNG, JPEG, GIF or WebP image, or whose "
                                              "dimensions can't be read from its header) or "
-                                             "image_too_large (over 16384 px per side or 50 megapixels), or "
-                                             "reason_required (a rename without a 10–2000 character reason)"},
+                                             "image_too_large (over 16384 px per side or 50 megapixels), "
+                                             "reason_required (a rename without a 10–2000 character reason), or a "
+                                             "capture-record code: capture_sha256_read_only, invalid_captured_at, "
+                                             "invalid_capture_text, captured_by_conflict, assignee_no_access"},
+                         404: {"model": ApiErrorBody, "description": "the file or entity, or user_not_found "
+                                                                    "(captured_by_id)"},
                          409: {"model": ApiErrorBody,
                                "description": "incident closed, or file_integrity_failed (include_in_report "
                                              "on a file whose stored bytes fail decryption / authentication)"},
                          503: {"model": ApiErrorBody,
                                "description": "file_read_error (include_in_report on a file that could not be "
                                              "read: storage error or wrong EVIDENCE_KEK)"}},
-              summary="Rename a file, (un)link it to an entity, or pick it as a report figure")
+              summary="Rename a file, (un)link it to an entity, pick it as a report figure, or edit its capture record")
 async def update_incident_file(
     incident_id: uuid.UUID,
     file_id:     uuid.UUID,
@@ -544,7 +703,12 @@ async def update_incident_file(
     and sending include_in_report=true again for a figure that has none stored
     (picked before they were stored) computes them. `report_caption` (max 512
     characters) is printed under the figure; null or "" clears it. The audit row
-    records the caption's length, not its text."""
+    records the caption's length, not its text.
+
+    S5: the capture record's fields (all but `capture_sha256`, which was checked against the bytes at
+    upload: sending it is 422 capture_sha256_read_only) can be changed; only those sent change, null or
+    "" clears one, and each change is audited in `file_update` as {from, to}. No reason is needed (as for
+    the entity link and the report figure)."""
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
@@ -555,7 +719,20 @@ async def update_incident_file(
     if not ef:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
 
+    # S5: the capture record, checked before anything changes.
+    if "capture_sha256" in req.model_fields_set:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "capture_sha256_read_only",
+                       "capture_sha256 was checked against the file's bytes at upload and can't be changed. "
+                       "Nothing was changed.")
+    cap = capture.capture_columns({k: getattr(req, k) for k in capture.EDITABLE if k in req.model_fields_set})
+    if cap.get("captured_by_id") and cap["captured_by_id"] not in (ef.captured_by_id, user.id):
+        await require_incident_person(db, incident_id, cap["captured_by_id"], "the capturer")
+
     changed: dict[str, object] = {}
+    for k, v in cap.items():
+        if v != getattr(ef, k):
+            changed[k] = {"from": capture.jsonable(getattr(ef, k)), "to": capture.jsonable(v)}
+            setattr(ef, k, v)
     reason: Optional[str] = None
     new_name = (req.original_name or "").strip()
     if new_name and new_name != ef.original_name:
@@ -691,6 +868,92 @@ async def delete_incident_file(
     return {"status": "ok"}
 
 
+# ─── S5 (EG-7): what a supporting document corroborates ───────────────────────
+
+@router.post("/{incident_id}/files/{file_id}/links", response_model=SupportingFileLinkOut,
+             status_code=status.HTTP_201_CREATED,
+             summary="Link a supporting document to the exhibit, timeline event or IOC it corroborates",
+             responses={404: {"model": ApiErrorBody, "description": "the file, or evidence_not_found / "
+                                                                    "timeline_event_not_found / ioc_not_found (not "
+                                                                    "in this incident)"},
+                        409: {"model": ApiErrorBody, "description": "incident_closed or already_linked"}})
+async def link_incident_file(
+    incident_id: uuid.UUID,
+    file_id:     uuid.UUID,
+    req:         SupportingFileLinkCreate,
+    request:     Request,
+    user: User = Depends(require_analyst),
+    db:   AsyncSession = Depends(get_db),
+) -> SupportingFileLinkOut:
+    """Record that this supporting document corroborates an exhibit, a timeline event or an IOC of the same
+    incident (`target_type` exhibit | timeline_event | ioc, `target_id`, optional `note`). Distinct from
+    Register as exhibit (`evidence_id`, "registered as"): the file stays a supporting document, with no chain of
+    custody, and never goes into a disclosure package. A linked file can't be deleted (409 file_referenced) until
+    it is unlinked; deleting the timeline event or IOC removes its links. Audited `file_link`. 409 already_linked
+    for the same target twice, 409 incident_closed. Analyst role and incident access."""
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
+    ef = await locked_file(db, file_id, incident_id=incident_id)       # serialises with delete and other links
+    if not ef:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    await _require_link_target(db, incident_id, req.target_type, req.target_id)
+    column = _LINK_COLUMN[req.target_type]
+    if (await db.execute(select(SupportingFileLink.id).where(
+            SupportingFileLink.file_id == ef.id, getattr(SupportingFileLink, column) == req.target_id))).first():
+        raise ApiError(status.HTTP_409_CONFLICT, "already_linked",
+                       f"This file is already linked to that {req.target_type.replace('_', ' ')}")
+    link = SupportingFileLink(id=uuid.uuid4(), file_id=ef.id, note=req.note or None, linked_by_id=user.id,
+                              **{column: req.target_id})
+    db.add(link)
+    await db.flush()
+    out = (await link_outs(db, [link]))[0]
+    await write_audit(db, "file_link", user_id=user.id, username=user.username,
+                      resource_type="incident_file", resource_id=str(ef.id),
+                      details={"incident_id": str(incident_id), "link_id": str(link.id),
+                               "target_type": req.target_type, "target_id": str(req.target_id),
+                               "target_label": out.target_label, "note": link.note},
+                      ip_address=request.client.host if request.client else None)
+    await db.commit()
+    return out
+
+
+@router.delete("/{incident_id}/files/{file_id}/links/{link_id}",
+               summary="Unlink a supporting document from what it corroborates",
+               responses={404: {"model": ApiErrorBody, "description": "the file, or link_not_found"},
+                          409: {"model": ApiErrorBody, "description": "incident_closed"}})
+async def unlink_incident_file(
+    incident_id: uuid.UUID,
+    file_id:     uuid.UUID,
+    link_id:     uuid.UUID,
+    request:     Request,
+    user: User = Depends(require_analyst),
+    db:   AsyncSession = Depends(get_db),
+) -> dict:
+    """Remove one of the file's links (ids in the file's `links`). Audited `file_unlink` with the target and the
+    note. Analyst role, incident access, open incident (409 incident_closed)."""
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
+    ef = await locked_file(db, file_id, incident_id=incident_id)
+    if not ef:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    link = (await db.execute(select(SupportingFileLink).where(
+        SupportingFileLink.id == link_id, SupportingFileLink.file_id == ef.id))).scalar_one_or_none()
+    if not link:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "link_not_found", "Link not found")
+    out = (await link_outs(db, [link]))[0]
+    await db.delete(link)
+    await write_audit(db, "file_unlink", user_id=user.id, username=user.username,
+                      resource_type="incident_file", resource_id=str(ef.id),
+                      details={"incident_id": str(incident_id), "link_id": str(link_id),
+                               "target_type": out.target_type, "target_id": str(out.target_id),
+                               "target_label": out.target_label, "note": out.note},
+                      ip_address=request.client.host if request.client else None)
+    await db.commit()
+    return {"status": "ok"}
+
+
 # ─── H4: Register as exhibit ─────────────────────────────────────────────────
 
 class _HashMismatch(Exception):
@@ -702,6 +965,34 @@ def _hash_mismatch() -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, "file_hash_mismatch",
                     "The stored file no longer matches the SHA-256 recorded at upload. Nothing was registered; "
                     "the attempt was audited.")
+
+
+def _prefill_out(cols: dict, left_empty: list[dict]) -> FileExhibitPrefillOut:
+    return FileExhibitPrefillOut(**{k: v for k, v in cols.items() if k in FileExhibitPrefillOut.model_fields},
+                                 left_empty=left_empty)
+
+
+@router.get("/{incident_id}/files/{file_id}/exhibit-prefill", response_model=FileExhibitPrefillOut,
+            summary="What Register as exhibit would pre-fill from the file's capture record")
+async def file_exhibit_prefill(
+    incident_id: uuid.UUID,
+    file_id:     uuid.UUID,
+    user: User = Depends(current_user),
+    db:   AsyncSession = Depends(get_db),
+) -> FileExhibitPrefillOut:
+    """S5: the acquisition and source fields a NEW draft exhibit gets from this file's capture record when it is
+    registered (POST …/register-exhibit): acquired_at ← captured_at, acquisition_tool / _version ← capture_tool /
+    _version, source_system ← capture_source, source_path ← capture_url (style cloud_uri when it passes that rule,
+    else other), screen_state ← capture_context. Null = no capture value: nothing is invented. `left_empty` = a
+    source field the exhibit's source check would refuse, left empty rather than refusing the registration. When
+    the incident already holds an exhibit with the same SHA-256, registering links that one and pre-fills
+    nothing. Read-only; incident access."""
+    await _get_incident(db, incident_id, user)
+    ef = (await db.execute(select(EntityFile).where(EntityFile.id == file_id,
+                                                    EntityFile.incident_id == incident_id))).scalar_one_or_none()
+    if not ef:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
+    return _prefill_out(*capture.exhibit_prefill(ef))
 
 
 @router.post("/{incident_id}/files/{file_id}/register-exhibit", response_model=FileRegisterExhibitOut,
@@ -728,11 +1019,15 @@ async def register_file_as_exhibit(
     (FENRGCM v2) and its SHA-256 checked against the one recorded at upload before anything is kept.
     Same rules as an analyser upload (G3): when the SHA-256 equals an active digital exhibit of the
     incident (the oldest, if several), that exhibit is linked (`exhibit_link` sha256_match, no second
-    copy; the file is re-hashed first); otherwise a new UNSEALED DRAFT exhibit is created (`DOC-…`,
-    collected by and in the custody of the caller, acquired_at unknown), audited `evidence_collect`
+    copy; the file is re-hashed first); otherwise a new UNSEALED DRAFT exhibit is created (its identifier
+    from the naming convention, collected by and in the custody of the caller), audited `evidence_collect`
     (method and source `supporting_document`, `file_id`) — complete its acquisition record and seal it
     on the Evidence page as for any draft. Idempotent: a file already registered returns its exhibit
-    (`already_registered`). Analyst role, incident access, open incident (409 incident_closed)."""
+    (`already_registered`). Analyst role, incident access, open incident (409 incident_closed).
+
+    S5: the new draft is pre-filled from the file's capture record (see GET …/exhibit-prefill; `prefill`
+    in the response); with no capture record acquired_at stays unknown. A source field the source check
+    refuses is left empty, never a refused registration; the audit rows say so (`prefill_left_empty`)."""
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
@@ -741,10 +1036,10 @@ async def register_file_as_exhibit(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
     ip = request.client.host if request.client else None
 
-    async def out(ev: Evidence, link: str) -> FileRegisterExhibitOut:
+    async def out(ev: Evidence, link: str, prefill: Optional[FileExhibitPrefillOut] = None) -> FileRegisterExhibitOut:
         return FileRegisterExhibitOut(evidence_id=ev.id, evidence_identifier=ev.identifier,
                                       evidence_sealed=bool(ev.coc_sealed), exhibit_link=link,
-                                      file=(await decorated_files(db, [ef]))[0])
+                                      file=(await decorated_files(db, [ef]))[0], prefill=prefill)
 
     if ef.evidence_id is not None:
         ev = await db.get(Evidence, ef.evidence_id)
@@ -792,6 +1087,10 @@ async def register_file_as_exhibit(
         return await out(match, "sha256_match")
 
     require_free_space(codec.container_size(ef.file_size), "this exhibit")   # evidence volume; 507, nothing stored
+    prefill, left_empty = capture.exhibit_prefill(ef)              # S5: the new draft's fields from the capture record
+    prefilled = {k: capture.jsonable(v) for k, v in prefill.items()}
+    noted = {**({"prefilled_from_capture": prefilled} if prefilled else {}),
+             **({"prefill_left_empty": left_empty} if left_empty else {})}
     ev_id = uuid.uuid4()
     filename, rel = draft_storage_path(incident_id, ev_id, ef.original_name)
 
@@ -810,15 +1109,18 @@ async def register_file_as_exhibit(
     try:
         ev = await register_draft(
             db, incident_id=incident_id, user=user, ev_id=ev_id, filename=filename, stored=stored,
-            mime_type=ef.content_type, prefix="DOC", name=f"Supporting document: {ef.original_name}",
+            mime_type=ef.content_type, name=f"Supporting document: {ef.original_name}",
             method="supporting_document", analyser_label="Supporting documents", ip=ip,
-            extra={"source": "supporting_document", "file_id": str(ef.id)})
+            acquired_at=prefill.get("acquired_at"), upload_hash_check=prefill.get("upload_hash_check", "not_checked"),
+            extra={"source": "supporting_document", "file_id": str(ef.id), **noted})
+        for k, v in prefill.items():
+            setattr(ev, k, v)
         ev.description = (f"Draft exhibit registered from the supporting document {ef.original_name} "
                           f"(file {ef.id}, uploaded {_z(ef.uploaded_at)}). Complete the acquisition record and seal it.")
         ef.evidence_id = ev.id
-        await audit("registered", ev)
+        await audit("registered", ev, **noted)
         await db.commit()
     except BaseException:
         await adelete_encrypted(rel)                              # no row, so no copy left behind
         raise
-    return await out(ev, "registered")
+    return await out(ev, "registered", _prefill_out(prefill, left_empty))

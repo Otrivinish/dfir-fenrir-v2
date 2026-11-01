@@ -69,7 +69,9 @@ from core.database import SessionLocal, get_db
 from core.errors import ApiError, ApiErrorBody
 from email_analyzer.parser import is_msg
 from email_analyzer.routes import MAX_EMAIL_BYTES
-from evidence import codec, crypto, exports
+from evidence import codec, crypto, exports, source
+from evidence import identifier as exhibit_ids
+from evidence import manifest as container_manifest
 from evidence.crypto import EncryptedStagingWriter, EvidenceCryptoError, StoredFile
 from evidence.hashing import hash_algorithm
 from evidence.register import draft_storage_path, lock_upload_sha256, register_draft, unique_sha256_match
@@ -96,11 +98,12 @@ REAP_EVERY_SECONDS = 60
 _HEAD_LEN = 64                        # first plaintext bytes kept in memory for the content checks
 
 _MIB = 1024 * 1024
-# G3 analysers: identifier prefix, the audit method and the label register_or_link_upload uses.
+# G3 analysers: the audit method and the label register_or_link_upload uses (EI: the draft's identifier follows the
+# naming convention).
 _G3 = {
-    "email":      ("EMAIL", "email_upload", "Email analyser"),
-    "pcap":       ("PCAP", "pcap_upload", "PCAP analyser"),
-    "webhistory": ("WEBHIST", "webhistory_upload", "Browser history"),
+    "email":      ("email_upload", "Email analyser"),
+    "pcap":       ("pcap_upload", "PCAP analyser"),
+    "webhistory": ("webhistory_upload", "Browser history"),
 }
 
 
@@ -538,7 +541,10 @@ async def put_upload_chunk(
                422: _E("purpose_mismatch, upload_hash_mismatch (expected_hash; nothing stored), hash_mismatch "
                        "(C3 target hash; nothing stored), not_a_capture (pcap; nothing stored), not_sqlite "
                        "(webhistory; nothing stored), form_history_not_firefox, invalid_hash_format, "
-                       "acquired_in_future, assignee_no_access, or a request-body validation error. The ones "
+                       "acquired_in_future, assignee_no_access, a source-record code (evidence, S2: "
+                       "invalid_source_path, invalid_source_text, source_path_style_required, "
+                       "source_path_style_mismatch, source_path_norm_read_only, source_unknown_reason_too_short), "
+                       "or a request-body validation error. The ones "
                        "marked 'nothing stored' end the session; the others leave it open."),
                503: _E("upload_storage_error (the staged file could not be finalised; nothing stored)"),
                507: _E("insufficient_storage (the evidence volume is below its 1 GiB reserve: nothing stored, "
@@ -556,8 +562,11 @@ async def complete_upload_session(
     """Finish the upload once every byte has arrived. The body repeats the session's `purpose`
     (discriminator) with the same metadata the multipart route for that purpose takes:
 
-    - **evidence** — the POST …/evidence/digital fields as JSON (name, identifier, acquisition
-      record, C3 `acquisition_hash_target` + `target_hash_scope`). Creates the exhibit exactly as
+    - **evidence** — the POST …/evidence/digital fields as JSON (name, identifier — blank or left out:
+      assigned from the naming convention when the exhibit is created (EI) — acquisition
+      record, C3 `acquisition_hash_target` + `target_hash_scope`, S2 source device make / model /
+      serial and the `source_*` location record, S6 `container_format`: zip / tar queue the
+      background manifest build). Creates the exhibit exactly as
       that route does (`evidence_collect`; a refused target hash → 422 hash_mismatch, audited
       `evidence_collect_rejected`, nothing stored). 201, exhibit_link `collected`.
     - **email** / **pcap** / **webhistory** — `acquired_at` (+ `browser`, and `companion_of` for a
@@ -704,16 +713,21 @@ async def _prepare_evidence(db: AsyncSession, s: _Session, body: UploadCompleteE
     entity_id = await _resolve_entity(db, s.incident_id, str(body.entity_id)) if body.entity_id else None
     intake = digital_intake(body.acquired_at, body.acquisition_hash_source, body.acquisition_hash_target,
                             body.target_hash_scope)
-    if (await db.execute(select(Evidence.id).where(Evidence.incident_id == s.incident_id,
-                                                   Evidence.identifier == body.identifier))).first():
+    identifier = exhibit_ids.typed(body.identifier)      # EI: None = assigned at the end, in the row's transaction
+    if identifier is not None and (await db.execute(select(Evidence.id).where(
+            Evidence.incident_id == s.incident_id, Evidence.identifier == identifier))).first():
         raise ApiError(status.HTTP_409_CONFLICT, "identifier_exists",
                        "Evidence identifier already exists on this incident: the upload is kept, complete it "
                        "again with another identifier.")
     fields = body.model_dump(exclude={"purpose", "entity_id", "witness_user_id", "acquisition_hash_source",
-                                      "acquisition_hash_target", "target_hash_scope", "acquired_at"})
+                                      "acquisition_hash_target", "target_hash_scope", "acquired_at",
+                                      *source.SOURCE_INPUT_FIELDS})
     fields.update(entity_id=entity_id, witness_user_id=witness_uid, device_types=body.device_types or None,
                   acquisition_tool_sha256=(body.acquisition_tool_sha256.lower()
-                                           if body.acquisition_tool_sha256 else None))
+                                           if body.acquisition_tool_sha256 else None),
+                  make=body.make or None, model=body.model or None, serial=body.serial or None)
+    fields.update(source.source_columns(source.sent_source_fields(body)))   # S2, checked before anything is stored
+    fields["manifest_status"] = container_manifest.initial_status(body.container_format)   # S6: zip / tar → pending
 
     async def final(db: AsyncSession, request: Request, user: User, ip: Optional[str]):
         await _finish(db, s, ip)
@@ -725,7 +739,7 @@ async def _prepare_evidence(db: AsyncSession, s: _Session, body: UploadCompleteE
             if refused.why == "too_large":            # the cap was lowered after the upload opened
                 raise ApiError(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "upload_too_large",
                                f"Upload exceeds max {settings.evidence_max_upload_bytes} bytes") from None
-            err = await audit_collect_rejected(db, request, user, s.incident_id, identifier=body.identifier,
+            err = await audit_collect_rejected(db, request, user, s.incident_id, identifier=identifier,
                                                name=body.name, original_filename=s.filename, intake=intake,
                                                refused=refused, extra={"upload_id": str(s.id)})
             await _audit(db, "upload_session_abort", s, ip=ip, outcome="failure", reason="hash_mismatch",
@@ -735,12 +749,17 @@ async def _prepare_evidence(db: AsyncSession, s: _Session, body: UploadCompleteE
         try:
             ev = await create_digital_evidence(db, request, user, s.incident_id, evidence_id=evidence_id,
                                                stored=stored, original_filename=s.filename, mime_type=s.mime_type,
-                                               intake=intake, fields=fields, audit_extra={"upload_id": str(s.id)})
+                                               intake=intake, fields=fields,
+                                               audit_extra={"upload_id": str(s.id),
+                                                            "container_format": body.container_format,
+                                                            "manifest_status": fields["manifest_status"]})
             await _completed_audit(db, s, ip, stored, ev, "collected")
             await db.commit()
         except BaseException:
             await crypto.adelete_encrypted(rel)       # no row: never leave the stored file behind
             raise
+        if ev.manifest_status == "pending":
+            container_manifest.enqueue(ev.id, (user.id, user.username))
         return ev, "collected"
     return final
 
@@ -748,7 +767,7 @@ async def _prepare_evidence(db: AsyncSession, s: _Session, body: UploadCompleteE
 async def _prepare_g3(db: AsyncSession, s: _Session, body):
     """The G3 upload's checks and names (email_analyzer / pcap / webhistory upload routes)."""
     acquired_at = _check_acquired_at(body.acquired_at)
-    prefix, method, label = _G3[s.purpose]
+    method, label = _G3[s.purpose]
     extra: dict = {}
     if s.purpose == "email":
         src = PurePosixPath(s.filename).name or "message.eml"
@@ -796,7 +815,7 @@ async def _prepare_g3(db: AsyncSession, s: _Session, body):
         stored = await s.writer.acommit(rel)
         try:
             ev = await register_draft(db, incident_id=s.incident_id, user=user, ev_id=ev_id, filename=filename,
-                                      stored=stored, mime_type=mime, prefix=prefix, name=name, method=method,
+                                      stored=stored, mime_type=mime, name=name, method=method,
                                       analyser_label=label, acquired_at=acquired_at, ip=ip,
                                       extra={**extra, "upload_id": str(s.id)})
             await _completed_audit(db, s, ip, stored, ev, "registered")

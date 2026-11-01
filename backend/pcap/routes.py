@@ -42,6 +42,7 @@ from evidence.register import (EXAMINED_MASTER, EXAMINED_MATCH, EXAMINED_UPLOAD,
 from evidence.routes import _check_acquired_at
 from forensic.parser import apply_clock_offset
 from forensic.routes import clock_offset_fields, exhibit_info
+from entities.match import link_rows, load_index
 from incidents.access import get_accessible_incident
 from models import IOC, Incident, PCAPAnalysis, TimelineEvent, User, utcnow
 from pcap.dns_recon import DnsReconResponse, build_recon
@@ -359,7 +360,7 @@ async def upload_pcap(
 
     Register-first (G3): a packet capture (pcap / pcapng, max 500 MiB; anything else is 422
     not_a_capture and nothing is stored) is FIRST kept as an exhibit — a new unsealed draft
-    (identifier `PCAP-…`, the caller as collector and custodian, `acquired_at` as supplied or
+    (identifier from the naming convention, the caller as collector and custodian, `acquired_at` as supplied or
     unknown, lawful basis pending; hashed SHA-256 / SHA-1 / MD5, encrypted at rest, audited
     `evidence_collect`) or the one active exhibit with the same SHA-256 — and then that exhibit is
     analysed by the air-gapped worker. The result is persisted with its run record (`evidence_id`,
@@ -380,7 +381,7 @@ async def upload_pcap(
     ip = request.client.host if request and request.client else None
     x = await register_or_link_upload(
         db, incident_id=incident_id, user=user, data=content, filename=filename,
-        mime_type="application/vnd.tcpdump.pcap", prefix="PCAP", name=f"Network capture: {filename}",
+        mime_type="application/vnd.tcpdump.pcap", name=f"Network capture: {filename}",
         method="pcap_upload", analyser_label="PCAP analyser", acquired_at=acquired_at, ip=ip)
     del content
     await db.commit()                     # registered first: the capture stands even if the analysis fails
@@ -513,6 +514,8 @@ async def promote_pcap_candidates(
             "clock_offset_seconds": r.clock_offset_seconds if c.get("recorded_time") else None,
             "created_at": now, "updated_at": now,
         })
+    if req.link_entities and rows:      # TE: host (the source address) -> entity
+        link_rows(await load_index(db, incident_id, [x["hostname"] for x in rows]), rows)
     made: list[int] = []
     for start in range(0, len(rows), _PROMOTE_CHUNK):
         res = await db.execute(
@@ -522,6 +525,8 @@ async def promote_pcap_candidates(
             .returning(TimelineEvent.import_event_index))
         made.extend(res.scalars().all())
     again = sorted(set(again) | ({e["import_event_index"] for e in rows} - set(made)))
+    made_set = set(made)
+    linked = sum(1 for x in rows if x.get("entity_id") and x["import_event_index"] in made_set)
     await write_audit(
         db, "pcap_promote",
         user_id=user.id, username=user.username,
@@ -529,12 +534,14 @@ async def promote_pcap_candidates(
         details={"incident_id": str(incident_id), "evidence_id": str(r.evidence_id),
                  "analyser_version": r.analyser_version, "clock_offset_seconds": r.clock_offset_seconds,
                  "requested": len(wanted), "created_events": len(made),
-                 "skipped_untimestamped": len(untimed), "already_promoted": len(again), "ir_phase": req.ir_phase},
+                 "skipped_untimestamped": len(untimed), "already_promoted": len(again), "ir_phase": req.ir_phase,
+                 "entities_linked": linked},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
     return ForensicImportPromoteResult(created=len(made), created_indices=sorted(made),
-                                       skipped_untimestamped=untimed, already_promoted=again)
+                                       skipped_untimestamped=untimed, already_promoted=again,
+                                       entities_linked=linked)
 
 
 # ─── Import IOCs (literal before parametric) ─────────────────────────────────

@@ -86,6 +86,100 @@ export default function IncidentReference() {
           </div>
         </form>
       )}
+
+      <ExhibitIdentifiers />
     </div>
+  )
+}
+
+// EI — the naming convention for automatically assigned exhibit identifiers. The server checks the template
+// (422 invalid_identifier_template, naming the rule) and gives the example; nothing is checked here.
+function ExhibitIdentifiers() {
+  const [data,     setData]     = useState(null)
+  const [template, setTemplate] = useState('')
+  const [saving,   setSaving]   = useState(false)
+  const [error,    setError]    = useState(null)
+  const [saved,    setSaved]    = useState(false)
+
+  useEffect(() => {
+    api.getEvidenceIdentifierSettings()
+      .then(d => { setData(d); setTemplate(d.template) })
+      .catch(e => setError(e.message || 'Could not load the exhibit identifier settings'))
+  }, [])
+
+  const dirty = data && template !== data.template
+
+  const save = async (e) => {
+    e.preventDefault()
+    if (!dirty) return
+    setSaving(true); setError(null); setSaved(false)
+    try {
+      const d = await api.updateEvidenceIdentifierSettings(template)
+      setData(d); setTemplate(d.template); setSaved(true)
+    } catch (err) {
+      setError(err.message || 'Save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section style={{ marginTop: 'var(--space-5)' }} data-testid="exhibit-identifiers">
+      <h3 style={{ margin: 0, fontSize: 16, fontFamily: 'var(--font-heading)' }}>Exhibit identifiers</h3>
+      <p style={{ color: 'var(--muted)', fontSize: 13, marginTop: 'var(--space-1)' }}>
+        When an exhibit is registered without an identifier, FENRIR assigns one from this convention. Drafts FENRIR
+        registers itself (supporting documents, Email, Network capture and Browser history uploads) use it too.
+        Identifiers already assigned never change.
+      </p>
+
+      {error && (
+        <div className="alert error" role="alert" style={{ marginBottom: 'var(--space-3)' }}>
+          <span className="alert-icon">!</span><span>{error}</span>
+        </div>
+      )}
+
+      {data && (
+        <form className="panel" onSubmit={save} style={{ maxWidth: 560 }}>
+          <div className="field">
+            <label className="field-label" htmlFor="ei-template">Convention</label>
+            <input
+              id="ei-template"
+              className="input"
+              value={template}
+              onChange={e => { setTemplate(e.target.value); setSaved(false) }}
+              autoComplete="off"
+              spellCheck={false}
+              style={{ fontFamily: 'var(--font-mono)' }}
+            />
+          </div>
+
+          <table className="settings-table compact" style={{ marginTop: 'var(--space-2)' }}>
+            <tbody>
+              {data.tokens.map(t => (
+                <tr key={t.token}>
+                  <td style={{ whiteSpace: 'nowrap' }}><code>{t.token}</code></td>
+                  <td style={{ color: 'var(--muted)', fontSize: 12 }}>{t.description}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="field-hint">
+            Other text: letters, digits, <code>.</code> <code>_</code> <code>-</code>. At most 64 characters.
+          </div>
+
+          <div style={{ marginTop: 'var(--space-3)', fontSize: 13 }}>
+            <span style={{ color: 'var(--muted)' }}>Next exhibit of {data.example_incident_ref} (saved convention): </span>
+            <code style={{ fontSize: 13 }} data-testid="ei-example">{data.example}</code>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}>
+            <button type="submit" className="btn primary" disabled={!dirty || saving}>
+              {saving ? 'Saving…' : 'Save convention'}
+            </button>
+            {saved && <span style={{ fontSize: 12, color: 'var(--ok)' }}>Saved — applies to new exhibits only.</span>}
+          </div>
+        </form>
+      )}
+    </section>
   )
 }

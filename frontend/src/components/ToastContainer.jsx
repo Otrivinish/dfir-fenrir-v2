@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { notifyUnauthorized } from '../api/client.js'
+import { useAuth } from '../hooks/useAuth.jsx'
 
 function wsBase() {
   return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host
@@ -28,6 +29,7 @@ const TYPE_COLOR = {
 let toastId = 0
 
 export default function ToastContainer() {
+  const { sessionEpoch } = useAuth()    // SE: reconnect the socket after signing in again
   const [toasts, setToasts] = useState([])
   const timers = useRef({})
 
@@ -64,7 +66,7 @@ export default function ToastContainer() {
       ws.close()
       Object.values(timers.current).forEach(clearTimeout)
     }
-  }, [addToast])
+  }, [addToast, sessionEpoch])
 
   if (toasts.length === 0) return null
 

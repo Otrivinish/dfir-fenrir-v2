@@ -42,6 +42,8 @@ export default function EmailAnalyzer() {
   const [raw, setRaw]         = useState('')
   const [files, setFiles]     = useState([])   // one file, many files, or a single .zip -- one control
   const [busy, setBusy]       = useState(false)
+  // TE (D3): link imported hops to the entity their relay host names — on by default, visible beside the button.
+  const [hopLink, setHopLink] = useState(true)
   const up = useChunkedUpload()   // G1 stage 3b: a single message file goes up as a chunked upload
   const [error, setError]     = useState(null)
   const [analysis, setAnalysis] = useState(null)
@@ -255,8 +257,15 @@ export default function EmailAnalyzer() {
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
               <button className="btn ghost" disabled={busy || isClosed || !hopImport.importable || hopsOnTimeline}
-                      title={CLOSED_TITLE} onClick={() => act(() => api.importEmailHops(incidentId, a.id), 'Hops imported to Timeline.')}>
+                      title={CLOSED_TITLE} onClick={() => act(() => api.importEmailHops(incidentId, a.id, hopLink), 'Hops imported to Timeline.')}>
                 {hopsOnTimeline ? 'Hops on Timeline ✓' : hopsMarked ? 'Re-import missing hops' : 'Import hops → Timeline'}</button>
+              {!hopsOnTimeline && hopImport.importable > 0 && (
+                <label className="tl-key-toggle" title="Each hop whose relay host names a registered entity is linked to it (an annotation; the host stays as recorded)">
+                  <input type="checkbox" checked={hopLink} onChange={(e) => setHopLink(e.target.checked)}
+                         disabled={busy || isClosed} data-testid="email-hops-link-entities" />
+                  Link to entities by host
+                </label>
+              )}
               {/* G3 — new analyses already are of an exhibit; "Register as exhibit" is for older ones only */}
               {!a.analyser_version && (
                 <button className="btn ghost" disabled={busy || isClosed || !!a.evidence_id} title={CLOSED_TITLE || EXHIBIT_HINT}

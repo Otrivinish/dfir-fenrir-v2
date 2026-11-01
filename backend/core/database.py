@@ -1068,4 +1068,122 @@ _INPLACE_MIGRATIONS: list[str] = [
     # 3 000 rows on 2026-10-07, milliseconds); IF NOT EXISTS makes a re-run a no-op.
     "CREATE INDEX IF NOT EXISTS ix_audit_logs_incident_resource ON audit_logs(resource_id, action) " +
     "WHERE resource_type = 'incident'",
+
+    # CN-2 — editable, signed case notes. An edit is a new row (the H2 append-only trigger is untouched), so
+    # nothing is backfilled: the columns are additive and existing rows keep hash_v 1 with no signature. The
+    # constant default is metadata-only (PG 11+: no rewrite, no UPDATE, so the trigger doesn't fire); the CHECK
+    # scans case_notes once (small), well inside the 5 s lock_timeout.
+    "ALTER TABLE case_notes ADD COLUMN IF NOT EXISTS signed_name VARCHAR(255)",
+    "ALTER TABLE case_notes ADD COLUMN IF NOT EXISTS signed_as TEXT",
+    "ALTER TABLE case_notes ADD COLUMN IF NOT EXISTS hash_v SMALLINT NOT NULL DEFAULT 1",
+    _add_check_if_missing("case_notes", "ck_case_notes_signed_cn2",
+                          "hash_v = 1 OR (hash_v = 2 AND signed_name IS NOT NULL AND signed_as IS NOT NULL)"),
+
+    # S2 (EG-1/2/3/5) — an exhibit's source location record. Nullable, no default, no backfill: metadata-only
+    # ADD COLUMNs; the CHECK scans evidence once (small), well inside the 5 s lock_timeout. No index on
+    # source_path_norm yet: nothing queries it until a search lands.
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS source_system VARCHAR(256)",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS source_path TEXT",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS source_path_style VARCHAR(16)",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS source_path_norm TEXT",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS source_details JSON",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS source_unknown_reason TEXT",
+    _add_check_if_missing("evidence", "ck_evidence_source_path_style_s2",
+                          "source_path_style IS NULL OR source_path_style IN ('windows', 'unc', 'posix', 'macos', "
+                          "'android', 'ios', 'cloud_uri', 'mail_store', 'device', 'other')"),
+
+    # S3 (EG-11) — what the seal binds. seal_record_sha256: nullable, no default, no backfill (legacy seals bound no
+    # record). seal_tst_subject: what an existing seal token covers. It is added and backfilled in one guarded block,
+    # so the UPDATE runs once, when the column is created: an existing seal with a token covers the file's SHA-256.
+    # Both are metadata-only ADD COLUMNs; the UPDATE and the CHECK scan evidence once (small), well inside the 5 s
+    # lock_timeout.
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS seal_record_sha256 VARCHAR(64)",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'evidence' AND column_name = 'seal_tst_subject'
+        ) THEN
+            ALTER TABLE evidence ADD COLUMN seal_tst_subject VARCHAR(16);
+            UPDATE evidence SET seal_tst_subject = 'file_sha256' WHERE coc_sealed AND seal_tst IS NOT NULL;
+        END IF;
+    END $$
+    """,
+    _add_check_if_missing("evidence", "ck_evidence_seal_tst_subject_s3",
+                          "seal_tst_subject IS NULL OR seal_tst_subject = 'file_sha256' "
+                          "OR (seal_tst_subject = 'record_v1' AND seal_record_sha256 IS NOT NULL)"),
+
+    # S5 (EG-6, EG-7) — a supporting document's capture record, and what it corroborates. Ten nullable entity_files
+    # columns, no default, no backfill (legacy files have no capture record): metadata-only ADD COLUMNs; the
+    # REFERENCES of captured_by_id briefly takes SHARE ROW EXCLUSIVE on users; the two CHECKs scan entity_files once
+    # (small), well inside the 5 s lock_timeout. One NEW table from create_all, `supporting_file_links` (the
+    # one-target CHECK; FKs file RESTRICT, targets CASCADE, linked_by SET NULL; a partial UNIQUE index per target,
+    # leading on the target so it also serves the per-target lookups and the cascades; an index on file_id).
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS captured_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS captured_by_id UUID REFERENCES users(id) ON DELETE SET NULL",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS captured_by_name VARCHAR(128)",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS capture_tool VARCHAR(128)",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS capture_tool_version VARCHAR(64)",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS capture_method VARCHAR(16)",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS capture_source VARCHAR(256)",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS capture_url TEXT",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS capture_context TEXT",
+    "ALTER TABLE entity_files ADD COLUMN IF NOT EXISTS capture_sha256 VARCHAR(64)",
+    _add_check_if_missing("entity_files", "ck_entity_files_capture_method_s5",
+                          "capture_method IS NULL OR capture_method IN ('screen', 'window', 'region', 'full_page', "
+                          "'scrolling', 'photo_of_screen', 'other')"),
+    _add_check_if_missing("entity_files", "ck_entity_files_capture_s5",
+                          "(capture_sha256 IS NULL OR capture_sha256 ~ '^[0-9a-f]{64}$') "
+                          "AND (captured_by_id IS NULL OR captured_by_name IS NULL)"),
+
+    # S6 (EG-4) — container exhibits and their per-file manifest. Seven nullable evidence columns, no default, no
+    # backfill (no exhibit is a container yet): metadata-only ADD COLUMNs; the two CHECKs scan evidence once (small),
+    # well inside the 5 s lock_timeout. One NEW table from create_all, `evidence_manifest_entries` (PK (evidence_id,
+    # seq), which also serves the per-exhibit pagination and path search; the type / encoding CHECKs; FK RESTRICT,
+    # DEFERRABLE INITIALLY DEFERRED). Append-only in the DB like case_notes (H2): CREATE OR REPLACE FUNCTION takes no
+    # table lock and the trigger is created only while pg_trigger lacks it. No trigram index for the substring
+    # search: pg_trgm needs CREATE on the database, which fenrir_owner does not have.
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS container_format VARCHAR(8)",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS manifest_status VARCHAR(12)",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS manifest_sha256 VARCHAR(64)",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS manifest_entries BIGINT",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS manifest_builder VARCHAR(128)",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS manifest_error TEXT",
+    "ALTER TABLE evidence ADD COLUMN IF NOT EXISTS manifest_listing JSON",
+    _add_check_if_missing("evidence", "ck_evidence_container_format_s6",
+                          "container_format IS NULL OR container_format IN ('zip', 'tar', 'ad1', 'l01', 'aff4l', "
+                          "'other')"),
+    _add_check_if_missing("evidence", "ck_evidence_manifest_status_s6",
+                          "manifest_status IS NULL OR manifest_status IN ('pending', 'failed', 'not_indexed') "
+                          "OR (manifest_status = 'built' AND manifest_sha256 IS NOT NULL "
+                          "AND manifest_sha256 ~ '^[0-9a-f]{64}$' AND manifest_entries IS NOT NULL)"),
+    """CREATE OR REPLACE FUNCTION fenrir_manifest_entries_append_only() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+       BEGIN
+         RAISE EXCEPTION 'evidence_manifest_entries is append-only (S6): % blocked', TG_OP
+           USING ERRCODE = 'insufficient_privilege';
+       END; $$""",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger
+                       WHERE tgrelid = 'evidence_manifest_entries'::regclass
+                         AND tgname = 'trg_manifest_entries_append_only') THEN
+            CREATE TRIGGER trg_manifest_entries_append_only
+                BEFORE UPDATE OR DELETE ON evidence_manifest_entries
+                FOR EACH ROW EXECUTE FUNCTION fenrir_manifest_entries_append_only();
+        END IF;
+    END $$
+    """,
+
+    # EI — automatic exhibit identifiers. One NEW table from create_all, `evidence_identifier_counters` (PK incident_id,
+    # FK → incidents ON DELETE CASCADE, last_seq NOT NULL); nothing to alter and no backfill (every counter starts at 0,
+    # existing identifiers stay). The DML-only app role gets SELECT / INSERT / UPDATE from the owner's default
+    # privileges, as for S5's and S6's tables. The template is a platform_settings row (no DDL).
+
+    # RD — readiness deferrals. One NEW table from create_all, `readiness_deferrals` (PK check_id, deferred_by_id → users
+    # ON DELETE SET NULL, deferred_by_name, deferred_at, level, reason NULL); nothing to alter, no backfill (no check starts
+    # deferred). The app role gets SELECT / INSERT / UPDATE / DELETE from the owner's default privileges (Undo deletes).
 ]

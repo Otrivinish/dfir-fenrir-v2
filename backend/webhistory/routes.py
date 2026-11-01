@@ -37,6 +37,7 @@ from artifacts import store as artifact_store
 from evidence.crypto import EvidenceCryptoError, awrite_encrypted
 from evidence.hashing import ahashes_of
 from evidence.streaming import require_free_space
+from evidence import identifier as exhibit_ids
 from evidence.register import (EXAMINED_MASTER, EXAMINED_MATCH, EXAMINED_UPLOAD, UPLOAD_ID_DOC, ExhibitInput,
                                examine_audit, exhibit_brief, link_error_extra, read_exhibit_for_analysis,
                                recheck_exhibit, register_or_link_upload, upload_link_for)
@@ -361,7 +362,7 @@ async def upload_history(
 
     Register-first (G3): a Chrome/Edge/Brave `History` or Firefox `places.sqlite` file (capped at
     500 MB, must be SQLite — else 422 and nothing is stored) is FIRST registered as an exhibit — a
-    new unsealed draft (identifier `WEBHIST-…`, the caller as collector and custodian, `acquired_at`
+    new unsealed draft (identifier from the naming convention, the caller as collector and custodian, `acquired_at`
     as supplied or unknown, lawful basis pending; hashed, encrypted at rest, audited
     `evidence_collect`) or the one active exhibit with the same SHA-256 — and then that exhibit is
     parsed: every visit, download and (Chromium) typed search term is persisted. No quarantine copy
@@ -399,7 +400,7 @@ async def upload_history(
     src_name = Path(file.filename or "History").name or "History"
     x = await register_or_link_upload(
         db, incident_id=incident_id, user=user, data=data, filename=src_name,
-        mime_type="application/vnd.sqlite3", prefix="WEBHIST",
+        mime_type="application/vnd.sqlite3",
         name=f"Browser history ({browser}): {src_name}", method="webhistory_upload",
         analyser_label="Browser history", acquired_at=acquired_at, ip=ip, extra={"browser": browser})
     fx = None
@@ -408,7 +409,7 @@ async def upload_history(
         fh_name = Path(form_history_file.filename or "formhistory.sqlite").name or "formhistory.sqlite"
         fx = await register_or_link_upload(
             db, incident_id=incident_id, user=user, data=form_history_data, filename=fh_name,
-            mime_type="application/vnd.sqlite3", prefix="WEBHIST",
+            mime_type="application/vnd.sqlite3",
             name=f"Browser form history (firefox): {fh_name}", method="webhistory_upload",
             analyser_label="Browser history", acquired_at=acquired_at, ip=ip,
             extra={"browser": browser, "companion_of": str(x.evidence.id)})
@@ -694,7 +695,7 @@ async def mint_evidence(
     upload time and audits `evidence_collect` (details.method = webhistory_mint). 409
     already_minted if already minted, 410 if the source file is gone. Requires the analyst role.
     """
-    await _incident(db, incident_id, user)
+    inc = await _incident(db, incident_id, user)
     upload = await _get_upload(db, incident_id, upload_id)
     if upload.evidence_id:
         raise ApiError(status.HTTP_409_CONFLICT, "already_minted", "Already minted as Evidence")
@@ -727,15 +728,16 @@ async def mint_evidence(
     ev_id = uuid.uuid4()
     rel = f"webhistory/{ev_id}.db.enc"
     stored = await awrite_encrypted(raw, rel)
-    short = str(upload_id)[:8]
+    at = utcnow()                            # EI (D4): the identifier follows the naming convention
+    identifier, template = await exhibit_ids.assign(db, incident_id, inc.ref, at)
     ev = Evidence(
         id=ev_id, incident_id=incident_id, kind="digital_file", status="active",
         name=f"Browser history ({upload.browser}): {upload.original_filename}",
-        identifier=f"WEBHIST-{short}",
+        identifier=identifier,
         original_filename=upload.original_filename, storage_path=rel, nonce_hex=stored.nonce_hex,
         file_size_bytes=len(raw), mime_type="application/vnd.sqlite3",
         sha256=sha256, sha1=sha1, md5=md5,
-        current_custodian_id=user.id, collected_by_id=user.id, collected_at=utcnow(),
+        current_custodian_id=user.id, collected_by_id=user.id, collected_at=at,
         acquired_at=src.uploaded_at, upload_hash_check="not_checked",
     )
     db.add(ev)
@@ -747,7 +749,8 @@ async def mint_evidence(
         resource_type="evidence", resource_id=str(ev_id), outcome="success",
         details={"incident_id": str(incident_id), "method": "webhistory_mint",
                  "upload_id": str(upload_id), "artifact_id": str(src.id),
-                 "kind": "digital_file", "identifier": ev.identifier, "name": ev.name,
+                 "kind": "digital_file", "identifier": ev.identifier,
+                 "identifier_assigned": "auto", "identifier_template": template, "name": ev.name,
                  "sha256": ev.sha256, "file_size_bytes": ev.file_size_bytes,
                  "acquired_at": ev.acquired_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
                                  if ev.acquired_at else None,

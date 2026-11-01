@@ -2,17 +2,20 @@ import { useEffect, useState } from 'react'
 import { api } from '../../../api/client.js'
 import { TLP } from '../../../lib/incidentVocab.js'
 import { formatLocal } from '../../../lib/datetime.js'
-import { hashAlgorithm } from '../../../lib/evidenceProvenance.js'
+import { hashAlgorithm, SOURCE_MISSING_LABEL, sourceMissing } from '../../../lib/evidenceProvenance.js'
 import LocalDateTimePicker from '../../../components/LocalDateTimePicker.jsx'
 import { fmtOffset, parseOffsetSeconds } from '../../../components/ClockOffset.jsx'
 import UploadProgress, { useChunkedUpload, useRetainedUpload } from '../../../components/UploadProgress.jsx'
+import { SourceSection, sourcePayload, sourceStateFrom } from './SourceFields.jsx'
 
 // Collection wizard — ISO/IEC 27037 §7 (branch-aware).
 //
 // Spine = 27037 Figure 1 (collect vs acquire × device state). Device type is a
 // non-exclusive context tag that injects the §7 sub-procedure's extras. Steps:
 //   type     — device type tag(s) + digital/physical kind
-//   identify — lawful basis, source description, in-situ photo (physical only)
+//   identify — lawful basis, source description, in-situ photo (physical only), and (S2) the source
+//              record: the source device + where on it (digital) or the device's make / model / serial
+//              and storage location (physical)
 //   decide   — system state, collect/acquire, §7.1.1.3 decision factors
 //   branch   — per-type extras (computer/storage/mobile/network/cctv)
 //   acquire  — file + acquisition time + tool/version/params, source/target hashes
@@ -206,6 +209,7 @@ export default function AcquisitionWizard({
   const [entityId, setEntityId]     = useState(ex.entity_id || '')
   const [collectedLocation, setCollectedLocation] = useState(ex.collected_location || '')
   const [collectedAsRole, setCollectedAsRole]     = useState(ex.collected_as_role || '')   // GS-12 — '' | defr | des
+  const [src, setSrc] = useState(() => sourceStateFrom(ex))   // S2 — the source record (SourceFields.jsx)
 
   // ── Type step ─────────────────────────────────────────────────────────
   const [deviceTypes, setDeviceTypes] = useState(ex.device_types || [])
@@ -243,6 +247,9 @@ export default function AcquisitionWizard({
   const [acquiredAt, setAcquiredAt]               = useState(ex.acquired_at || '')   // UTC ISO …Z or ''
   const [acquisitionScope, setAcquisitionScope]   = useState(ex.acquisition_scope || '')   // '' | full_image | logical
   const [logicalRationale, setLogicalRationale]   = useState(ex.logical_acquisition_rationale || '')
+  // S6 — the file is a tool-made logical container (zip / tar get a per-file manifest); locked once it is built.
+  const [containerFormat, setContainerFormat]     = useState(ex.container_format || '')
+  const containerLocked = completing && ex.manifest_status === 'built'
   const [systemTimeOffset, setSystemTimeOffset]   = useState(ex.system_time_offset || '')
   // G4 (R35) — the same offset as a signed number of seconds (device clock minus true UTC); '' = not recorded.
   const [timeOffsetSeconds, setTimeOffsetSeconds] = useState(
@@ -306,6 +313,15 @@ export default function AcquisitionWizard({
     api.listValidatedTools().then(r => setValidatedTools(r.items || [])).catch(() => {})
   }, [])
 
+  // EI — the identifier FENRIR would assign if the field is left empty (an example; nothing is reserved).
+  const [nextIdentifier, setNextIdentifier] = useState(null)
+  useEffect(() => {
+    if (completing) return
+    let cancelled = false
+    api.nextEvidenceIdentifier(incidentId).then(r => { if (!cancelled) setNextIdentifier(r.example) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [incidentId, completing])
+
   // Picking a registry tool auto-fills tool/version + marks it validated with its ref.
   function pickRegistryTool(id) {
     const t = validatedTools.find(x => x.id === id)
@@ -331,13 +347,15 @@ export default function AcquisitionWizard({
     }
     if (s === 'identify') {
       if (!name.trim())       { setError('Name is required.'); return false }
-      if (!identifier.trim()) { setError('Identifier is required.'); return false }
       if (!lawfulBasis)       { setError('Lawful basis is required (GDPR Art. 5.1(c)).'); return false }
       if ((lawfulBasis === 'other' || lawfulBasis === 'lia') && !lawfulBasisNote.trim()) {
         setError('This lawful basis requires a justification note.'); return false
       }
       if (captionRequired && !photoCaption.trim()) {
         setError('Physical evidence requires at least one in-situ photo caption (ISO 27037 §6.2.1).'); return false
+      }
+      if (kind === 'digital_file' && src.source_path && !src.source_path_style) {
+        setError('Pick the path style of the source path (the server checks the path against it).'); return false
       }
     }
     if (s === 'decide') {
@@ -377,6 +395,14 @@ export default function AcquisitionWizard({
   }
 
   // Seal-readiness mirror of the server gate (so the operator sees gaps first).
+  // S3 — the source the seal needs (the same rule as the server, evidenceProvenance.sourceMissing), or the
+  // Unknown source — reason, which meets all of it.
+  const srcGap = kind === 'digital_file' ? sourceMissing({
+    entity_id: entityId || null, source_system: src.source_system, serial: src.serial,
+    source_path: src.source_path || null, source_path_style: src.source_path ? (src.source_path_style || null) : null,
+    acquisition_scope: acquisitionScope || null, system_state: systemState || null, device_types: deviceTypes,
+  }) : []
+  const srcUnknown = !!src.source_unknown_reason.trim()
   const sealChecks = [
     { ok: !!lawfulBasis,           label: 'Lawful basis recorded' },
     { ok: deviceTypes.length > 0,  label: 'Device type tagged' },
@@ -385,6 +411,10 @@ export default function AcquisitionWizard({
       { ok: !!(acquisitionTool.trim() && acquisitionToolVersion.trim()), label: 'Acquisition tool + version' },
       ...(isLive ? [{ ok: !!liveJustification.trim(), label: 'Live justification' }] : []),
       ...(acquisitionScope === 'logical' ? [{ ok: !!logicalRationale.trim(), label: 'Logical-acquisition rationale' }] : []),
+      { ok: !srcGap.length || srcUnknown,
+        label: !srcGap.length ? 'Source recorded (device + path)'
+          : srcUnknown ? 'Source stated as unknown (Unknown source — reason)'
+          : `Source: record ${srcGap.map(m => SOURCE_MISSING_LABEL[m]).join(' and ')} on the Identification step, or give Unknown source — reason` },
     ] : [
       { ok: !!photoCaption.trim() || (completing && exPhotos.length > 0), label: 'In-situ photo caption' },
     ]),
@@ -416,6 +446,8 @@ export default function AcquisitionWizard({
         decision_factors,
         acquisition_scope: acquisitionScope || null,
         logical_acquisition_rationale: logicalRationale.trim() || null,
+        ...(kind === 'digital_file' && acquisitionScope === 'logical' && !containerLocked
+          ? { container_format: containerFormat || null } : {}),
         system_time_offset: systemTimeOffset.trim() || null,
         system_time_offset_seconds: parseOffsetSeconds(timeOffsetSeconds) ?? null,
         screen_state: screenState.trim() || null,
@@ -426,6 +458,7 @@ export default function AcquisitionWizard({
         acquisition_tool_validation_ref: toolValidationRef.trim() || null,
         acquisition_tool_validation_date: toolValidationDate || null,
         acquired_at: acquiredAt || null,   // C3 — when the image was taken / item seized
+        ...sourcePayload(src, kind),       // S2 — source device + location (path sent as typed)
       }
 
       let created
@@ -458,7 +491,7 @@ export default function AcquisitionWizard({
       } else if (kind === 'digital_file') {
         const fields = {
           name: name.trim(),
-          identifier: identifier.trim(),
+          identifier: identifier.trim() || null,   // EI: empty = FENRIR assigns one
           description: description.trim() || null,
           tlp,
           collected_location: collectedLocation.trim() || null,
@@ -485,11 +518,11 @@ export default function AcquisitionWizard({
       } else {
         created = await api.collectPhysical(incidentId, {
           name: name.trim(),
-          identifier: identifier.trim(),
+          identifier: identifier.trim() || null,   // EI: empty = FENRIR assigns one
           description: description.trim() || null,
           tlp,
           entity_id: entityId || null,
-          physical_location: dd.physical_location || null,
+          physical_location: src.physical_location.trim() || null,   // FP-1: from its own input
           collected_location: collectedLocation.trim() || null,
           photos: photoCaption.trim() ? [{
             url: '',
@@ -514,8 +547,13 @@ export default function AcquisitionWizard({
       const still = e.retained ? ' The file stays uploaded on the server: Collect again to finish without re-sending it.' : ''
       // C3 — a refused hash stores nothing; the fix is on the Acquisition step.
       const code = e.data?.code
+      // S2 — a refused source record (the server's own words), fixed on the Identification step.
+      const sourceRefused = /^(invalid_source_|source_)/.test(code || '')
+        || (code === 'validation_error' && /source_details/.test(e.message || ''))
       setError(((code === 'hash_mismatch' || code === 'invalid_hash_format')
         ? `${e.message} Go Back to the Acquisition step to correct it.`
+        : sourceRefused
+          ? `${e.message} Go Back to the Identification step to correct the source.`
         : code === 'acquired_in_future'
           ? (kind === 'digital_file'
             ? 'The acquisition time is in the future. Go Back to the Acquisition step and correct it, or clear it if unknown.'
@@ -607,8 +645,10 @@ export default function AcquisitionWizard({
               <div className="field">
                 <label className="field-label" htmlFor="aw-id">Identifier (case tag / item #)</label>
                 <input id="aw-id" className="input" value={identifier} onChange={e => setIdentifier(e.target.value)}
-                       maxLength={128} placeholder="e.g. EV-2026-042-01" style={{ fontFamily: 'var(--font-mono)' }} disabled={completing} />
-                {completing && <div className="field-hint">The identifier is fixed; name, TLP and description are edited from the item&rsquo;s detail.</div>}
+                       maxLength={128} placeholder={nextIdentifier || 'e.g. EV-2026-042-01'} style={{ fontFamily: 'var(--font-mono)' }} disabled={completing} />
+                {completing
+                  ? <div className="field-hint">The identifier is fixed; name, TLP and description are edited from the item&rsquo;s detail.</div>
+                  : <div className="field-hint" data-testid="aw-id-hint">Leave empty to assign automatically{nextIdentifier ? <>, e.g. <code>{nextIdentifier}</code></> : ''}. It can&rsquo;t be changed later.</div>}
               </div>
 
               <div className="field">
@@ -666,6 +706,9 @@ export default function AcquisitionWizard({
                   </select>
                 </div>
               )}
+
+              <SourceSection kind={kind} value={src} onChange={setSrc} prefix="aw-src"
+                             showLocation={kind === 'physical_item' && !completing} />
 
               {kind === 'physical_item' && completing && storedPhotos.length > 0 && (
                 <div className="field" data-testid="aw-photos-kept">
@@ -915,6 +958,23 @@ export default function AcquisitionWizard({
                 </div>
               )}
 
+              {acquisitionScope === 'logical' && (
+                <div className="field">
+                  <label className="field-label" htmlFor="aw-container">Logical container</label>
+                  <select id="aw-container" className="select" value={containerFormat} disabled={containerLocked}
+                          onChange={e => setContainerFormat(e.target.value)}>
+                    <option value="">— not a container (a single file) —</option>
+                    <option value="zip">ZIP</option>
+                    <option value="tar">TAR (also .tar.gz / .tgz / .tar.bz2 / .tar.xz)</option>
+                    <option value="ad1">AD1 (FTK)</option>
+                    <option value="l01">L01 (EnCase)</option>
+                    <option value="aff4l">AFF4-L</option>
+                    <option value="other">Other</option>
+                  </select>
+                  <div className="field-hint">The acquisition tool’s container is one exhibit: FENRIR lists each file in a ZIP or TAR (path, times, hashes); other formats stay unindexed.{containerLocked ? ' Locked: its contents are listed.' : ''}</div>
+                </div>
+              )}
+
               {validatedTools.length > 0 && (
                 <div className="field">
                   <label className="field-label" htmlFor="aw-vtool">Validated tool (ISO 27041 registry)</label>
@@ -1155,10 +1215,15 @@ export default function AcquisitionWizard({
                   }}>
                     <strong>Summary</strong>
                     <ul style={{ margin: 'var(--space-1) 0 0 var(--space-3)', padding: 0 }}>
-                      <li><strong>{kind === 'digital_file' ? 'Digital file' : 'Physical item'}:</strong> {name} ({identifier})</li>
+                      <li><strong>{kind === 'digital_file' ? 'Digital file' : 'Physical item'}:</strong> {name} ({identifier.trim() || 'identifier assigned when you collect'})</li>
                       <li><strong>Type(s):</strong> {deviceTypes.map(t => DEVICE_TYPES.find(d => d.value === t)?.label).join(', ') || '—'}</li>
                       <li><strong>State / handling:</strong> {SYSTEM_STATE.find(s => s.value === systemState)?.label || '—'} · {HANDLING_MODE.find(h => h.value === handlingMode)?.label}</li>
                       <li><strong>Lawful basis:</strong> {LAWFUL_BASIS.find(l => l.value === lawfulBasis)?.label || '—'}</li>
+                      <li data-testid="aw-summary-source"><strong>{kind === 'digital_file' ? 'Source' : 'Device'}:</strong>{' '}
+                        {[src.source_system, [src.make, src.model].filter(Boolean).join(' '), src.serial && `S/N ${src.serial}`,
+                          kind === 'digital_file' && src.source_path].filter(Boolean).join(' · ')
+                          || (kind === 'digital_file' && src.source_unknown_reason ? `unknown — ${src.source_unknown_reason}` : 'not recorded')}
+                      </li>
                       {kind === 'digital_file' && <li><strong>Tool:</strong> {acquisitionTool} v{acquisitionToolVersion} ({acquisitionScope || 'scope n/s'})</li>}
                       <li><strong>{kind === 'digital_file' ? 'Acquired' : 'Seized'}:</strong> {acquiredAt ? formatLocal(acquiredAt) : 'not recorded'}</li>
                       {parseOffsetSeconds(timeOffsetSeconds) != null && (
@@ -1198,13 +1263,13 @@ export default function AcquisitionWizard({
               {sealResult?.kind === 'sealed' && (
                 <div className="alert info" role="status">
                   <span className="alert-icon">✓</span>
-                  <span>{completing ? 'Acquisition record saved and sealed.' : 'Evidence row created and sealed.'} ISO 27037 + GDPR fields locked; further changes write amend-after-seal audit entries.</span>
+                  <span>{completing ? 'Acquisition record saved and sealed.' : <>Evidence row <b data-testid="aw-saved-identifier">{sealResult.evidence.identifier}</b> created and sealed.</>} ISO 27037 + GDPR fields locked; further changes write amend-after-seal audit entries.</span>
                 </div>
               )}
               {sealResult?.kind === 'unsealed' && (
                 <div className="alert error" role="alert">
                   <span className="alert-icon">!</span>
-                  <span>{completing ? 'Acquisition record saved' : 'Evidence row created'} but seal failed: {sealResult.message}. You can return later to seal the row.</span>
+                  <span>{completing ? 'Acquisition record saved' : <>Evidence row <b data-testid="aw-saved-identifier">{sealResult.evidence.identifier}</b> created</>} but seal failed: {sealResult.message}. You can return later to seal the row.</span>
                 </div>
               )}
               {sealResult && (

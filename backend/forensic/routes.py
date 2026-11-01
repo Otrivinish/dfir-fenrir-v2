@@ -45,6 +45,7 @@ from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
 from artifacts import store as artifact_store
+from entities.match import link_rows, load_index
 from evidence.crypto import EvidenceCryptoError, EvidenceIntegrityError, iter_decrypted
 from evidence.hashing import sha256_chunked
 from incidents.access import get_accessible_incident
@@ -997,6 +998,8 @@ async def promote_forensic_import(
         ), {"id": imp.id, "idx": todo})).all()]
     rows, untimed = await asyncio.to_thread(
         _promotion_rows, stored, incident_id=incident_id, imp=imp, ir_phase=req.ir_phase, user_id=user.id)
+    if req.link_entities and rows:      # TE: host -> entity (an annotation, not an imported fact)
+        link_rows(await load_index(db, incident_id, [r["hostname"] for r in rows]), rows)
 
     created: list[int] = []
     for start in range(0, len(rows), _PROMOTE_CHUNK):
@@ -1011,6 +1014,8 @@ async def promote_forensic_import(
     # A concurrent promote of the same index loses the ON CONFLICT race: count it as already there.
     raced = sorted(set(r["import_event_index"] for r in rows) - set(created))
     already_promoted = sorted(already | set(raced))
+    made = set(created)
+    linked = sum(1 for r in rows if r.get("entity_id") and r["import_event_index"] in made)
 
     await write_audit(
         db, "forensic_import_promote",
@@ -1026,12 +1031,14 @@ async def promote_forensic_import(
             "skipped_untimestamped": len(untimed),
             "already_promoted":      len(already_promoted),
             "ir_phase":              req.ir_phase,
+            "entities_linked":       linked,
         },
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
     return ForensicImportPromoteResult(created=len(created), created_indices=created,
-                                       skipped_untimestamped=untimed, already_promoted=already_promoted)
+                                       skipped_untimestamped=untimed, already_promoted=already_promoted,
+                                       entities_linked=linked)
 
 
 @router.delete(

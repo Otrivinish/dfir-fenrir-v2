@@ -58,7 +58,7 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
   const [allTeams, setAllTeams] = useState([])
   const [selectedTeamIds, setSelectedTeamIds] = useState([])
   const [tags, setTags] = useState([])
-  const [blockers, setBlockers] = useState([])   // failing readiness blockers: shown, never blocking
+  const [blockers, setBlockers] = useState([])   // failing readiness blockers (not deferred, RD): shown, never blocking
   const [suggested, setSuggested] = useState([])  // playbook templates suggested for the chosen type (I3)
   const [people, setPeople] = useState([])        // Incident Commander picker (active users)
 
@@ -79,7 +79,7 @@ export default function IncidentCreateModal({ open, onClose, onCreated }) {
     if (!open || !readsReadiness) return
     let live = true
     api.getReadiness()
-      .then(d => { if (live) setBlockers(d.checks.filter(c => c.level === 'blocker' && c.status === 'fail')) })
+      .then(d => { if (live) setBlockers(d.checks.filter(c => c.level === 'blocker' && c.status === 'fail' && !c.deferral)) })
       .catch(() => {})   // 403 or offline: no callout
     return () => { live = false }
   }, [open, readsReadiness])

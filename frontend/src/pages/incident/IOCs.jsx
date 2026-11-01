@@ -10,6 +10,7 @@ import TagInput, { normalizeTags } from '../../components/TagInput.jsx'
 import { SEV_PALETTE } from '../../components/SevBadge.jsx'
 import ContainmentBadge from '../../components/ContainmentBadge.jsx'
 import LinkedCaseNotes from '../../components/LinkedCaseNotes.jsx'
+import LinkedSupportingFiles from '../../components/LinkedSupportingFiles.jsx'
 import { useOutboundConfirm } from '../../components/OutboundConfirm.jsx'
 
 // Reuse the canonical severity palette so the IOC status badges read with the
@@ -779,6 +780,7 @@ export default function IOCs() {
                         <IocTimelineLinks incidentId={inc.id} ioc={i} isClosed={ro} onChanged={load} />
 
                         <LinkedCaseNotes incidentId={inc.id} kind="ioc" targetId={i.id} isClosed={ro} />
+                        <LinkedSupportingFiles incidentId={inc.id} kind="ioc" targetId={i.id} />
 
                         {/* Provenance — when & who added this IOC */}
                         <div style={{ fontSize: 11, color: 'var(--dim)' }}>

@@ -24,7 +24,8 @@ import backup.routes as backup_routes
 from core.config import settings
 from core.security import decrypt_secret
 from models import (AuditAnchor, OnCallEntry, OperationalRole, OrgContact, PlatformSetting, PlaybookTemplate,
-                    ResponderProfile, StakeholderMatrixRule, ThreatFeed, User, ValidatedTool, utc_today)
+                    ReadinessDeferral, ResponderProfile, StakeholderMatrixRule, ThreatFeed, User, ValidatedTool,
+                    utc_today)
 from schemas import ENRICHMENT_SERVICES
 from settings_api.routes import _db_key as _api_key_row, _env_value as _api_key_env
 
@@ -57,6 +58,8 @@ RESPONDER_ROLES = ("admin", "analyst")
 # audit chain). Non-admins get the status and a pointer to an admin instead.
 ADMIN_ONLY_DETAIL = frozenset({"admin_totp", "audit_anchor"})
 _STATUS_ONLY = {"pass": "Passing", "fail": "Failing", "unknown": "Not checked"}
+# RD: a deferral holds at the level it was made at or below (audit_anchor and backup_recent change level).
+_LEVEL_RANK = {"warning": 0, "blocker": 1}
 
 
 def check(id: str, title: str, level: str, csf: list[str], fix_route: str):
@@ -340,8 +343,12 @@ async def _contacts_directory(db: AsyncSession, now: datetime):
 async def evaluate(db: AsyncSession, is_admin: bool) -> dict:
     """Run every check now. One failing check never hides the others: it reports `unknown`, and its
     SAVEPOINT is rolled back so a DB error doesn't leave the session aborted for the checks after it.
-    Non-admins get only the status of the ADMIN_ONLY_DETAIL checks."""
+    Non-admins get only the status of the ADMIN_ONLY_DETAIL checks.
+    RD: a deferred check still runs and reports its status, carries `deferral`, and is left out of
+    blockers_failing / warnings_failing (counted in blockers_deferred / warnings_deferred instead). A
+    deferral made at warning level doesn't apply while the check is a blocker."""
     now = datetime.now(timezone.utc).replace(microsecond=0)
+    deferrals = {d.check_id: d for d in (await db.execute(select(ReadinessDeferral))).scalars()}
     out = []
     for meta, fn in CHECKS:
         try:
@@ -353,13 +360,27 @@ async def evaluate(db: AsyncSession, is_admin: bool) -> dict:
         status, detail, over = (*res, {}) if len(res) == 2 else res
         if not is_admin and meta["id"] in ADMIN_ONLY_DETAIL:
             detail = f"{_STATUS_ONLY[status]}; an admin has details."
-        out.append({**meta, **over, "status": status, "detail": detail})
+        d = deferrals.get(meta["id"])
+        if d is not None and _LEVEL_RANK[over.get("level", meta["level"])] > _LEVEL_RANK[d.level]:
+            d = None                                       # deferred as a warning, a blocker now: it shows again
+        deferral = None if d is None else {
+            "by_name": d.deferred_by_name, "at": d.deferred_at,
+            # L1: the reason for deferring an admin-only check can name what its detail hides.
+            "reason": d.reason if is_admin or meta["id"] not in ADMIN_ONLY_DETAIL else None,
+        }
+        out.append({**meta, **over, "status": status, "detail": detail, "deferral": deferral})
+
+    def failing(level, deferred):
+        return sum(c["status"] == "fail" and c["level"] == level and (c["deferral"] is not None) == deferred
+                   for c in out)
     return {
         "generated_at": now,
         "summary": {
-            "blockers_failing": sum(c["status"] == "fail" and c["level"] == "blocker" for c in out),
-            "warnings_failing": sum(c["status"] == "fail" and c["level"] == "warning" for c in out),
+            "blockers_failing": failing("blocker", False),
+            "warnings_failing": failing("warning", False),
             "unknown": sum(c["status"] == "unknown" for c in out),
+            "blockers_deferred": failing("blocker", True),
+            "warnings_deferred": failing("warning", True),
         },
         "checks": out,
     }

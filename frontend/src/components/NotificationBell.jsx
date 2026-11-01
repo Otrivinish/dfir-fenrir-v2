@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, notifyUnauthorized } from '../api/client.js'
+import { useAuth } from '../hooks/useAuth.jsx'
 
 function wsBase() {
   return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host
@@ -26,6 +27,7 @@ const TYPE_LABEL = {
 }
 
 export default function NotificationBell() {
+  const { sessionEpoch } = useAuth()    // SE: reconnect the socket after signing in again
   const [notifications, setNotifications] = useState([])
   const [unreadCount, setUnreadCount] = useState(0)
   const [open, setOpen] = useState(false)
@@ -65,7 +67,7 @@ export default function NotificationBell() {
     ws.onclose = (e) => { if (e.code === 4001) notifyUnauthorized() }
 
     return () => ws.close()
-  }, [])
+  }, [sessionEpoch])
 
   // Close panel on outside click
   useEffect(() => {

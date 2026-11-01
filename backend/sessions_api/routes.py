@@ -1,5 +1,6 @@
 """Session management — per-user (router) + admin-global (global_router)."""
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
@@ -8,9 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.service import write_audit
 from auth.deps import current_session, require_admin
 from auth.service import revoke_other_sessions, revoke_session
+from core.config import settings
 from core.database import get_db
 from models import User, UserSession
-from schemas import AdminSessionOut, SessionLabelUpdate, SessionOut
+from schemas import AdminSessionOut, CurrentSessionOut, SessionLabelUpdate, SessionOut
 
 router        = APIRouter()   # per-user, mounted at /api/sessions
 global_router = APIRouter()   # admin,    mounted at /api/admin
@@ -33,6 +35,42 @@ async def list_my_sessions(session=Depends(current_session),
         item.is_current = (s.id == current.id)
         out.append(item)
     return out
+
+
+# Slice SE. Literal paths, so registered before the /{session_id} routes.
+def _current_out(s: UserSession, last_seen: datetime) -> CurrentSessionOut:
+    if last_seen.tzinfo is None:          # tolerate naive values from legacy rows, as auth/deps.py does
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    timeout = settings.inactivity_timeout_minutes * 60
+    return CurrentSessionOut(
+        **SessionOut.model_validate(s).model_dump(exclude={"last_seen_at", "is_current"}),
+        last_seen_at=last_seen, is_current=True, idle_timeout_seconds=timeout,
+        idle_expires_at=last_seen + timedelta(seconds=timeout), server_time=datetime.now(timezone.utc),
+    )
+
+
+@router.get("/current", response_model=CurrentSessionOut, summary="Get my current session and when it ends")
+async def get_current_session(session=Depends(current_session),
+                              db: AsyncSession = Depends(get_db)) -> CurrentSessionOut:
+    """The calling browser session with its idle and hard-cap deadlines. Cookie session only (a Bearer
+    token gets 401). A pure read: it does not count as activity, so checking never extends the session."""
+    _, s = session
+    # Auth set last_seen_at = now on the row object; read the stored value without flushing that change.
+    with db.no_autoflush:
+        stored = (await db.execute(select(UserSession.last_seen_at).where(UserSession.id == s.id))).scalar_one()
+    return _current_out(s, stored)
+
+
+@router.post("/current/heartbeats", response_model=CurrentSessionOut,
+             summary="Record activity on my current session")
+async def post_session_heartbeat(session=Depends(current_session),
+                                 db: AsyncSession = Depends(get_db)) -> CurrentSessionOut:
+    """Counts as activity: stores last_seen_at = now, which restarts the idle timer. The browser sends
+    it only on real input (key, click, scroll, touch). Cookie session only. An idle-expired session
+    gets 401 and is not revived; the hard cap (`expires_at`) is never extended. Not audited."""
+    _, s = session
+    await db.commit()                     # auth already set last_seen_at = now on the row
+    return _current_out(s, s.last_seen_at)
 
 
 @router.delete("/{session_id}", summary="Revoke one of my sessions")

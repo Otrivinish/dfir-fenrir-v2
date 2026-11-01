@@ -27,12 +27,14 @@ Phase 1 endpoints (this slice):
 - GET    /{id}/evidence/{eid}/working-copies/{cid}/download?token= — its one-time download (G5)
 - POST   /{id}/evidence/{eid}/working-copy              — record a lab copy with its own hash (G5)
 - PUT    /{id}/evidence/{eid}/legal-hold                — set / release a legal hold (G5)
+- GET    /{id}/evidence/{eid}/seal-record               — the record the seal binds (S3)
 
 Phase 2 (next slice): /exports, /download/{token}
 Phase 3 (polish): PDF CoC generator, chain verifier endpoint.
 """
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import re
@@ -45,8 +47,9 @@ from typing import Literal, Optional
 
 from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
                      Request, Response, UploadFile, status)
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,17 +66,25 @@ from models import (AuditLog, BrowserHistoryUpload, CustodyExport, DefenderPdfIm
 from audit.service import verify_row_hash
 from schemas import (ChainVerifyResult, CustodyEventOut, DisposeRequest, EvidenceAcquisitionRecord,
                      EvidenceCopyList, EvidenceCopyOut, EvidenceList,
-                     EvidenceOut, EvidenceSealRequest,
+                     EvidenceOut, EvidenceSealRecordOut, EvidenceSealRequest,
                      EvidenceUpdate, ExamineRequest, ExportCreate,
-                     ExportCreateResponse, ExportList, ExportOut, LegalHoldChange,
-                     PhysicalEvidenceCreate, ProvenanceScore, TIME_OFFSET_DESCRIPTION,
-                     TIME_OFFSET_MAX_SECONDS, Tlp,
+                     ExportCreateResponse, ExportList, ExportOut, IDENTIFIER_DOC, LegalHoldChange,
+                     NextEvidenceIdentifier,
+                     PHOTO_CAMERA_MAX, PHOTO_CONTEXT_MAX, PHOTO_TAKEN_AT_DOC, PHOTO_TAKEN_BY_DOC,
+                     PHOTO_TAKEN_BY_NAME_MAX,
+                     PhysicalEvidenceCreate, ProvenanceScore, SourceDetails, SourcePathStyle,
+                     TIME_OFFSET_DESCRIPTION, TIME_OFFSET_MAX_SECONDS, Tlp,
                      TransferAcceptRequest, TransferDeclineRequest,
                      TransferRequest, VerifyResult, WorkingCopyCreate, WorkingCopyIssue,
                      WorkingCopyIssued)
 from evidence import codec
 from evidence import working_copies as wcs
 from evidence.provenance import score_evidence
+from evidence import source as src_record
+from evidence import photos as ev_photos
+from evidence import manifest as container_manifest
+from evidence import identifier as exhibit_ids
+from evidence.records import seal_record_v1
 from notifications.service import notify_custody_transfer, notify_custody_transfer_outcome, notify_disclosure_built
 
 from evidence.crypto import (EvidenceCryptoError, EvidenceIntegrityError, StoredFile, adelete_encrypted,
@@ -281,11 +292,12 @@ def digital_intake(acquired_at: Optional[datetime], acquisition_hash_source: Opt
 
 
 async def audit_collect_rejected(db: AsyncSession, request: Request, user: User, incident_id: uuid.UUID, *,
-                                 identifier: str, name: str, original_filename: Optional[str],
+                                 identifier: Optional[str], name: str, original_filename: Optional[str],
                                  intake: DigitalIntake, refused: "_UploadRefused",
                                  extra: Optional[dict] = None) -> ApiError:
     """C3: audit a refused target hash (`evidence_collect_rejected`, no file content); returns the
-    422 hash_mismatch to raise. The caller commits."""
+    422 hash_mismatch to raise. The caller commits. `identifier` None: it was to be assigned (EI), so
+    no number was used."""
     target_algo = intake.target_algo
     computed = getattr(refused.stored, target_algo)
     label = _ALGORITHM_LABEL[target_algo]
@@ -324,7 +336,14 @@ async def create_digital_evidence(
     """The digital exhibit row + its `evidence_collect` audit for a file already stored at
     `stored.relative_path`. `fields` = the descriptive / acquisition columns (name, identifier, …;
     witness_user_id and entity_id already resolved). An identifier that already exists → the stored
-    file is deleted and 409 identifier_exists. Flushes and audits; the caller commits."""
+    file is deleted and 409 identifier_exists. A blank identifier is assigned here (EI), so a refused
+    upload never uses a number. Flushes and audits; the caller commits."""
+    at = utcnow()
+    template = None
+    if exhibit_ids.typed(fields.get("identifier")) is None:
+        ref = (await db.execute(select(Incident.ref).where(Incident.id == incident_id))).scalar_one()
+        identifier, template = await exhibit_ids.assign(db, incident_id, ref, at)
+        fields = {**fields, "identifier": identifier}
     ev = Evidence(
         id=evidence_id,
         incident_id=incident_id,
@@ -338,7 +357,7 @@ async def create_digital_evidence(
         nonce_hex=stored.nonce_hex,
         current_custodian_id=user.id,
         collected_by_id=user.id,
-        collected_at=utcnow(),
+        collected_at=at,
         acquisition_hash_source=intake.hash_source,
         acquisition_hash_target=intake.hash_target,
         acquired_at=intake.acquired_at,
@@ -363,6 +382,8 @@ async def create_digital_evidence(
             "incident_id": str(incident_id),
             "kind": "digital_file",
             "identifier": ev.identifier,
+            "identifier_assigned": "auto" if template else "typed",
+            **({"identifier_template": template} if template else {}),
             "name": ev.name,
             "sha256": stored.sha256,
             "file_size_bytes": stored.size,
@@ -372,6 +393,7 @@ async def create_digital_evidence(
             "upload_hash_check": intake.upload_hash_check,
             "target_hash_algorithm": intake.target_algo,
             "system_time_offset_seconds": ev.system_time_offset_seconds,
+            **src_record.audit_values(ev),          # S2: the source location record as recorded
             **(audit_extra or {}),
         },
         ip_address=request.client.host if request.client else None,
@@ -704,6 +726,27 @@ async def get_export(
     return _to_export_out(exp)
 
 
+# ─── EI: the next automatic identifier (literal path: before /{evidence_id}) ──
+
+@router.get(
+    "/{incident_id}/evidence/next-identifier",
+    response_model=NextEvidenceIdentifier,
+    summary="Preview the identifier an exhibit registered now without one would get",
+)
+async def next_evidence_identifier(
+    incident_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> NextEvidenceIdentifier:
+    """The naming convention (template) and the identifier the incident's next exhibit registered
+    without an identifier would get now. Nothing is reserved: a concurrent registration can take that
+    number first, and an identifier typed by hand meanwhile is skipped. Requires access to the incident."""
+    inc = await _get_incident(db, incident_id, user)
+    template = await exhibit_ids.get_template(db)
+    return NextEvidenceIdentifier(template=template,
+                                  example=await exhibit_ids.preview(db, incident_id, inc.ref, template))
+
+
 # ─── Detail ──────────────────────────────────────────────────────────────────
 
 @router.get(
@@ -742,15 +785,18 @@ async def get_evidence(
     responses={404: {"model": ApiErrorBody, "description": "user_not_found (unknown witness_user_id)"},
                409: {"model": ApiErrorBody, "description": "identifier_exists (nothing stored)"},
                422: {"model": ApiErrorBody,
-                     "description": "hash_mismatch (nothing stored), invalid_hash_format, acquired_in_future or "
-                                    "assignee_no_access (witness deactivated or can't see the incident)"},
+                     "description": "hash_mismatch (nothing stored), invalid_hash_format, acquired_in_future, "
+                                    "assignee_no_access (witness deactivated or can't see the incident), "
+                                    "invalid_filename, or a source-record code: invalid_source_path, "
+                                    "invalid_source_text, source_path_style_required, source_path_style_mismatch, "
+                                    "source_path_norm_read_only, source_unknown_reason_too_short"},
                507: {"model": ApiErrorBody, "description": "insufficient_storage (the evidence volume, with its 1 GiB reserve, or the upload scratch space is full; nothing stored)"}},
 )
 async def collect_digital(
     incident_id:        uuid.UUID,
     request:            Request,
     name:               str           = Form(..., min_length=1, max_length=256),
-    identifier:         str           = Form(..., min_length=1, max_length=128),
+    identifier:         Optional[str] = Form(default=None, max_length=128, description=IDENTIFIER_DOC),
     description:        Optional[str] = Form(default=None),
     tlp:                Tlp           = Form(default="amber"),
     collected_location: Optional[str] = Form(default=None, max_length=256),
@@ -793,6 +839,17 @@ async def collect_digital(
     # ── C3 — intake integrity ─────────────────────────────────────────────
     acquired_at:       Optional[datetime] = Form(default=None),
     target_hash_scope: Literal["uploaded_file", "container_media"] = Form(default="uploaded_file"),
+    # ── S2 — the source device and the source location record (as the upload session's complete) ──
+    make:                  Optional[str] = Form(default=None, max_length=128),
+    model:                 Optional[str] = Form(default=None, max_length=128),
+    serial:                Optional[str] = Form(default=None, max_length=128),
+    source_system:         Optional[str] = Form(default=None, max_length=256),
+    source_path:           Optional[str] = Form(default=None),
+    source_path_style:     Optional[SourcePathStyle] = Form(default=None),
+    source_path_norm:      Optional[str] = Form(default=None, description="Read-only: sending it is 422 "
+                                                "source_path_norm_read_only"),
+    source_details:        Optional[str] = Form(default=None, description="JSON object (SourceDetails)"),
+    source_unknown_reason: Optional[str] = Form(default=None, max_length=4096),
     user:               User          = Depends(require_analyst),
     db:                 AsyncSession  = Depends(get_db),
 ) -> EvidenceOut:
@@ -822,7 +879,12 @@ async def collect_digital(
     the future, else 422 `acquired_in_future`); `collected_at` stays the
     registration time. A `witness_user_id` must be an active user who can see the
     incident (404 `user_not_found`, 422 `assignee_no_access`), checked before the
-    upload is read. Requires analyst role and an open incident; the caller
+    upload is read. S2: `make` / `model` / `serial` name the source device and the
+    `source_*` fields record where the bytes were on it, as the upload session's
+    complete takes them (`source_details` as a JSON string; the same 422 codes).
+    The exhibit's `original_filename` is the upload's basename (422 `invalid_filename`
+    for a name with control characters). EI: a blank or missing `identifier` is assigned from the
+    naming convention once the file is accepted. Requires analyst role and an open incident; the caller
     becomes collector and custodian. Returns the created evidence record (201)."""
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -840,6 +902,19 @@ async def collect_digital(
     decision_factors_obj = _json_object(decision_factors, "decision_factors")
     device_details_obj   = _json_object(device_details, "device_details")
     intake = digital_intake(acquired_at, acquisition_hash_source, acquisition_hash_target, target_hash_scope)
+    source_details_obj   = _json_object(source_details, "source_details")
+    try:
+        details = SourceDetails.model_validate(source_details_obj) if source_details_obj is not None else None
+    except ValidationError as e:
+        raise RequestValidationError([{**err, "loc": ("body", "source_details", *err["loc"])}
+                                      for err in e.errors(include_url=False)]) from None
+    src = src_record.source_columns({k: v for k, v in {
+        "source_system": source_system, "source_path": source_path, "source_path_style": source_path_style,
+        "source_path_norm": source_path_norm, "source_details": details,
+        "source_unknown_reason": source_unknown_reason}.items() if v is not None})
+    # FP-6: the basename, as the upload sessions keep it (a client-sent path never names the exhibit).
+    from evidence.uploads import _safe_filename        # local import: evidence.uploads imports this module
+    original_filename = _safe_filename(file.filename) if file.filename else None
 
     # Early reject on Content-Length if available — saves bandwidth.
     cap = multipart_max_bytes()
@@ -858,7 +933,7 @@ async def collect_digital(
 
     require_free_space(codec.container_size(file.size or 0), "this exhibit")   # L2: 507 before anything is written
     evidence_id   = uuid.uuid4()
-    relative_path = _storage_path_for(incident_id, evidence_id, file.filename or "unnamed.bin")
+    relative_path = _storage_path_for(incident_id, evidence_id, original_filename or "unnamed.bin")
 
     # One pass (G1 stage 3a, spec §4.4): SHA-256/SHA-1/MD5 and AES-256-GCM (FENRGCM v2) into a
     # staging file. C3 compares the typed target hash with the uploaded bytes BEFORE the file is
@@ -873,20 +948,24 @@ async def collect_digital(
                 status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 f"Upload exceeds max {cap} bytes",
             )
-        err = await audit_collect_rejected(db, request, user, incident_id, identifier=identifier, name=name,
-                                           original_filename=file.filename, intake=intake, refused=refused)
+        err = await audit_collect_rejected(db, request, user, incident_id, identifier=exhibit_ids.typed(identifier),
+                                           name=name, original_filename=original_filename, intake=intake,
+                                           refused=refused)
         await db.commit()
         raise err
 
     ev = await create_digital_evidence(
         db, request, user, incident_id, evidence_id=evidence_id, stored=stored,
-        original_filename=file.filename, mime_type=file.content_type, intake=intake,
+        original_filename=original_filename, mime_type=file.content_type, intake=intake,
         fields=dict(
             name=name,
             identifier=identifier,
             description=description,
             tlp=tlp,
             entity_id=resolved_entity_id,
+            # S2 — the source device and the source location record (checked above)
+            make=make or None, model=model or None, serial=serial or None,
+            **src,
             collected_as_role=(collected_as_role if collected_as_role in ("defr", "des") else None),
             collected_location=collected_location,
             # Wizard A — only persisted if the caller supplied them
@@ -931,9 +1010,14 @@ async def collect_digital(
     response_model=EvidenceOut,
     status_code=status.HTTP_201_CREATED,
     summary="Collect physical item evidence",
-    responses={404: {"model": ApiErrorBody, "description": "user_not_found (unknown witness_user_id)"},
-               422: {"model": ApiErrorBody, "description": "acquired_in_future, or assignee_no_access (witness "
-                                                           "deactivated or can't see the incident)"}},
+    responses={404: {"model": ApiErrorBody, "description": "user_not_found (unknown witness_user_id or a photo's "
+                                                           "taken_by_id)"},
+               409: {"model": ApiErrorBody, "description": "identifier_exists (a typed identifier already used on "
+                                                           "this incident)"},
+               422: {"model": ApiErrorBody, "description": "acquired_in_future, assignee_no_access (witness or "
+                                                           "photographer deactivated or can't see the incident), "
+                                                           "invalid_source_text (a NUL in source_system), or a "
+                                                           "photo's invalid_taken_at / taken_by_conflict"}},
 )
 async def collect_physical(
     incident_id: uuid.UUID,
@@ -944,41 +1028,57 @@ async def collect_physical(
 ) -> EvidenceOut:
     """Register a physical item (device, media, document) as evidence from a
     JSON body, capturing make/model/serial, location, condition, photos and
-    optional ISO/IEC 27037 acquisition metadata. `acquired_at` = when the item
+    optional ISO/IEC 27037 acquisition metadata. S2: `source_system` (the device's
+    own host or device name, verbatim) and `source_details` (asset tag, OS, owner, …)
+    are optional; a physical item has no source path. `acquired_at` = when the item
     was seized (UTC, not in the future, else 422 `acquired_in_future`). A
     `witness_user_id` must be an active user who can see the incident (404
-    `user_not_found`, 422 `assignee_no_access`). Requires analyst role and an open
+    `user_not_found`, 422 `assignee_no_access`). EI: leave `identifier` out or blank
+    and FENRIR assigns the next one from the naming convention (audited
+    `identifier_assigned` auto with `identifier_template`). Requires analyst role and an open
     incident; the caller becomes collector and custodian. Returns the created
     evidence record (201)."""
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
     acquired_at = _check_acquired_at(req.acquired_at)
+    src = src_record.source_columns(src_record.sent_source_fields(req))   # S2: source_system, source_details
     resolved_entity_id = await _resolve_entity(db, incident_id, str(req.entity_id) if req.entity_id else None)
 
     # Wizard A — the witness, if given, must be an active user who can see the incident (F2).
     witness_uid = req.witness_user_id
     if witness_uid:
         await require_incident_person(db, incident_id, witness_uid, "the witness")
+    # S4 — reference-only photos: taken_at checked and made canonical; a photographer must see the incident.
+    photo_entries = [ev_photos.reference(p.model_dump(mode="json")) for p in req.photos]
+    for p in req.photos:
+        if p.taken_by_id and p.taken_by_id != user.id:
+            await require_incident_person(db, incident_id, p.taken_by_id, "the photographer")
+    # EI — a blank identifier: the next one from the convention, dated by the registration instant.
+    at = utcnow()
+    identifier, template = exhibit_ids.typed(req.identifier), None
+    if identifier is None:
+        identifier, template = await exhibit_ids.assign(db, incident_id, inc.ref, at)
 
     ev = Evidence(
         id=uuid.uuid4(),
         incident_id=incident_id,
         kind="physical_item",
         name=req.name,
-        identifier=req.identifier,
+        identifier=identifier,
         description=req.description,
         tlp=req.tlp,
         status="active",
         entity_id=resolved_entity_id,
         make=req.make, model=req.model, serial=req.serial,
+        **src,
         physical_location=req.physical_location,
         condition=req.condition,
-        photos=[p.model_dump(mode="json") for p in req.photos],
+        photos=photo_entries,
         current_custodian_id=user.id,
         collected_by_id=user.id,
         collected_as_role=req.collected_as_role,
-        collected_at=utcnow(),
+        collected_at=at,
         collected_location=req.collected_location,
         acquired_at=acquired_at,
         # Wizard A passthrough (subset relevant to physical items)
@@ -1012,10 +1112,8 @@ async def collect_physical(
         await db.flush()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "Evidence identifier already exists on this incident",
-        )
+        raise ApiError(status.HTTP_409_CONFLICT, "identifier_exists",   # same code as the other create routes
+                       "Evidence identifier already exists on this incident")
 
     await write_audit(
         db, "evidence_collect",
@@ -1024,13 +1122,16 @@ async def collect_physical(
         details={
             "incident_id": str(incident_id),
             "kind": "physical_item",
-            "identifier": req.identifier,
+            "identifier": identifier,
+            "identifier_assigned": "auto" if template else "typed",
+            **({"identifier_template": template} if template else {}),
             "name": req.name,
             "make": req.make, "model": req.model, "serial": req.serial,
             "tlp": req.tlp,
             "collected_location": req.collected_location,
             "acquired_at": _utc_z(acquired_at),
             "system_time_offset_seconds": req.system_time_offset_seconds,
+            **src_record.audit_values(ev),          # S2: the source record as recorded
         },
         ip_address=request.client.host if request.client else None,
     )
@@ -1047,25 +1148,21 @@ async def collect_physical(
 # change over time; on a sealed item each change also writes evidence_amend_after_seal {field, from, to}.
 SEALED_IMMUTABLE_FIELDS = ("photos", "collected_as_role")
 
-# What a PATCH may change on an uploaded (encrypted-at-rest) photo (R101). Everything else on it is held by
-# the server: storage_path, nonce_hex, sha256, size, mime_type, url, id.
-_PHOTO_EDITABLE = ("caption", "taken_at")
-
-
 def _merge_photos(current: list, sent: list) -> list:
     """R101 / FE-H1: the photo list a PATCH asks for, merged with the stored one by photo `id` — never rebuilt
-    from what the client sent, so no server-held field (storage_path, nonce_hex, sha256, size, mime type) can
-    be dropped. An uploaded photo (it has an id) keeps every stored field; only caption / taken_at change. A
-    photo without an id is a reference-only entry (a URL or a caption, no stored file): those are replaced by
-    the ones sent, as before. 422 unknown_photo_id for an id the item doesn't have; 422
+    from what the client sent, so no server-held field (storage_path, nonce_hex, sha256, size, mime type,
+    original file name) can be dropped. An uploaded photo (it has an id) keeps every stored field; S4: only the
+    editable fields sent change (evidence/photos.py EDITABLE: caption, taken_at, taken_by_id / taken_by_name,
+    camera, context). A photo without an id is a reference-only entry (a URL or a caption, no stored file):
+    those are replaced by the ones sent, as before. 422 unknown_photo_id for an id the item doesn't have; 422
     photo_remove_not_supported when an uploaded photo is left out (there is no audited photo-delete route;
-    destroying the item removes its photos)."""
+    destroying the item removes its photos); 422 invalid_taken_at / taken_by_conflict (S4)."""
     stored = {str(p["id"]): p for p in current if isinstance(p, dict) and p.get("id")}
     seen: set[str] = set()
     out = []
     for ref in sent:
         if ref.id is None:
-            out.append(ref.model_dump(mode="json", exclude={"id", "mime_type"}))
+            out.append(ev_photos.reference(ref.model_dump(mode="json", exclude={"id", "mime_type"})))
             continue
         pid = str(ref.id)
         if pid not in stored:
@@ -1075,8 +1172,8 @@ def _merge_photos(current: list, sent: list) -> list:
         if pid in seen:
             continue
         seen.add(pid)
-        sent_fields = ref.model_dump(mode="json", include=set(_PHOTO_EDITABLE))
-        out.append({**stored[pid], **sent_fields})
+        sent_fields = ref.model_dump(mode="json", include=set(ev_photos.EDITABLE) & ref.model_fields_set)
+        out.append(ev_photos.edited(stored[pid], sent_fields))
     missing = sorted(set(stored) - seen)
     if missing:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "photo_remove_not_supported",
@@ -1105,15 +1202,23 @@ async def _check_offset_authority(db: AsyncSession, ev: Evidence, user: User, in
     response_model=EvidenceOut,
     summary="Update evidence descriptive fields",
     responses={403: {"model": ApiErrorBody, "description": "not_collector_or_custodian (changing "
-                                                           "system_time_offset_seconds: collector, custodian, "
-                                                           "incident lead or admin only)"},
+                                                           "system_time_offset_seconds, make / model / serial or a "
+                                                           "source_* field: collector, custodian, incident lead or "
+                                                           "admin only)"},
                409: {"model": ApiErrorBody, "description": "sealed_field_immutable (photos or collected_as_role "
                                                            "on a sealed item; nothing changed); changing "
-                                                           "system_time_offset_seconds: evidence_not_in_internal_"
-                                                           "custody or transfer_pending"},
+                                                           "system_time_offset_seconds or the source record: "
+                                                           "evidence_not_in_internal_custody or transfer_pending"},
+               404: {"model": ApiErrorBody, "description": "the item, or user_not_found (a photo's taken_by_id)"},
                422: {"model": ApiErrorBody, "description": "use_legal_hold_endpoint (legal_hold sent; nothing "
-                                                           "changed), unknown_photo_id or "
-                                                           "photo_remove_not_supported (photos)"}},
+                                                           "changed), unknown_photo_id, "
+                                                           "photo_remove_not_supported, invalid_taken_at, "
+                                                           "taken_by_conflict or assignee_no_access (photos), or a "
+                                                           "source-record "
+                                                           "code: invalid_source_path, invalid_source_text, "
+                                                           "source_path_style_required, source_path_style_mismatch, "
+                                                           "source_path_norm_read_only, "
+                                                           "source_unknown_reason_too_short"}},
 )
 async def update_evidence(
     incident_id: uuid.UUID,
@@ -1125,7 +1230,7 @@ async def update_evidence(
 ) -> EvidenceOut:
     """Edit descriptive fields (name, description, TLP, physical location,
     condition, photos, collected-as role) — hashes, custodian and acquisition
-    facts are immutable here, with one exception: `system_time_offset_seconds`
+    facts are immutable here, with two exceptions: the source record (S2, below) and `system_time_offset_seconds`
     (G4), the device clock offset as a number, can be set, corrected or cleared
     (explicit null). Its change is audited `{from, to}` with the number of imports
     of this exhibit that keep the offset they were parsed with. Imports and promoted timeline
@@ -1136,12 +1241,16 @@ async def update_evidence(
     sealed_field_immutable, nothing changed), and every other changed field also writes an
     `evidence_amend_after_seal` row `{field, from, to}` to the custody log.
     `photos` (R101) is merged with the stored list by photo `id`: an uploaded photo keeps its stored
-    file and hashes, and only its caption / taken_at change; an entry without an id is a reference-only
+    file and hashes, and only the fields sent change (S4: caption, taken_at — ISO 8601 with an offset, else
+    422 invalid_taken_at — taken_by_id or taken_by_name, camera, context); an entry without an id is a reference-only
     photo (URL / caption), and those are replaced by the ones sent. An unknown id is 422 unknown_photo_id;
     leaving an uploaded photo out is 422 photo_remove_not_supported (nothing changed).
     Changing `system_time_offset_seconds` follows the acquisition-record rules (M10): only the item's
     collector, its current custodian, the incident lead or an admin (403 not_collector_or_custodian), with
     the item in internal custody and no transfer pending (409).
+    S2: `make` / `model` / `serial` and the `source_*` fields (the source location record) follow the same
+    rules as the offset; only the fields sent change (null clears one). On a sealed item each change is an
+    amendment (`evidence_amend_after_seal` {field, from, to}).
     Requires analyst role and an open incident; the item must be active or
     verify_failed (disposed items reject). Only changed fields are audited.
     Returns the updated record."""
@@ -1182,10 +1291,26 @@ async def update_evidence(
     if req.condition is not None and req.condition != (ev.condition or ""):
         _set("condition", req.condition, ev.condition)
     if req.photos is not None:
+        # S4 — a photographer set here must see the incident (one already on that photo stays as recorded).
+        was = {str(p.get("id")): p.get("taken_by_id") for p in ev.photos or [] if isinstance(p, dict) and p.get("id")}
+        for ref in req.photos:
+            if (ref.taken_by_id and "taken_by_id" in ref.model_fields_set and ref.taken_by_id != user.id
+                    and str(ref.taken_by_id) != was.get(str(ref.id))):
+                await require_incident_person(db, incident_id, ref.taken_by_id, "the photographer")
         ev.photos = _merge_photos(list(ev.photos or []), req.photos)
         changed["photos_count"] = len(ev.photos)
     if req.collected_as_role is not None and req.collected_as_role != ev.collected_as_role:
         _set("collected_as_role", req.collected_as_role, ev.collected_as_role)
+    # S2 — the source device and the source location record: acquisition facts, so the M10 rules apply (as for
+    # the offset); on a sealed item each change is an amendment. Only the fields sent change; null clears one.
+    src = src_record.source_columns(src_record.sent_source_fields(req),
+                                    current={"source_path": ev.source_path, "source_path_style": ev.source_path_style})
+    src.update({k: getattr(req, k) or None for k in ("make", "model", "serial") if k in req.model_fields_set})
+    src = {k: v for k, v in src.items() if v != getattr(ev, k)}
+    if src:
+        await _check_offset_authority(db, ev, user, inc)
+        for k, v in src.items():
+            _set(k, v, getattr(ev, k))
     offset_change = None
     if ("system_time_offset_seconds" in req.model_fields_set
             and req.system_time_offset_seconds != ev.system_time_offset_seconds):
@@ -1237,7 +1362,7 @@ async def _runs_with_offset(db: AsyncSession, evidence_id: uuid.UUID) -> int:
 # acquisition record, so it could never be sealed (seal needs lawful basis, device type, tool +
 # version). This fills it in — only while the item is unsealed — so the existing seal works.
 
-_ACQ_JSON_FIELDS = ("device_types", "decision_factors", "device_details")
+_ACQ_JSON_FIELDS = ("device_types", "decision_factors", "device_details", "source_details")
 
 
 def _acq_audit_value(v):
@@ -1256,10 +1381,14 @@ def _acq_audit_value(v):
         403: {"model": ApiErrorBody, "description": "not_collector_or_custodian"},
         404: {"model": ApiErrorBody, "description": "the item, or user_not_found (unknown witness_user_id)"},
         409: {"model": ApiErrorBody, "description": "incident_closed, evidence_sealed, evidence_not_active, "
-              "evidence_not_in_internal_custody or transfer_pending"},
+              "evidence_not_in_internal_custody, transfer_pending, or manifest_built (S6: container_format "
+              "can't change once its manifest is built)"},
         422: {"model": ApiErrorBody, "description": "invalid_hash_format, hash_mismatch (target hash vs the "
-              "stored file; nothing changed), acquisition_hashes_differ, acquired_in_future or "
-              "assignee_no_access"},
+              "stored file; nothing changed), acquisition_hashes_differ, acquired_in_future, "
+              "assignee_no_access, container_format_not_applicable (S6: a physical item), or a source-record "
+              "code: invalid_source_path, invalid_source_text, "
+              "source_path_style_required, source_path_style_mismatch, source_path_norm_read_only, "
+              "source_unknown_reason_too_short"},
     },
 )
 async def update_acquisition_record(
@@ -1285,6 +1414,10 @@ async def update_acquisition_record(
     re-recorded: 409 evidence_sealed), in internal custody and not awaiting a transfer. Only its
     collector, its current custodian, the incident lead or an admin may record it (403
     not_collector_or_custodian; the same rules as changing the clock offset with PATCH, M10).
+    S2: also the source device (`make` / `model` / `serial`) and the source location record (`source_*`;
+    the path is stored verbatim and its style checked, `source_path_norm` is derived).
+    S6: `container_format` (zip | tar | ad1 | l01 | aff4l | other) marks the stored file as a tool-made container;
+    zip / tar queue the background manifest build (manifest_status pending), the others are not_indexed.
     Audited `evidence_acquisition_record` with each field's before / after (custody log). Requires the
     analyst role and an open incident. Returns the item."""
     inc = await _get_incident(db, incident_id, user)
@@ -1299,8 +1432,14 @@ async def update_acquisition_record(
                        f"Cannot record the acquisition of evidence in status '{ev.status}'")
     await _check_offset_authority(db, ev, user, inc)            # M10: one rule set with PATCH's offset
 
-    fs = req.model_fields_set - {"target_hash_scope"}
+    fs = req.model_fields_set - {"target_hash_scope"} - set(src_record.SOURCE_INPUT_FIELDS)
     values = {k: getattr(req, k) for k in fs}
+    for k in ("make", "model", "serial"):
+        if k in values:
+            values[k] = values[k] or None
+    # S2 — the source location record, checked against the stored path / style (source_path_norm derived).
+    values.update(src_record.source_columns(src_record.sent_source_fields(req), current={
+        "source_path": ev.source_path, "source_path_style": ev.source_path_style}))
     if "acquired_at" in values:
         values["acquired_at"] = _check_acquired_at(values["acquired_at"])
     for h in ("acquisition_hash_source", "acquisition_hash_target"):
@@ -1316,6 +1455,8 @@ async def update_acquisition_record(
         await require_incident_person(db, incident_id, values["witness_user_id"], "the witness")
     if "device_types" in values and values["device_types"] is not None:
         values["device_types"] = list(values["device_types"]) or None
+    if "container_format" in values:                         # S6: the manifest follows the format
+        values.update(container_manifest.format_change(ev, values.pop("container_format")))
 
     source = values.get("acquisition_hash_source", ev.acquisition_hash_source)
     target = values.get("acquisition_hash_target", ev.acquisition_hash_target)
@@ -1376,6 +1517,8 @@ async def update_acquisition_record(
             ip_address=request.client.host if request.client else None,
         )
     await db.commit()
+    if "container_format" in changes and ev.manifest_status == "pending":
+        container_manifest.enqueue(ev.id, (user.id, user.username))
     return _to_out(ev)
 
 
@@ -2092,7 +2235,11 @@ async def dispose_evidence(
     "/{incident_id}/evidence/{evidence_id}/photos",
     response_model=EvidenceOut,
     summary="Attach a photo to evidence",
-    responses={507: {"model": ApiErrorBody, "description": "insufficient_storage (the evidence volume, with its 1 GiB reserve, or the upload scratch space is full; nothing stored)"}},
+    responses={404: {"model": ApiErrorBody, "description": "the item, or user_not_found (taken_by_id)"},
+               422: {"model": ApiErrorBody, "description": "invalid_taken_at, taken_by_conflict, invalid_filename, "
+                                                           "or assignee_no_access (the photographer is deactivated "
+                                                           "or can't see the incident); nothing stored"},
+               507: {"model": ApiErrorBody, "description": "insufficient_storage (the evidence volume, with its 1 GiB reserve, or the upload scratch space is full; nothing stored)"}},
 )
 async def add_evidence_photo(
     incident_id: uuid.UUID,
@@ -2100,15 +2247,24 @@ async def add_evidence_photo(
     request:  Request,
     file:     UploadFile = File(...),
     caption:  Optional[str] = Form(default=None),
-    taken_at: Optional[str] = Form(default=None),   # ISO 8601 (optional)
+    taken_at: Optional[str] = Form(default=None, description=PHOTO_TAKEN_AT_DOC),
+    taken_by_id:   Optional[str] = Form(default=None, description=PHOTO_TAKEN_BY_DOC + ". Neither = you"),
+    taken_by_name: Optional[str] = Form(default=None, max_length=PHOTO_TAKEN_BY_NAME_MAX),
+    camera:   Optional[str] = Form(default=None, max_length=PHOTO_CAMERA_MAX,
+                                   description="Make / model / serial of the camera, or the phone's IMEI"),
+    context:  Optional[str] = Form(default=None, max_length=PHOTO_CONTEXT_MAX, description="What the photo shows"),
     user:     User = Depends(require_analyst),
     db:       AsyncSession = Depends(get_db),
 ) -> EvidenceOut:
     """Upload an image (multipart) and attach it to an evidence item, with an
-    optional caption and ISO 8601 `taken_at`. The image is stored encrypted at
-    rest with AES-256-GCM and its SHA-256 recorded; it is served back only via
-    the auth-gated photo GET route. Requires analyst role and an open incident;
-    the item must be active or verify_failed. Returns the updated record."""
+    optional caption and its photo record (S4, ISO/IEC 27037 §6.6): `taken_at` (ISO 8601
+    with an offset or Z, stored as UTC …Z; else 422 invalid_taken_at), the photographer
+    (`taken_by_id` = a user who can see the incident, or `taken_by_name`; neither = you; both =
+    422 taken_by_conflict), `camera` and `context`. The upload's file name is kept as
+    `original_filename`. The image is stored encrypted at rest with AES-256-GCM and its
+    SHA-256 and size recorded; it is served back only via the auth-gated photo GET route.
+    Allowed after the seal (R76: photos are added, never changed). Requires analyst role and
+    an open incident; the item must be active or verify_failed. Returns the updated record."""
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Incident is closed")
@@ -2117,6 +2273,20 @@ async def add_evidence_photo(
         raise HTTPException(status.HTTP_409_CONFLICT, "Disposed evidence cannot be edited")
     if not (file.content_type or "").lower().startswith("image/"):
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Photo must be an image/* file")
+    # S4 — the photo record, checked before anything is stored.
+    taken_by_uid = None
+    if taken_by_id:
+        try:
+            taken_by_uid = uuid.UUID(taken_by_id)
+        except ValueError:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid taken_by_id format")
+    record = ev_photos.new_photo(taken_at=taken_at, taken_by_id=str(taken_by_uid) if taken_by_uid else None,
+                                 taken_by_name=taken_by_name, camera=camera, context=context,
+                                 uploader_id=str(user.id))
+    if taken_by_uid and taken_by_uid != user.id:
+        await require_incident_person(db, incident_id, taken_by_uid, "the photographer")
+    from evidence.uploads import _safe_filename        # local import: evidence.uploads imports this module
+    original_filename = _safe_filename(file.filename) if file.filename else None
 
     raw = await file.read()
     if not raw:
@@ -2134,7 +2304,8 @@ async def add_evidence_photo(
         "id":           photo_id,
         "url":          f"/api/incidents/{incident_id}/evidence/{evidence_id}/photos/{photo_id}",
         "caption":      (caption or None),
-        "taken_at":     (taken_at or None),
+        **record,                                   # S4: taken_at, taken_by_id / _name, camera, context
+        "original_filename": original_filename,
         "storage_path": rel,
         "nonce_hex":    stored.nonce_hex,
         "mime_type":    file.content_type,
@@ -2147,7 +2318,10 @@ async def add_evidence_photo(
         user_id=user.id, username=user.username,
         resource_type="evidence", resource_id=str(ev.id), outcome="success",
         details={"incident_id": str(incident_id), "photo_id": photo_id,
-                 "mime_type": file.content_type, "sha256": entry["sha256"], "size": len(raw)},
+                 "mime_type": file.content_type, "sha256": entry["sha256"], "size": len(raw),
+                 # S4: the photo record as recorded (fields with a value)
+                 **{k: v for k, v in record.items() if v is not None},
+                 **({"original_filename": original_filename} if original_filename else {})},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -2194,10 +2368,13 @@ async def get_evidence_photo(
     response_model=EvidenceOut,
     summary="Seal the chain of custody",
     responses={400: {"model": ApiErrorBody, "description": "confirm_required"},
-               409: {"model": ApiErrorBody, "description": "transfer_pending, incident_closed, already_sealed or "
-                                                           "evidence_not_active"},
+               409: {"model": ApiErrorBody, "description": "transfer_pending, incident_closed, already_sealed, "
+                                                           "evidence_not_active, or manifest_pending (S6: a "
+                                                           "container's manifest is still being built)"},
                422: {"model": ApiErrorBody, "description": "hash_mismatch (acquisition source vs target hash), or "
-                                                           "seal_fields_missing (body has `missing`: the field names)"}},
+                                                           "seal_fields_missing (body has `missing`: the field names; "
+                                                           "for the source record source_device, source_path, "
+                                                           "source_path_style)"}},
 )
 async def seal_evidence(
     incident_id: uuid.UUID,
@@ -2210,7 +2387,15 @@ async def seal_evidence(
     """Seal an item's chain of custody (ISO/IEC 27037 §5.4.4, §6.1) after enforcing
     the minimum reproducibility and lawful-basis fields are present (e.g. lawful
     basis, device types, and for digital files the hash plus acquisition tool +
-    version). Best-effort applies a trusted timestamp to the sealed hash.
+    version). S3 (EG-12): a digital file also needs its source — the device (entity_id,
+    source_system or serial; missing: `source_device`) and the path its handling needs
+    (`source_path`: a full image needs style device, else `source_path_style`; live data and
+    exports need none; anything else needs the path and style) — or a `source_unknown_reason`.
+    S3 (EG-11): the seal binds the canonical record v1 (GET …/seal-record): its SHA-256 is stored
+    as `seal_record_sha256`, its exact text goes in the `evidence_seal` audit row, and the
+    best-effort trusted timestamp is taken over it (`seal_tst_subject` record_v1).
+    S6: a container exhibit is not sealed while its manifest is being built (409 manifest_pending); a built
+    manifest's `manifest_sha256` is in the record; a failed or not_indexed one doesn't block.
     Requires `confirm=true`, analyst role, an open incident, internal custody,
     and active status; rejects an already-sealed item, and 409 transfer_pending
     while a custody transfer awaits acceptance. After sealing, later
@@ -2228,9 +2413,13 @@ async def seal_evidence(
                        f"Cannot seal evidence in status '{ev.status}'")
     _block_if_external(ev, "seal")
     _block_if_transfer_pending(ev)
+    if ev.manifest_status == "pending":                     # S6: the record binds the manifest once it is built
+        raise ApiError(status.HTTP_409_CONFLICT, "manifest_pending",
+                       "The container's manifest is still being built: seal the item once it is built (or failed)")
 
     # Gate sealing on the wizard-A minimum (ISO/IEC 27037 §5.4.4 + GDPR Art. 5.1(c)).
     missing: list[str] = []
+    source_missing: list[str] = []
     if not ev.lawful_basis:
         missing.append("lawful_basis")
     if not ev.collected_by_id:
@@ -2257,24 +2446,37 @@ async def seal_evidence(
         # Logical acquisition must carry a rationale (§7.1.3.1.1).
         if (ev.acquisition_scope or "").lower() == "logical" and not (ev.logical_acquisition_rationale or "").strip():
             missing.append("logical_acquisition_rationale")
+        # S3 (EG-12, owner Q1) — the source device and the path its handling needs (27037 §5.4.2, §6.6,
+        # §7.1.3.4), or a stated reason it is unknown (§5.3.5).
+        source_missing = ([] if (ev.source_unknown_reason or "").strip()
+                          else src_record.seal_source_missing(ev))
+        missing += source_missing
     if ev.kind == "physical_item":
         if not (ev.photos and len(ev.photos) > 0):
             missing.append("photos")
 
     if missing:
+        hint = (". Record the source device (entity_id, source_system or serial) and the source path its handling "
+                "needs (a full image: style device), or source_unknown_reason" if source_missing else "")
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "seal_fields_missing",
-                       f"Cannot seal — required fields missing: {', '.join(missing)}", extra={"missing": missing})
+                       f"Cannot seal — required fields missing: {', '.join(missing)}{hint}", extra={"missing": missing})
 
     ev.coc_sealed       = True
     ev.coc_sealed_at    = utcnow()
     ev.coc_sealed_by_id = user.id
 
-    # GS-4 — trusted timestamp on the sealed hash (best-effort; only the hash egresses).
-    tst = await timestamp_sha256(ev.sha256)
+    # S3 (EG-11) — the canonical record v1 the seal binds: its digest goes in the row, its exact text and digest
+    # in the hash-chained evidence_seal row below, and the trusted timestamp is taken over the digest.
+    sealed_record = seal_record_v1(ev)
+    ev.seal_record_sha256 = hashlib.sha256(sealed_record).hexdigest()
+
+    # GS-4 — trusted timestamp at the seal (best-effort; only the hash egresses).
+    tst = await timestamp_sha256(ev.seal_record_sha256)
     if tst:
         ev.seal_tst      = tst["tst_b64"]
         ev.seal_tst_time = tst["time"]
         ev.seal_tsa      = tst["tsa"]
+        ev.seal_tst_subject = "record_v1"
 
     await write_audit(
         db, "evidence_seal",
@@ -2290,11 +2492,55 @@ async def seal_evidence(
             "witness_user_id": str(ev.witness_user_id) if ev.witness_user_id else None,
             "trusted_timestamp": bool(tst),
             "tsa_time":        tst["time"] if tst else None,
+            # S3 — the record bound (its exact text: hash it to get seal_record_sha256) and what the token covers
+            "seal_record_sha256": ev.seal_record_sha256,
+            "sealed_record":      sealed_record.decode("utf-8"),
+            "seal_tst_subject":   ev.seal_tst_subject,
         },
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
     return _to_out(ev)
+
+
+@router.get(
+    "/{incident_id}/evidence/{evidence_id}/seal-record",
+    response_model=EvidenceSealRecordOut,
+    summary="Get the record an exhibit's seal binds",
+    responses={404: {"model": ApiErrorBody, "description": "the incident or the item"},
+               409: {"model": ApiErrorBody, "description": "evidence_not_sealed"}},
+)
+async def get_seal_record(
+    incident_id: uuid.UUID,
+    evidence_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db:   AsyncSession = Depends(get_db),
+) -> EvidenceSealRecordOut:
+    """S3 (EG-11, ISO/IEC 27037 §5.4.5): the canonical record v1 bound at the seal, as stored in the hash-chained
+    `evidence_seal` audit row (`sealed_record`; its SHA-256 is `seal_record_sha256`, which the RFC 3161 token
+    covers when `seal_tst_subject` is record_v1), and the same record rebuilt from the exhibit now
+    (`recomputed_now_sha256`). `changed_since_seal` is expected after an audited amendment (Amended after seal,
+    Photo added): it reports the change and is not by itself tampering. A seal made before record binding has
+    no record (`seal_record_sha256`, `sealed_record` and `changed_since_seal` null). Requires access to the
+    incident. 409 evidence_not_sealed before the seal."""
+    await _get_incident(db, incident_id, user)
+    ev = await _get_evidence(db, incident_id, evidence_id)
+    if not ev.coc_sealed:
+        raise ApiError(status.HTTP_409_CONFLICT, "evidence_not_sealed", "The item is not sealed: it binds no record yet")
+    sealed_text = None
+    if ev.seal_record_sha256:
+        rows = (await db.execute(
+            select(AuditLog.details).where(AuditLog.action == "evidence_seal", AuditLog.resource_type == "evidence",
+                                           AuditLog.resource_id == str(ev.id))
+            .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
+        )).scalars().all()
+        sealed_text = next((d.get("sealed_record") for d in rows
+                            if isinstance(d, dict) and d.get("seal_record_sha256") == ev.seal_record_sha256), None)
+    now = hashlib.sha256(seal_record_v1(ev)).hexdigest()
+    return EvidenceSealRecordOut(
+        seal_tst_subject=ev.seal_tst_subject, seal_record_sha256=ev.seal_record_sha256, sealed_record=sealed_text,
+        recomputed_now_sha256=now,
+        changed_since_seal=None if ev.seal_record_sha256 is None else now != ev.seal_record_sha256)
 
 
 # ─── Wizard B — Examination session (copy hash before + examine + copy hash after) ──

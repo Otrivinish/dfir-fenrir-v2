@@ -5,14 +5,41 @@ import { useAuth } from '../hooks/useAuth.jsx'
 import { api } from '../api/client.js'
 import { formatLocal } from '../lib/datetime.js'
 
-// H2 — the case notes linked to one exhibit / entity / IOC / timeline event: a read-only list
-// (a corrected entry is struck through) plus "Add note", which posts a new entry pre-linked to it.
+// H2 — the case notes linked to one exhibit / entity / IOC / timeline event: a read-only list of each
+// note's current revision (CN-2; edit and history live on the Case notes page) plus "Add note", which
+// posts a new entry pre-linked to it.
 // kind → [list filter, create field]
 export const CASE_NOTE_LINK = {
   evidence:       ['evidence_id', 'evidence_ids'],
   entity:         ['entity_id', 'entity_ids'],
   ioc:            ['ioc_id', 'ioc_ids'],
   timeline_event: ['timeline_event_id', 'timeline_event_ids'],
+}
+
+// Who saved this revision, as recorded with it (CN-2), plus server time and the entry's SHA-256.
+// Entries from before CN-2 carry no signature: the author's username is shown instead.
+export function CaseNoteSignature({ note }) {
+  return (
+    <div className="case-note-sig" data-testid="case-note-signature">
+      {note.hash_v >= 2 ? (
+        <>
+          <span>Signed</span>
+          <span className="case-note-author">{note.signed_name}</span>
+          {note.author_username && note.author_username !== note.signed_name && <span>({note.author_username})</span>}
+          <span className="mono" title="Operational roles held on this incident when saved (else the platform role)">
+            {note.signed_as.split(',').join(', ')}
+          </span>
+        </>
+      ) : (
+        <>
+          <span className="case-note-author">{note.author_username || 'unknown'}</span>
+          <span className="case-note-flag" title="Written before signed case notes: no signature was recorded">unsigned</span>
+        </>
+      )}
+      <span className="mono" title={`${note.created_at} (UTC)`}>{formatLocal(note.created_at)}</span>
+      <span className="case-note-hash mono" title={`SHA-256 ${note.content_sha256}`}>#{note.content_sha256.slice(0, 12)}</span>
+    </div>
+  )
 }
 
 export default function LinkedCaseNotes({ incidentId, kind, targetId, isClosed }) {
@@ -26,7 +53,7 @@ export default function LinkedCaseNotes({ incidentId, kind, targetId, isClosed }
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(() => {
-    api.listAllPages(api.listCaseNotes, incidentId, { [filter]: targetId }, 200)
+    api.listAllPages(api.listCaseNotes, incidentId, { current: true, [filter]: targetId }, 200)
       .then(setNotes)
       .catch(e => { setNotes([]); setError(e.message || 'Could not load case notes.') })
   }, [incidentId, filter, targetId])
@@ -55,15 +82,15 @@ export default function LinkedCaseNotes({ incidentId, kind, targetId, isClosed }
         : notes.length === 0 ? <div className="case-note-empty">No case notes linked yet.</div>
         : notes.map(n => (
           <div key={n.id} className="case-note compact">
-            <div className="case-note-meta">
-              <span className="case-note-author">{n.author_username || 'unknown'}</span>
-              <span className="mono">{formatLocal(n.created_at)}</span>
-              {n.corrected_by_id && <span className="case-note-flag">corrected</span>}
-              {n.corrects_id && <span className="case-note-flag">correction</span>}
-            </div>
-            <div className={`md-body case-note-body${n.corrected_by_id ? ' case-note-struck' : ''}`}>
+            {n.revision > 1 && (
+              <div className="case-note-meta">
+                <span className="case-note-flag">edited · revision {n.revision}</span>
+              </div>
+            )}
+            <div className="md-body case-note-body">
               <ReactMarkdown>{n.body}</ReactMarkdown>
             </div>
+            <CaseNoteSignature note={n} />
           </div>
         ))}
       {canWrite && !isClosed && (adding ? (

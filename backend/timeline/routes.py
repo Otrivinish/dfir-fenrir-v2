@@ -4,24 +4,35 @@ Mounted at prefix="/api/incidents".
 Ordered by event_time ASC (oldest event first) — forensic chronological order;
 `?sort=-event_time` lists newest first.
 """
+import asyncio
 import base64
+import hashlib
 import json
+import re
 import uuid
+from datetime import timezone
 from typing import Literal, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import and_, exists, func, not_, or_, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from sqlalchemy import and_, exists, func, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.service import write_audit
 from auth.deps import current_user, require_analyst
 from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
+from entities.match import load_index, match
 import lolbins.service as lolbins_svc
 from incidents.access import get_accessible_incident
+from timeline import export as tx
+from timeline.export.common import ORIGIN, PHASES
 from models import (BrowserHistoryUpload, DefenderPdfImport, EmailAnalysis, Entity, Evidence, ForensicImport, Incident,
                     IOC, IocTimelineLink, PCAPAnalysis, TimelineEvent, User)
 from schemas import (
+    TimelineEntityLinkCreate,
+    TimelineEntityLinkResult,
+    TimelineEntityRef,
     TimelineEventBatchCreate,
     TimelineEventBatchResult,
     TimelineEventCreate,
@@ -97,8 +108,17 @@ def _key_event(ev: TimelineEvent) -> bool:
     return bool(ev.is_key or ev.mitre_tactic_id or ev.mitre_technique_id or _server_generated(ev))
 
 
+SERVER_EVENT = and_(TimelineEvent.is_system == True,  # noqa: E712
+                    func.lower(func.trim(TimelineEvent.system_source)).in_(RESERVED_SYSTEM_SOURCES))
+
+
+def _entity_ref(e) -> TimelineEntityRef:
+    return TimelineEntityRef(id=e.id, type=e.type, value=e.value, compromised=bool(e.compromised))
+
+
 async def _decorate(db: AsyncSession, events) -> None:
-    """Read-only fields set on loaded rows: server_generated, key_event and the linked IOCs (one query)."""
+    """Read-only fields set on loaded rows: server_generated, key_event, the linked IOCs (one query) and
+    TE's entity / entity_match (two)."""
     links: dict[uuid.UUID, list[TimelineIocRef]] = {}
     ids = [e.id for e in events]
     if ids:
@@ -109,10 +129,20 @@ async def _decorate(db: AsyncSession, events) -> None:
             .order_by(IOC.value)
         )).all():
             links.setdefault(ev_id, []).append(TimelineIocRef(id=ioc_id, type=typ, value=value, malicious=mal))
+    linked_ids = {e.entity_id for e in events if e.entity_id}
+    linked = {r.id: r for r in (await db.execute(
+        select(Entity.id, Entity.type, Entity.value, Entity.compromised).where(Entity.id.in_(linked_ids))
+    )).all()} if linked_ids else {}
+    # A server-recorded event can't be edited, so it is never offered a link.
+    open_hosts = [e.hostname for e in events if not e.entity_id and e.hostname and not _server_generated(e)]
+    index = await load_index(db, events[0].incident_id, open_hosts) if open_hosts else {}
     for e in events:
         e.server_generated = _server_generated(e)
         e.key_event = _key_event(e)
         e.linked_iocs = links.get(e.id, [])
+        e.entity = _entity_ref(linked[e.entity_id]) if e.entity_id in linked else None
+        m = None if e.entity_id or e.server_generated else match(index, e.hostname)
+        e.entity_match = _entity_ref(m) if m else None
 
 
 def _like(q: str) -> str:
@@ -207,6 +237,32 @@ async def _username_map(db: AsyncSession, user_ids) -> dict[uuid.UUID, str]:
     return {uid: uname for uid, uname in rows}
 
 
+def _filtered(stmt, *, include_system, entity_id, ioc_id, ir_phase, origin, key, q):
+    """The list's filters, combined with AND — shared by GET …/timeline and GET …/timeline/export."""
+    if not include_system:
+        stmt = stmt.where(TimelineEvent.is_system == False)  # noqa: E712
+    if entity_id is not None:
+        stmt = stmt.where(TimelineEvent.entity_id == entity_id)
+    if ioc_id is not None:
+        stmt = stmt.where(exists().where(IocTimelineLink.timeline_event_id == TimelineEvent.id,
+                                         IocTimelineLink.ioc_id == ioc_id))
+    if ir_phase == "none":
+        stmt = stmt.where(TimelineEvent.ir_phase.is_(None))
+    elif ir_phase is not None:
+        stmt = stmt.where(TimelineEvent.ir_phase == ir_phase)
+    if origin is not None:
+        stmt = stmt.where(TimelineEvent.origin == origin)
+    if key is not None:
+        stmt = stmt.where(KEY_EVENT if key else not_(KEY_EVENT))
+    if q and q.strip():
+        pat = _like(q.strip())
+        stmt = stmt.where(or_(*(func.coalesce(c, "").ilike(pat, escape="\\") for c in (
+            TimelineEvent.description, TimelineEvent.hostname, TimelineEvent.source, TimelineEvent.event_type,
+            TimelineEvent.raw_log, TimelineEvent.mitre_tactic_id, TimelineEvent.mitre_tactic_name,
+            TimelineEvent.mitre_technique_id, TimelineEvent.mitre_technique_name))))
+    return stmt
+
+
 # ─── List ─────────────────────────────────────────────────────────────────────
 
 @router.get("/{incident_id}/timeline", response_model=TimelineEventList, summary="List timeline events")
@@ -257,27 +313,8 @@ async def list_timeline_events(
         .where(TimelineEvent.incident_id == incident_id)
         .order_by(*(k.desc() for k in keys) if desc else keys)
     )
-    if not include_system:
-        stmt = stmt.where(TimelineEvent.is_system == False)  # noqa: E712
-    if entity_id is not None:
-        stmt = stmt.where(TimelineEvent.entity_id == entity_id)
-    if ioc_id is not None:
-        stmt = stmt.where(exists().where(IocTimelineLink.timeline_event_id == TimelineEvent.id,
-                                         IocTimelineLink.ioc_id == ioc_id))
-    if ir_phase == "none":
-        stmt = stmt.where(TimelineEvent.ir_phase.is_(None))
-    elif ir_phase is not None:
-        stmt = stmt.where(TimelineEvent.ir_phase == ir_phase)
-    if origin is not None:
-        stmt = stmt.where(TimelineEvent.origin == origin)
-    if key is not None:
-        stmt = stmt.where(KEY_EVENT if key else not_(KEY_EVENT))
-    if q and q.strip():
-        pat = _like(q.strip())
-        stmt = stmt.where(or_(*(func.coalesce(c, "").ilike(pat, escape="\\") for c in (
-            TimelineEvent.description, TimelineEvent.hostname, TimelineEvent.source, TimelineEvent.event_type,
-            TimelineEvent.raw_log, TimelineEvent.mitre_tactic_id, TimelineEvent.mitre_tactic_name,
-            TimelineEvent.mitre_technique_id, TimelineEvent.mitre_technique_name))))
+    stmt = _filtered(stmt, include_system=include_system, entity_id=entity_id, ioc_id=ioc_id, ir_phase=ir_phase,
+                     origin=origin, key=key, q=q)
 
     rows = (await db.execute(stmt.offset(offset).limit(limit + 1))).scalars().all()
 
@@ -301,6 +338,162 @@ async def list_timeline_events(
         )).scalar_one()
 
     return TimelineEventList(items=items, next_cursor=next_cursor, system_event_count=system_count)
+
+
+# ─── Export (TX) ──────────────────────────────────────────────────────────────
+
+# The most events one export holds; narrow a bigger timeline with the filters or key=true.
+EXPORT_MAX_EVENTS = 10_000
+_TZ_NAME = re.compile(r"[A-Za-z0-9_+\-]+(?:/[A-Za-z0-9_+\-]+){0,2}")
+
+
+def _zone(name: str):
+    if name == "UTC":
+        return timezone.utc
+    try:
+        if not _TZ_NAME.fullmatch(name):
+            raise ValueError(name)
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_timezone",
+                       "Unknown time zone. Use an IANA name such as Europe/Stockholm, or UTC.")
+
+
+async def _filter_labels(db: AsyncSession, incident_id: uuid.UUID, *, include_system, entity_id, ioc_id, ir_phase,
+                         origin, key, q) -> list[str]:
+    """The filters in words, for the export's header."""
+    out = []
+    if key is not None:
+        out.append("Key events only" if key else "Non-key events only")
+    if not include_system:
+        out.append("System events left out")
+    if entity_id is not None:
+        ent = await db.get(Entity, entity_id)
+        out.append(f"Entity: {ent.value if ent and ent.incident_id == incident_id else entity_id}")
+    if ioc_id is not None:
+        ioc = await db.get(IOC, ioc_id)
+        out.append(f"IOC: {ioc.value if ioc and ioc.incident_id == incident_id else ioc_id}")
+    if ir_phase is not None:
+        out.append("Phase: " + ("none set" if ir_phase == "none" else PHASES[ir_phase][0]))
+    if origin is not None:
+        out.append(f"Origin: {ORIGIN[origin]}")
+    if q and q.strip():
+        out.append(f'Search: "{q.strip()}"')
+    return out
+
+
+def _render_export_html(layout: str, ctx, csv_rows: list, lolbins_ready: bool) -> str:
+    """CPU work for one HTML export (run in a worker thread): LOLBAS flags, the Ledger's CSV hash, the page."""
+    if lolbins_ready:
+        ctx.lolbin_ids = {e["id"] for e in ctx.events
+                          if lolbins_svc.lookup_in_text((e["description"] or "") + " " + (e["raw_log"] or ""))}
+    if layout == "ledger":
+        ctx.csv_sha256 = hashlib.sha256(tx.render_csv(csv_rows, ctx.include_raw_logs).encode("utf-8")).hexdigest()
+    return tx.render_html(layout, ctx)
+
+
+@router.get("/{incident_id}/timeline/export", summary="Export the timeline (HTML layout or CSV)",
+            response_class=Response,
+            responses={200: {"content": {"text/html": {}, "text/csv": {}},
+                             "description": "The export as a file attachment (Content-Disposition)."},
+                       404: {"model": ApiErrorBody, "description": "Incident not found or not accessible"},
+                       422: {"model": ApiErrorBody,
+                             "description": "invalid_timezone, export_too_large (or a validation error)"}})
+async def export_timeline(
+    incident_id:      uuid.UUID,
+    request:          Request,
+    user:             User         = Depends(current_user),
+    db:               AsyncSession = Depends(get_db),
+    layout:           Literal["rail", "horizon", "swimlanes", "ledger", "brief", "zigzag"] = Query(
+        default="rail", description=(
+            "HTML layout: rail (vertical spine), horizon (horizontal, time-scaled; multi-day incidents get a "
+            "true-scale overview and quiet stretches over 6 h folded), swimlanes (one lane per linked entity), "
+            "ledger (forensic table with provenance and the CSV's SHA-256), brief (executive one-pager), zigzag "
+            "(the original alternating layout). Ignored for format=csv.")),
+    fmt:              Literal["html", "csv"] = Query(
+        default="html", alias="format",
+        description="html = one standalone page in `layout` (no script, prints light); csv = the flat 18-column "
+                    "file, UTC ISO 8601, formula-escaped."),
+    tz:               str = Query(default="UTC", min_length=1, max_length=64, description=(
+        "IANA time zone for the times an HTML layout shows (e.g. Europe/Stockholm); each day header shows its "
+        "UTC offset. The CSV is always UTC.")),
+    include_raw_logs: bool = Query(default=False, description=(
+        "Print the raw log lines (rail, ledger, zigzag; the CSV's raw_log column, which is empty otherwise). "
+        "Off by default: raw lines can hold secrets.")),
+    include_system:   bool = Query(default=True, description="false = leave out system events."),
+    entity_id:        Optional[uuid.UUID] = Query(default=None, description="Only events linked to this entity."),
+    ioc_id:           Optional[uuid.UUID] = Query(default=None, description="Only events linked to this IOC."),
+    ir_phase:         Optional[Literal["preparation", "detection_and_analysis", "containment_eradication_recovery",
+                                       "post_incident", "none"]] = Query(
+        default=None, description="Only events tagged with this 800-61 phase; none = no phase set."),
+    origin:           Optional[TimelineOrigin] = Query(default=None, description="manual, forensic_import or system."),
+    key:              Optional[bool] = Query(default=None, description="true = key events only, false = the others."),
+    q:                Optional[str] = Query(default=None, min_length=1, max_length=200,
+                                            description="Text search, as on the list."),
+) -> Response:
+    """Export an incident's timeline as a file: one of six standalone HTML layouts, or the flat CSV.
+
+    The events are the ones `GET …/timeline` returns with the same filters (AND, oldest first), not paged:
+    more than 10 000 is 422 `export_too_large` (narrow with the filters or `key=true`). HTML pages carry the
+    incident's TLP and severity, who exported and when, the time zone and the filters; every value is escaped
+    and the page has no script. Raw logs are left out unless `include_raw_logs=true`. Any user who can read
+    the incident may export; each export is audited (`timeline_export`). 422 `invalid_timezone` for an
+    unknown `tz`.
+    """
+    inc = await _get_incident(db, incident_id, user)
+    zone = _zone(tz)
+    filters = dict(include_system=include_system, entity_id=entity_id, ioc_id=ioc_id, ir_phase=ir_phase,
+                   origin=origin, key=key, q=q)
+    stmt = (select(TimelineEvent).where(TimelineEvent.incident_id == incident_id)
+            .order_by(TimelineEvent.event_time, TimelineEvent.created_at, TimelineEvent.id))
+    rows = (await db.execute(_filtered(stmt, **filters).limit(EXPORT_MAX_EVENTS + 1))).scalars().all()
+    if len(rows) > EXPORT_MAX_EVENTS:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "export_too_large",
+                       f"This export would hold more than {EXPORT_MAX_EVENTS:,} events. Narrow it with the filters, "
+                       "or export key events only (key=true).")
+    umap = await _username_map(db, [r.created_by_id for r in rows])
+    for r in rows:
+        r.created_by_username = umap.get(r.created_by_id)
+    if rows:
+        await _decorate(db, rows)
+        await _resolve_provenance(db, rows)
+    outs = [TimelineEventOut.model_validate(r) for r in rows]
+    csv_rows = [o.model_dump(mode="json") for o in outs]
+    slug = re.sub(r"[^a-z0-9-]", "-", (inc.ref or "timeline").lower())
+
+    if fmt == "csv":
+        body = await asyncio.to_thread(tx.render_csv, csv_rows, include_raw_logs)
+        media, filename = "text/csv; charset=utf-8", f"timeline-{slug}.csv"
+    else:
+        ent_ids = {r.entity_id for r in rows if r.entity_id}
+        entities = {e.id: {"type": e.type, "value": e.value, "name": e.name, "compromised": e.compromised,
+                           "criticality": e.criticality}
+                    for e in (await db.execute(select(Entity).where(Entity.id.in_(ent_ids)))).scalars()} \
+            if ent_ids else {}
+        ctx = tx.Ctx(
+            inc={k: getattr(inc, k) for k in ("ref", "title", "severity", "tlp", "status", "phase", "occurred_at",
+                                              "detected_at", "contained_at", "eradicated_at", "recovered_at")},
+            events=[o.model_dump() for o in outs], entities=entities, tz=zone, tz_name=tz,
+            include_raw_logs=include_raw_logs, exported_by=user.username,
+            filters=await _filter_labels(db, incident_id, **filters))
+        # Never syncs the LOLBAS cache here (that can reach the network); a cold cache just means no LOL flags.
+        lolbins_ready = bool(lolbins_svc.status()["synced"])
+        body = await asyncio.to_thread(_render_export_html, layout, ctx, csv_rows, lolbins_ready)
+        media, filename = "text/html; charset=utf-8", f"timeline-{slug}-{layout}.html"
+
+    await write_audit(
+        db, "timeline_export",
+        user_id=user.id, username=user.username,
+        resource_type="incident", resource_id=str(incident_id), resource_label=inc.ref,
+        details={"format": fmt, **({"layout": layout} if fmt == "html" else {}), "events": len(rows), "tz": tz,
+                 "include_raw_logs": include_raw_logs,
+                 "filters": {k: str(v) for k, v in filters.items() if v is not None and k != "include_system"}
+                 | ({} if include_system else {"include_system": "false"})},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    return Response(content=body, media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"})
 
 
 # ─── Create ───────────────────────────────────────────────────────────────────
@@ -536,8 +729,10 @@ async def batch_create_timeline_events(
     entity_values = dict((await db.execute(
         select(Entity.id, Entity.value).where(Entity.id.in_(wanted), Entity.incident_id == incident_id)
     )).all()) if wanted else {}
+    index = await load_index(db, incident_id, [i.hostname for i in req.events]) if req.link_entities else {}
 
     created = 0
+    linked = 0
     errors: list[str] = []
 
     for i, item in enumerate(req.events):
@@ -546,6 +741,8 @@ async def batch_create_timeline_events(
             continue
         # K5 (R49): per-row savepoint (as iocs/routes.py batch create): without it, one row the
         # database rejects left the session failed and lost the whole batch.
+        # TE: an item that names no entity is linked to the one its hostname names.
+        m = None if item.entity_id else match(index, item.hostname)
         sp = await db.begin_nested()
         try:
             ev = TimelineEvent(
@@ -553,7 +750,7 @@ async def batch_create_timeline_events(
                 incident_id=incident_id,
                 event_time=item.event_time,
                 hostname=item.hostname or (entity_values[item.entity_id][:256] if item.entity_id else None),
-                entity_id=item.entity_id,
+                entity_id=item.entity_id or (m.id if m else None),
                 source=item.source,
                 event_type=item.event_type,
                 description=item.description.strip(),
@@ -571,6 +768,7 @@ async def batch_create_timeline_events(
             await db.flush()
             await sp.commit()
             created += 1
+            linked += m is not None
         except Exception as exc:
             await sp.rollback()
             # The exception class only: a DB error's text carries the SQL and the row's values.
@@ -584,11 +782,82 @@ async def batch_create_timeline_events(
             "incident_id": str(incident_id),
             "created": created,
             "errors": len(errors),
+            "entities_linked": linked,
         },
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
-    return TimelineEventBatchResult(created=created, errors=errors)
+    return TimelineEventBatchResult(created=created, errors=errors, entities_linked=linked)
+
+
+# ─── Bulk entity link (TE) ────────────────────────────────────────────────────
+
+@router.post("/{incident_id}/timeline/entity-links",
+             response_model=TimelineEntityLinkResult,
+             responses=_ENTITY_ERRORS,
+             summary="Link every unlinked event that names an entity")
+async def link_timeline_entity(
+    incident_id: uuid.UUID,
+    req: TimelineEntityLinkCreate,
+    request: Request,
+    user: User = Depends(require_analyst),
+    db: AsyncSession = Depends(get_db),
+) -> TimelineEntityLinkResult:
+    """Link to `entity_id` every event of this incident that is linked to no entity and whose
+    hostname names it — the events listed with that `entity_match`. An event already linked to an
+    entity keeps its link, the hostname is never changed, and an event the server recorded itself is
+    never linked. Imported events are linked too: the entity link is an annotation, not an imported fact.
+
+    `dry_run=true` only counts them (`matched`) and writes nothing. Otherwise the link is audited
+    once as `timeline_entity_link`, listing the event ids; a repeat call links 0. 404
+    `entity_not_found`, 422 `entity_other_incident`, 409 `incident_closed`. Requires the analyst role
+    and write access. Returns the entity id, `matched` and `linked`.
+    """
+    inc = await _get_incident(db, incident_id, user)
+    if inc.status == "closed":
+        raise ApiError(status.HTTP_409_CONFLICT, "incident_closed", "Incident is closed")
+    ent = await _entity(db, incident_id, req.entity_id)
+
+    # Every unlinked host spelling with the entity's matching key; the rule decides which name it.
+    spellings = set((await db.execute(
+        select(TimelineEvent.hostname).distinct().where(
+            TimelineEvent.incident_id == incident_id,
+            TimelineEvent.entity_id.is_(None),
+            func.lower(func.trim(TimelineEvent.hostname)) == ent.value.strip().lower(),
+            not_(SERVER_EVENT))
+    )).scalars().all())
+    index = await load_index(db, incident_id, [ent.value])
+    names = sorted(h for h in spellings if (m := match(index, h)) and m.id == ent.id)
+    if not names:
+        return TimelineEntityLinkResult(entity_id=ent.id, matched=0, linked=0)
+    where = (TimelineEvent.incident_id == incident_id, TimelineEvent.entity_id.is_(None),
+             TimelineEvent.hostname.in_(names), not_(SERVER_EVENT))
+    if req.dry_run:
+        n = (await db.execute(select(func.count()).select_from(TimelineEvent).where(*where))).scalar_one()
+        return TimelineEntityLinkResult(entity_id=ent.id, matched=n, linked=0)
+
+    ids = (await db.execute(
+        update(TimelineEvent).where(*where).values(entity_id=ent.id)
+        .returning(TimelineEvent.id).execution_options(synchronize_session=False)
+    )).scalars().all()
+    if ids:
+        await write_audit(
+            db, "timeline_entity_link",
+            user_id=user.id, username=user.username,
+            resource_type="entity", resource_id=str(ent.id),
+            details={
+                "incident_id": str(incident_id),
+                "entity_id":   str(ent.id),
+                "entity_type": ent.type,
+                "entity_value": ent.value[:120],
+                "hostnames":   [h[:120] for h in names],
+                "linked":      len(ids),
+                "event_ids":   sorted(str(i) for i in ids),
+            },
+            ip_address=request.client.host if request.client else None,
+        )
+    await db.commit()
+    return TimelineEntityLinkResult(entity_id=ent.id, matched=len(ids), linked=len(ids))
 
 
 # ─── LOLBin correlation scan ──────────────────────────────────────────────────

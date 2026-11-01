@@ -541,6 +541,52 @@ class EntityFile(Base):
     # H4: the exhibit this supporting document was registered as ("Register as exhibit"); the file stays.
     evidence_id       = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="SET NULL"),
                                nullable=True, index=True)
+    # S5 (EG-6, ISO/IEC 27037 §7.1.1.1, §6.6) — the capture record of a screenshot or similar: when, by whom
+    # (a user or a name; never the uploader by default), with what tool, how, of which host / display, which
+    # URL, and what was visible. capture_sha256 = the hash taken at capture, checked against the bytes at upload
+    # (files/capture.py) and never editable afterwards. All nullable; method / hash CHECKs in core/database.py.
+    captured_at          = Column(DateTime(timezone=True))
+    captured_by_id       = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    captured_by_name     = Column(String(128))
+    capture_tool         = Column(String(128))
+    capture_tool_version = Column(String(64))
+    capture_method       = Column(String(16))
+    capture_source       = Column(String(256))
+    capture_url          = Column(Text)
+    capture_context      = Column(Text)
+    capture_sha256       = Column(String(64))
+
+
+# ─── Supporting-document links (S5, EG-7) ────────────────────────────────────
+# A supporting document "corroborates" an exhibit, a timeline event or an IOC of its incident: distinct from
+# entity_files.evidence_id ("registered as"). Exactly one target per row (CHECK), each a real FK: the file
+# RESTRICT (the delete guard in files/routes.py file_references refuses first; incidents are never deleted),
+# each target CASCADE (deleting the event or IOC removes its links; that delete is audited by its own route).
+# The partial UNIQUE indexes make a second link to the same target a 409 and serve the per-target lookups
+# (the Files list's ?linked_type=&linked_id= filter) and the cascades.
+
+class SupportingFileLink(Base):
+    __tablename__ = "supporting_file_links"
+    __table_args__ = (
+        CheckConstraint("num_nonnulls(evidence_id, timeline_event_id, ioc_id) = 1",
+                        name="ck_supporting_file_links_one_target"),
+        Index("uq_supporting_file_links_evidence", "evidence_id", "file_id", unique=True,
+              postgresql_where=text("evidence_id IS NOT NULL")),
+        Index("uq_supporting_file_links_timeline_event", "timeline_event_id", "file_id", unique=True,
+              postgresql_where=text("timeline_event_id IS NOT NULL")),
+        Index("uq_supporting_file_links_ioc", "ioc_id", "file_id", unique=True,
+              postgresql_where=text("ioc_id IS NOT NULL")),
+    )
+
+    id                = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    file_id           = Column(UUID(as_uuid=True), ForeignKey("entity_files.id", ondelete="RESTRICT"),
+                               nullable=False, index=True)
+    evidence_id       = Column(UUID(as_uuid=True), ForeignKey("evidence.id", ondelete="CASCADE"), nullable=True)
+    timeline_event_id = Column(UUID(as_uuid=True), ForeignKey("timeline_events.id", ondelete="CASCADE"), nullable=True)
+    ioc_id            = Column(UUID(as_uuid=True), ForeignKey("iocs.id", ondelete="CASCADE"), nullable=True)
+    note              = Column(String(1000))
+    linked_by_id      = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    linked_at         = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 # ─── Evidence (chain of custody) ─────────────────────────────────────────────
@@ -674,6 +720,19 @@ class Evidence(Base):
     acquisition_tool_validation_date = Column(String(32))     # ISO-8601 date the tool/method was validated
     collected_by_qualifications      = Column(Text)           # snapshot of collector's User.qualifications (item 10)
 
+    # ── S2 (EG-1/2/3/5) — the source location record (ISO/IEC 27037 §5.4.2, §6.6, §7.1.3.4) ──
+    # Where the bytes came from, as recorded (tool report or DEFR), never from the upload. make / model /
+    # serial above also name a digital exhibit's source device. source_path is stored verbatim (no trim, case
+    # fold or Unicode normalisation); source_path_norm is the server's search form (norm_v1,
+    # evidence/source.py), never client-set. source_details = the typed SourceDetails JSON (schemas.py).
+    # Style CHECK in core/database.py. All nullable; legacy rows have none.
+    source_system         = Column(String(256))
+    source_path           = Column(Text)
+    source_path_style     = Column(String(16))
+    source_path_norm      = Column(Text)
+    source_details        = Column(JSON)
+    source_unknown_reason = Column(Text)
+
     # Non-mapped (Slice D / GS-2 / GS-3): set per-instance by the list/provenance
     # endpoints from grouped queries (EvidenceCopy + examination audit rows). Plain
     # class defaults avoid both async lazy-loads and missing-attribute on serialisation.
@@ -694,6 +753,27 @@ class Evidence(Base):
     seal_tst        = Column(Text)            # base64 DER Time-Stamp Token over sha256
     seal_tst_time   = Column(String(32))      # TSA-asserted time (ISO-8601 UTC)
     seal_tsa        = Column(String(256))      # TSA URL/name that issued the token
+    # ── S3 (EG-11) — what the seal binds (HLD §3.8) ──
+    # seal_record_sha256 = SHA-256 of the canonical record v1 (evidence/records.py seal_record_v1), whose exact
+    # text is in the hash-chained evidence_seal audit row; null on a seal made before S3. seal_tst_subject = what
+    # the token above covers: file_sha256 (a seal before S3) or record_v1; null without a token. CHECK in
+    # core/database.py.
+    seal_record_sha256 = Column(String(64))
+    seal_tst_subject   = Column(String(16))
+
+    # ── S6 (EG-4) — a container exhibit and its per-file manifest (HLD §3.5) ──
+    # container_format: what the stored file is (zip | tar | ad1 | l01 | aff4l | other). FENRIR indexes zip and tar
+    # itself (evidence/manifest.py, in the background: manifest_status pending → built | failed); the others are
+    # not_indexed. manifest_sha256 = SHA-256 of the canonical JSONL of evidence_manifest_entries (seq order);
+    # manifest_listing = what each tool listing found in the container did (merged or why not). CHECKs in
+    # core/database.py. All nullable; a non-container exhibit has none.
+    container_format  = Column(String(8))
+    manifest_status   = Column(String(12))
+    manifest_sha256   = Column(String(64))
+    manifest_entries  = Column(BigInteger)
+    manifest_builder  = Column(String(128))
+    manifest_error    = Column(Text)
+    manifest_listing  = Column(JSON)
 
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
@@ -701,6 +781,57 @@ class Evidence(Base):
     __table_args__ = (
         UniqueConstraint("incident_id", "identifier", name="uq_evidence_incident_identifier"),
     )
+
+
+# ─── Automatic exhibit identifiers (EI) ─────────────────────────────────────
+# The last number an automatic identifier used in each incident (evidence/identifier.py): bumped with INSERT … ON
+# CONFLICT DO UPDATE … RETURNING in the registering transaction, so concurrent registrations wait on the row and a
+# rolled-back one gives its number back. Never reset; hand-typed identifiers use no number.
+
+class EvidenceIdentifierCounter(Base):
+    __tablename__ = "evidence_identifier_counters"
+
+    incident_id = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"), primary_key=True)
+    last_seq    = Column(Integer, nullable=False)
+
+
+# ─── Container manifest entries (S6, EG-4) ──────────────────────────────────
+# One row per member of a container exhibit, in container order (seq from 1), as FENRIR read it from the stored
+# bytes: the path verbatim (entry_path; the header bytes in entry_path_raw_b64 when they are not that path's UTF-8),
+# the tool listing's source_path, times with their basis, FENRIR's hashes of the member bytes, the tool's hash and
+# whether it matched. Append-only in the DB (trigger in core/database.py, as case_notes): a built manifest never
+# changes. The FK is RESTRICT and DEFERRABLE INITIALLY DEFERRED: a build inserts up to a million rows in one
+# transaction, and an immediate FK check would hold a KEY SHARE lock on the exhibit row for the whole build
+# (blocking every SELECT … FOR UPDATE of it); deferred, the check and its lock come at commit.
+
+class EvidenceManifestEntry(Base):
+    __tablename__ = "evidence_manifest_entries"
+    __table_args__ = (
+        CheckConstraint("entry_type IN ('file', 'dir', 'symlink', 'hardlink', 'stream', 'other')",
+                        name="ck_evidence_manifest_entries_type"),
+        CheckConstraint("entry_name_encoding IN ('utf8', 'cp437', 'other')",
+                        name="ck_evidence_manifest_entries_encoding"),
+    )
+
+    evidence_id         = Column(UUID(as_uuid=True),
+                                 ForeignKey("evidence.id", ondelete="RESTRICT", deferrable=True, initially="DEFERRED"),
+                                 primary_key=True)
+    seq                 = Column(BigInteger, primary_key=True)
+    entry_path          = Column(Text, nullable=False)
+    entry_name_encoding = Column(String(8), nullable=False)
+    entry_path_raw_b64  = Column(Text)
+    source_path         = Column(Text)
+    entry_type          = Column(String(8), nullable=False)
+    size                = Column(BigInteger)
+    compressed_size     = Column(BigInteger)
+    times               = Column(JSON)
+    md5                 = Column(String(32))
+    sha1                = Column(String(40))
+    sha256              = Column(String(64))
+    tool_hash           = Column(JSON)
+    tool_hash_match     = Column(Boolean)
+    encrypted           = Column(Boolean, nullable=False, default=False)
+    notes               = Column(Text)
 
 
 # ─── EvidenceCopy — working-copy ledger (ISO/IEC 27037 §7.1.3.1.1, Slice C) ───
@@ -1321,6 +1452,11 @@ class NoteVersion(Base):
 # `content_sha256` = SHA-256 of the canonical entry (case_notes/hashing.py), also in its audit row.
 # Links are id arrays validated to the same incident at write time (no FK: a link to an IOC,
 # entity or event deleted later stays as it was recorded).
+# CN-2: a note is the chain of its revisions -- an edit is a new entry naming the current one in
+# `corrects_id` (root / revision number are computed on read, case_notes/chain.py). From CN-2 each
+# entry carries its signature, frozen at save time: `signed_name` (full name, else username) and
+# `signed_as` (operational role keys held on the incident, else the platform role); `hash_v` = 2
+# puts both in `content_sha256`. Earlier entries keep hash_v 1 and no signature.
 
 class CaseNote(Base):
     __tablename__ = "case_notes"
@@ -1328,6 +1464,8 @@ class CaseNote(Base):
         CheckConstraint("char_length(body) BETWEEN 1 AND 16384", name="ck_case_notes_body_len"),
         CheckConstraint("content_sha256 ~ '^[0-9a-f]{64}$'", name="ck_case_notes_sha256"),
         CheckConstraint("corrects_id IS NULL OR corrects_id <> id", name="ck_case_notes_not_self"),
+        CheckConstraint("hash_v = 1 OR (hash_v = 2 AND signed_name IS NOT NULL AND signed_as IS NOT NULL)",
+                        name="ck_case_notes_signed_cn2"),
         Index("uq_case_notes_corrects_id", "corrects_id", unique=True,
               postgresql_where=text("corrects_id IS NOT NULL")),
         Index("ix_case_notes_incident_created", "incident_id", "created_at", "id"),
@@ -1349,6 +1487,9 @@ class CaseNote(Base):
     ioc_ids            = Column(ARRAY(UUID(as_uuid=True)), nullable=False, server_default=text("'{}'"))
     timeline_event_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=False, server_default=text("'{}'"))
     content_sha256     = Column(String(64), nullable=False)
+    signed_name        = Column(String(255))
+    signed_as          = Column(Text)
+    hash_v             = Column(SmallInteger, nullable=False, default=1, server_default="1")
 
 
 
@@ -2478,3 +2619,22 @@ class StakeholderMatrixRule(Base):
         UniqueConstraint("severity", "role", "category",
                          name="uq_stakeholder_matrix_severity_role_category"),
     )
+
+
+# ─── Readiness deferrals (RD) ───────────────────────────────────────────────
+# A failing readiness check an admin chose to live with: it stays deferred until an admin undoes it. The check still
+# runs and still reports its status; deferred checks only drop out of summary.blockers_failing / warnings_failing (the
+# Dashboard banner and the New incident list). One row per check id (readiness/checks.py ids are stable); the audit log
+# keeps the history. `level` is the check's level when it was deferred: the deferral holds at that level or below, so
+# deferring a check's warning never hides its blocker (audit_anchor's failed verification, backup_recent's missing
+# backup).
+
+class ReadinessDeferral(Base):
+    __tablename__ = "readiness_deferrals"
+
+    check_id         = Column(String(64), primary_key=True)
+    deferred_by_id   = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    deferred_by_name = Column(String(255), nullable=False)
+    deferred_at      = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    level            = Column(String(16), nullable=False)   # blocker | warning, when deferred
+    reason           = Column(Text, nullable=True)   # optional (owner decision D4); blank is stored as NULL

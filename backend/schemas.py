@@ -1,4 +1,5 @@
 """All Pydantic request/response schemas."""
+import base64
 from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional, Union
 from uuid import UUID
@@ -16,6 +17,18 @@ def _as_utc(v: datetime) -> datetime:
     if isinstance(v, datetime):
         return v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v.astimezone(timezone.utc)
     return v
+
+
+def offset_datetime(v) -> Optional[datetime]:
+    """S4 (EG-9, FP-2): `v` as an aware UTC datetime when it is an ISO 8601 date-time string with an offset or Z;
+    None for anything else (no offset, a date only, not ISO 8601, not a string, out of range)."""
+    if not isinstance(v, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(v)
+        return dt.astimezone(timezone.utc) if dt.utcoffset() is not None else None
+    except (ValueError, OverflowError):
+        return None
 
 
 # ─── Auth ───────────────────────────────────────────────────────────────────
@@ -117,6 +130,15 @@ class SessionOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CurrentSessionOut(SessionOut):
+    """The calling browser session and when it ends (slice SE). `expires_at` is the hard cap, which
+    activity never extends; `idle_expires_at` = `last_seen_at` + the idle timeout. The session ends at
+    whichever comes first. Count down from `server_time`, not the client clock."""
+    idle_timeout_seconds: int
+    idle_expires_at:      datetime
+    server_time:          datetime
 
 
 class SessionLabelUpdate(BaseModel):
@@ -1061,6 +1083,52 @@ class EntityList(BaseModel):
     next_cursor: Optional[str] = None
 
 
+# S5 (EG-6, HLD §3.7) — a supporting document's capture record. The limits match the exhibit columns that Register
+# as exhibit fills from it (acquisition_tool 128, _version 64, source_system 256, screen_state 4096).
+CaptureMethod = Literal["screen", "window", "region", "full_page", "scrolling", "photo_of_screen", "other"]
+CAPTURE_BY_NAME_MAX, CAPTURE_TOOL_MAX, CAPTURE_TOOL_VERSION_MAX = 128, 128, 64
+CAPTURE_SOURCE_MAX, CAPTURE_URL_MAX, CAPTURE_CONTEXT_MAX = 256, 8192, 4096
+CAPTURE_DOC = {
+    "captured_at": "When it was captured: an ISO 8601 date-time with an offset or Z (e.g. 2026-10-31T09:15:00+01:00), "
+                   "stored as UTC; anything else, or a time in the future, is 422 invalid_captured_at",
+    "captured_by_id": "Who captured it: a user who can see the incident (404 user_not_found, 422 assignee_no_access). "
+                      "Or captured_by_name, not both (422 captured_by_conflict); neither = not recorded (the uploader "
+                      "is uploaded_by_id, never assumed to be the capturer)",
+    "captured_by_name": "Who captured it, for someone without an account",
+    "capture_tool": "The capture tool (e.g. Snagit, Greenshot, the browser's own full-page capture)",
+    "capture_tool_version": "The capture tool's version",
+    "capture_method": "screen | window | region | full_page | scrolling | photo_of_screen | other",
+    "capture_source": "The host, device or display it was captured on, as recorded",
+    "capture_url": "The page or resource URL, for a web or app capture",
+    "capture_context": "What is visible: window title, application, the window's position and its contents "
+                       "(ISO/IEC 27037 §7.1.1.1)",
+    "capture_sha256": "The SHA-256 taken at capture (64 hex). The upload compares it with the server's SHA-256 of the "
+                      "bytes before anything is stored: a mismatch is 422 capture_hash_mismatch, audited, nothing "
+                      "stored. Not editable afterwards",
+}
+LinkTargetType = Literal["exhibit", "timeline_event", "ioc"]
+
+
+class SupportingFileLinkCreate(BaseModel):
+    """S5 (EG-7): this supporting document corroborates an exhibit, a timeline event or an IOC of its incident."""
+    target_type: LinkTargetType
+    target_id:   UUID
+    note:        Optional[str] = Field(default=None, max_length=1000, description="What the file shows about the target")
+
+
+class SupportingFileLinkOut(BaseModel):
+    id:                 UUID
+    file_id:            UUID
+    target_type:        LinkTargetType
+    target_id:          UUID
+    target_label:       Optional[str] = Field(default=None, description="Display only: the exhibit identifier, the "
+                                                                        "event's time and description, or the IOC")
+    note:               Optional[str] = None
+    linked_by_id:       Optional[UUID] = None
+    linked_by_username: Optional[str] = None
+    linked_at:          datetime
+
+
 class EntityFileOut(BaseModel):
     id:             UUID
     entity_id:      Optional[UUID] = None
@@ -1084,6 +1152,19 @@ class EntityFileOut(BaseModel):
     evidence_id:       Optional[UUID] = None
     evidence_identifier: Optional[str]  = None   # filled at query time
     evidence_sealed:     Optional[bool] = None   # false = still an unsealed draft
+    # S5 (EG-6): the capture record (all null = none recorded); EG-7: what the file corroborates.
+    captured_at:          Optional[datetime] = None
+    captured_by_id:       Optional[UUID] = None
+    captured_by_name:     Optional[str] = None
+    captured_by_username: Optional[str] = None   # filled at query time
+    capture_tool:         Optional[str] = None
+    capture_tool_version: Optional[str] = None
+    capture_method:       Optional[CaptureMethod] = None
+    capture_source:       Optional[str] = None
+    capture_url:          Optional[str] = None
+    capture_context:      Optional[str] = None
+    capture_sha256:       Optional[str] = None
+    links:                list[SupportingFileLinkOut] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -1106,6 +1187,25 @@ class IncidentFileUpdate(BaseModel):
                                               description="H4: required with a rename (original_name that changes the "
                                                           "name): " + _REASON_DOC + " Audited with the old and new "
                                                           "name; ignored otherwise.")
+    # S5: the capture record (only the fields sent change; null or "" clears one). Audited with from / to.
+    captured_at:          Optional[str]  = Field(default=None, description=CAPTURE_DOC["captured_at"])
+    captured_by_id:       Optional[UUID] = Field(default=None, description=CAPTURE_DOC["captured_by_id"] +
+                                                 ". Setting one of the two clears the other")
+    captured_by_name:     Optional[str]  = Field(default=None, max_length=CAPTURE_BY_NAME_MAX,
+                                                 description=CAPTURE_DOC["captured_by_name"])
+    capture_tool:         Optional[str]  = Field(default=None, max_length=CAPTURE_TOOL_MAX)
+    capture_tool_version: Optional[str]  = Field(default=None, max_length=CAPTURE_TOOL_VERSION_MAX)
+    capture_method:       Optional[CaptureMethod] = None
+    capture_source:       Optional[str]  = Field(default=None, max_length=CAPTURE_SOURCE_MAX,
+                                                 description=CAPTURE_DOC["capture_source"])
+    capture_url:          Optional[str]  = Field(default=None, max_length=CAPTURE_URL_MAX,
+                                                 description=CAPTURE_DOC["capture_url"])
+    capture_context:      Optional[str]  = Field(default=None, max_length=CAPTURE_CONTEXT_MAX,
+                                                 description=CAPTURE_DOC["capture_context"])
+    capture_sha256:       Optional[str]  = Field(default=None, json_schema_extra={"readOnly": True},
+                                                 description="Not editable: it was checked against the file's bytes "
+                                                             "at upload. Sending it (even null) is 422 "
+                                                             "capture_sha256_read_only")
 
 
 class FileDelete(BaseModel):
@@ -1115,9 +1215,36 @@ class FileDelete(BaseModel):
 
 
 class FileReference(BaseModel):
-    type:  str            = Field(description="report_figure | generated_report | case_note | exhibit | entity")
+    type:  str            = Field(description="report_figure | generated_report | case_note | exhibit | entity | link "
+                                              "(S5: it corroborates an exhibit, timeline event or IOC; id = the link)")
     id:    Optional[str]  = None
     label: Optional[str]  = None
+
+
+class FilePrefillSkip(BaseModel):
+    field:  str = Field(description="source_system or source_path")
+    code:   str = Field(description="The code the source check (evidence/source.py source_columns) gave")
+    detail: str
+
+
+class FileExhibitPrefillOut(BaseModel):
+    """S5 (HLD §3.7 item 4): what Register as exhibit pre-fills on a NEW draft exhibit from the file's capture record
+    (not when it links an existing exhibit with the same SHA-256). Nothing is invented: null = no capture value."""
+    acquired_at:              Optional[datetime] = Field(default=None, description="← captured_at")
+    acquisition_tool:         Optional[str] = Field(default=None, description="← capture_tool")
+    acquisition_tool_version: Optional[str] = Field(default=None, description="← capture_tool_version")
+    source_system:            Optional[str] = Field(default=None, description="← capture_source")
+    source_path:              Optional[str] = Field(default=None, description="← capture_url")
+    source_path_style:        Optional[str] = Field(default=None, description="cloud_uri when the URL passes that "
+                                                    "style's rule (https, s3, gs, az, abfss), else other")
+    screen_state:             Optional[str] = Field(default=None, description="← capture_context")
+    acquisition_hash_target:  Optional[str] = Field(default=None, description="← capture_sha256 (checked against "
+                                                    "the file's bytes at upload)")
+    upload_hash_check:        Optional[str] = Field(default=None, description="match when acquisition_hash_target "
+                                                    "is set")
+    left_empty:               list[FilePrefillSkip] = Field(
+        default_factory=list, description="Source fields the source check refused: left empty, and the registration "
+                                          "still goes ahead (recorded in the audit row)")
 
 
 class FileRegisterExhibitOut(BaseModel):
@@ -1129,6 +1256,8 @@ class FileRegisterExhibitOut(BaseModel):
                                                  "incident's active exhibit with the same SHA-256, linked) | "
                                                  "already_registered (an earlier call registered or linked it)")
     file:                EntityFileOut
+    prefill:             Optional[FileExhibitPrefillOut] = Field(
+        default=None, description="S5, registered only: what the new draft was pre-filled with from the capture record")
 
 
 class EntityFileList(BaseModel):
@@ -1202,12 +1331,86 @@ CollectorRole = Literal["defr", "des"]   # GS-12 — ISO/IEC 27037 §3.7 (DEFR) 
 UploadHashCheck = Literal["match", "mismatch", "not_checked", "container_media"]
 
 
+# S4 (EG-9, HLD §3.6) — an exhibit photo's record: who took it, with what, when, and what it shows.
+PHOTO_TAKEN_BY_NAME_MAX = 128
+PHOTO_CAMERA_MAX = 256
+PHOTO_CONTEXT_MAX = 2000
+PHOTO_TAKEN_AT_DOC = ("When the photo was taken: an ISO 8601 date-time with an offset or Z (e.g. "
+                      "2026-10-31T09:15:00+01:00), stored as UTC …Z; anything else is 422 invalid_taken_at")
+PHOTO_TAKEN_BY_DOC = ("Who took the photo: taken_by_id (a user who can see the incident) or taken_by_name (free "
+                      "text, for a photographer without an account), not both (422 taken_by_conflict); setting one "
+                      "clears the other")
+
+
+class PhotoRefIn(BaseModel):
+    """A photo in a request: the reference-only photos of a physical create (no stored file), and the list a
+    PATCH …/evidence/{id} merges by photo id. The stored file, sha256, size, mime type and original file name are
+    the server's: never taken from a request (POST …/photos uploads a photo)."""
+    url:           str
+    caption:       Optional[str] = None
+    taken_at:      Optional[str] = Field(default=None, description=PHOTO_TAKEN_AT_DOC)
+    id:            Optional[str] = None   # GS-11 — set for uploaded (encrypted-at-rest) photos
+    mime_type:     Optional[str] = None
+    taken_by_id:   Optional[UUID] = Field(default=None, description=PHOTO_TAKEN_BY_DOC)
+    taken_by_name: Optional[str] = Field(default=None, max_length=PHOTO_TAKEN_BY_NAME_MAX)
+    camera:        Optional[str] = Field(default=None, max_length=PHOTO_CAMERA_MAX,
+                                         description="Make / model / serial of the camera, or the phone's IMEI")
+    context:       Optional[str] = Field(default=None, max_length=PHOTO_CONTEXT_MAX, description="What it shows")
+
+
 class PhotoRef(BaseModel):
+    """An exhibit photo as recorded (GS-11; S4 adds the photo record and the stored image's sha256 and size).
+    Never the storage path, nonce or other internals."""
     url:       str
     caption:   Optional[str] = None
     taken_at:  Optional[datetime] = None
+    taken_at_unparsed: Optional[str] = Field(
+        default=None, description="FP-2: a taken_at stored before S4 that is not an ISO 8601 date-time with an "
+                                  "offset, kept exactly as stored (taken_at is then null). Null otherwise")
     id:        Optional[str] = None   # GS-11 — set for uploaded (encrypted-at-rest) photos
     mime_type: Optional[str] = None
+    sha256:    Optional[str] = None   # of the image bytes as uploaded
+    size:      Optional[int] = None
+    original_filename: Optional[str] = Field(default=None, description="The upload's file name (basename)")
+    taken_by_id:   Optional[UUID] = None
+    taken_by_name: Optional[str] = None
+    camera:        Optional[str] = None
+    context:       Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unparsed_taken_at(cls, v):
+        # FP-2: a legacy taken_at that isn't ISO 8601 with an offset never breaks reading the exhibit, and is kept.
+        if isinstance(v, dict) and v.get("taken_at") is not None:
+            raw = v["taken_at"]
+            parsed = offset_datetime(raw)
+            v = {**v, "taken_at": parsed, **({} if parsed or raw == "" else {"taken_at_unparsed": str(raw)})}
+        return v
+
+
+# ── S6 (EG-4) — container exhibits and their per-file manifest (docs/evidence-hld-2026-10-31.md §3.5) ──────────
+ContainerFormat = Literal["zip", "tar", "ad1", "l01", "aff4l", "other"]
+ManifestStatus  = Literal["pending", "built", "failed", "not_indexed"]
+CONTAINER_FORMAT_DOC = (
+    "S6: the stored file is a tool-made logical container (one exhibit per container, ISO/IEC 27037 §7.1.3.1.2). "
+    "zip or tar (also .tar.gz / .tgz / .tar.bz2 / .tar.xz): FENRIR builds a per-file manifest in the background "
+    "(manifest_status pending → built | failed). ad1, l01, aff4l, other: kept as one file, not indexed "
+    "(manifest_status not_indexed). Digital exhibits only (422 container_format_not_applicable). It can't change "
+    "once the manifest is built (409 manifest_built); null clears it")
+
+
+class ManifestListingOut(BaseModel):
+    """What one tool listing found in the container did (S6: KAPE *_CopyLog.csv, Velociraptor uploads.json)."""
+    parser:               Optional[str] = Field(default=None, description="kape_copylog | velociraptor_uploads")
+    version:              Optional[int] = Field(default=None, description="The parser's version")
+    member:               Optional[str] = Field(default=None, description="The listing's path in the container")
+    status:               Optional[Literal["merged", "not_merged"]] = None
+    rows:                 Optional[int] = None
+    matched:              Optional[int] = Field(default=None, description="Rows merged into a member's entry")
+    unmatched:            Optional[int] = Field(default=None, description="Rows naming no member (or one already merged)")
+    tool_hash_matches:    Optional[int] = None
+    tool_hash_mismatches: Optional[int] = None
+    note:                 Optional[str] = Field(default=None, description="Why it was not merged, or a caveat")
 
 
 class EvidenceOut(BaseModel):
@@ -1228,13 +1431,22 @@ class EvidenceOut(BaseModel):
     sha1:              Optional[str] = None
     md5:               Optional[str] = None
 
-    # physical_item
+    # physical_item (make / model / serial: also a digital exhibit's source device, S2)
     make:              Optional[str] = None
     model:             Optional[str] = None
     serial:            Optional[str] = None
     physical_location: Optional[str] = None
     condition:         Optional[str] = None
     photos:            list[PhotoRef] = Field(default_factory=list)
+
+    # S2 — the source location record, as recorded (source_path verbatim); source_path_norm is server-derived
+    # (norm_v1) and source_details the SourceDetails object as stored.
+    source_system:         Optional[str] = None
+    source_path:           Optional[str] = None
+    source_path_style:     Optional[str] = None
+    source_path_norm:      Optional[str] = None
+    source_details:        Optional[dict] = None
+    source_unknown_reason: Optional[str] = None
 
     # common
     entity_id:            Optional[UUID] = None
@@ -1313,12 +1525,49 @@ class EvidenceOut(BaseModel):
     # GS-4 trusted timestamp on the seal (the TST blob itself is not listed — fetch on demand)
     seal_tst_time:             Optional[str] = None
     seal_tsa:                  Optional[str] = None
+    # S3 (EG-11) — what the seal binds; GET …/evidence/{id}/seal-record has the record itself.
+    seal_record_sha256:        Optional[str] = Field(default=None, description=(
+        "SHA-256 of the canonical record v1 bound at the seal (record, hashes, acquisition and source records, "
+        "photo hashes); null for a seal made before record binding, and before the seal"))
+    seal_tst_subject:          Optional[Literal["file_sha256", "record_v1"]] = Field(default=None, description=(
+        "What the seal's RFC 3161 token covers: file_sha256 (a seal made before record binding) or record_v1 "
+        "(seal_record_sha256); null without a token"))
+    # S6 (EG-4) — a container exhibit's manifest; GET …/evidence/{id}/manifest lists its entries.
+    container_format:          Optional[ContainerFormat] = Field(default=None, description=CONTAINER_FORMAT_DOC)
+    manifest_status:           Optional[ManifestStatus] = Field(default=None, description=(
+        "pending (being built; the seal waits), built, failed (manifest_error says why; the exhibit itself is "
+        "unaffected; POST …/manifest/rebuild), not_indexed (ad1 / l01 / aff4l / other); null: not a container"))
+    manifest_sha256:           Optional[str] = Field(default=None, description=(
+        "SHA-256 of the manifest's canonical JSONL (one line per entry in seq order, sorted keys, compact UTF-8); "
+        "bound by the seal record when set"))
+    manifest_entries:          Optional[int] = None
+    manifest_builder:          Optional[str] = Field(default=None, description="The builder's name and version")
+    manifest_error:            Optional[str] = Field(default=None, description="Why the build failed (reason: detail)")
+    manifest_listing:          Optional[list[ManifestListingOut]] = Field(default=None, description=(
+        "Each tool listing found in the container: merged (source paths, times, tool hashes) or not, and why"))
 
     created_at:           datetime
     updated_at:           datetime
 
     class Config:
         from_attributes = True
+
+
+class EvidenceSealRecordOut(BaseModel):
+    """S3 (EG-11, HLD §3.8) — what an exhibit's seal binds, and whether the record still says the same."""
+    seal_tst_subject:      Optional[Literal["file_sha256", "record_v1"]] = Field(description=(
+        "What the RFC 3161 token covers: file_sha256 (the file's SHA-256: a seal made before record binding) or "
+        "record_v1 (seal_record_sha256); null without a token"))
+    seal_record_sha256:    Optional[str] = Field(description="SHA-256 of sealed_record; null for a seal made "
+                                                             "before record binding")
+    sealed_record:         Optional[str] = Field(description=(
+        "The canonical record v1 exactly as bound at the seal (from the hash-chained evidence_seal audit row): "
+        "UTF-8 JSON, sorted keys, compact. Its SHA-256 is seal_record_sha256"))
+    recomputed_now_sha256: str = Field(description="SHA-256 of the canonical record v1 built from the exhibit now")
+    changed_since_seal:    Optional[bool] = Field(description=(
+        "recomputed_now_sha256 differs from seal_record_sha256: an audited amendment after the seal (custody "
+        "log: Amended after seal, Photo added) changed the record. Not by itself tampering. Null for a seal "
+        "made before record binding"))
 
 
 # G4 (R35) — the structured device-clock offset. Bound: 100 years either way (a clock reset to 1970
@@ -1395,7 +1644,7 @@ class EvidenceSealRequest(BaseModel):
 #   red    — at least one mandatory check fails
 
 class ProvenanceCheck(BaseModel):
-    code:        str           # iso_27037_9_1_4, iso_27037_9_2_3, …
+    code:        str           # iso_27037_9_1_4, iso_27037_9_2_3, … (FP-8: stable ids, not clause numbers; the label cites the clause)
     label:       str
     status:      str           # pass | fail | manual | n_a
     severity:    str           # mandatory | advisory
@@ -1409,20 +1658,185 @@ class ProvenanceScore(BaseModel):
     completeness: int = 0   # % of determinable checks passing (ISO 27041 paper rubric; >90% = good)
 
 
+# ── S2 (EG-1/2/3/5) — the source location record (docs/evidence-hld-2026-10-31.md §3.2–§3.4) ──────────
+# Recorded as found (the acquisition tool's report or the DEFR), never taken from the upload's name, the
+# browser or the MCP's local path. The checks that need a code (style, NUL, length, norm) are in
+# evidence/source.py, run by every intake route.
+SOURCE_PATH_MAX = 32_768
+SourcePathStyle = Literal["windows", "unc", "posix", "macos", "android", "ios", "cloud_uri", "mail_store",
+                          "device", "other"]
+_SOURCE_PATH_DOC = ("The original full path, URI or store path on the source, exactly as recorded: never trimmed, "
+                    "case-folded or Unicode-normalised. At most 32,768 characters, no NUL (422 invalid_source_path). "
+                    "Needs source_path_style (422 source_path_style_required); null clears it")
+_SOURCE_PATH_STYLE_DOC = ("How to read source_path; its shape is checked (422 source_path_style_mismatch): windows "
+                          "(C:\\… or \\\\?\\…), unc (\\\\server\\share\\…), posix / macos / android (/…), ios (/… or "
+                          "<Domain>-<path>, e.g. HomeDomain-Library/SMS/sms.db), cloud_uri (an absolute https, s3, gs, "
+                          "az or abfss URI), mail_store (mailbox / folder path), device (\\\\.\\PhysicalDrive0, "
+                          "/dev/sda: full images), other (explain in source_details.note)")
+
+
+def _as_utc(v: Optional[datetime]) -> Optional[datetime]:
+    if v is None:
+        return None
+    return v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v.astimezone(timezone.utc)
+
+
+class _SourceStrict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SourceTime(_SourceStrict):
+    utc:         Optional[datetime] = Field(default=None, description="The time in UTC (no offset = UTC). Never "
+                                            "adjusted by the clock offset; no future check (a wrong device clock "
+                                            "is itself evidence)")
+    as_recorded: Optional[str] = Field(default=None, max_length=128, description="Exactly as the tool or device "
+                                       "showed it")
+
+    @field_validator("utc")
+    @classmethod
+    def _utc(cls, v):
+        return _as_utc(v)
+
+
+class SourceTimes(_SourceStrict):
+    """The source MACB as found (ISO/IEC 27037 §5.4.5). Never required; a time needs its basis and reader (Q11)."""
+    m:        Optional[SourceTime] = Field(default=None, description="Content modified")
+    a:        Optional[SourceTime] = Field(default=None, description="Accessed")
+    c:        Optional[SourceTime] = Field(default=None, description="Metadata changed (NTFS MFT entry / inode ctime)")
+    b:        Optional[SourceTime] = Field(default=None, description="Born (created)")
+    basis:    Optional[str] = Field(default=None, max_length=256, description="Where the times come from, e.g. "
+                                    "\"NTFS $STANDARD_INFORMATION\", \"FAT local time\". Required with any time")
+    tz_basis: Optional[str] = Field(default=None, max_length=128, description="The timezone the source recorded in")
+    read_by:  Optional[str] = Field(default=None, max_length=256, description="The tool and version that read the "
+                                    "times (or a validated_tools id). Required with any time")
+    read_at:  Optional[datetime] = Field(default=None, description="When they were read (UTC)")
+
+    @field_validator("read_at")
+    @classmethod
+    def _read_at_utc(cls, v):
+        return _as_utc(v)
+
+    @model_validator(mode="after")
+    def _traceable(self):
+        given = [t for t in (self.m, self.a, self.c, self.b)
+                 if t is not None and (t.utc is not None or (t.as_recorded or "").strip())]
+        if given and not ((self.basis or "").strip() and (self.read_by or "").strip()):
+            raise ValueError("a source time (m, a, c or b) needs times.basis and times.read_by: every time names "
+                             "where it comes from and what read it")
+        return self
+
+
+class SourceVolume(_SourceStrict):
+    label:      Optional[str] = Field(default=None, max_length=128)
+    serial:     Optional[str] = Field(default=None, max_length=128)
+    filesystem: Optional[str] = Field(default=None, max_length=64)
+    partition:  Optional[str] = Field(default=None, max_length=128)
+
+
+class SourceOwner(_SourceStrict):
+    id:   Optional[str] = Field(default=None, max_length=256, description="SID or uid, as recorded")
+    name: Optional[str] = Field(default=None, max_length=256)
+
+
+class ProviderHash(_SourceStrict):
+    algorithm: str = Field(min_length=1, max_length=32, description="As the provider names it, e.g. MD5, SHA-256, "
+                           "QuickXorHash. Only MD5, SHA-1 and SHA-256 are compared with the stored file (advisory, "
+                           "in the provenance score)")
+    value:     str = Field(min_length=1, max_length=256, description="As the provider gives it (hex or base64)")
+
+
+class SourceProvider(_SourceStrict):
+    provider:          Optional[str] = Field(default=None, max_length=128, description="e.g. SharePoint, S3")
+    tenant_or_account: Optional[str] = Field(default=None, max_length=256)
+    site_or_bucket:    Optional[str] = Field(default=None, max_length=1024)
+    item_id:           Optional[str] = Field(default=None, max_length=1024)
+    version_id:        Optional[str] = Field(default=None, max_length=256)
+    etag:              Optional[str] = Field(default=None, max_length=256)
+    export_id:         Optional[str] = Field(default=None, max_length=256)
+    provider_hash:     Optional[ProviderHash] = None
+
+
+class SourceMail(_SourceStrict):
+    mailbox:     Optional[str] = Field(default=None, max_length=320)
+    folder_path: Optional[str] = Field(default=None, max_length=2048)
+    message_id:  Optional[str] = Field(default=None, max_length=998)
+    item_id:     Optional[str] = Field(default=None, max_length=1024)
+
+
+class SourceDetails(_SourceStrict):
+    """S2 — the rest of the source location record (all optional; stored as given, unknown keys refused)."""
+    v:                  Literal[1] = 1
+    filename_on_source: Optional[str] = Field(default=None, max_length=1024, description="The name on the source "
+                                              "(original_filename is the upload's name)")
+    volume:             Optional[SourceVolume] = None
+    os:                 Optional[str] = Field(default=None, max_length=256)
+    asset_tag:          Optional[str] = Field(default=None, max_length=128)
+    times:              Optional[SourceTimes] = None
+    owner:              Optional[SourceOwner] = None
+    stream:             Optional[str] = Field(default=None, max_length=1024, description="Alternate data stream name")
+    link_target:        Optional[str] = Field(default=None, max_length=SOURCE_PATH_MAX, description="Symlink, "
+                                              "junction or hard link: its target, and which one was copied")
+    provider:           Optional[SourceProvider] = None
+    mail:               Optional[SourceMail] = None
+    namespace:          Optional[str] = Field(default=None, max_length=512, description="The tool's path namespace, "
+                                              "e.g. an iOS backup domain")
+    path_raw_b64:       Optional[str] = Field(default=None, max_length=87_384, description="The path's raw bytes "
+                                              "(base64) when it is not valid UTF-8 or holds unpaired surrogates")
+    note:               Optional[str] = Field(default=None, max_length=4096)
+
+    @field_validator("path_raw_b64")
+    @classmethod
+    def _b64(cls, v):
+        if v is not None:
+            try:
+                base64.b64decode(v, validate=True)
+            except ValueError:
+                raise ValueError("path_raw_b64 must be base64") from None
+        return v
+
+
+class SourceRecordIn(BaseModel):
+    """S2 — the source location fields an intake or edit takes (only the fields sent change; null clears)."""
+    source_system:         Optional[str] = Field(default=None, max_length=256, description="Host name, FQDN, "
+                                                 "device name, tenant or mailbox owner, as recorded (kept verbatim)")
+    source_path:           Optional[str] = Field(default=None, description=_SOURCE_PATH_DOC,
+                                                 json_schema_extra={"maxLength": SOURCE_PATH_MAX})
+    source_path_style:     Optional[SourcePathStyle] = Field(default=None, description=_SOURCE_PATH_STYLE_DOC)
+    source_path_norm:      Optional[str] = Field(default=None, json_schema_extra={"readOnly": True},
+                                                 description="Read-only: the server derives it (norm_v1, for search). "
+                                                             "Sending it, even null, is 422 source_path_norm_read_only")
+    source_details:        Optional[SourceDetails] = None
+    source_unknown_reason: Optional[str] = Field(default=None, max_length=4096, description="Why the source can't be "
+                                                 "stated (at least 10 characters, else 422 "
+                                                 "source_unknown_reason_too_short), e.g. a file a user emailed")
+
+
+# EI: the identifier on the create routes (physical, the upload session's complete, the multipart digital form).
+IDENTIFIER_DOC = ("The exhibit's identifier (case tag / item number), unique in the incident: an identifier already "
+                  "used is 409 identifier_exists. Leave it out, null or blank to have FENRIR assign the next one "
+                  "from the naming convention (GET /api/settings/evidence-identifier; preview GET "
+                  "…/evidence/next-identifier) — an assigned identifier never ends in 409. Fixed once created.")
+
+
 # Used for creating a `physical_item` (digital_file uses multipart/form-data
 # directly — see evidence/routes.py — because file upload doesn't fit JSON).
 class PhysicalEvidenceCreate(BaseModel):
     name:               str = Field(min_length=1, max_length=256)
-    identifier:         str = Field(min_length=1, max_length=128)
+    identifier:         Optional[str] = Field(default=None, max_length=128, description=IDENTIFIER_DOC)
     description:        Optional[str] = Field(default=None, max_length=4096)
     tlp:                Tlp = "amber"
     entity_id:          Optional[UUID] = None
     make:               Optional[str] = Field(default=None, max_length=128)
     model:              Optional[str] = Field(default=None, max_length=128)
     serial:             Optional[str] = Field(default=None, max_length=128)
+    # S2 — the device's own name (host name as recorded) and details such as asset tag, OS or owner. A physical
+    # item has no source path (HLD §3.3).
+    source_system:      Optional[str] = Field(default=None, max_length=256, description="The device's host or "
+                                              "device name, as recorded (kept verbatim)")
+    source_details:     Optional[SourceDetails] = None
     physical_location:  Optional[str] = Field(default=None, max_length=256)
     condition:          Optional[str] = Field(default=None, max_length=4096)
-    photos:             list[PhotoRef] = Field(default_factory=list)
+    photos:             list[PhotoRefIn] = Field(default_factory=list)
     collected_location: Optional[str] = Field(default=None, max_length=256)
     collected_as_role:  Optional[CollectorRole] = None   # GS-12 (DEFR/DES)
     # C3 — when the item was seized (UTC; at most a couple of minutes ahead of the server
@@ -1459,18 +1873,24 @@ class PhysicalEvidenceCreate(BaseModel):
     acquisition_tool_validation_date: Optional[str]  = Field(default=None, max_length=32)
 
 
-class EvidenceUpdate(BaseModel):
+class EvidenceUpdate(SourceRecordIn):
     # MVP allows updating descriptive fields only. Identifier is immutable,
     # custodian changes go through /transfer, status changes through /dispose
-    # or /verify.
+    # or /verify. S2: the source location record (inherited) and the device identifiers are acquisition facts:
+    # the M10 rules apply, and on a sealed item each change is an amendment (evidence_amend_after_seal).
+    make:              Optional[str] = Field(default=None, max_length=128)
+    model:             Optional[str] = Field(default=None, max_length=128)
+    serial:            Optional[str] = Field(default=None, max_length=128)
     name:              Optional[str] = Field(default=None, min_length=1, max_length=256)
     description:       Optional[str] = Field(default=None, max_length=4096)
     tlp:               Optional[Tlp] = None
     physical_location: Optional[str] = Field(default=None, max_length=256)
     condition:         Optional[str] = Field(default=None, max_length=4096)
-    photos:            Optional[list[PhotoRef]] = Field(
+    photos:            Optional[list[PhotoRefIn]] = Field(
         default=None, description="Replaces the photo list. Not on a sealed item: 409 code sealed_field_immutable "
-                                  "(add a photo with POST …/photos instead).")
+                                  "(add a photo with POST …/photos instead). An uploaded photo (with its id) keeps "
+                                  "its stored file and hashes; only the fields sent change (caption, taken_at, "
+                                  "taken_by_id / taken_by_name, camera, context).")
     legal_hold:        Optional[bool] = Field(
         default=None, description="Not settable here: sending it (any value) is 422 code use_legal_hold_endpoint. "
                                   "Set or release a legal hold with PUT …/evidence/{id}/legal-hold "
@@ -1508,14 +1928,19 @@ _TARGET_HASH_SCOPE_DOC = ("What acquisition_hash_target is the hash of: uploaded
                           "media hash; recorded, advisory)")
 
 
-class EvidenceAcquisitionRecord(BaseModel):
+class EvidenceAcquisitionRecord(SourceRecordIn):
     """G3 — complete the acquisition record of an UNSEALED item (e.g. a draft exhibit registered by an
     Email / PCAP / Browser history upload, or a Quick add) so it can be sealed. Only the fields sent
     change (an explicit null clears one); the stored file and its hashes never change. Same rules as
     the collect routes: hashes are MD5 / SHA-1 / SHA-256 hex (422 invalid_hash_format), a target hash
     with target_hash_scope=uploaded_file is compared with the stored file's hash of the same
     algorithm (422 hash_mismatch, nothing changed), acquired_at not in the future, the witness an
-    active user who can see the incident."""
+    active user who can see the incident. S2: the source location record (source_*) and the source
+    device's make / model / serial."""
+    make:                      Optional[str] = Field(default=None, max_length=128, description="The source device "
+                                                     "(a digital exhibit) or the item (physical)")
+    model:                     Optional[str] = Field(default=None, max_length=128)
+    serial:                    Optional[str] = Field(default=None, max_length=128)
     lawful_basis:              Optional[LawfulBasis] = Field(default=None, description=_LAWFUL_BASIS_DOC)
     lawful_basis_note:         Optional[str] = Field(default=None, max_length=4096)
     acquisition_tool:          Optional[str] = Field(default=None, max_length=128)
@@ -1541,6 +1966,7 @@ class EvidenceAcquisitionRecord(BaseModel):
     decision_factors:          Optional[dict] = None
     acquisition_scope:         Optional[AcquisitionScope] = Field(default=None, description=_ACQUISITION_SCOPE_DOC)
     logical_acquisition_rationale: Optional[str] = Field(default=None, max_length=4096)
+    container_format:          Optional[ContainerFormat] = Field(default=None, description=CONTAINER_FORMAT_DOC)
     system_time_offset:        Optional[str]  = Field(default=None, max_length=128)
     system_time_offset_seconds: Optional[int] = Field(
         default=None, ge=-TIME_OFFSET_MAX_SECONDS, le=TIME_OFFSET_MAX_SECONDS,
@@ -1551,6 +1977,47 @@ class EvidenceAcquisitionRecord(BaseModel):
     acquisition_tool_validated:       Optional[bool] = None
     acquisition_tool_validation_ref:  Optional[str]  = Field(default=None, max_length=256)
     acquisition_tool_validation_date: Optional[str]  = Field(default=None, max_length=32)
+
+
+class ManifestEntryOut(BaseModel):
+    """S6 — one member of a container exhibit, as FENRIR read it from the stored bytes."""
+    seq:                 int = Field(description="Position in the container (from 1): the central directory / "
+                                                 "archive order")
+    entry_path:          str = Field(description="The member's path inside the container, verbatim (a NUL is shown "
+                                                 "as U+FFFD)")
+    entry_name_encoding: Literal["utf8", "cp437", "other"] = Field(description=(
+        "How the name was read: utf8 (ZIP UTF-8 flag or Info-ZIP Unicode Path field; TAR UTF-8), cp437 (a ZIP name "
+        "without the flag: the raw bytes are in entry_path_raw_b64 when not ASCII), other (not valid UTF-8)"))
+    entry_path_raw_b64:  Optional[str] = Field(default=None, description="The name's raw bytes (base64) when they are "
+                                                                         "not the UTF-8 of entry_path")
+    source_path:         Optional[str] = Field(default=None, description="The original full path on the source, "
+                                                                         "from the tool listing (verbatim)")
+    entry_type:          Literal["file", "dir", "symlink", "hardlink", "stream", "other"]
+    size:                Optional[int] = Field(default=None, description="Uncompressed size as the container states it")
+    compressed_size:     Optional[int] = Field(default=None, description="ZIP only")
+    times:               Optional[dict] = Field(default=None, description=(
+        "m / a / c / b: {utc, as_recorded, basis} from the container (zip_ntfs_extra_filetime, "
+        "zip_extended_timestamp_unix, zip_dos_time_local_timezone_unknown (utc null), tar_header_mtime, tar_pax_*); "
+        "`source`: the tool listing's times of the original {m, a, b: {utc, as_recorded}, basis, read_by}"))
+    md5:                 Optional[str] = None
+    sha1:                Optional[str] = None
+    sha256:              Optional[str] = Field(default=None, description="FENRIR's hashes of the member's bytes (null "
+                                                                         "for a directory, an encrypted or unreadable "
+                                                                         "member: see notes)")
+    tool_hash:           Optional[dict] = Field(default=None, description="{algorithm, value}: the tool listing's "
+                                                                          "hash of the original, as given")
+    tool_hash_match:     Optional[bool] = Field(default=None, description="tool_hash equals FENRIR's hash of the same "
+                                                                          "algorithm; null when not comparable")
+    encrypted:           bool = False
+    notes:               Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ManifestEntryList(BaseModel):
+    items:       list[ManifestEntryOut]
+    next_cursor: Optional[str] = None
 
 
 class ExternalCustodian(BaseModel):
@@ -2096,6 +2563,8 @@ class UploadSessionCreate(BaseModel):
                     "mobile | network | cctv | email_export | vendor_report | network_capture]; handling_mode "
                     "collect | acquire; acquisition_scope full_image | "
                     "logical; target_hash_scope uploaded_file | container_media; collected_as_role defr | des; "
+                    "source_path_style windows | unc | posix | macos | android | ios | cloud_uri | mail_store | "
+                    "device | other; "
                     "browser (webhistory) chrome | edge | brave | firefox. Only the schema is checked here: "
                     "the witness, entity, identifier and hash checks run at `complete`.")
 
@@ -2135,7 +2604,7 @@ class UploadCompleteEvidence(EvidenceAcquisitionRecord):
     model_config = ConfigDict(extra="forbid")
     purpose:     Literal["evidence"]
     name:        str = Field(min_length=1, max_length=256)
-    identifier:  str = Field(min_length=1, max_length=128)
+    identifier:  Optional[str] = Field(default=None, max_length=128, description=IDENTIFIER_DOC)
     description: Optional[str] = Field(default=None, max_length=4096)
     tlp:         Tlp = "amber"
     entity_id:   Optional[UUID] = None
@@ -2639,7 +3108,9 @@ CASE_NOTE_MAX_LINKS = 50    # per link kind
 class CaseNoteCreate(BaseModel):
     """A new case-note entry. Give `body`, or `source_scratchpad_id` (your own legacy scratchpad,
     whose current text becomes the body) -- exactly one. Links must belong to the same incident.
-    `corrects_id` names an earlier entry this one corrects (the original is never changed)."""
+    `corrects_id` makes this entry an edit (CN-2): it names the note's current revision, and this
+    entry becomes the next revision with the full new text and links (the earlier one is never
+    changed)."""
     model_config = ConfigDict(extra="forbid")
 
     body:                 Optional[str] = Field(default=None, min_length=1, max_length=CASE_NOTE_MAX_CHARS)
@@ -2660,20 +3131,31 @@ class CaseNoteCreate(BaseModel):
 
 
 class CaseNoteOut(BaseModel):
+    """One case-note entry = one revision of a note (CN-2). `root_id` is the note's stable id (its
+    revision 1); `corrected_by_id` is the next revision, so the current revision has none. Signed
+    entries (`hash_v` 2) carry the signature frozen at save time; `hash_v` 1 entries (before CN-2)
+    have none."""
     id:                   UUID
     incident_id:          UUID
+    root_id:              Optional[UUID] = None   # the note's revision 1 (its own id if it is revision 1)
+    revision:             int = 1
+    root_author_id:       Optional[UUID] = None   # the note's author (of revision 1): with admins, who may edit it
+    root_author_username: Optional[str] = None
     author_id:            UUID
     author_username:      Optional[str] = None
+    signed_name:          Optional[str] = None    # full name (else username) at save time
+    signed_as:            Optional[str] = None    # operational role keys held on the incident, else platform role
     created_at:           datetime
     body:                 str
-    corrects_id:          Optional[UUID] = None
-    corrected_by_id:      Optional[UUID] = None   # the entry that corrects this one, if any
+    corrects_id:          Optional[UUID] = None   # the revision this one replaces
+    corrected_by_id:      Optional[UUID] = None   # the revision that replaces this one, if any
     source_scratchpad_id: Optional[UUID] = None
     evidence_ids:         list[UUID]
     entity_ids:           list[UUID]
     ioc_ids:              list[UUID]
     timeline_event_ids:   list[UUID]
     content_sha256:       str
+    hash_v:               int = 1
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -3051,6 +3533,15 @@ class DecisionList(BaseModel):
 TimelineOrigin = Literal["manual", "forensic_import", "system"]
 
 
+class TimelineEntityRef(BaseModel):
+    """TE: an entity of the incident, as a timeline event shows it (`entity` when linked, `entity_match` when
+    its host only names it)."""
+    id:          UUID
+    type:        str
+    value:       str
+    compromised: bool = False
+
+
 class TimelineIocRef(BaseModel):
     """K3: an IOC linked to a timeline event (link / unlink with POST / DELETE …/iocs/{ioc_id}/timeline-links)."""
     id:        UUID
@@ -3137,6 +3628,12 @@ class TimelineEventOut(BaseModel):
     linked_iocs:          list[TimelineIocRef] = Field(default_factory=list, description=(
         "K3: the IOCs linked to this event, by value. Link / unlink with POST / DELETE "
         "…/iocs/{ioc_id}/timeline-links."))
+    entity:               Optional[TimelineEntityRef] = Field(default=None, description=(
+        "Read-only. TE: the entity this event is linked to (entity_id), with its type, value and compromised flag."))
+    entity_match:         Optional[TimelineEntityRef] = Field(default=None, description=(
+        "Read-only. TE: the entity this event's hostname names when the event is not linked (case-insensitive "
+        "value match; ties go to the exact-case value, then the host; still tied = none). A suggestion only: "
+        "link it with PATCH entity_id, or every such event at once with POST …/timeline/entity-links."))
 
     class Config:
         from_attributes = True
@@ -3193,11 +3690,27 @@ class TimelineEventList(BaseModel):
 
 class TimelineEventBatchCreate(BaseModel):
     events: list[TimelineEventCreate] = Field(min_length=1, max_length=500)
+    link_entities: bool = Field(default=True, description=(
+        "TE: link each event that names no entity_id to the entity its hostname names (the rule of "
+        "TimelineEventOut.entity_match). false = only the entity_id each item sends."))
 
 
 class TimelineEventBatchResult(BaseModel):
     created: int
     errors:  list[str] = Field(default_factory=list)
+    entities_linked: int = Field(default=0, description="TE: events created linked to an entity by their hostname.")
+
+
+class TimelineEntityLinkCreate(BaseModel):
+    """TE: link every unlinked event of the incident whose hostname names this entity."""
+    entity_id: UUID
+    dry_run:   bool = Field(default=False, description="true = only count the events that would be linked.")
+
+
+class TimelineEntityLinkResult(BaseModel):
+    entity_id: UUID
+    matched:   int = Field(description="Unlinked events whose hostname names the entity.")
+    linked:    int = Field(description="Events linked now (0 on a dry run).")
 
 
 # ─── Defender incident PDF import (stateless preview + review) ──────────────
@@ -3282,6 +3795,9 @@ class DefenderPdfPromote(BaseModel):
     """G4 — commit candidates of a stored Defender import; the server copies them."""
     items:    list[DefenderPdfPromoteItem] = Field(min_length=1, max_length=5_000)
     ir_phase: Optional[Phase] = Field(default=None, description="IR phase for the timeline events created")
+    link_entities: bool = Field(default=True, description=(
+        "TE: link each new timeline event to the entity its hostname names, entities created by this commit included (the rule of "
+        "TimelineEventOut.entity_match)."))
 
 
 class DefenderPdfPromoteResult(BaseModel):
@@ -3296,6 +3812,7 @@ class DefenderPdfPromoteResult(BaseModel):
     already_promoted:      list[int] = Field(default_factory=list)
     # The IOC / entity (same type + value) is already on the incident: left as it is.
     already_exists:        list[int] = Field(default_factory=list)
+    entities_linked:       int = Field(default=0, description="TE: events created linked to an entity by their hostname.")
 
 
 # ─── Post-Incident ────────────────────────────────────────────────────────────
@@ -3540,6 +4057,9 @@ class ForensicImportPromote(BaseModel):
     """C5 — promote events of a stored import to the timeline by their index (`idx`)."""
     indices:  list[int] = Field(min_length=1, max_length=10_000)
     ir_phase: Optional[Phase] = None
+    link_entities: bool = Field(default=True, description=(
+        "TE: link each new timeline event to the entity its hostname names (the rule of "
+        "TimelineEventOut.entity_match)."))
 
 
 class ForensicImportPromoteResult(BaseModel):
@@ -3549,6 +4069,7 @@ class ForensicImportPromoteResult(BaseModel):
     skipped_untimestamped: list[int] = Field(default_factory=list)
     # Already on the timeline from this import (re-promoting is a no-op).
     already_promoted:      list[int] = Field(default_factory=list)
+    entities_linked:       int = Field(default=0, description="TE: events created linked to an entity by their hostname.")
 
 
 class PcapPromote(BaseModel):
@@ -3556,6 +4077,9 @@ class PcapPromote(BaseModel):
     copies them from the run (the caller sends only indices)."""
     indices:  list[int] = Field(min_length=1, max_length=10_000)
     ir_phase: Optional[Phase] = None
+    link_entities: bool = Field(default=True, description=(
+        "TE: link each new timeline event to the entity its hostname names (the rule of "
+        "TimelineEventOut.entity_match)."))
 
 
 # ─── OSINT enrichment ────────────────────────────────────────────────────────
@@ -3757,6 +4281,35 @@ class IncidentRefSettings(BaseModel):
 
 class IncidentRefSettingsUpdate(BaseModel):
     prefix: str = Field(pattern=r"^[A-Z][A-Z0-9]{1,9}$", description="2–10 characters: A–Z then A–Z/0–9")
+
+
+class EvidenceIdentifierToken(BaseModel):
+    token:       str = Field(description="As written in a template, e.g. {seq:N}")
+    description: str
+
+
+class EvidenceIdentifierSettings(BaseModel):
+    """EI: the naming convention for automatically assigned exhibit identifiers (an exhibit registered without an
+    identifier, and every draft FENRIR registers itself). Identifiers already assigned never change."""
+    template:             str = Field(description="The convention, e.g. {incident}-{date}-{seq:3} (the default)")
+    tokens:               list[EvidenceIdentifierToken]
+    example:              str = Field(description="The identifier the next automatic exhibit of example_incident_ref "
+                                                  "would get now (does not reserve it)")
+    example_incident_ref: str = Field(description="The most recent incident's reference, or the reference the next "
+                                                  "incident would get when there is none yet")
+
+
+class EvidenceIdentifierSettingsUpdate(BaseModel):
+    template: str = Field(description="Tokens {incident}, {date}, {seq} / {seq:N} (N 1–6, default 3); literal text "
+                                      "A–Z a–z 0–9 . _ -; {seq} exactly once; at most 64 characters; the longest "
+                                      "result (a 32-character incident reference, a 9-digit number) at most 128. "
+                                      "Anything else is 422 invalid_identifier_template, naming the rule.")
+
+
+class NextEvidenceIdentifier(BaseModel):
+    """EI: what an exhibit registered now without an identifier would get."""
+    template: str
+    example:  str = Field(description="An example, not a reservation: a concurrent registration can take it first")
 
 
 class ApiKeySet(BaseModel):

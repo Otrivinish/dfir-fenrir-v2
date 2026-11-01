@@ -19,9 +19,12 @@ from core.database import get_db
 from core.errors import ApiError, ApiErrorBody
 from evidence.crypto import EvidenceCryptoError, awrite_encrypted
 from evidence.streaming import decrypted_download, require_free_space
+from entities.match import load_index, match as match_entity
 from incidents.access import get_accessible_incident
 from models import Entity, EntityEvent, EntityFile, EntityRelation, Incident, RecoveryRecord, RespondAction, User, utcnow
-from files.routes import decorated_files, delete_file_row, file_references, locked_file, referenced_error, required_reason
+from files import capture
+from files.routes import (capture_form, capture_record, check_capture_sha256, decorated_files, delete_file_row,
+                          file_references, locked_file, referenced_error, required_reason)
 from respond.containment import containment_map
 from schemas import (Criticality, EntityCreate, EntityEventCreate,
                      EntityEventList, EntityEventOut, EntityFileList, EntityFileOut, FileDelete,
@@ -103,11 +106,16 @@ async def list_entities(
                                                            "affected systems); false = only the others"),
     limit:       int                   = Query(default=50, ge=1, le=200),
     cursor:      Optional[str]         = Query(default=None),
+    match:       Optional[str]         = Query(default=None, min_length=1, max_length=2048, description=(
+        "TE: only the entity this text names (a typed host name): the value matches case-insensitively, "
+        "ties go to the exact-case value, then the host; still tied = none. With `type`, only entities of "
+        "that type are matched. 0 or 1 item.")),
 ) -> EntityList:
     """List entities (hosts, accounts, etc.) for an incident, newest first.
 
     Supports optional filtering by `type`, `criticality` and `compromised`, plus
-    cursor-based pagination via `limit` and `cursor`. Each item includes a `file_count` of
+    cursor-based pagination via `limit` and `cursor`. `match` returns only the entity a typed
+    name resolves to (the rule timeline suggestions and imports use), or none. Each item includes a `file_count` of
     attached files and its `containment` state from the Respond board (isolated /
     disabled / blocked / pending, or null). Requires an authenticated user with
     access to the incident. Returns a paginated `EntityList` with `items` and
@@ -124,6 +132,14 @@ async def list_entities(
     if type:        stmt = stmt.where(Entity.type        == type)
     if criticality: stmt = stmt.where(Entity.criticality == criticality)
     if compromised is not None: stmt = stmt.where(Entity.compromised == compromised)
+    if match is not None:
+        index = await load_index(db, incident_id, [match])
+        if type:
+            index = {k: [e for e in v if e.type == type] for k, v in index.items()}
+        m = match_entity(index, match)
+        if m is None:
+            return EntityList(items=[], next_cursor=None)
+        stmt = stmt.where(Entity.id == m.id)
 
     stmt = stmt.offset(offset).limit(limit + 1)
     rows = (await db.execute(stmt)).scalars().all()
@@ -467,12 +483,18 @@ async def list_entity_files(
              response_model=EntityFileOut,
              status_code=status.HTTP_201_CREATED,
              summary="Upload a file to an entity",
-             responses={507: {"model": ApiErrorBody, "description": "insufficient_storage (the file store, with its 1 GiB reserve, or the upload scratch space is full; nothing stored)"}})
+             responses={404: {"model": ApiErrorBody, "description": "the entity, or user_not_found (captured_by_id)"},
+                        422: {"model": ApiErrorBody, "description": "capture_hash_mismatch (audited), "
+                                                                    "invalid_captured_at, invalid_capture_text, "
+                                                                    "invalid_hash_format, captured_by_conflict or "
+                                                                    "assignee_no_access (the capturer); nothing stored"},
+                        507: {"model": ApiErrorBody, "description": "insufficient_storage (the file store, with its 1 GiB reserve, or the upload scratch space is full; nothing stored)"}})
 async def upload_entity_file(
     incident_id: uuid.UUID,
     entity_id:   uuid.UUID,
     request:     Request,
     file:        UploadFile = File(...),
+    capture_sent: dict = Depends(capture_form),
     user: User = Depends(require_analyst),
     db:   AsyncSession = Depends(get_db),
 ) -> EntityFileOut:
@@ -480,6 +502,11 @@ async def upload_entity_file(
     hashed by the server in the same pass (SHA-256 / SHA-1 / MD5). Returns 409 if the incident is closed, 404 if the entity is not found, and
     413 if the file exceeds the 50 MB limit. Requires the analyst role and access
     to the incident. Returns the created `EntityFileOut`.
+
+    S5: the same optional capture-record form fields as POST …/files (captured_at, captured_by_id or
+    captured_by_name, capture_tool, capture_tool_version, capture_method, capture_source, capture_url,
+    capture_context, capture_sha256); a capture_sha256 that differs from the bytes is 422
+    capture_hash_mismatch, audited `entity_file_upload_rejected`, nothing stored.
     """
     inc = await _get_incident(db, incident_id, user)
     if inc.status == "closed":
@@ -490,6 +517,7 @@ async def upload_entity_file(
     )).scalar_one_or_none()
     if not ent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Entity not found")
+    cap = await capture_record(db, incident_id, user, capture_sent)     # S5: checked before anything is read
 
     cl = request.headers.get("content-length")
     if cl and int(cl) > _ENTITY_FILE_MAX_BYTES:
@@ -498,6 +526,9 @@ async def upload_entity_file(
     raw = await file.read()
     if len(raw) > _ENTITY_FILE_MAX_BYTES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File exceeds 50 MB limit")
+    await check_capture_sha256(db, request, user, raw, cap, action="entity_file_upload", resource_type="entity_file",
+                               details={"entity_id": str(entity_id), "incident_id": str(incident_id),
+                                        "filename": file.filename or "file"})
 
     file_id       = uuid.uuid4()
     original_name = file.filename or "file"
@@ -517,6 +548,7 @@ async def upload_entity_file(
         nonce_hex=stored.nonce_hex,
         sha256=stored.sha256, sha1=stored.sha1, md5=stored.md5,
         uploaded_by_id=user.id,
+        **cap,
     )
     db.add(ef)
     await write_audit(
@@ -524,7 +556,8 @@ async def upload_entity_file(
         user_id=user.id, username=user.username,
         resource_type="entity_file", resource_id=str(file_id),
         details={"entity_id": str(entity_id), "incident_id": str(incident_id),
-                 "filename": original_name, "size": len(raw), "sha256": stored.sha256},
+                 "filename": original_name, "size": len(raw), "sha256": stored.sha256,
+                 **capture.audit_values(ef)},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()

@@ -5,10 +5,13 @@ import { useAuth } from '../../hooks/useAuth.jsx'
 import { api } from '../../api/client.js'
 import { relative, formatLocal } from '../../lib/datetime.js'
 import { lineDiff } from '../../lib/diff.js'
+import { CaseNoteSignature } from '../../components/LinkedCaseNotes.jsx'
 
 // H2 — Case notes: shared, append-only entries (they replace the private scratchpad, which stays
-// as a read-only legacy view for its author with "Post as case note"). Nothing is edited or
-// deleted here: a correction is a new entry and the original is shown struck through.
+// as a read-only legacy view for its author with "Post as case note").
+// CN-2 — a note is the chain of its revisions. "Edit" saves the next revision (a new entry whose
+// corrects_id is the current one); nothing stored is changed or deleted. Each revision is signed by
+// whoever saved it, and the history shows every revision with what changed.
 
 function DiffView({ oldText, newText }) {
   const lines = lineDiff(oldText, newText)
@@ -118,45 +121,42 @@ function LinkPicker({ targets, links, setLinks, disabled }) {
   )
 }
 
-function Composer({ incidentId, targets, correcting, onCancelCorrect, onPosted }) {
-  const empty = Object.fromEntries(KINDS.map(k => [k.field, []]))
-  const [body, setBody]       = useState('')
-  const [links, setLinks]     = useState(empty)
+const emptyLinks = () => Object.fromEntries(KINDS.map(k => [k.field, []]))
+const linksOf    = n => Object.fromEntries(KINDS.map(k => [k.field, [...n[k.field]]]))
+const sameIds    = (a, b) => a.length === b.length && [...a].sort().join() === [...b].sort().join()
+
+// Text + links with Write/Preview. `onSubmit(payload)` saves (throws on error). Without `initial` it is
+// the new-note composer and clears itself after a save.
+function NoteEditor({ title, initial, targets, submitLabel, busyLabel, hint, onSubmit, onCancel, notice }) {
+  const [body, setBody]       = useState(initial?.body ?? '')
+  const [links, setLinks]     = useState(() => (initial ? linksOf(initial) : emptyLinks()))
   const [preview, setPreview] = useState(false)
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState('')
+  const unchanged = !!initial && body.trim() === initial.body && KINDS.every(k => sameIds(links[k.field], initial[k.field]))
 
-  const post = async () => {
+  const submit = async () => {
     setBusy(true); setError('')
     try {
-      const n = await api.createCaseNote(incidentId, {
-        body: body.trim(), ...links, ...(correcting ? { corrects_id: correcting.id } : {}),
-      })
-      setBody(''); setLinks(empty); setPreview(false)
-      onPosted(n)
+      await onSubmit({ body: body.trim(), ...links })
+      if (!initial) { setBody(''); setLinks(emptyLinks()); setPreview(false) }
     } catch (e) {
-      setError(e.message || 'Could not post the case note.')
+      if (e.code !== 'already_corrected') setError(e.message || 'Could not save the case note.')
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <section className="panel case-note-composer" data-testid="case-note-composer">
+    <>
       <div className="panel-toolbar">
-        <h3 className="panel-h">{correcting ? 'Post a correction' : 'New case note'}</h3>
+        {title && <h3 className="panel-h">{title}</h3>}
         <div className="det-add-tabs">
           <button type="button" className={`btn ghost ${!preview ? 'active' : ''}`} onClick={() => setPreview(false)}>Write</button>
           <button type="button" className={`btn ghost ${preview ? 'active' : ''}`} onClick={() => setPreview(true)}>Preview</button>
         </div>
       </div>
-      {correcting && (
-        <div className="case-note-correcting">
-          Correcting the entry by <strong>{correcting.author_username || 'unknown'}</strong> at{' '}
-          <span className="mono">{formatLocal(correcting.created_at)}</span>. The original stays as written and is shown struck through.
-          <button type="button" className="btn-link" onClick={onCancelCorrect}>Cancel correction</button>
-        </div>
-      )}
+      {notice}
       <Alert text={error} />
       {!preview ? (
         <textarea className="input" rows={6} value={body} maxLength={MAX_CHARS} disabled={busy}
@@ -167,49 +167,127 @@ function Composer({ incidentId, targets, correcting, onCancelCorrect, onPosted }
         : <div className="case-note-empty">Nothing to preview yet.</div>}
       <LinkPicker targets={targets} links={links} setLinks={setLinks} disabled={busy} />
       <div className="case-note-actions">
-        <span className="case-note-hint">Entries can't be edited or deleted once posted. Time is set by the server.</span>
-        <button type="button" className="btn primary" onClick={post} disabled={busy || !body.trim()}>
-          {busy ? 'Posting…' : correcting ? 'Post correction' : 'Post note'}
+        <span className="case-note-hint">{hint}</span>
+        {onCancel && <button type="button" className="btn ghost" onClick={onCancel} disabled={busy}>Cancel</button>}
+        <button type="button" className="btn primary" onClick={submit} disabled={busy || !body.trim() || unchanged}>
+          {busy ? busyLabel : submitLabel}
         </button>
       </div>
-    </section>
+    </>
   )
 }
 
-function CaseNoteEntry({ note, byNoteId, targets, canCorrect, onCorrect }) {
-  const fix = note.corrected_by_id && byNoteId[note.corrected_by_id]
+function LinkChips({ note, targets }) {
+  if (!KINDS.some(k => note[k.field].length)) return null
   return (
-    <article id={`cn-${note.id}`} className="case-note" data-testid="case-note">
-      <div className="case-note-meta">
-        <span className="case-note-author">{note.author_username || 'unknown'}</span>
-        <span className="mono" title={`${note.created_at} (UTC)`}>{formatLocal(note.created_at)}</span>
-        {note.source_scratchpad_id && <span className="case-note-flag">from scratchpad</span>}
-        {note.corrects_id && (
-          <a className="case-note-flag" href={`#cn-${note.corrects_id}`}>correction of an earlier entry ↑</a>
-        )}
-        {note.corrected_by_id && (
-          <a className="case-note-flag" href={`#cn-${note.corrected_by_id}`}>
-            corrected{fix ? ` by ${fix.author_username || 'unknown'} at ${formatLocal(fix.created_at)}` : ''} ↓
-          </a>
-        )}
-        <span className="case-note-hash mono" title={`SHA-256 ${note.content_sha256}`}>#{note.content_sha256.slice(0, 12)}</span>
-      </div>
-      <div className={`md-body case-note-body${note.corrected_by_id ? ' case-note-struck' : ''}`}>
-        <ReactMarkdown>{note.body}</ReactMarkdown>
-      </div>
-      {KINDS.some(k => note[k.field].length) && (
-        <div className="case-note-links">
-          {KINDS.flatMap(k => note[k.field].map(id => (
-            <span key={`${k.field}:${id}`} className="case-note-chip">
-              {k.group.replace(/s$/, '')}: {targets.byId[id] ? k.name(targets.byId[id]) : `${id.slice(0, 8)} (not found)`}
-            </span>
-          )))}
-        </div>
-      )}
-      {canCorrect && (
-        <div className="case-note-actions">
-          <button type="button" className="btn-link" onClick={() => onCorrect(note)}>Correct</button>
-        </div>
+    <div className="case-note-links">
+      {KINDS.flatMap(k => note[k.field].map(id => (
+        <span key={`${k.field}:${id}`} className="case-note-chip">
+          {k.group.replace(/s$/, '')}: {targets.byId[id] ? k.name(targets.byId[id]) : `${id.slice(0, 8)} (not found)`}
+        </span>
+      )))}
+    </div>
+  )
+}
+
+// Every revision of one note, revision 1 first, each with its signature; "Changes" diffs its text
+// against the revision before it.
+function RevisionHistory({ incidentId, note, targets }) {
+  const [revs, setRevs]   = useState(null)
+  const [error, setError] = useState('')
+  const [open, setOpen]   = useState(null)
+
+  useEffect(() => {
+    api.listAllPages((id, p) => api.listCaseNoteRevisions(id, note.id, p), incidentId, {}, 200)
+      .then(setRevs)
+      .catch(e => { setRevs([]); setError(e.message || 'Could not load the history.') })
+  }, [incidentId, note.id])
+
+  return (
+    <div className="note-history" data-testid="case-note-history">
+      <Alert text={error} />
+      {revs === null && <div className="case-note-empty">Loading history…</div>}
+      {revs && revs.map((r, i) => {
+        const prev = revs[i - 1]
+        const linksChanged = prev && KINDS.some(k => !sameIds(prev[k.field], r[k.field]))
+        return (
+          <div key={r.id} className="case-note-rev" data-testid="case-note-revision">
+            <div className="case-note-meta">
+              <span className="case-note-author">Revision {r.revision}</span>
+              {r.id === note.id && <span className="case-note-flag">current</span>}
+              {linksChanged && <span className="case-note-flag">links changed</span>}
+              <button className="btn-link" type="button" onClick={() => setOpen(open === r.id ? null : r.id)}>
+                {open === r.id ? 'Hide' : prev ? 'Changes' : 'Text'}
+              </button>
+            </div>
+            <CaseNoteSignature note={r} />
+            {open === r.id && (prev
+              ? <DiffView oldText={prev.body} newText={r.body} />
+              : <div className="md-body case-note-body"><ReactMarkdown>{r.body}</ReactMarkdown></div>)}
+            {open === r.id && linksChanged && <LinkChips note={r} targets={targets} />}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function CaseNoteCard({ incidentId, note, targets, canEdit, onSaved }) {
+  const [editing, setEditing]         = useState(false)
+  const [conflict, setConflict]       = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
+
+  const save = async (payload) => {
+    try {
+      await api.createCaseNote(incidentId, { ...payload, corrects_id: note.id })
+    } catch (e) {
+      if (e.code === 'already_corrected') setConflict(true)
+      throw e
+    }
+    setEditing(false)
+    onSaved()
+  }
+  const reload = () => { setConflict(false); setEditing(false); onSaved() }
+  const byOther = note.revision > 1 && note.root_author_id !== note.author_id
+
+  return (
+    <article id={`cn-${note.root_id}`} className="case-note" data-testid="case-note">
+      {editing ? (
+        <NoteEditor title={`Edit note (saves revision ${note.revision + 1})`} initial={note} targets={targets}
+                    submitLabel="Save revision" busyLabel="Saving…"
+                    hint="Saving adds a new signed revision; the current text stays in the history."
+                    onSubmit={save} onCancel={() => { setConflict(false); setEditing(false) }}
+                    notice={conflict && (
+                      <div className="alert error" role="alert" data-testid="case-note-conflict">
+                        <span className="alert-icon">!</span>
+                        <span>Someone saved a newer revision of this note while you were editing. Copy your text,
+                          then reload to edit the latest revision.</span>
+                        <button type="button" className="btn" onClick={reload}>Reload</button>
+                      </div>
+                    )} />
+      ) : (
+        <>
+          <div className="case-note-meta">
+            {note.source_scratchpad_id && <span className="case-note-flag">from scratchpad</span>}
+            {note.revision > 1 && (
+              <span className="case-note-flag" data-testid="case-note-edited">
+                edited · revision {note.revision}{byOther ? ` · note by ${note.root_author_username || 'unknown'}` : ''}
+              </span>
+            )}
+          </div>
+          <div className="md-body case-note-body"><ReactMarkdown>{note.body}</ReactMarkdown></div>
+          <LinkChips note={note} targets={targets} />
+          <CaseNoteSignature note={note} />
+          <div className="case-note-actions">
+            {note.revision > 1 && (
+              <button type="button" className="btn-link" onClick={() => setShowHistory(v => !v)}>
+                {showHistory ? 'Hide history' : `History (${note.revision})`}
+              </button>
+            )}
+            {canEdit && <button type="button" className="btn-link" onClick={() => setEditing(true)}>Edit</button>}
+          </div>
+          {showHistory && <RevisionHistory incidentId={incidentId} note={note} targets={targets} />}
+        </>
       )}
     </article>
   )
@@ -265,12 +343,11 @@ export default function Notes() {
   const [targets, setTargets] = useState({ loaded: false, byId: {}, ...Object.fromEntries(KINDS.map(k => [k.field, []])) })
   const [author,  setAuthor]  = useState('')
   const [exhibit, setExhibit] = useState('')
-  const [correcting, setCorrecting] = useState(null)
   const [error,   setError]   = useState('')
 
   const load = useCallback(async () => {
     try {
-      setNotes(await api.listAllPages(api.listCaseNotes, inc.id, { author_id: author, evidence_id: exhibit }, 200))
+      setNotes(await api.listAllPages(api.listCaseNotes, inc.id, { current: true, author_id: author, evidence_id: exhibit }, 200))
     } catch (e) {
       setNotes([]); setError(e.message || 'Failed to load case notes.')
     }
@@ -289,35 +366,36 @@ export default function Notes() {
     })
   }, [inc.id])
 
-  const byNoteId = useMemo(() => Object.fromEntries((notes || []).map(n => [n.id, n])), [notes])
   const authors  = useMemo(() => {
     const m = new Map((notes || []).map(n => [n.author_id, n.author_username]))
     if (author && !m.has(author)) m.set(author, 'selected author')
     return [...m.entries()]
   }, [notes, author])
 
-  const posted = () => { setCorrecting(null); load() }
-  const mayCorrect = n => canWrite && !isClosed && !n.corrected_by_id && (n.author_id === user?.id || user?.role === 'admin')
+  const mayEdit = n => canWrite && !isClosed && (n.root_author_id === user?.id || user?.role === 'admin')
   const myLegacy = legacy.filter(n => n.author_id === user?.id)
   const otherLegacy = legacy.filter(n => n.author_id !== user?.id)
 
   return (
     <div className="comments-wrap case-notes" data-testid="case-notes-page">
       <p className="case-note-intro">
-        Shared, append-only case notes: everyone who can see this incident reads them. Entries can't be edited or
-        deleted — post a correction instead. Each entry's SHA-256 is recorded in the audit log and exported with the
-        LE package and the full report.
+        Shared case notes: everyone who can see this incident reads them. A note's author (or an admin) can edit it,
+        but editing never overwrites: every save is a new revision, signed by whoever saved it, and earlier revisions
+        stay in the history. Each revision's SHA-256 is recorded in the audit log and exported with the LE package.
       </p>
       <Alert text={error} />
 
       {canWrite && !isClosed && (
-        <Composer incidentId={inc.id} targets={targets} correcting={correcting}
-                  onCancelCorrect={() => setCorrecting(null)} onPosted={posted} />
+        <section className="panel case-note-composer" data-testid="case-note-composer">
+          <NoteEditor title="New case note" targets={targets} submitLabel="Post note" busyLabel="Posting…"
+                      hint="Signed with your name and incident roles. Time is set by the server."
+                      onSubmit={async payload => { await api.createCaseNote(inc.id, payload); load() }} />
+        </section>
       )}
-      {isClosed && <div className="case-note-empty">The incident is closed: case notes are read-only. Re-open it to add one.</div>}
+      {isClosed && <div className="case-note-empty">The incident is closed: case notes are read-only. Re-open it to add or edit one.</div>}
 
       <div className="panel-toolbar case-note-filters">
-        <h3 className="panel-h">Entries{notes ? ` (${notes.length})` : ''}</h3>
+        <h3 className="panel-h">Notes{notes ? ` (${notes.length})` : ''}</h3>
         <select className="select" aria-label="Filter by author" value={author} onChange={e => setAuthor(e.target.value)}>
           <option value="">All authors</option>
           {authors.map(([id, name]) => <option key={id} value={id}>{name || id.slice(0, 8)}</option>)}
@@ -331,9 +409,7 @@ export default function Notes() {
       {notes === null ? <div className="panel-empty">Loading case notes…</div>
         : notes.length === 0 ? <div className="panel-empty">No case notes{author || exhibit ? ' match these filters' : ' yet'}.</div>
         : notes.map(n => (
-          <CaseNoteEntry key={n.id} note={n} byNoteId={byNoteId} targets={targets}
-                         canCorrect={mayCorrect(n)}
-                         onCorrect={note => { setCorrecting(note); window.scrollTo({ top: 0, behavior: 'smooth' }) }} />
+          <CaseNoteCard key={n.id} incidentId={inc.id} note={n} targets={targets} canEdit={mayEdit(n)} onSaved={load} />
         ))}
 
       {(myLegacy.length > 0 || otherLegacy.length > 0) && (
@@ -344,10 +420,10 @@ export default function Notes() {
             use <strong>Post as case note</strong> to share yours.
           </p>
           {myLegacy.map(n => (
-            <LegacyScratchpad key={n.id} incidentId={inc.id} note={n} mine canPost={canWrite && !isClosed} onPosted={posted} />
+            <LegacyScratchpad key={n.id} incidentId={inc.id} note={n} mine canPost={canWrite && !isClosed} onPosted={load} />
           ))}
           {otherLegacy.map(n => (
-            <LegacyScratchpad key={n.id} incidentId={inc.id} note={n} mine={false} canPost={false} onPosted={posted} />
+            <LegacyScratchpad key={n.id} incidentId={inc.id} note={n} mine={false} canPost={false} onPosted={load} />
           ))}
         </details>
       )}

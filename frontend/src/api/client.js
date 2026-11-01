@@ -27,10 +27,11 @@ async function request(method, path, body) {
     err.status = res.status
     err.code = data && typeof data === 'object' ? data.code : undefined
     err.data = data
-    // Session expired/revoked mid-use → let the auth layer redirect to login.
+    // Session expired/revoked mid-use → the auth layer shows the sign-in dialog over the page (SE).
     // Skip /api/auth/* so login failures and bootstrap probes (which 401
-    // normally) don't trigger a redirect.
+    // normally) don't trigger it. The page keeps its state, so its error line tells the user what to do.
     if (res.status === 401 && !path.startsWith('/api/auth/')) {
+      err.message = 'Your session ended. Sign in again, then retry.'
       onUnauthorized?.()
     }
     throw err
@@ -83,7 +84,10 @@ function apiError(res, data, fallback) {
   err.status = res.status
   err.code = data && typeof data === 'object' ? data.code : undefined
   err.data = data
-  if (res.status === 401) onUnauthorized?.()
+  if (res.status === 401) {
+    err.message = 'Your session ended. Sign in again, then retry.'   // SE: same as request()
+    onUnauthorized?.()
+  }
   return err
 }
 
@@ -404,6 +408,10 @@ export const api = {
   revokeSession:       (id)            => request('DELETE', `/api/sessions/${id}`),
   revokeOtherSessions: ()              => request('POST',   '/api/sessions/revoke-others'),
   labelSession:        (id, label)     => request('PATCH',  `/api/sessions/${id}/label`, { label }),
+  // SE: when this browser session ends. getCurrentSession is a pure read (never extends the session);
+  // sessionHeartbeat counts as activity, so it is sent only on real input.
+  getCurrentSession:   ()              => request('GET',    '/api/sessions/current'),
+  sessionHeartbeat:    ()              => request('POST',   '/api/sessions/current/heartbeats'),
 
   // sessions (admin — all users)
   listAdminSessions:  ()   => request('GET',    '/api/admin/sessions'),
@@ -663,16 +671,26 @@ export const api = {
   },
 
   // Incident file store ("Files") — unified with entity files
-  listIncidentFiles:   (incidentId)             => request('GET',    `/api/incidents/${incidentId}/files`),
+  // S5: params { linked_type, linked_id } = only the files linked to that exhibit / timeline event / IOC.
+  listIncidentFiles:   (incidentId, params = {}) => {
+    const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString()
+    return request('GET', `/api/incidents/${incidentId}/files${qs ? `?${qs}` : ''}`)
+  },
   updateIncidentFile:  (incidentId, fileId, payload) => request('PATCH', `/api/incidents/${incidentId}/files/${fileId}`, payload),
   deleteIncidentFile:  (incidentId, fileId, reason) => request('DELETE', `/api/incidents/${incidentId}/files/${fileId}`, { reason }),
   registerFileExhibit: (incidentId, fileId)     => request('POST',   `/api/incidents/${incidentId}/files/${fileId}/register-exhibit`),
+  fileExhibitPrefill:  (incidentId, fileId)     => request('GET',    `/api/incidents/${incidentId}/files/${fileId}/exhibit-prefill`),
+  // S5: payload { target_type: exhibit | timeline_event | ioc, target_id, note }
+  linkIncidentFile:    (incidentId, fileId, payload) => request('POST', `/api/incidents/${incidentId}/files/${fileId}/links`, payload),
+  unlinkIncidentFile:  (incidentId, fileId, linkId) => request('DELETE', `/api/incidents/${incidentId}/files/${fileId}/links/${linkId}`),
   incidentFileDownloadUrl: (incidentId, fileId) => `/api/incidents/${incidentId}/files/${fileId}/download`,
 
-  uploadIncidentFile: async (incidentId, file, entityId = null) => {
+  // S5: capture = the capture-record form fields (captured_at, captured_by_id / _name, capture_tool, …); empty ones are left out.
+  uploadIncidentFile: async (incidentId, file, entityId = null, capture = {}) => {
     const form = new FormData()
     form.append('file', file)
     if (entityId) form.append('entity_id', entityId)
+    for (const [k, v] of Object.entries(capture)) if (v !== null && v !== undefined && v !== '') form.append(k, v)
     const res = await fetch(`/api/incidents/${incidentId}/files`, {
       method: 'POST',
       credentials: 'same-origin',
@@ -721,6 +739,9 @@ export const api = {
 
   collectPhysical: (incidentId, payload) =>
     request('POST', `/api/incidents/${incidentId}/evidence/physical`, payload),
+  // EI — what an exhibit registered now without an identifier would get: {template, example} (reserves nothing).
+  nextEvidenceIdentifier: (incidentId) =>
+    request('GET', `/api/incidents/${incidentId}/evidence/next-identifier`),
 
   transferEvidence: (incidentId, evidenceId, payload) =>
     request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/transfer`, payload),
@@ -792,7 +813,9 @@ export const api = {
   containEmail:        (incidentId, aid, items, assigneeId = null) => request('POST', `/api/incidents/${incidentId}/email/${aid}/containment`, { items, assignee_id: assigneeId }),
   promoteEmailIocs:    (incidentId, aid, iocs) => request('POST', `/api/incidents/${incidentId}/email/${aid}/promote-iocs`, { iocs }),
   extractEmailAttachment: (incidentId, aid, idx) => request('POST', `/api/incidents/${incidentId}/email/${aid}/attachments/${idx}/extract`),
-  importEmailHops:     (incidentId, aid)   => request('POST', `/api/incidents/${incidentId}/email/${aid}/import-hops`),
+  // TE: linkEntities links each hop to the entity its relay host names (server default: on)
+  importEmailHops:     (incidentId, aid, linkEntities = true) =>
+    request('POST', `/api/incidents/${incidentId}/email/${aid}/import-hops?link_entities=${linkEntities}`),
   mintEmailEvidence:   (incidentId, aid)   => request('POST', `/api/incidents/${incidentId}/email/${aid}/mint-evidence`),
   checkEmailDomain:    (incidentId, domain, selector, confirmOutbound = false) => {
     const qs = new URLSearchParams({ domain })
@@ -802,11 +825,17 @@ export const api = {
   },
 
   // GS-11 — attach an image/* photo (encrypted at rest). Returns the updated evidence.
-  addEvidencePhoto: async (incidentId, evidenceId, { file, caption, taken_at }) => {
+  // S4 — the photo record: taken_at (ISO 8601 with an offset), taken_by_id or taken_by_name (neither = you),
+  // camera, context. A refused field is 422 invalid_taken_at / taken_by_conflict (err.data.code).
+  addEvidencePhoto: async (incidentId, evidenceId, { file, caption, taken_at, taken_by_id, taken_by_name, camera, context }) => {
     const form = new FormData()
     form.append('file', file)
     if (caption)  form.append('caption', caption)
     if (taken_at) form.append('taken_at', taken_at)
+    if (taken_by_id)   form.append('taken_by_id', taken_by_id)
+    if (taken_by_name) form.append('taken_by_name', taken_by_name)
+    if (camera)   form.append('camera', camera)
+    if (context)  form.append('context', context)
     const res = await fetch(`/api/incidents/${incidentId}/evidence/${evidenceId}/photos`, {
       method: 'POST', credentials: 'same-origin', body: form,
     })
@@ -830,6 +859,25 @@ export const api = {
   // Wizard A — Seal: validates ISO 27037 + GDPR Art. 5.1(c) minimum fields and locks the row.
   sealEvidence:     (incidentId, evidenceId) =>
     request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/seal`, { confirm: true }),
+  // S3 — the record the seal binds: {seal_tst_subject, seal_record_sha256, sealed_record, recomputed_now_sha256,
+  // changed_since_seal}; 409 evidence_not_sealed before the seal.
+  evidenceSealRecord: (incidentId, evidenceId) =>
+    request('GET', `/api/incidents/${incidentId}/evidence/${evidenceId}/seal-record`),
+  // S6 — a container exhibit's manifest: {items, next_cursor}; q = case-insensitive path substring.
+  // 409 manifest_not_built unless the exhibit's manifest_status is built.
+  evidenceManifest: (incidentId, evidenceId, { limit, cursor, q } = {}) => {
+    const qs = new URLSearchParams()
+    if (limit) qs.set('limit', limit)
+    if (cursor) qs.set('cursor', cursor)
+    if (q) qs.set('q', q)
+    const s = qs.toString()
+    return request('GET', `/api/incidents/${incidentId}/evidence/${evidenceId}/manifest${s ? '?' + s : ''}`)
+  },
+  // The same entries as a CSV download (a plain link: the browser streams it to disk).
+  evidenceManifestCsvUrl: (incidentId, evidenceId, q) =>
+    `/api/incidents/${incidentId}/evidence/${evidenceId}/manifest?format=csv${q ? '&q=' + encodeURIComponent(q) : ''}`,
+  rebuildEvidenceManifest: (incidentId, evidenceId) =>
+    request('POST', `/api/incidents/${incidentId}/evidence/${evidenceId}/manifest/rebuild`),
 
   // Wizard B — Examination session (pre-verify → record → post-verify, transactional).
   examinationSession: (incidentId, evidenceId, payload) =>
@@ -968,7 +1016,8 @@ export const api = {
   listNotes:        (incidentId)          => request('GET',    `/api/incidents/${incidentId}/notes`),
   listNoteVersions:  (incidentId, noteId)  => request('GET',    `/api/incidents/${incidentId}/notes/${noteId}/versions`),
 
-  // Case notes (H2): shared, append-only; filters author_id / evidence_id / entity_id / ioc_id / timeline_event_id
+  // Case notes (H2): shared, append-only; filters author_id / evidence_id / entity_id / ioc_id / timeline_event_id,
+  // current=true (CN-2: each note's current revision). An edit = createCaseNote with corrects_id = current revision.
   listCaseNotes: (incidentId, params = {}) => {
     const qs = new URLSearchParams()
     for (const [k, v] of Object.entries(params)) {
@@ -978,6 +1027,10 @@ export const api = {
     return request('GET', `/api/incidents/${incidentId}/case-notes${s ? '?' + s : ''}`)
   },
   createCaseNote: (incidentId, payload) => request('POST', `/api/incidents/${incidentId}/case-notes`, payload),
+  listCaseNoteRevisions: (incidentId, noteId, params = {}) => {
+    const s = new URLSearchParams(params).toString()
+    return request('GET', `/api/incidents/${incidentId}/case-notes/${noteId}/revisions${s ? '?' + s : ''}`)
+  },
 
   // Recovery tracker (I1): in-scope systems + roll-up; filters state; PATCH one system (fields / one state step)
   listRecovery: (incidentId, params = {}) => {
@@ -1037,9 +1090,34 @@ export const api = {
     const s = qs.toString()
     return request('GET', `/api/incidents/${incidentId}/timeline${s ? '?' + s : ''}`)
   },
-  createTimelineEvent: (incidentId, payload)          => request('POST',   `/api/incidents/${incidentId}/timeline`, payload),
+  // TX: the server renders the export → { blob, filename }. params: layout, format (html|csv), tz,
+  // include_raw_logs and the list's filters. Errors carry .status / .code like request().
+  exportTimeline: async (incidentId, params = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    }
+    const res = await fetch(`/api/incidents/${incidentId}/timeline/export?${qs}`, { credentials: 'same-origin' })
+    if (!res.ok) {
+      const text = await res.text()
+      const data = text ? safeJson(text) : null
+      const err = new Error(extractMessage(data, res.status))
+      err.status = res.status
+      err.code = data && typeof data === 'object' ? data.code : undefined
+      if (res.status === 401) {
+        err.message = 'Your session ended. Sign in again, then retry.'
+        onUnauthorized?.()
+      }
+      throw err
+    }
+    const match = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)
+    return { blob: await res.blob(), filename: match ? match[1] : 'timeline-export' }
+  },
+  createTimelineEvent:(incidentId, payload)          => request('POST',   `/api/incidents/${incidentId}/timeline`, payload),
   updateTimelineEvent: (incidentId, eventId, payload) => request('PATCH',  `/api/incidents/${incidentId}/timeline/${eventId}`, payload),
   deleteTimelineEvent: (incidentId, eventId)          => request('DELETE', `/api/incidents/${incidentId}/timeline/${eventId}`),
+  // TE: link every unlinked event whose host names the entity ({entity_id, dry_run}) → {entity_id, matched, linked}
+  linkTimelineEntity: (incidentId, payload) => request('POST', `/api/incidents/${incidentId}/timeline/entity-links`, payload),
 
   batchCreateTimelineEvents: (incidentId, payload) =>
     request('POST', `/api/incidents/${incidentId}/timeline/batch`, payload),
@@ -1188,6 +1266,9 @@ export const api = {
   deleteApiKey:       (service)        => request('DELETE', `/api/settings/api-keys/${service}`),
   getIncidentRefSettings:    ()       => request('GET',   '/api/settings/incident-ref'),
   updateIncidentRefSettings: (prefix) => request('PATCH', '/api/settings/incident-ref', { prefix }),
+  // EI — the exhibit-identifier naming convention (admin): {template, tokens, example, example_incident_ref}.
+  getEvidenceIdentifierSettings:    ()         => request('GET',   '/api/settings/evidence-identifier'),
+  updateEvidenceIdentifierSettings: (template) => request('PATCH', '/api/settings/evidence-identifier', { template }),
 
   // Browser history (per-incident)
   // G3 — register-first: the file(s) become draft exhibits, then they are parsed.
@@ -1460,6 +1541,9 @@ export const api = {
 
   // Organisation readiness (E1) — admins + analysts; viewers get 403
   getReadiness: () => request('GET', '/api/readiness'),
+  // RD: defer failing checks for good / undo one (admins only). Both return the readiness response.
+  deferReadinessChecks:   (body) => request('POST', '/api/readiness/deferrals', body),
+  removeReadinessDeferral: (id)  => request('DELETE', `/api/readiness/deferrals/${encodeURIComponent(id)}`),
 
   // Contacts directory (E2) — read: admins + analysts (viewers 403); write: admins only.
   // { verified: true } on update stamps the server time + you as verifier.
