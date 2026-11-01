@@ -14,12 +14,17 @@
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-markdown": "^10.1.0",
-    "react-router-dom": "^7.18.0"
+    "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
-    "vite": "^8.0.16"
+    "vite": "^8.3.4"
+  },
+  "overrides": {
+    "postcss": "8.5.30",
+    "rolldown": "1.2.14",
+    "set-cookie-parser": "2.7.2"
   }
 }
