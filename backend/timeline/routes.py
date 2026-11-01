@@ -344,14 +344,22 @@ async def list_timeline_events(
 
 # The most events one export holds; narrow a bigger timeline with the filters or key=true.
 EXPORT_MAX_EVENTS = 10_000
-_TZ_NAME = re.compile(r"[A-Za-z0-9_+\-]+(?:/[A-Za-z0-9_+\-]+){0,2}")
+# An IANA name: 1–3 non-empty "/" parts of A–Z a–z 0–9 _ + - (the longest real one is 32 characters). Checked without a
+# regex (CodeQL py/polynomial-redos) and before ZoneInfo opens anything.
+_TZ_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+-/")
+_TZ_NAME_MAX = 64
+
+
+def _tz_name_ok(name: str) -> bool:
+    parts = name.split("/")
+    return len(name) <= _TZ_NAME_MAX and len(parts) <= 3 and all(parts) and set(name) <= _TZ_CHARS
 
 
 def _zone(name: str):
     if name == "UTC":
         return timezone.utc
     try:
-        if not _TZ_NAME.fullmatch(name):
+        if not _tz_name_ok(name):
             raise ValueError(name)
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError, OSError):

@@ -16,9 +16,9 @@ import hashlib
 import json
 import types
 import unittest
+import unittest.mock
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest import mock
 
 from evidence import records, source
 from evidence.provenance import score_evidence
@@ -131,7 +131,7 @@ class CanonicalRecord(unittest.TestCase):
         """S6 adds manifest_sha256 to SEAL_RECORD_OPTIONAL_FIELDS: absent when null, so v1 stays byte-identical."""
         self.assertEqual(records.SEAL_RECORD_OPTIONAL_FIELDS, ("manifest_sha256",))
         self.assertEqual(records.seal_record_v1(exhibit()), VECTOR)               # S6 in place: same bytes
-        with mock.patch.object(records, "SEAL_RECORD_OPTIONAL_FIELDS", ("manifest_sha256",)):
+        with unittest.mock.patch.object(records, "SEAL_RECORD_OPTIONAL_FIELDS", ("manifest_sha256",)):
             self.assertEqual(records.seal_record_v1(exhibit(manifest_sha256=None)), VECTOR)
             rec = json.loads(records.seal_record_v1(exhibit(manifest_sha256="9" * 64)))
             self.assertEqual(rec["manifest_sha256"], "9" * 64)

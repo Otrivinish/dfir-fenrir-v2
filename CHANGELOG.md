@@ -231,6 +231,7 @@ REVERT.md says how). The schema stays: it is additive and unused by the old code
 
 ### Fixed
 
+- **Timeline export: the time-zone name is checked without a regex** (GitHub CodeQL `py/polynomial-redos` on `?tz=`). The rule is unchanged (1–3 `/` parts of `A–Z a–z 0–9 _ + -`), plus a 64-character cap; anything else is 422 `invalid_timezone`. The old regex was linear under `fullmatch` in practice, but it no longer exists. The same pass cleared the PR's eight code-quality notes (comments on three empty `except` blocks, one test helper uses `contextlib.closing`, test imports). Revert: `ignore/revert/code-quality-2026-11-01/`.
 - **Security: the IOC export ignored team access.** `GET /api/incidents/{id}/iocs/export/{fmt}` only checked that the incident existed, so anyone signed in could export the IOCs of a team-restricted incident by its UUID. It now uses the same access check as the IOC list (404 `incident_not_found`). The gap predates this release; the independent review found it.
 - **Entity bulk import rejected every row** (`Unknown type "", Value is required` from line 2) unless the input was a comma CSV with a `type,value` header. Fixed cases:
   - A semicolon CSV (Excel in many locales) or tab-separated cells pasted from a spreadsheet now parse.

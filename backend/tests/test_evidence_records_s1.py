@@ -19,10 +19,10 @@ import io
 import json
 import types
 import unittest
+import unittest.mock
 import uuid
 import zipfile
 from datetime import datetime, timezone
-from unittest import mock
 
 from evidence import exports, records
 from le_package import builder
@@ -113,7 +113,7 @@ def _build(items):
     zf = zipfile.ZipFile(buf, "w")
     manifest = Manifest(incident_id="i", incident_ref=None, case_reference="c", platform_version="t")
     stub = lambda zf_, man, ev, path, mime, src: {"sha256": ev.sha256}          # noqa: E731
-    with mock.patch.object(builder, "_stream_evidence_file", stub):
+    with unittest.mock.patch.object(builder, "_stream_evidence_file", stub):
         asyncio.run(builder._section_evidence(_Db(items), uuid.uuid4(), legal_hold_only=False,
                                               include_unsealed_drafts=True, manifest=manifest, zf=zf))
     zf.close()

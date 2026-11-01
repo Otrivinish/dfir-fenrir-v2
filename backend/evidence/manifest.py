@@ -143,7 +143,7 @@ async def stop() -> None:
         try:
             await _worker
         except asyncio.CancelledError:
-            pass
+            pass                                           # the cancellation just requested: the worker has stopped
     _queue, _worker = None, None
     _queued.clear()
 

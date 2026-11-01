@@ -15,6 +15,7 @@ repo root:
       --entrypoint python dfir-fenrir-v2-backend:local -m unittest tests.test_evidence_manifest_s6 -v
 """
 import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -59,10 +60,8 @@ def run(fmt: str, data: bytes, caps: Caps = CAPS):
     rel, nonce, size = store(data)
     mb = ManifestBuild(fmt, caps)
     src = seekable.open_view(rel, nonce, size) if fmt == "zip" else crypto.iter_decrypted(rel, nonce, size)
-    try:
+    with contextlib.closing(src):
         entries = list(mb.entries(src))
-    finally:
-        src.close()
     return mb, entries
 
 
@@ -534,8 +533,7 @@ class KapeCopyLog(unittest.TestCase):
             "2024-01-02 03:04:05,C:\\Users\\jdoe\\NTUSER.DAT,D:\\kape\\out\\C\\Users\\jdoe\\NTUSER.DAT,6,"
             f"{'0' * 40},True,,,,0.2",
             "2024-01-02 03:04:05,C:\\Users\\jdoe\\gone.txt,D:\\kape\\out\\C\\Users\\jdoe\\gone.txt,1,,False,,,,0",
-            "2024-01-02 03:04:05,C:\\Users\\jdoe\\Desktop\\x.lnk,D:\\kape\\out\\C\\Users\\jdoe\\Desktop\\x.lnk,3,,"
-            "False,,,,0",
+            "2024-01-02 03:04:05,C:\\Users\\jdoe\\Desktop\\x.lnk,D:\\kape\\out\\C\\Users\\jdoe\\Desktop\\x.lnk,3,,False,,,,0",
         ]) + "\r\n"
         mb, entries = run("zip", kape_zip(log))
         e = by_path(entries)

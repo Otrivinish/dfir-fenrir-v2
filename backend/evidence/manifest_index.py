@@ -225,7 +225,7 @@ def _zip_name(zi: zipfile.ZipInfo) -> tuple[str, str, bytes]:
                 try:
                     name, enc = data[5:].decode("utf-8"), "utf8"
                 except UnicodeDecodeError:
-                    pass
+                    pass                                   # not UTF-8 after all: keep the cp437 header name
     return _clean(name), enc, raw
 
 
@@ -403,7 +403,7 @@ def _tar_name(name: str) -> tuple[str, str, Optional[bytes]]:
         if "\x00" not in text:
             return text, "utf8", None
     except UnicodeDecodeError:
-        pass
+        pass                                               # not UTF-8: fall through to the replaced name + raw bytes
     return _clean(raw.decode("utf-8", "replace")), "other", raw
 
 

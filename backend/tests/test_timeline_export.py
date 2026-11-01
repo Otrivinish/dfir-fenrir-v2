@@ -325,5 +325,35 @@ class CsvTest(unittest.TestCase):
         self.assertTrue(text.endswith("\r\n") and re.fullmatch(r"[a-z_,]+\r\n", text))
 
 
+class TimeZoneNameTest(unittest.TestCase):
+    """The ?tz name check (timeline/routes.py _tz_name_ok) replaced a regex CodeQL flagged (py/polynomial-redos): same
+    rule, no regex, plus a length cap."""
+    OLD = re.compile(r"[A-Za-z0-9_+\-]+(?:/[A-Za-z0-9_+\-]+){0,2}")
+
+    def test_same_rule_as_the_old_regex(self):
+        import random
+        from timeline.routes import _tz_name_ok
+        rnd = random.Random(1101)
+        alphabet = "Ab0_+-/.: \\%\x00é"
+        names = ["UTC", "Europe/Stockholm", "America/Argentina/ComodRivadavia", "Etc/GMT+5", "a/b/c/d", "/Europe",
+                 "Europe/", "Europe//Oslo", "", "../etc/passwd", "Europe/../../etc"]
+        names += ["".join(rnd.choice(alphabet) for _ in range(rnd.randint(0, 20))) for _ in range(5000)]
+        for n in names:
+            self.assertEqual(_tz_name_ok(n), bool(self.OLD.fullmatch(n)), repr(n))
+
+    def test_zone(self):
+        import time
+        from core.errors import ApiError
+        from timeline.routes import _zone
+        self.assertIs(_zone("UTC"), timezone.utc)
+        self.assertEqual(str(_zone("Europe/Stockholm")), "Europe/Stockholm")
+        for bad in ("../etc/passwd", "Europe/Nowhere", "x" * 65, "+" * 200_000 + "!"):
+            t = time.perf_counter()
+            with self.assertRaises(ApiError) as cm:
+                _zone(bad)
+            self.assertEqual(cm.exception.code, "invalid_timezone")
+            self.assertLess(time.perf_counter() - t, 0.5, bad[:20])
+
+
 if __name__ == "__main__":
     unittest.main()

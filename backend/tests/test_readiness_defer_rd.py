@@ -15,9 +15,9 @@ stdlib unittest; no DB, no network. From the repo root:
 import asyncio
 import contextlib
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest import mock
 
 from pydantic import ValidationError
 
@@ -32,7 +32,7 @@ def fake_checks(results):
     out = []
     for cid, level, st, *over in results:
         async def fn(db, now, st=st, over=over):
-            return (st, f"{st} detail", {"level": over[0]}) if over else (st, f"{st} detail")
+            return st, f"{st} detail", ({"level": over[0]} if over else {})
         out.append(({"id": cid, "title": cid.title(), "level": level, "csf": [], "fix_route": None}, fn))
     return out
 
@@ -60,7 +60,7 @@ CHECKS = [("admin_totp", "blocker", "fail"), ("on_call_14d", "blocker", "fail"),
 
 
 def run(deferrals, is_admin=True, results=CHECKS):
-    with mock.patch.object(checks, "CHECKS", fake_checks(results)):
+    with unittest.mock.patch.object(checks, "CHECKS", fake_checks(results)):
         res = asyncio.run(checks.evaluate(FakeDB(deferrals), is_admin=is_admin))
     Readiness(**res)                                         # the response model accepts it
     return res
