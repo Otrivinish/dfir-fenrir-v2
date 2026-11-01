@@ -89,6 +89,16 @@ def _deadline_compliance(d: RegulatoryDeadline, now: datetime) -> tuple[str, Opt
     return ("violated", round(late, 1)) if late > 0 else ("pending", None)
 
 
+def _evidence_items(evidence) -> list[dict]:
+    """The report's exhibit list, in collection order: identifier, name, kind, status and the
+    SHA-256 (null for a physical item). Nothing else: no storage path, crypto or custody fields."""
+    return [
+        {"identifier": e.identifier, "name": e.name, "kind": e.kind, "status": e.status,
+         "sha256": e.sha256 if e.kind == "digital_file" else None}
+        for e in sorted(evidence, key=lambda e: (e.collected_at, e.identifier))
+    ]
+
+
 @router.get("/{incident_id}/reports/data", summary="Get report data")
 async def get_report_data(
     incident_id: uuid.UUID,
@@ -143,6 +153,9 @@ async def get_report_data(
       …/stakeholder-notifications returns them (every obligation, superseded included, timestamps
       UTC Z): role, category, required, severity, clock start, due, status, notified at/by/channel,
       linked stakeholder name, not-required reason, note.
+    - `evidence_items[]`: every exhibit, in collection order: {identifier, name, kind
+      digital_file|physical_item, status, sha256 (of the original file; null for a physical item)}.
+      No storage path, crypto envelope or custody details.
     """
     # Access gate — returns 404 (not 403) for incidents the caller can't see,
     # matching the rest of the per-incident routers. Without this any analyst
@@ -506,6 +519,7 @@ async def get_report_data(
             "digital":  sum(1 for e in evidence if e.kind == "digital_file"),
             "physical": sum(1 for e in evidence if e.kind == "physical_item"),
         },
+        "evidence_items":   _evidence_items(evidence),
         "business_impact":  jsonable_encoder(bia) if bia else None,
         "costs":            jsonable_encoder(list(costs)),
         "mitre_summary":    mitre_summary,
