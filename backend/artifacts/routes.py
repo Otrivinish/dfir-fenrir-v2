@@ -6,7 +6,8 @@ Upload pipeline:
   - H1 (R06): encrypted at rest (FENRGCM v2, artifacts/store.py) in one streaming pass that also
     computes MD5 + SHA-256 (+ SHA-512) and keeps the first 2 KiB for MIME detection (python-magic);
     the plaintext never reaches a disk
-  - File stored at {quarantine_path}/{incident_id}/{uuid}_{safe_filename}.enc
+  - File stored at {quarantine_path}/{incident_id}/{uuid}.enc (server ids only; the uploaded name is the row's
+    original_filename). Rows stored before keep {uuid}_{safe name}.enc
   - Path-traversal guard on every file access
   - Hash IOCs only on request (`create_hash_iocs`, default false) or later through
     POST …/artifacts/{id}/hash-iocs: a ransom note or a screenshot is not an indicator
@@ -182,7 +183,8 @@ async def upload_artifact(
     only with `create_hash_iocs=true` (form field; default false), deduplicated against the incident's
     IOCs. Requires the analyst role and an open incident (409 incident_closed); rejects oversize uploads
     (413) and a full quarantine volume (507). Returns the created artifact metadata."""
-    _ensure_open(await _get_incident(db, incident_id, user))
+    inc = await _get_incident(db, incident_id, user)
+    _ensure_open(inc)
 
     cap = settings.artifact_max_upload_bytes
     cl = request.headers.get("content-length")
@@ -192,8 +194,8 @@ async def upload_artifact(
 
     original_filename = file.filename or "unnamed.bin"
     artifact_id       = uuid.uuid4()
-    stored_filename   = store.stored_name(artifact_id, original_filename)
-    stored, tap = await store.awrite(file.file, incident_id, stored_filename, cap=cap)
+    stored_filename   = store.stored_name(artifact_id)
+    stored, tap = await store.awrite(file.file, inc.id, stored_filename, cap=cap)   # the row's id, not the URL's
     mime_type = magic.from_buffer(tap.head, mime=True)   # magic-based, not extension trust
 
     artifact = Artifact(
@@ -234,7 +236,7 @@ async def upload_artifact(
     try:
         await db.commit()
     except BaseException:
-        await asyncio.to_thread(store.unlink, incident_id, stored_filename)   # no row: no file left behind
+        await asyncio.to_thread(store.unlink, inc.id, stored_filename)   # no row: no file left behind
         raise
     return _artifact_out(artifact)
 

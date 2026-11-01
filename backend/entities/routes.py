@@ -46,9 +46,10 @@ def _safe_name(name: str) -> str:
     return safe + "_" if safe.lower().endswith(_RESERVED_SUFFIXES) else safe
 
 
-def _entity_file_path(entity_id: uuid.UUID, file_id: uuid.UUID, original_name: str) -> str:
-    # New names end with a fixed ".enc" (R3-1); rows written before keep their path (readers use the row's).
-    return f"entity-files/{entity_id}/{file_id}_{_safe_name(original_name)}.enc"
+def _entity_file_path(entity_id: uuid.UUID, file_id: uuid.UUID) -> str:
+    # Server ids only, never the uploaded name (CodeQL py/path-injection); the name lives in the row. New names end with
+    # a fixed ".enc" (R3-1); rows written before keep their `<id>_<name>.enc` path (readers use the row's).
+    return f"entity-files/{entity_id}/{file_id}.enc"
 
 router = APIRouter()
 
@@ -532,7 +533,7 @@ async def upload_entity_file(
 
     file_id       = uuid.uuid4()
     original_name = file.filename or "file"
-    rel_path      = _entity_file_path(entity_id, file_id, original_name)
+    rel_path      = _entity_file_path(ent.id, file_id)          # the row's id, not the URL's
 
     require_free_space(len(raw), "this file", root=settings.logs_path)       # L2: 507, nothing stored
     stored = await awrite_encrypted(raw, rel_path, root=settings.logs_path)   # FENRGCM v2, staged write
