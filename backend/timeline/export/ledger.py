@@ -25,6 +25,9 @@ CSS = """
 .tbl .ty{font-weight:700}
 .tbl .sm{font-size:10px;color:var(--muted)}
 .tbl .pv{font-family:var(--font-mono);font-size:10px;color:var(--muted)}
+.tbl td.hst,.tbl td.ev,.tbl td.pv{overflow-wrap:anywhere}
+.tbl td.hst{width:170px}
+.tbl td.pv{width:220px}
 .tbl .fls{display:flex;flex-direction:column;gap:3px;align-items:flex-start}
 .tbl .att{white-space:normal}
 .tbl tr.key td.n{color:var(--accent);font-weight:700}
@@ -136,7 +139,7 @@ def render(ctx: Ctx) -> str:
             f'<div>{esc(ev["description"])}</div>'
         cls = ' class="key"' if ev.get("key_event") else ""
         rows.append(f'<tr{cls}><td class="n">{i}</td><td class="t">{esc(_time(ctx, t))}</td><td class="dl">{esc(dl)}</td>'
-                    f'<td>{_host(ev)}</td><td>{event}</td><td>{att}</td><td>{phase}</td>'
+                    f'<td class="hst">{_host(ev)}</td><td class="ev">{event}</td><td>{att}</td><td>{phase}</td>'
                     f'<td class="pv">{_prov(ctx, ev)}</td><td>{_flags(ctx, ev)}</td></tr>')
         if ctx.include_raw_logs and ev.get("raw_log"):
             rows.append(f'<tr class="rw"><td></td><td colspan="8"><pre class="raw">{esc(ev["raw_log"])}</pre></td></tr>')

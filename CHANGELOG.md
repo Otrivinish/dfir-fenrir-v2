@@ -2,7 +2,7 @@
 
 All notable changes to DFIR-FENRIR v2. Dates are UTC (ISO 8601).
 
-## [0.4.0] — 2026-11-01 — Phishing fast path, Defender IOC export, email URL promotion, entity bulk import (2026-10-15); editable, signed case notes, timeline events pick up registered entities, unsaved edits survive a session timeout, timeline export layouts (2026-10-31); evidence source location, seal binding, photo record, screenshot capture record, container exhibits with manifests, automatic exhibit identifiers, deferring a failing readiness check, report section picker and exhibit list (2026-11-01) — **breaking for API clients, sealing scripts and package verifiers** (see ⚠ Upgrading below)
+## [0.4.0] — 2026-11-01 — Phishing fast path, Defender IOC export, email URL promotion, entity bulk import (2026-10-15); editable, signed case notes, timeline events pick up registered entities, unsaved edits survive a session timeout, timeline export layouts (2026-10-31); evidence source location, seal binding, photo record, screenshot capture record, container exhibits with manifests, automatic exhibit identifiers, deferring a failing readiness check, report section picker and exhibit list, timeline CSV provenance columns and external-safe export filter (2026-11-01) — **breaking for API clients, sealing scripts and package verifiers** (see ⚠ Upgrading below)
 
 Everything since `v0.3.9`: the commits after that tag and all work not yet committed.
 
@@ -85,6 +85,14 @@ declared a 1 GiB pax header was OOM-killed under 512 MiB before the fix; such a 
 
 **Rollback:** reverse-apply `ignore/revert/evidence-owner-decisions-2026-11-01/`, then the slice kits S6 → S1 (each
 REVERT.md says how). The schema stays: it is additive and unused by the old code.
+
+### Added — timeline export: 11 more CSV columns, an external-safe filter; the Ledger wraps long values (TXF, [design + as built](docs/timeline-export-fields-slice.md))
+
+- **⚠ The CSV grows from 18 to 29 columns** (breaking for a script that checks the column count or expects exactly the old header; reading by position or by name keeps working). Appended after the old 18: `id`, `key_event`, `entity_type`, `entity_value`, `entity_compromised`, `malicious_iocs`, `created_by_username`, `created_at`, `updated_at`, `import_event_index`, `source_record_id`. Booleans are `true` / `false`; every cell stays formula-escaped. `updated_at` also moves on a key-flag or link change. The Ledger's CSV SHA-256 covers the new columns; the Ledger page itself is unchanged.
+- **External-safe events only:** a new export option that leaves out internal-only events (system records, response actions, legal records, SIEM webhook events, PCAP and browser history). On by default for **Brief**, off for the other layouts and the CSV; a switch in the export dialog (each layout sets its default). The export header and the `timeline_export` audit row name it. FENRIR sets an event's `external_safe` flag from its source; it can't be changed on an event.
+- **API (additive):** `GET …/timeline/export?external_safe_only=true|false` (omitted = `true` for `layout=brief`, else `false`). **MCP:** `fenrir_timeline_list(export=…, external_safe_only=…)`; the docstring lists the 29 columns.
+- **Fixed — Ledger:** Host / entity, Event and Provenance wrap long unbroken values (paths, URLs, encoded command lines, FQDNs). Provenance is 220 px and Host 170 px wide; Event takes the rest. A stress case went from a 2572 px table to 1232 px in the 1280 px page.
+- No migration. Tests: `backend/tests/test_timeline_export.py` (22), dfir-fenrir-mcp `tests/test_tx.py`.
 
 ### Added — reports: pick sections and appendices, exhibit list with SHA-256
 

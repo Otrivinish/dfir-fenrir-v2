@@ -312,13 +312,57 @@ class CsvTest(unittest.TestCase):
     def test_columns_escape_and_raw(self):
         rows = self.rows(False)
         self.assertEqual(tuple(rows[0]), CSV_COLUMNS)
-        self.assertEqual(len(CSV_COLUMNS), 18)
+        self.assertEqual(len(CSV_COLUMNS), 29)
         self.assertEqual(len(rows), len(phish_events()) + 1)
         self.assertEqual(rows[1][1], "'=HYPERLINK(\"http://x\")")
         raw_col = CSV_COLUMNS.index("raw_log")
         self.assertEqual(rows[2][raw_col], "")
         self.assertIn("SECRET-RAW-TOKEN", self.rows(True)[2][raw_col])
         self.assertEqual(rows[7][CSV_COLUMNS.index("clock_offset_seconds")], "134")
+
+    def test_appended_columns(self):
+        """TXF: the first 18 columns keep their place; the 11 appended ones carry what the Ledger shows (KEY, MAL,
+        entity, who) and where the event came from."""
+        self.assertEqual(CSV_COLUMNS[:18][-1], "clock_offset_seconds")
+        self.assertEqual(CSV_COLUMNS[18:], ("id", "key_event", "entity_type", "entity_value", "entity_compromised",
+                                            "malicious_iocs", "created_by_username", "created_at", "updated_at",
+                                            "import_event_index", "source_record_id"))
+        evs = [dict(e, event_time=e["event_time"].strftime("%Y-%m-%dT%H:%M:%SZ")) for e in phish_events()]
+        evs[4].update(created_at="2026-10-14T08:30:00.123456Z", updated_at="2026-10-14T09:00:00Z",
+                      import_event_index=7, source_record_id=str(uuid.UUID(int=77)),
+                      linked_iocs=[IOC, {"id": uuid.UUID(int=2002), "type": "domain", "value": "=cmd|evil",
+                                         "malicious": True}, {"id": uuid.UUID(int=2003), "type": "ip",
+                                                              "value": "10.0.0.1", "malicious": None}])
+        rows = list(csv.reader(io.StringIO(render_csv(evs, False), newline="")))
+        col = {c: i for i, c in enumerate(CSV_COLUMNS)}
+        beacon, unlinked, reimaged = rows[5], rows[11], rows[15]
+        self.assertEqual(beacon[col["id"]], str(uuid.UUID(int=5)))
+        self.assertEqual(beacon[col["key_event"]], "true")             # ATT&CK-tagged
+        self.assertEqual(rows[13][col["key_event"]], "false")          # SRV-FS-02 isolated: untagged, unflagged
+        self.assertEqual(reimaged[col["key_event"]], "true")           # analyst-flagged
+        self.assertEqual((beacon[col["entity_type"]], beacon[col["entity_value"]], beacon[col["entity_compromised"]]),
+                         ("host", "WS-FIN-017", "true"))
+        self.assertEqual(rows[1][col["entity_compromised"]], "false")  # EXCH-01, not compromised
+        self.assertEqual((unlinked[col["entity_type"]], unlinked[col["entity_compromised"]]), ("", ""))
+        # only the malicious IOCs, and a formula-looking value is escaped like every other cell
+        self.assertEqual(beacon[col["malicious_iocs"]], "185.220.101.47; =cmd|evil")
+        self.assertEqual(rows[1][col["malicious_iocs"]], "")
+        self.assertEqual(beacon[col["created_by_username"]], "irw-analyst")
+        self.assertEqual((beacon[col["created_at"]], beacon[col["updated_at"]]),
+                         ("2026-10-14T08:30:00.123456Z", "2026-10-14T09:00:00Z"))
+        self.assertEqual((beacon[col["import_event_index"]], beacon[col["source_record_id"]]),
+                         ("7", str(uuid.UUID(int=77))))
+
+    def test_appended_text_cells_are_formula_escaped(self):
+        evs = [dict(e, event_time=e["event_time"].strftime("%Y-%m-%dT%H:%M:%SZ")) for e in phish_events()[:1]]
+        evs[0].update(created_by_username="=evil()", entity={"id": WS["id"], "type": "host", "value": "+cmd",
+                                                              "compromised": True},
+                      linked_iocs=[{"id": uuid.UUID(int=9), "type": "domain", "value": "@x", "malicious": True}])
+        row = list(csv.reader(io.StringIO(render_csv(evs, False), newline="")))[1]
+        col = {c: i for i, c in enumerate(CSV_COLUMNS)}
+        self.assertEqual(row[col["created_by_username"]], "'=evil()")
+        self.assertEqual(row[col["entity_value"]], "'+cmd")
+        self.assertEqual(row[col["malicious_iocs"]], "'@x")
 
     def test_crlf(self):
         text = render_csv([], False)
